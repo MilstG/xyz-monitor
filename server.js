@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.27-37";
+const VERSION = "2026.08.27-38";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1188,6 +1188,40 @@ async function main() {
     if (op === "backfill") { poller.congressBackfillNow(+b.years || undefined).catch(() => {});
       return { ok: true, started: 1, note: "backfill started \u2014 one prior year at a time, progress in the ops log" }; }
     if (op === "status") return { ok: true, status: poller.congressStatus() };
+    return reply.code(400).send({ ok: false, error: "unknown op" });
+  });
+  // INSIDERS (build 2026.08.27-38): Section 16 Form 4 transactions. Read route only here; the
+  // manifest registers it as def:"admin" so the gate refuses non-admins while the lane soaks, and
+  // taking it public later is a flag flip rather than an edit to this file. The POST is a
+  // different axis and rechecks admin regardless, exactly as the congress route documents.
+  fastify.get("/api/insiders", async (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const q = req.query || {};
+    if (q.ticker && !q.feed) return { ok: true, roll: poller.insidersTickerRoll(String(q.ticker), +q.days || 90) };
+    // The selection and the VIEW of it are separate: total counts every row the filter matches,
+    // not the page being returned, or the pager cannot know how many pages exist.
+    const sel = { q: q.q ? String(q.q).slice(0, 60) : null,
+      ticker: q.ticker ? String(q.ticker) : null,
+      codes: q.codes ? String(q.codes).slice(0, 30) : null,
+      role: q.role ? String(q.role) : null,
+      plan: q.plan === "only" || q.plan === "excl" ? q.plan : null,
+      minValue: q.minValue ? +q.minValue : null,
+      since: q.since ? String(q.since).slice(0, 10) : null };
+    return { ok: true, status: poller.insidersStatus(),
+      feed: poller.insidersFeed(Object.assign({ limit: Math.min(200, +q.limit || 50), offset: +q.offset || 0,
+        sort: q.sort ? String(q.sort) : null,
+        dir: q.dir == null || q.dir === "" ? -1 : +q.dir }, sel)),
+      total: poller.insidersFeedCount(sel) };
+  });
+  fastify.post("/api/insiders", { bodyLimit: 4 * 1024 }, async (req, reply) => {
+    reply.header("cache-control", "no-store");
+    if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "forbidden" });
+    const b = req.body || {};
+    const op = String(b.op || "");
+    if (op === "parse") { poller.insidersParseNow(Math.min(50, +b.n || 10)).catch(() => {});
+      return { ok: true, started: 1, note: "parse run started — two SEC reads per filing, progress in the ops log" }; }
+    if (op === "requeue") return poller.insidersRequeueNow(!!b.all);
+    if (op === "status") return { ok: true, status: poller.insidersStatus() };
     return reply.code(400).send({ ok: false, error: "unknown op" });
   });
   fastify.get("/api/ai-report", (req, reply) => {

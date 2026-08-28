@@ -5315,7 +5315,7 @@ const NAV_GROUPS = [
   { key: "tape",     label: "Tape",     views: ["trend", "charts", "treemap", "sectors", "corr", "funding", "sessions"] },
   { key: "signals",  label: "Signals",  views: ["signals", "actionable", "focus", "backtest"] },
   { key: "macro",    label: "Macro",    views: ["earnings", "news", "housing", "liquidity"] },
-  { key: "research", label: "Research", views: ["report", "funds", "congress", "notes"] },
+  { key: "research", label: "Research", views: ["report", "funds", "congress", "insiders", "notes"] },
 ];
 // markets is pin:true and is where every load lands; admin is the locked panel itself. Both stay
 // flat in the row and are deliberately NOT movable — a one-item menu, or a home two clicks away,
@@ -5410,6 +5410,11 @@ const FEATURES = [
   // then a flag change here, not a code change. The POST rechecks admin regardless of this flag:
   // gate and authz are different axes, exactly as the whale watchlist route documents.
   { key: "congress",   kind: "tab", label: "Congress",    def: "admin",  routes: ["/api/congress"] },
+  // INSIDERS (build 2026.08.27-38): Section 16 Form 4 transactions for the equity roster — exact
+  // shares, exact price, exact date, straight off the form. Admin-only while the parse lane soaks:
+  // the coverage numbers on the tab have to be real before the group reads them, same doctrine the
+  // congress lane shipped under. The POST rechecks admin regardless of this flag.
+  { key: "insiders",   kind: "tab", label: "Insiders",    def: "admin",  routes: ["/api/insiders"] },
   { key: "report",     kind: "tab", label: "AI Report",   def: "public", routes: ["/api/ai-report", "/api/ai-reports"] },
   { key: "actionable", kind: "tab", label: "Actionable",  def: "admin",  routes: ["/api/actionable"] },
   { key: "backtest",   kind: "tab", label: "Backtest",    def: "admin",  routes: ["/api/duel"] },
@@ -8424,6 +8429,166 @@ module.exports.parsePtr = parsePtr;
 module.exports.PTR_BANDS = PTR_BANDS;
 module.exports.PTR_TICKERABLE = PTR_TICKERABLE;
 module.exports.pdfImages = pdfImages;
+// ===== INSIDERS: SEC Form 3/4/5 ownership documents ===============================================
+// Section 16 insiders — officers, directors and 10% holders — report their own trades on Form 4
+// within two business days. Unlike the congressional PTR, which discloses an AMOUNT BAND and no
+// price at all, a Form 4 carries the exact share count, the exact price per share and the exact
+// date. Nothing here is derived, estimated or banded: every number in this lane is a number the
+// filer typed on the form.
+//
+// What decides whether a row means anything is the TRANSACTION CODE, not the dollar figure:
+//   P  open-market purchase       <- the rare one. Someone chose to buy with their own money.
+//   S  open-market sale           <- a decision too, but often a scheduled one (see the plan flag)
+//   A  grant / award              <- compensation. Not a view on the price.
+//   M  exercise of a derivative   <- mechanical; usually paired with an S or an F the same day
+//   F  shares withheld for taxes  <- the issuer taking shares back at vest. Not a sale.
+//   D  disposition to the issuer  G  gift    C  conversion    X  in-the-money exercise
+// A/M/F are the bulk of the volume, which is what "routine insider flow" in the alert doctrine
+// refers to. They are parsed and stored like everything else — the FILTER is the reader's, not
+// the parser's — but the tab opens on P and S because those are the two that carry a decision.
+const F4_CODES = {
+  P: "buy", S: "sell", A: "grant", M: "exercise", F: "tax", D: "to issuer", G: "gift",
+  C: "conversion", X: "exercise", J: "other", K: "swap", L: "small acq", U: "tender", W: "will", Z: "trust",
+};
+// The codes that represent an open-market decision by the insider — the default view of the tab.
+const F4_DECISION = new Set(["P", "S"]);
+// One <tag><value>x</value></tag>, tolerating the footnote-only form the schema also allows:
+// <transactionPricePerShare><footnoteId id="F1"/></transactionPricePerShare> carries NO value
+// because the price is explained in a footnote (a range, a weighted average). That is a real,
+// common case and it must read as "no price on the form", never as zero.
+function f4Val(block, tag) {
+  const m = block.match(new RegExp("<" + tag + "\\b[^>]*>([\\s\\S]*?)</" + tag + ">"));
+  if (!m) return null;
+  const v = m[1].match(/<value>([\s\S]*?)<\/value>/);
+  const raw = (v ? v[1] : m[1]).replace(/<[^>]*>/g, "").trim();
+  return raw === "" ? null : raw;
+}
+function f4Num(block, tag) {
+  const s = f4Val(block, tag);
+  if (s == null) return null;
+  const n = +String(s).replace(/[$,\s]/g, "");
+  return Number.isFinite(n) ? n : null;
+}
+const f4Flag = (s) => /^(1|true|y|yes)$/i.test(String(s == null ? "" : s).trim());
+// Everything between <tag> and </tag>, repeated. Written out rather than done with a lazy global
+// regex because these blocks nest one level (<transactionAmounts> inside the transaction) and a
+// non-greedy match to the first closing tag would cut a transaction short.
+function f4Blocks(xml, tag) {
+  const out = [];
+  const open = new RegExp("<" + tag + "\\b[^>]*>", "g");
+  let m;
+  while ((m = open.exec(xml))) {
+    const end = xml.indexOf("</" + tag + ">", m.index);
+    if (end < 0) break;
+    out.push(xml.slice(m.index + m[0].length, end));
+    open.lastIndex = end;
+  }
+  return out;
+}
+// The 10b5-1 checkbox, added to Form 4 by the 2022 amendments (effective 2023). It answers the
+// question that decides what a SALE means: a sale under a pre-arranged plan was scheduled months
+// ago and says nothing about today, while a discretionary sale is a decision taken now.
+// THREE states, never two: checked, explicitly unchecked, and ABSENT — the box did not exist on
+// filings before 2023 and a filer agent may still omit the element. Absent is null, "not marked",
+// and must never be rendered as "not a plan".
+//
+// The element's position moved between schema versions, so a document-level occurrence is also
+// honoured — but ONLY when the document is unambiguous: one flag, one transaction. The first cut
+// fell back to the document for every row, which on a filing whose SALE carried the flag marked
+// the same insider's open-market PURCHASE as plan-scheduled — inverting the one distinction this
+// field exists to make. Where the mapping is ambiguous the answer is null, not a guess.
+function f4Plan(block, docFlag) {
+  const m = String(block || "").match(/<aff10b5One\b[^>]*>([\s\S]*?)<\/aff10b5One>/i);
+  if (m) {
+    const v = m[1].match(/<value>([\s\S]*?)<\/value>/);
+    const raw = ((v ? v[1] : m[1]) || "").replace(/<[^>]*>/g, "").trim();
+    if (raw !== "") return f4Flag(raw) ? 1 : 0;
+  }
+  return docFlag == null ? null : docFlag;
+}
+// The document-level flag, usable only where it cannot be misattributed: exactly one occurrence
+// in the file and exactly one transaction for it to belong to.
+function f4DocPlan(xml, nTx) {
+  const all = String(xml || "").match(/<aff10b5One\b[^>]*>[\s\S]*?<\/aff10b5One>/gi) || [];
+  if (all.length !== 1 || nTx !== 1) return null;
+  const v = all[0].match(/<value>([\s\S]*?)<\/value>/);
+  const raw = ((v ? v[1] : all[0].replace(/<\/?aff10b5One\b[^>]*>/gi, "")) || "").replace(/<[^>]*>/g, "").trim();
+  return raw === "" ? null : (f4Flag(raw) ? 1 : 0);
+}
+// Form 4 XML -> transaction rows. Table I (nonDerivative) ONLY, deliberately: a derivative row's
+// "price" is the exercise price of an option, a different quantity in the same shaped field, and
+// letting it into a PRICE column would silently mix two things the reader would then average.
+// Derivative rows are COUNTED so the tab can disclose that they exist and were not shown.
+function parseForm4(xml) {
+  const s = typeof xml === "string" ? xml : "";
+  if (!s || !/<ownershipDocument/i.test(s)) return { ok: false, error: "not an ownership document", tx: [] };
+  const docType = (f4Val(s, "documentType") || "").trim() || null;
+  const issuerB = f4Blocks(s, "issuer")[0] || "";
+  const issuer = {
+    cik: f4Val(issuerB, "issuerCik"),
+    name: f4Val(issuerB, "issuerName"),
+    tk: (f4Val(issuerB, "issuerTradingSymbol") || "").toUpperCase().trim() || null,
+  };
+  // A joint filing carries several <reportingOwner> blocks for ONE set of transactions. The first
+  // is the row's owner and the rest are counted: attributing one trade to four people would
+  // quadruple the flow, and dropping them silently would hide that the filing was joint.
+  const owners = f4Blocks(s, "reportingOwner").map((b) => {
+    const rel = f4Blocks(b, "reportingOwnerRelationship")[0] || "";
+    const roles = [];
+    if (f4Flag(f4Val(rel, "isDirector"))) roles.push("director");
+    if (f4Flag(f4Val(rel, "isOfficer"))) roles.push("officer");
+    if (f4Flag(f4Val(rel, "isTenPercentOwner"))) roles.push("10% owner");
+    if (f4Flag(f4Val(rel, "isOther"))) roles.push("other");
+    return { cik: f4Val(b, "rptOwnerCik"), name: (f4Val(b, "rptOwnerName") || "").trim() || null,
+      role: roles.join(" · ") || null, title: (f4Val(rel, "officerTitle") || "").trim() || null };
+  }).filter((o) => o.name);
+  const own0 = owners[0] || { cik: null, name: null, role: null, title: null };
+  const tx = [];
+  let ln = 0;
+  const nonDeriv = f4Blocks(s, "nonDerivativeTransaction");
+  const nDeriv = f4Blocks(s, "derivativeTransaction").length;
+  const docPlan = f4DocPlan(s, nonDeriv.length + nDeriv);
+  for (const b of nonDeriv) {
+    const code = (f4Val(b, "transactionCode") || "").trim().toUpperCase() || null;
+    const shares = f4Num(b, "transactionShares");
+    const price = f4Num(b, "transactionPricePerShare");
+    const ad = (f4Val(b, "transactionAcquiredDisposedCode") || "").trim().toUpperCase() || null;
+    const txDate = (f4Val(b, "transactionDate") || "").slice(0, 10) || null;
+    tx.push({
+      ln: ln++, sec: f4Val(b, "securityTitle"), code, act: code ? (F4_CODES[code] || "other") : null, ad,
+      shares, price,
+      // Dollar value only where a price exists. A grant prices at 0 and a footnoted price is
+      // absent; both would compute a $0 "value" that reads as a fact rather than as an absence.
+      value: shares != null && price != null && price > 0 ? +(shares * price).toFixed(2) : null,
+      txDate,
+      own: f4Num(b, "sharesOwnedFollowingTransaction"),
+      dir: (f4Val(b, "directOrIndirectOwnership") || "").trim().toUpperCase() || null,
+      plan: f4Plan(b, docPlan),
+    });
+  }
+  return { ok: true, docType, amended: /\/A$/.test(docType || ""),
+    period: (f4Val(s, "periodOfReport") || "").slice(0, 10) || null,
+    issuer, owner: own0, owners, nDeriv,
+    nHold: f4Blocks(s, "nonDerivativeHolding").length,
+    tx };
+}
+// The primary document inside an accession, from EDGAR's own directory listing. The rendered
+// copy (xslF345X0*/...) is the SAME xml wrapped in a stylesheet path — taking it would work by
+// accident today and break the day EDGAR changes the transform, so the raw one is chosen by name.
+function form4DocName(indexJson) {
+  const items = indexJson && indexJson.directory && Array.isArray(indexJson.directory.item)
+    ? indexJson.directory.item : [];
+  const xml = items.map((i) => String((i && i.name) || ""))
+    .filter((n) => /\.xml$/i.test(n) && !/^xsl/i.test(n));
+  // A Form 4 accession holds exactly one ownership document. Where a filer agent ships extra xml
+  // (rare, and never the primary), prefer the one whose name says what it is.
+  return xml.find((n) => /form|ownership|doc4|edgar/i.test(n)) || xml[0] || null;
+}
+module.exports.parseForm4 = parseForm4;
+module.exports.form4DocName = form4DocName;
+module.exports.F4_CODES = F4_CODES;
+module.exports.F4_DECISION = F4_DECISION;
+
 module.exports.ccittTiff = ccittTiff;
 module.exports.ocrPtrRows = ocrPtrRows;
 module.exports.ocrCheckboxForm = ocrCheckboxForm;

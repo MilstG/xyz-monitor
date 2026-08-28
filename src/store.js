@@ -16,6 +16,32 @@ function congressTokens(q) {
     .map((t) => t.trim()).filter((t) => t.length >= 2).slice(0, 6);
 }
 
+// The insiders feed's WHERE clause, built once and shared by the page query and the count — two
+// copies of a filter drift, and the pager would then say "of N" about a different set than the
+// rows below it. Every filter is parameterised; nothing user-typed reaches the SQL as text.
+function insidersWhere(opt) {
+  const o = opt || {}, where = ["f.parsed=1"], args = [];
+  if (o.ticker) { where.push("t.tk=?"); args.push(String(o.ticker).toUpperCase()); }
+  if (o.since) { where.push("t.txDate>=?"); args.push(String(o.since)); }
+  // Transaction codes arrive as a comma list from the chips. Whitelisted against the code map so
+  // the IN list is built from known letters only, and an empty result means "no chips", not "all".
+  const codes = String(o.codes || "").split(",").map((c) => c.trim().toUpperCase())
+    .filter((c) => /^[A-Z]$/.test(c)).slice(0, 12);
+  if (codes.length) { where.push("t.code IN (" + codes.map(() => "?").join(",") + ")"); args.push(...codes); }
+  if (o.minValue) { where.push("t.value >= ?"); args.push(+o.minValue); }
+  // "plan" is TRI-state on the form and stays tri-state here: only=marked, excl=explicitly not
+  // marked. Neither bucket may swallow the rows where the box is absent — that is a third answer.
+  if (o.plan === "only") where.push("t.plan=1");
+  if (o.plan === "excl") where.push("(t.plan=0 OR t.plan IS NULL)");
+  if (o.role) { where.push("f.role LIKE ?"); args.push("%" + String(o.role).slice(0, 20) + "%"); }
+  for (const tok of congressTokens(o.q)) {
+    const like = "%" + tok + "%";
+    where.push("(f.owner LIKE ? OR f.issuer LIKE ? OR t.tk LIKE ? OR f.title LIKE ?)");
+    args.push(like, like, like.toUpperCase(), like);
+  }
+  return { where: where.join(" AND "), args };
+}
+
 function openStore(dataDir) {
   fs.mkdirSync(dataDir, { recursive: true });
   const file = path.join(dataDir, "oi.log");
@@ -66,7 +92,8 @@ function openStore(dataDir) {
   const candleFile = path.join(dataDir, "candles.db");
   const t13fFile = path.join(dataDir, "whale13f.db");   // market-wide 13F holder index — separate, droppable, rebuildable
   const congressFile = path.join(dataDir, "congress.db");   // congressional disclosure index — same posture: separate, droppable, rebuildable
-  let t13f = null, congress = null;
+  const insidersFile = path.join(dataDir, "insiders.db");   // SEC Form 4 insider transactions — same posture again
+  let t13f = null, congress = null, insiders = null;
   let cdb = null, cInsert = null, cRange = null, cEvict = null, cCov = null, cCount = null;
   let mInsert = null, mRange = null, mEvict = null, mCov = null;   // 1m opening-hour archive (2026.08.18-04)
   const deepStmt = {};   // "12h" / "1d" -> { ins, rng, cov } — deep-history archive (2026.08.21-01)
@@ -937,6 +964,162 @@ CREATE TABLE schosen(acc TEXT PRIMARY KEY, cik INTEGER) WITHOUT ROWID;`);
     t13fHolderRow(q, cusip, cik) { const d = this.open13F(); if (!d) return null;
       try { return d.prepare("SELECT value, shares, shOk FROM top WHERE q=? AND cusip=? AND cik=?").get(q, cusip, +cik) || null; } catch (_) { return null; } },
 
+    // ---- INSIDERS: SEC Form 4 ownership documents (build 2026.08.27-38) ------------------------
+    // A FOURTH sqlite file, for the same reason congress.db is a third: droppable and rebuildable
+    // without touching anything expensive to refill. Shape deliberately mirrors the congress lane —
+    // a `filing` row per accession with its own parse state, a `tx` row per transaction — because
+    // the two feeds answer the same question about two different populations, and one shape means
+    // one set of habits for reading them.
+    //
+    // What is NOT here, and the difference that matters: no amount bands and no derivation. A PTR
+    // discloses a range; a Form 4 discloses shares and price. Every numeric column below is a
+    // number the filer typed, and `value` is null wherever the form carried no price rather than
+    // a computed zero.
+    openInsiders() {
+      if (insiders) return insiders;
+      try {
+        const { DatabaseSync } = require("node:sqlite");
+        insiders = new DatabaseSync(insidersFile);
+        insiders.exec("PRAGMA journal_mode=WAL; PRAGMA auto_vacuum=INCREMENTAL;");
+        insiders.exec(`CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS filing(
+  acc TEXT PRIMARY KEY, tk TEXT, form TEXT, filed INTEGER, url TEXT,
+  issuer TEXT, period TEXT, owner TEXT, role TEXT, title TEXT,
+  parsed INTEGER, nTx INTEGER, nDeriv INTEGER, tries INTEGER, pnote TEXT) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS ins_fil_q ON filing(parsed, filed);
+CREATE INDEX IF NOT EXISTS ins_fil_tk ON filing(tk, filed);
+CREATE TABLE IF NOT EXISTS tx(
+  acc TEXT, ln INTEGER, tk TEXT, txDate TEXT, code TEXT, act TEXT, ad TEXT,
+  shares REAL, price REAL, value REAL, own REAL, dir TEXT, plan INTEGER, sec TEXT,
+  PRIMARY KEY(acc, ln)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS ins_tx_tk ON tx(tk, txDate);
+CREATE INDEX IF NOT EXISTS ins_tx_code ON tx(code, txDate);`);
+        return insiders;
+      } catch (_) { insiders = null; return null; }
+    },
+    insidersReady() { try { return !!this.openInsiders(); } catch (_) { return false; } },
+    insidersMeta(k) { const d = this.openInsiders(); if (!d) return null;
+      try { const r = d.prepare("SELECT v FROM meta WHERE k=?").get(String(k)); return r ? r.v : null; } catch (_) { return null; } },
+    insidersMetaSet(k, v) { const d = this.openInsiders(); if (!d) return;
+      try { d.prepare("INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v").run(String(k), String(v)); } catch (_) {} },
+    // Discovery: the EDGAR atom rotation already sees every ownership filing on the roster, so it
+    // queues them here. Idempotent, and pointedly does NOT touch parse state — the same accession
+    // seen on ten rotations must not reset the work done on it, the lesson congressUpsertFilings
+    // documents at length.
+    insidersQueue(rows) { const d = this.openInsiders(); if (!d || !rows || !rows.length) return { seen: 0, added: 0 };
+      const ins = d.prepare(`INSERT INTO filing(acc,tk,form,filed,url,issuer,period,owner,role,title,parsed,nTx,nDeriv,tries,pnote)
+VALUES(?,?,?,?,?,NULL,NULL,NULL,NULL,NULL,0,NULL,NULL,0,NULL)
+ON CONFLICT(acc) DO UPDATE SET tk=excluded.tk, form=excluded.form, url=excluded.url,
+  filed=CASE WHEN excluded.filed>0 THEN excluded.filed ELSE filing.filed END`);
+      const had = d.prepare("SELECT 1 FROM filing WHERE acc=?");
+      let added = 0;
+      d.exec("BEGIN");
+      try {
+        for (const r of rows) {
+          if (!r || !r.acc) continue;
+          if (!had.get(String(r.acc))) added++;
+          ins.run(String(r.acc), String(r.tk || "").toUpperCase(), String(r.form || ""), +r.filed || 0, r.url || null);
+        }
+        d.exec("COMMIT");
+      } catch (e) { try { d.exec("ROLLBACK"); } catch (_) {} return { seen: rows.length, added: 0, error: e.message }; }
+      return { seen: rows.length, added };
+    },
+    // The parse queue, oldest-filed first so a backlog drains in the order the market saw it.
+    insidersPending(n) { const d = this.openInsiders(); if (!d) return [];
+      try { return d.prepare("SELECT acc, tk, form, filed, url FROM filing WHERE parsed=0 AND COALESCE(tries,0) < 4 ORDER BY filed DESC LIMIT ?")
+        .all(Math.max(1, Math.min(200, n | 0 || 20))); } catch (_) { return []; } },
+    insidersBumpTry(acc) { const d = this.openInsiders(); if (!d) return;
+      try { d.prepare("UPDATE filing SET tries=COALESCE(tries,0)+1 WHERE acc=?").run(String(acc)); } catch (_) {} },
+    // parsed: 0 queued, 1 read with rows, 2 permanently unreadable. `pnote` carries WHY, so the
+    // panel can break a failure count down into reasons instead of asking to be believed.
+    insidersMark(acc, state, note) { const d = this.openInsiders(); if (!d) return;
+      try { d.prepare("UPDATE filing SET parsed=?, pnote=? WHERE acc=?").run(state | 0, note || null, String(acc)); } catch (_) {} },
+    insidersSave(acc, head, tx) { const d = this.openInsiders(); if (!d) return 0;
+      const h = head || {};
+      try {
+        d.exec("BEGIN");
+        d.prepare(`UPDATE filing SET tk=COALESCE(?,tk), issuer=?, period=?, owner=?, role=?, title=?,
+          parsed=1, nTx=?, nDeriv=?, pnote=NULL WHERE acc=?`)
+          .run(h.tk || null, h.issuer || null, h.period || null, h.owner || null, h.role || null, h.title || null,
+            (tx || []).length, h.nDeriv | 0, String(acc));
+        d.prepare("DELETE FROM tx WHERE acc=?").run(String(acc));   // a re-parse REPLACES its rows, never doubles them
+        const ins = d.prepare(`INSERT INTO tx(acc,ln,tk,txDate,code,act,ad,shares,price,value,own,dir,plan,sec)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+        for (const t of tx || [])
+          ins.run(String(acc), t.ln | 0, h.tk || null, t.txDate || null, t.code || null, t.act || null, t.ad || null,
+            t.shares == null ? null : +t.shares, t.price == null ? null : +t.price,
+            t.value == null ? null : +t.value, t.own == null ? null : +t.own,
+            t.dir || null, t.plan == null ? null : (t.plan ? 1 : 0), t.sec || null);
+        d.exec("COMMIT");
+        return (tx || []).length;
+      } catch (e) { try { d.exec("ROLLBACK"); } catch (_) {} return 0; }
+    },
+    // Search tokens: every word must appear somewhere in the row, in any order — a person is
+    // written "Tan Lip-Bu" on one form and "TAN LIP BU" on another, and one LIKE over the whole
+    // phrase fails on exactly the way a reader types a name.
+    insidersFeed(opt) { const d = this.openInsiders(); if (!d) return [];
+      const b = insidersWhere(opt);
+      const lim = Math.max(1, Math.min(500, (opt && opt.limit) | 0 || 50));
+      const off = Math.max(0, (opt && opt.offset) | 0);
+      // Sort in SQL from a closed WHITELIST — a header click orders the whole result set, not the
+      // page that happens to be loaded, and a sort key can never reach the query as text.
+      const SORTS = { filed: "f.filed", traded: "t.txDate", ticker: "t.tk", owner: "f.owner",
+        role: "f.role", act: "t.code", shares: "t.shares", price: "t.price", value: "t.value",
+        own: "t.own", plan: "t.plan", issuer: "f.issuer", sec: "t.sec", form: "f.form",
+        // Position change: what the trade did to their holding. Null-safe — a row with no
+        // post-transaction figure sorts as unknown rather than as zero.
+        pct: "CASE WHEN t.own IS NULL OR t.shares IS NULL OR t.own<=0 THEN NULL ELSE t.shares/t.own END" };
+      const col = SORTS[opt && opt.sort] || SORTS.filed;
+      const dir = ((opt && opt.dir) == null || Number.isNaN(+(opt && opt.dir)) ? -1 : +opt.dir) < 0 ? "DESC" : "ASC";
+      // NULLS LAST in BOTH directions, which is not what SQL does by default (ascending puts them
+      // first). A blank price means the form carried none, and floating those to the top of a
+      // "cheapest first" sort buries every row the reader asked to see under the rows that have no
+      // answer at all. Unknown belongs at the bottom whichever way the column is pointing.
+      try { return d.prepare(`SELECT f.acc, f.tk, f.form, f.filed, f.url, f.issuer, f.period, f.owner, f.role, f.title,
+        f.nDeriv, t.ln, t.txDate, t.code, t.act, t.ad, t.shares, t.price, t.value, t.own, t.dir, t.plan, t.sec
+        FROM tx t JOIN filing f ON f.acc=t.acc WHERE ${b.where}
+        ORDER BY ${col} ${dir} NULLS LAST, f.filed DESC, t.acc DESC, t.ln LIMIT ? OFFSET ?`)
+        .all(...b.args, lim, off); } catch (_) { return []; } },
+    insidersFeedCount(opt) { const d = this.openInsiders(); if (!d) return 0;
+      const b = insidersWhere(opt);
+      try { const r = d.prepare(`SELECT COUNT(*) n FROM tx t JOIN filing f ON f.acc=t.acc WHERE ${b.where}`).get(...b.args);
+        return (r && r.n) || 0; } catch (_) { return 0; } },
+    // Coverage, stated rather than implied: how many filings are known, read, queued or failed,
+    // and what the transaction mix looks like. The tab shows this so "few rows" can be told apart
+    // from "the lane is stalled".
+    insidersStatus() { const d = this.openInsiders(); if (!d) return { ready: 0 };
+      const one = (sql, ...a) => { try { return d.prepare(sql).get(...a) || {}; } catch (_) { return {}; } };
+      const all = (sql, ...a) => { try { return d.prepare(sql).all(...a) || []; } catch (_) { return []; } };
+      const f = one("SELECT COUNT(*) n, SUM(parsed=1) done, SUM(parsed=0) queued, SUM(parsed=2) failed FROM filing");
+      const t = one("SELECT COUNT(*) n, COUNT(DISTINCT tk) names, SUM(price IS NULL) noPrice FROM tx");
+      return { ready: 1,
+        filings: { n: f.n || 0, done: f.done || 0, queued: f.queued || 0, failed: f.failed || 0 },
+        tx: { n: t.n || 0, names: t.names || 0, noPrice: t.noPrice || 0 },
+        codes: all("SELECT code, COUNT(*) n FROM tx GROUP BY code ORDER BY n DESC LIMIT 12"),
+        notes: all("SELECT pnote note, COUNT(*) n FROM filing WHERE pnote IS NOT NULL GROUP BY pnote ORDER BY n DESC LIMIT 8"),
+        last: (one("SELECT MAX(filed) m FROM filing").m) || null,
+        lastParse: this.insidersMeta("lastParse") };
+    },
+    // Per-ticker roll-up for the markets drawer: net decision flow over a window, buys and sells
+    // counted separately because a net figure hides that both happened.
+    insidersTickerRoll(tk, days) { const d = this.openInsiders(); if (!d || !tk) return null;
+      const since = new Date(Date.now() - Math.max(1, days || 90) * 86400000).toISOString().slice(0, 10);
+      // The dollar sums skip rows the form gave no price for, and nPx counts how many were skipped.
+      // Coalescing those to 0 inside the SUM reported "$0 of sales" for a sale that happened at a
+      // price the filing footnoted — a number that reads as a fact and is not one. With no priced
+      // row at all the sum is NULL, so the caller shows a dash rather than a zero.
+      try { const r = d.prepare(`SELECT SUM(code='P') nBuy, SUM(code='S') nSell,
+          SUM(CASE WHEN code='P' AND value IS NOT NULL THEN value END) buyVal,
+          SUM(CASE WHEN code='S' AND value IS NOT NULL THEN value END) sellVal,
+          SUM(value IS NULL) nNoPx,
+          COUNT(DISTINCT acc) nFil
+          FROM tx WHERE tk=? AND txDate>=? AND code IN ('P','S')`).get(String(tk).toUpperCase(), since);
+        return r && r.nFil ? Object.assign({ tk: String(tk).toUpperCase(), days: days || 90 }, r) : null;
+      } catch (_) { return null; } },
+    insidersRequeue(all) { const d = this.openInsiders(); if (!d) return 0;
+      try { const r = d.prepare(all ? "UPDATE filing SET parsed=0, tries=0, pnote=NULL"
+        : "UPDATE filing SET parsed=0, tries=0, pnote=NULL WHERE parsed=2").run();
+        return r && r.changes != null ? r.changes : 0; } catch (_) { return 0; } },
     // ---- congressional disclosure index (build 2026.08.24-02) ---------------------------------
     // Phase 1 of the CONGRESS lane. A THIRD sqlite file, separate from whale13f.db for exactly the
     // reason that one is separate from candles.db: droppable and rebuildable without breathing near

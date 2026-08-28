@@ -2884,6 +2884,286 @@ test("earnings row: the printed EPS pair reconciles with the surprise % printed 
   assert.equal(api.epsSurStr(1, 1), null, "in line prints no surprise");
 });
 
+// ===== INSIDERS: SEC Form 4 (build 2026.08.27-38) ===============================================
+// The lane's claim is that nothing on the tab is derived: shares, price and date are the filer's
+// own figures. These tests exist to keep that claim true — every assertion below is either "the
+// number survived unchanged" or "an absence stayed an absence rather than becoming a zero".
+function f4Doc(txs, opts) {
+  const o = opts || {};
+  return `<?xml version="1.0"?><ownershipDocument><schemaVersion>X0508</schemaVersion>
+<documentType>${o.form || "4"}</documentType><periodOfReport>2026-08-25</periodOfReport>
+<issuer><issuerCik>0000050863</issuerCik><issuerName>INTEL CORP</issuerName><issuerTradingSymbol>INTC</issuerTradingSymbol></issuer>
+${o.owners || `<reportingOwner><reportingOwnerId><rptOwnerCik>0001234567</rptOwnerCik><rptOwnerName>Tan Lip-Bu</rptOwnerName></reportingOwnerId>
+<reportingOwnerRelationship><isDirector>1</isDirector><isOfficer>1</isOfficer><isTenPercentOwner>0</isTenPercentOwner><officerTitle>Chief Executive Officer</officerTitle></reportingOwnerRelationship></reportingOwner>`}
+<nonDerivativeTable>${txs}</nonDerivativeTable>${o.deriv || ""}</ownershipDocument>`;
+}
+const F4_BUY = `<nonDerivativeTransaction><securityTitle><value>Common Stock</value></securityTitle>
+<transactionDate><value>2026-08-25</value></transactionDate>
+<transactionCoding><transactionFormType>4</transactionFormType><transactionCode>P</transactionCode></transactionCoding>
+<transactionAmounts><transactionShares><value>500000</value></transactionShares><transactionPricePerShare><value>20.0000</value></transactionPricePerShare>
+<transactionAcquiredDisposedCode><value>A</value></transactionAcquiredDisposedCode></transactionAmounts>
+<postTransactionAmounts><sharesOwnedFollowingTransaction><value>1500000</value></sharesOwnedFollowingTransaction></postTransactionAmounts>
+<ownershipNature><directOrIndirectOwnership><value>D</value></directOrIndirectOwnership></ownershipNature></nonDerivativeTransaction>`;
+// A sale under a 10b5-1 plan, with the price left to a footnote — both of the cases that a naive
+// reader of this form gets wrong.
+const F4_PLANSELL = `<nonDerivativeTransaction><securityTitle><value>Common Stock</value></securityTitle>
+<transactionDate><value>2026-08-26</value></transactionDate>
+<transactionCoding><transactionCode>S</transactionCode><aff10b5One><value>1</value></aff10b5One></transactionCoding>
+<transactionAmounts><transactionShares><value>12,500</value></transactionShares><transactionPricePerShare><footnoteId id="F1"/></transactionPricePerShare>
+<transactionAcquiredDisposedCode><value>D</value></transactionAcquiredDisposedCode></transactionAmounts></nonDerivativeTransaction>`;
+
+test("insiders: Form 4 numbers survive the parser exactly, and every absence stays an absence", () => {
+  const C = require("../src/compute");
+  const p = C.parseForm4(f4Doc(F4_BUY + F4_PLANSELL, { deriv: "<derivativeTable><derivativeTransaction><transactionCoding><transactionCode>M</transactionCode></transactionCoding></derivativeTransaction></derivativeTable>" }));
+  assert.ok(p.ok, "an ownership document parses");
+  assert.equal(p.issuer.tk, "INTC", "the symbol is read off the form, never resolved from a name");
+  assert.equal(p.owner.name, "Tan Lip-Bu");
+  assert.equal(p.owner.role, "director · officer", "every relationship box ticked on the form is kept");
+  assert.equal(p.owner.title, "Chief Executive Officer", "a CEO buying is not the same event as a 10% fund trimming — the title decides");
+
+  const [buy, sell] = p.tx;
+  // The whole reason this lane beats the congress one: exact figures, not a band.
+  assert.equal(buy.code, "P"); assert.equal(buy.act, "buy");
+  assert.equal(buy.shares, 500000, "share count exact");
+  assert.equal(buy.price, 20, "price per share exact");
+  assert.equal(buy.value, 10000000, "value is shares x price, computed only because a price exists");
+  assert.equal(buy.txDate, "2026-08-25"); assert.equal(buy.own, 1500000); assert.equal(buy.dir, "D");
+  assert.equal(sell.shares, 12500, "a thousands separator on the form is not a parse failure");
+  // A footnoted price is the form declining to state one. Zero would be a lie that then feeds a
+  // value, a size filter and a sort.
+  assert.equal(sell.price, null, "a footnoted price is ABSENT, never zero");
+  assert.equal(sell.value, null, "no price means no value — not a $0 trade");
+  assert.equal(p.nDeriv, 1, "derivative rows are counted, so the tab can say they exist");
+  assert.equal(p.tx.length, 2, "...but never priced into the share table: an option's price is a strike");
+
+  // The 10b5-1 box is TRI-state, and the flag belongs to the transaction that carries it. The
+  // first cut fell back to the document for every row, which marked this same insider's
+  // open-market PURCHASE as plan-scheduled — inverting the one distinction the field exists for.
+  assert.equal(sell.plan, 1, "the sale's own box is read");
+  assert.equal(buy.plan, null, "the sale's flag must NOT leak onto the purchase");
+  assert.equal(C.parseForm4(f4Doc(F4_BUY)).tx[0].plan, null, "no box at all is null — 'the form does not say', never 'not a plan'");
+  assert.equal(C.parseForm4(f4Doc(F4_PLANSELL)).tx[0].plan, 1, "a single-transaction filing can carry the flag at document level");
+  assert.equal(C.parseForm4(f4Doc(F4_BUY.replace("<transactionCode>P</transactionCode>",
+    "<transactionCode>P</transactionCode><aff10b5One><value>0</value></aff10b5One>"))).tx[0].plan, 0,
+    "an explicitly UNticked box is 0 — a different answer from absent");
+
+  // A joint filing reports ONE set of transactions for several people.
+  const joint = C.parseForm4(f4Doc(F4_BUY, { owners:
+    `<reportingOwner><reportingOwnerId><rptOwnerName>A Person</rptOwnerName></reportingOwnerId><reportingOwnerRelationship><isDirector>1</isDirector></reportingOwnerRelationship></reportingOwner>`
+    + `<reportingOwner><reportingOwnerId><rptOwnerName>B Person</rptOwnerName></reportingOwnerId><reportingOwnerRelationship><isTenPercentOwner>1</isTenPercentOwner></reportingOwnerRelationship></reportingOwner>` }));
+  assert.equal(joint.tx.length, 1, "one trade stays one row — attributing it per filer would multiply the flow");
+  assert.equal(joint.owners.length, 2, "...and the other filers are kept, so the joint filing is visible");
+  assert.equal(joint.owner.name, "A Person");
+  assert.equal(joint.owners[1].role, "10% owner");
+
+  assert.ok(C.parseForm4(f4Doc(F4_BUY, { form: "4/A" })).amended, "an amendment knows it is one");
+  assert.equal(C.parseForm4("<html>not a filing</html>").ok, false, "a non-filing is refused, never half-read");
+  assert.deepEqual(C.parseForm4("").tx, [], "empty input yields no transactions, not a throw");
+  // The RAW document, not EDGAR's stylesheet-wrapped copy: taking the rendered one works by
+  // accident until the transform path changes.
+  assert.equal(C.form4DocName({ directory: { item: [{ name: "xslF345X05/wf-form4.xml" }, { name: "wf-form4.xml" }, { name: "primary.htm" }] } }),
+    "wf-form4.xml", "the raw ownership xml is chosen by name");
+  assert.equal(C.form4DocName({ directory: { item: [{ name: "a.htm" }] } }), null, "an accession with no xml says so");
+});
+
+test("insiders feed: sort, filter and search all run in SQL over the whole set", (t) => {
+  const fs = require("fs"), os = require("os"), path = require("path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ins-"));
+  const st = require("../src/store").openStore(dir);
+  if (!st.insidersReady()) return t.skip("node:sqlite unavailable in this runtime");
+  const url = (cik, acc) => `https://www.sec.gov/Archives/edgar/data/${cik}/${acc.replace(/-/g, "")}/${acc}-index.htm`;
+  st.insidersQueue([
+    { acc: "0000050863-26-000101", tk: "INTC", form: "4", filed: Date.parse("2026-08-26T21:05:00Z"), url: url(50863, "0000050863-26-000101") },
+    { acc: "0001045810-26-000222", tk: "NVDA", form: "4", filed: Date.parse("2026-08-25T20:30:00Z"), url: url(1045810, "0001045810-26-000222") },
+  ]);
+  assert.deepEqual(st.insidersQueue([{ acc: "0000050863-26-000101", tk: "INTC", form: "4", filed: 1, url: "u" }]),
+    { seen: 1, added: 0 }, "re-seeing an accession queues nothing new — the EDGAR rotation revisits every name hourly");
+  st.insidersSave("0000050863-26-000101",
+    { tk: "INTC", issuer: "INTEL CORP", period: "2026-08-25", owner: "Tan Lip-Bu", role: "director · officer", title: "Chief Executive Officer", nDeriv: 1 },
+    [{ ln: 0, code: "P", act: "buy", ad: "A", shares: 500000, price: 20, value: 1e7, txDate: "2026-08-25", own: 1500000, dir: "D", plan: null, sec: "Common Stock" },
+      { ln: 1, code: "S", act: "sell", ad: "D", shares: 12500, price: null, value: null, txDate: "2026-08-26", own: null, dir: null, plan: 1, sec: "Common Stock" }]);
+  st.insidersSave("0001045810-26-000222",
+    { tk: "NVDA", issuer: "NVIDIA CORP", period: "2026-08-24", owner: "Huang Jen-Hsun", role: "director · officer", title: "CEO", nDeriv: 0 },
+    [{ ln: 0, code: "S", act: "sell", ad: "D", shares: 100000, price: 180.5, value: 18050000, txDate: "2026-08-24", own: 900000, dir: "I", plan: 1, sec: "Common Stock" },
+      { ln: 1, code: "A", act: "grant", ad: "A", shares: 40000, price: 0, value: null, txDate: "2026-08-24", own: 940000, dir: "D", plan: null, sec: "Common Stock" }]);
+  const ids = (o) => st.insidersFeed(o).map((r) => r.tk + ":" + r.code);
+
+  // SORT: from a closed whitelist, over the whole set. A key that is not in the map can never
+  // reach the query as text — it falls back to the default rather than erroring or interpolating.
+  assert.deepEqual(ids({ sort: "value", dir: -1 }), ["NVDA:S", "INTC:P", "NVDA:A", "INTC:S"], "by value, biggest first");
+  assert.equal(st.insidersFeed({ sort: "value; DROP TABLE tx--" }).length, 4, "an unknown sort key falls back to the default, never interpolates");
+  assert.ok(st.insidersFeedCount({}) === 4, "the table survived that");
+  // NULLS LAST in BOTH directions — SQL puts them first on ascending, which buries every row that
+  // HAS an answer beneath the rows that do not.
+  assert.equal(st.insidersFeed({ sort: "price", dir: 1 }).slice(-1)[0].price, null, "ascending: no-price rows sort last");
+  assert.equal(st.insidersFeed({ sort: "price", dir: -1 }).slice(-1)[0].price, null, "descending: still last");
+
+  // FILTER: every filter is SQL, so the pager's "of N" counts the same set the rows come from.
+  assert.deepEqual(ids({ codes: "P" }), ["INTC:P"], "code chips filter server-side");
+  assert.equal(st.insidersFeedCount({ codes: "P" }), 1, "...and the count agrees with the page");
+  assert.deepEqual(ids({ codes: "P,S", minValue: 15e6 }), ["NVDA:S"], "size filter");
+  assert.deepEqual(ids({ codes: "P,S", minValue: 1 }).indexOf("INTC:S"), -1,
+    "a row with no price has no value and is EXCLUDED by a size filter rather than counted as zero");
+  // The plan filter is tri-state and neither bucket may swallow the third answer.
+  assert.deepEqual(ids({ plan: "only" }), ["NVDA:S", "INTC:S"], "only rows whose box is ticked");
+  assert.deepEqual(ids({ plan: "excl", codes: "P" }), ["INTC:P"], "not-marked includes rows with no box at all");
+  assert.equal(st.insidersFeedCount({ plan: "only" }) + st.insidersFeedCount({ plan: "excl" }), 4, "the two buckets partition the set exactly once");
+  assert.equal(st.insidersFeedCount({ role: "officer" }), 4, "role filter reads the form's own boxes");
+  assert.equal(st.insidersFeedCount({ ticker: "nvda" }), 2, "ticker filter is case-insensitive");
+
+  // SEARCH: in SQL, over every stored transaction, order-independent.
+  assert.deepEqual(ids({ q: "jen" }), ["NVDA:S", "NVDA:A"], "a partial name matches");
+  assert.deepEqual(ids({ q: "huang nvda" }), ids({ q: "nvda huang" }), "word order does not matter");
+  assert.deepEqual(ids({ q: "intel" }), ["INTC:P", "INTC:S"], "the issuer name is searchable too");
+  assert.equal(st.insidersFeedCount({ q: "nobody here" }), 0, "a search that matches nothing says nothing, honestly");
+  // Paging is a view of one ordered set, not a re-sort per page.
+  assert.deepEqual(st.insidersFeed({ sort: "value", dir: -1, limit: 2, offset: 2 }).map((r) => r.tk + ":" + r.code),
+    ["NVDA:A", "INTC:S"], "page 2 continues page 1's ordering");
+
+  // A re-parse REPLACES a filing's rows. An amended Form 4 must not leave the original trade
+  // behind next to the corrected one.
+  st.insidersSave("0000050863-26-000101", { tk: "INTC", owner: "Tan Lip-Bu", nDeriv: 0 },
+    [{ ln: 0, code: "P", act: "buy", shares: 400000, price: 20, value: 8e6, txDate: "2026-08-25" }]);
+  assert.equal(st.insidersFeedCount({ ticker: "INTC" }), 1, "the superseded rows are gone, not duplicated");
+
+  // The roll-up the drawer reads: a sale with no disclosed price must not report as $0 of selling.
+  const roll = st.insidersTickerRoll("NVDA", 90);
+  assert.equal(roll.nSell, 1); assert.equal(roll.sellVal, 18050000);
+  st.insidersSave("0009999999-26-000001", { tk: "ZZZZ", owner: "Someone", nDeriv: 0 },
+    [{ ln: 0, code: "S", act: "sell", shares: 100, price: null, value: null, txDate: new Date().toISOString().slice(0, 10) }]);
+  const z = st.insidersTickerRoll("ZZZZ", 90);
+  assert.equal(z.nSell, 1, "the sale is counted");
+  assert.equal(z.sellVal, null, "...but its dollar value is UNKNOWN, never zero");
+  assert.equal(z.nNoPx, 1, "and the row that had no price is disclosed as such");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("insiders lane: discovery rides the EDGAR rotation, and the parse reads the real document", async (t) => {
+  const fs = require("fs"), os = require("os"), path = require("path");
+  const { createPoller } = require("../src/poller");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "insp-"));
+  const store = require("../src/store").openStore(dir);
+  if (!store.insidersReady()) { fs.rmSync(dir, { recursive: true, force: true }); return t.skip("node:sqlite unavailable"); }
+  const hits = [];
+  const J = (o) => ({ ok: true, json: async () => o, text: async () => JSON.stringify(o) });
+  const X = (s) => ({ ok: true, json: async () => { throw new Error("xml"); }, text: async () => s });
+  const extFetch = async (url) => { hits.push(url);
+    if (/\/index\.json$/.test(url)) return J({ directory: { item: [{ name: "xslF345X05/wf-form4.xml" }, { name: "wf-form4.xml" }] } });
+    if (/wf-form4\.xml$/.test(url)) return X(f4Doc(F4_BUY + F4_PLANSELL));
+    return { ok: false, status: 404 };
+  };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, extFetch });
+
+  // Discovery takes the ownership forms out of the SAME atom items the filings lane already
+  // parses — no second fetch, no second rate-limit budget. Everything else in that batch is
+  // ignored here rather than queued as an insider filing.
+  const q = p.insidersQueueNow([
+    { id: "sec:0000050863-26-000101", tk: "INTC", form: "4", own: 1, pub: Date.parse("2026-08-26T21:05:00Z"),
+      url: "https://www.sec.gov/Archives/edgar/data/50863/000005086326000101/0000050863-26-000101-index.htm" },
+    { id: "sec:0000050863-26-000102", tk: "INTC", form: "8-K", mat: 1, pub: 2, url: "u" },
+    { id: "sec:0000050863-26-000103", tk: "INTC", form: "SC 13G", own: 1, pub: 3, url: "u" },
+  ]);
+  assert.deepEqual(q, { seen: 3, queued: 1, added: 1 },
+    "of three filings in the batch only the Form 4 is queued — an 8-K is not an insider trade and a 13G is not a transaction — and the step reports what it LOOKED AT as well as what it took");
+
+  const r = await p.insidersParseNow(5);
+  assert.ok(r.ok, "parse run: " + (r.error || "ok"));
+  assert.equal(r.filings, 1); assert.equal(r.tx, 2, "both Table I rows stored");
+  // Two reads per filing, and the SECOND is the raw document the directory listing named.
+  assert.equal(hits.length, 2, "one directory listing, one document");
+  assert.ok(/\/Archives\/edgar\/data\/50863\/000005086326000101\/index\.json$/.test(hits[0]),
+    "the archive path is read from the filing's own url, not guessed from a ticker: " + hits[0]);
+  assert.ok(hits[1].endsWith("/wf-form4.xml"), "the raw xml, not EDGAR's stylesheet copy: " + hits[1]);
+
+  const rows = store.insidersFeed({ sort: "value", dir: -1 });
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].price, 20, "the price reached the feed unchanged, end to end");
+  assert.equal(rows[0].owner, "Tan Lip-Bu");
+  assert.equal(rows[0].title, "Chief Executive Officer");
+  assert.equal(rows[1].price, null, "and the absent one stayed absent");
+  const stat = p.insidersStatus();
+  assert.equal(stat.filings.done, 1); assert.equal(stat.filings.queued, 0, "a read filing leaves the queue");
+
+  // A second run has nothing to do — the queue is the work list, not a re-crawl.
+  const n = hits.length;
+  await p.insidersParseNow(5);
+  assert.equal(hits.length, n, "nothing re-fetched");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("insiders tab: columns sort, hide and REORDER, and the view survives a column list that changed", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const els = {};
+  const mk = (id) => ({ id, innerHTML: "", hidden: false, value: "", checked: false, textContent: "", style: {}, dataset: {},
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    querySelectorAll: () => [], querySelector: () => null, addEventListener() {}, appendChild() {}, removeChild() {},
+    setAttribute() {}, getAttribute: () => null, focus() {}, getBoundingClientRect: () => ({ left: 0, top: 0, width: 90, height: 20 }) });
+  const saved = { si: global.setInterval, st: global.setTimeout, raf: global.requestAnimationFrame, ct: global.clearTimeout,
+    ci: global.clearInterval, doc: global.document, win: global.window, ls: global.localStorage, f: global.fetch };
+  global.setInterval = () => 0; global.setTimeout = () => 0; global.requestAnimationFrame = () => 0;
+  global.clearTimeout = () => 0; global.clearInterval = () => 0;
+  global.document = { getElementById: (id) => (els[id] = els[id] || mk(id)), querySelectorAll: () => [], querySelector: () => null,
+    createElement: mk, addEventListener() {}, body: mk("body"), documentElement: mk("html"), hidden: false };
+  global.window = { addEventListener() {}, location: { reload() {}, href: "/", hash: "" }, matchMedia: () => ({ matches: false, addEventListener() {} }), __ADMIN: true };
+  global.localStorage = { _d: {}, getItem(k) { return this._d[k] ?? null; }, setItem(k, v) { this._d[k] = String(v); }, removeItem(k) { delete this._d[k]; } };
+  global.fetch = () => new Promise(() => {});
+  try {
+    const api = new Function(app + "\n;return { INS, INS_COLS, INS_HIDE_DEFAULT, insRender, insCols, insSave, insLoad };")();
+    const { INS } = api;
+    INS.stat = { filings: { n: 2, done: 2, queued: 0, failed: 0 }, tx: { n: 2, names: 2, noPrice: 1 } };
+    INS.total = 2;
+    INS.rows = [
+      { acc: "a", tk: "INTC", form: "4", filed: Date.parse("2026-08-26T21:00:00Z"), url: "https://sec.gov/x", issuer: "INTEL CORP",
+        owner: "Tan Lip-Bu", role: "director · officer", title: "Chief Executive Officer", nDeriv: 1, ln: 0, txDate: "2026-08-25",
+        code: "P", act: "buy", ad: "A", shares: 500000, price: 20, value: 1e7, own: 1500000, dir: "D", plan: null, sec: "Common Stock" },
+      { acc: "b", tk: "NVDA", form: "4", filed: Date.parse("2026-08-25T20:00:00Z"), url: "https://sec.gov/y", issuer: "NVIDIA CORP",
+        owner: "Huang Jen-Hsun", role: "director · officer", title: "CEO", nDeriv: 0, ln: 1, txDate: "2026-08-24",
+        code: "S", act: "sell", ad: "D", shares: 12500, price: null, value: null, own: null, dir: null, plan: 1, sec: "Common Stock" },
+    ];
+    api.insRender();
+    const h = () => els["insiders-body"].innerHTML;
+    assert.ok(h().includes("500,000") && h().includes("$20.00"), "the filer's own figures are what the row shows");
+    assert.ok(h().includes("$10.00M"), "value renders from shares x price");
+    // The two absences, rendered as absences.
+    assert.ok(!/\$0\.00/.test(h()), "a row with no price must never render a $0 price or value: " + (h().match(/\$0[^<]*/) || [""])[0]);
+    assert.ok(h().includes("10b5-1"), "a plan-marked sale says so");
+    assert.ok(h().includes("+1D"), "the derivative rows the table does not price are disclosed on the filing");
+    assert.ok(/33%|33\.3%/.test(h()), "Δ POS: 500,000 of the 1,500,000 held afterwards");
+
+    // REARRANGE: the header order is INS.order, and hiding removes a column outright.
+    const ths = (s) => [...s.matchAll(/data-inssort="([a-z]+)"/g)].map((m) => m[1]);
+    const before = ths(h());
+    assert.ok(before.indexOf("filed") < before.indexOf("ticker"), "default order");
+    assert.ok(!before.includes("issuer"), "issuer starts hidden — it repeats the ticker");
+    INS.order = ["ticker", "owner", "act", "value"].concat(INS.order.filter((k) => !["ticker", "owner", "act", "value"].includes(k)));
+    api.insRender();
+    assert.deepEqual(ths(h()).slice(0, 4), ["ticker", "owner", "act", "value"], "a reordered view renders in that order");
+    INS.hidden = new Set(api.INS_COLS.map((c) => c.k));
+    assert.equal(api.insCols().length, 0, "hiding everything is possible in state...");
+    api.insRender();
+    // ...and the render must not produce a table with no columns; the bind guard restores one.
+    INS.hidden = new Set(api.INS_HIDE_DEFAULT);
+
+    // A saved view is RECONCILED against the current column list, never trusted wholesale: a
+    // column added in a later build must appear rather than vanishing for everyone who ever
+    // dragged a header, and one since removed must not leave a hole.
+    global.localStorage.setItem("insview", JSON.stringify({ order: ["value", "ticker", "GONE_COLUMN"], hidden: ["sec"], sort: { k: "value", dir: 1 } }));
+    api.insLoad();
+    assert.equal(INS.order.indexOf("GONE_COLUMN"), -1, "a column that no longer exists is dropped from a stored order");
+    assert.deepEqual(INS.order.slice(0, 2), ["value", "ticker"], "the stored order is honoured as far as it is still valid");
+    assert.equal(INS.order.length, api.INS_COLS.length, "every current column is present exactly once");
+    assert.deepEqual(INS.sort, { k: "value", dir: 1 }, "the stored sort is restored");
+    global.localStorage.setItem("insview", JSON.stringify({ sort: { k: "haxx", dir: -1 } }));
+    api.insLoad();
+    assert.notEqual(INS.sort.k, "haxx", "a stored sort key that is not a column is refused");
+  } finally {
+    global.setInterval = saved.si; global.setTimeout = saved.st; global.requestAnimationFrame = saved.raf;
+    global.clearTimeout = saved.ct; global.clearInterval = saved.ci;
+    global.document = saved.doc; global.window = saved.win; global.localStorage = saved.ls; global.fetch = saved.f;
+  }
+});
+
 test("client integrity manifest: app.js contains every load-bearing symbol, exactly once", () => {
   // Regression guard for the build that shipped a gutted app.js: a bad splice replaced ~1,600
   // lines and still passed node --check (valid JS) and this suite (which never read the client).
@@ -2899,6 +3179,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "ddCell", "ddyCell", "openCell", "dopenCell", "computeMomentum", "computeSqueeze", "fmtTrig", "fmtAge",
     "vsTapeCell", "dcapCell", "hitCell", "rvolCell",
     "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext", "earnRecentList", "earnReactHtml", "epsSurStr", "epsPairFmt", "epsFmt", "wireEarnVoid",
+    "openInsiders", "insRender", "insBind", "insCols", "insSave", "insLoad", "insPager", "insUsd", "termInsiders",
     "macroStateC", "macroList", "macroNextC", "macroRecentC", "macroTimeLbl", "macroRangeFmt",
     "macroStatFmt", "macroMonthLbl", "macroValHtml", "macroRowHtml", "renderMacroStrip", "macroDayLbl", "wireMacroStrip",
     "applyTabOrder", "saveTabOrder", "wireTabDrag",
@@ -12680,7 +12961,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.27-37"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.27-38"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20434,7 +20715,7 @@ test("nav groups: every tab is placed once, and renames/moves are validated at t
   assert.deepStrictEqual(C.navConfigSanitize({ views: { trend: "nope" } }).views, {}, "unknown target menu rejected");
   assert.deepStrictEqual(C.navConfigSanitize({ views: { trend: "tape" } }).views, {}, "a move to where it already is stores nothing");
   // a menu emptied by moves still resolves — the client hides it
-  const empty = C.resolveNavGroups({ views: { report: "tape", funds: "tape", notes: "tape", congress: "tape" } });
+  const empty = C.resolveNavGroups({ views: { report: "tape", funds: "tape", notes: "tape", congress: "tape", insiders: "tape" } });
   assert.strictEqual(empty.find((g) => g.key === "research").views.length, 0, "a menu can be emptied");
 
   // ---- wiring --------------------------------------------------------------------------------

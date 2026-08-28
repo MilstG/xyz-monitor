@@ -2096,3 +2096,18 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
    text filing and should never be indistinguishable from one. */
 .cng-ocr{font-family:var(--mono);font-size:9px;letter-spacing:.08em;border:1px solid var(--accent-dim);
   color:var(--accent);border-radius:2px;padding:0 4px;vertical-align:1px}
+
+/* ---- INSIDERS tab (build 2026.08.27-38) -----------------------------------------------------
+   Rides the congress table's shell (.cng-tbl, .cng-chip, .cng-pager) — one dataset shape, one set
+   of reading habits. Only what Form 4 has and a PTR does not needs styling of its own. */
+.ins-filters{flex-wrap:wrap}
+.ins-sep{width:1px;height:14px;background:var(--line);margin:0 4px;flex:0 0 auto}
+.ins-th{cursor:grab;user-select:none}
+.ins-th.dragging{opacity:.45;cursor:grabbing}
+.ins-th:active{cursor:grabbing}
+.ins-tbl td{white-space:nowrap}
+.ins-role{font-size:10.5px;letter-spacing:.02em;text-transform:uppercase;color:var(--faint);border-bottom:1px dotted var(--line)}
+.ins-dir{font-size:9.5px;color:var(--faint);margin-left:3px;vertical-align:super}
+.ins-plan{font-size:10px;letter-spacing:.03em;padding:1px 4px;border:1px solid var(--line);border-radius:3px;color:var(--faint)}
+.ins-plan.off{border-style:dashed}
+.ins-dv{font-size:9.5px;color:var(--faint);margin-left:4px}

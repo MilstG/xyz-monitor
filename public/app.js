@@ -3595,7 +3595,7 @@ function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch
   if(d.open&&typeof d.open==='object') state.alerts.open=Object.assign(state.alerts.open,d.open); }
 
 function setHash(h){ try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} }
-const HASH_VIEWS=new Set(['markets','focus','funds','trend','charts','sectors','corr','funding','sessions','signals','earnings','news','backtest','report','actionable','admin','housing','liquidity','notes','congress']);
+const HASH_VIEWS=new Set(['markets','focus','funds','trend','charts','sectors','corr','funding','sessions','signals','earnings','news','backtest','report','actionable','admin','housing','liquidity','notes','congress','insiders']);
 // ===== admin panel: feature visibility switchboard =============================================
 // Reads /api/features (manifest + raw states + BOTH resolved audiences). Writes one key per call and
 // rolls back on failure — a batch write would make a partial failure ambiguous, and there is no save
@@ -6278,6 +6278,7 @@ function showView(v){
   setHidden('view-news', v!=='news');
   setHidden('view-notes', v!=='notes');
   setHidden('view-congress', v!=='congress');
+  setHidden('view-insiders', v!=='insiders');
   setHidden('view-backtest', v!=='backtest');
   setHidden('view-report', v!=='report');
   setHidden('view-admin', v!=='admin');
@@ -6296,6 +6297,7 @@ function showView(v){
   if(v==='news'){ if(el('view-news')) openNews(); else { showView('markets'); return; } }
   if(v==='notes'){ if(el('view-notes')) openNotes(); else { showView('markets'); return; } }
   if(v==='congress'){ if(el('view-congress')) openCongress(); else { showView('markets'); return; } }
+  if(v==='insiders'){ if(el('view-insiders')) openInsiders(); else { showView('markets'); return; } }
   if(v==='backtest'){ if(el('view-backtest')) renderBacktest_load(); else { showView('markets'); return; } }
   if(v==='report'){ if(el('view-report')) openReportView(); else { showView('markets'); return; } }
   if(v==='admin'){ if(el('view-admin')&&IS_ADMIN) openAdmin(); else { showView('markets'); return; } }
@@ -10308,7 +10310,8 @@ const CMDK_TABS=[
   {v:'markets',label:'Markets'},{v:'focus',label:'Focus'},{v:'funds',label:'Funds'},{v:'trend',label:'Trend'},{v:'charts',label:'Charts'},{v:'sectors',label:'Sectors'},
   {v:'corr',label:'Correlation'},{v:'funding',label:'Funding'},{v:'sessions',label:'Sessions'},{v:'signals',label:'Signals'},
   {v:'earnings',label:'Earnings'},{v:'news',label:'News'},{v:'report',label:'AI Report'},
-  {v:'actionable',label:'Actionable'},{v:'backtest',label:'Backtest'},{v:'housing',label:'Housing'},{v:'liquidity',label:'Liquidity'},{v:'admin',label:'Admin'}];
+  {v:'actionable',label:'Actionable'},{v:'backtest',label:'Backtest'},{v:'housing',label:'Housing'},{v:'liquidity',label:'Liquidity'},
+  {v:'congress',label:'Congress'},{v:'insiders',label:'Insiders'},{v:'admin',label:'Admin'}];
 let _cmdkSel=0, _cmdkRows=[];
 function openCmdk(){ const bg=el('cmdkbg'), m=el('cmdk'), q=el('cmdk-q'); if(!bg||!m||!q) return;
   bg.hidden=false; m.hidden=false; q.value=''; cmdkRender(''); q.focus();
@@ -10763,6 +10766,7 @@ function termGrammarComplete(p){ const head=p[0].toLowerCase(), r=termFind(p[0])
   if(head==='fund'||head==='bs'||head==='balance'||head==='etf'||head==='holdings') return !!p[1];   // symbols may live outside the universe (ETFs)
   if(head==='whale'||head==='13f') return true;   // bare = watchlist; args validate server-side against the live list
   if(head==='congress') return true;   // bare = status; the verb itself validates admin server-side
+  if(head==='insiders'||head==='form4') return true;   // bare = status; the verbs validate admin server-side
   if(head==='holds'||head==='who') return !!p[1];
   if(head==='basket') return ['create','list','drop'].includes((p[1]||'').toLowerCase());
   if(head==='ratio') return p.length>=2;
@@ -10781,6 +10785,7 @@ function termExec(cmdStr){ const p=cmdStr.trim().split(/\s+/), h=p[0].toLowerCas
   if(h==='fund'||h==='bs'||h==='balance') return termFund(p[1]);
   if(h==='whale'||h==='13f') return termWhale(p.slice(1));
   if(h==='congress') return termCongress(p.slice(1));
+  if(h==='insiders'||h==='form4') return termInsiders(p.slice(1));
   if(h==='holds'||h==='who') return termWhale(['who'].concat(p.slice(1)));
   if(h==='etf'||h==='holdings') return termEtf(p[1]);
   if(h==='vs'||h==='compare'){ const a=termFind(p[1]), b=termFind(p[2]); return (a&&b)?termCompare(a,b):termErr('usage: vs <a> <b>'); }
@@ -13247,6 +13252,302 @@ function termWhaleSeason(q){
 // two admin verbs and the ops log. No tab, no panel, nothing public: the index is worth nothing to
 // a reader until phase 2 parses transactions out of the PTR documents, and shipping a tab that only
 // says "someone filed something" would be a surface to maintain in exchange for nothing.
+// ===== INSIDERS tab (build 2026.08.27-38) ======================================================
+// Section 16 transactions off SEC Form 4. The contrast with the CONGRESS tab next to it is the
+// whole point and is stated on the footer: a PTR discloses an amount band and no price, so that
+// lane can never show one; a Form 4 discloses the share count and the price per share, so every
+// number here is the filer's own and nothing is derived, banded or estimated.
+//
+// Four capabilities, and each one is answered where it has to be answered:
+//   SEARCH and SORT run in SQL over every stored transaction. Sorting the loaded page would show
+//     a different "top" on every page, and searching it would scope every query to the most recent
+//     few hundred rows — a name outside that window would read as "not in the tool".
+//   FILTER splits: the code / plan / role / size filters are SQL (they change what the pager is
+//     counting), and nothing narrows the page in the browser, so "N of M" is always true.
+//   REARRANGE is local and persistent: drag a header to move a column, uncheck one to hide it.
+//     The order lives on this browser, so two readers can hold different views of one dataset.
+const INS_COLS = [
+  { k: 'filed',  label: 'FILED',   cls: 'l', tip: 'when the filing hit EDGAR. Section 16 gives insiders two business days from the trade, so this is close to the trade date and far closer than a PTR’s 45.' },
+  { k: 'traded', label: 'TRADED',  cls: 'l', tip: 'the transaction date on the form — the day the trade actually happened.' },
+  { k: 'ticker', label: 'TICKER',  cls: 'l', tip: 'the issuer’s trading symbol as written on the form itself, not resolved from a name.' },
+  { k: 'owner',  label: 'INSIDER', cls: 'l', tip: 'the reporting person. A joint filing is attributed to the first owner named and says so on hover — counting one trade once per filer would multiply the flow.' },
+  { k: 'role',   label: 'ROLE',    cls: 'l', tip: 'director, officer, 10% owner — the boxes ticked on the form, plus the officer title where one is given. A CEO buying is not the same event as a 10% fund trimming.' },
+  { k: 'act',    label: 'ACT',     cls: 'l', tip: 'the transaction CODE, which is what decides whether a row means anything. P is an open-market purchase and S an open-market sale — decisions. A (grant), M (option exercise) and F (shares withheld for tax) are compensation mechanics, not views on the price.' },
+  { k: 'shares', label: 'SHARES',  cls: 'r', tip: 'share count exactly as filed.' },
+  { k: 'price',  label: 'PRICE',   cls: 'r', tip: 'price per share exactly as filed. Blank where the form carried none — a footnoted weighted average or a range — which is a real and common case, never a zero.' },
+  { k: 'value',  label: 'VALUE',   cls: 'r', tip: 'shares x price, computed only where a price exists. A grant prices at zero and a footnoted price is absent; both would otherwise read as a $0 trade.' },
+  { k: 'pct',    label: 'Δ POS', cls: 'r', tip: 'the trade as a share of the holding it left behind — how much of their own position this was. Blank unless the form carries the post-transaction figure.' },
+  { k: 'own',    label: 'HOLDING', cls: 'r', tip: 'shares owned after the transaction, as reported. Direct holdings and indirect (a trust, a family LLC) are different claims and are marked D or I.' },
+  { k: 'plan',   label: 'PLAN',    cls: 'l', tip: 'the Rule 10b5-1 checkbox. A sale under a pre-arranged plan was scheduled months ago and says little about today; a discretionary one is a decision taken now. THREE states: marked, not marked, and blank — the box did not exist before 2023, so blank means the form does not say, never "not a plan".' },
+  { k: 'sec',    label: 'SECURITY',cls: 'l', tip: 'the class of stock as the form names it.' },
+  { k: 'issuer', label: 'ISSUER',  cls: 'l', tip: 'the company name on the filing.' },
+  { k: 'form',   label: 'FORM',    cls: 'l', tip: '4 is the timely report; 4/A amends one already filed. An amendment REPLACES its rows here rather than adding a second copy of the trade.' },
+  { k: 'src',    label: 'SRC',     cls: 'l', tip: 'the filing itself on EDGAR — the document every number in the row was read from.' },
+];
+// Everything the parser knows is a column and the reader decides what to look at. Issuer name,
+// security class and form type start hidden: they repeat the ticker, repeat "Common Stock" and
+// read "4" on almost every row respectively.
+const INS_HIDE_DEFAULT = ['issuer', 'sec', 'form'];
+const INS_LS = 'insview';
+const INS_PAGE = 50;
+// The transaction codes, grouped as a reader thinks about them rather than as the form lists them.
+const INS_CHIPS = [
+  { k: 'P', label: 'buys', tip: 'code P — an open-market purchase. The insider chose to buy with their own money; the rarest row here and the only one that is unambiguously a view.' },
+  { k: 'S', label: 'sells', tip: 'code S — an open-market sale. A decision too, but check the PLAN column: a scheduled 10b5-1 sale was set up in advance.' },
+  { k: 'A', label: 'grants', tip: 'code A — shares awarded as compensation. Not a purchase and not a signal about price.' },
+  { k: 'M', label: 'exercises', tip: 'code M — an option or RSU converted into shares. Mechanical, and usually paired with an S or an F the same day.' },
+  { k: 'F', label: 'tax', tip: 'code F — shares handed back to the issuer to cover withholding at vest. The insider did not choose to sell these.' },
+  { k: 'G', label: 'gifts', tip: 'code G — a gift. No price, no proceeds.' },
+];
+const INS = { rows: [], stat: null, total: 0, page: 0, q: '', codes: new Set(['P', 'S']), plan: null,
+  role: '', minValue: 0, sort: { k: 'filed', dir: -1 }, hidden: new Set(INS_HIDE_DEFAULT),
+  order: INS_COLS.map(c => c.k), menu: false, drag: null };
+// The saved view: which columns, in what order, sorted how. Filters are deliberately NOT saved —
+// a filter is a question being asked right now, and reopening the tab to yesterday's narrowed set
+// with no memory of narrowing it is how a reader concludes the lane is empty.
+function insSave() {
+  try { localStorage.setItem(INS_LS, JSON.stringify({ hidden: [...INS.hidden], order: INS.order, sort: INS.sort })); } catch (_) {}
+}
+function insLoad() {
+  try {
+    const v = JSON.parse(localStorage.getItem(INS_LS) || 'null');
+    if (!v) return;
+    if (Array.isArray(v.hidden)) INS.hidden = new Set(v.hidden.filter(k => INS_COLS.some(c => c.k === k)));
+    // A stored order is RECONCILED against the current column list, never trusted: a column added
+    // in a later build must appear (at the end) rather than vanishing for everyone who ever
+    // dragged a header, and one since removed must not leave a hole.
+    if (Array.isArray(v.order)) {
+      const known = INS_COLS.map(c => c.k);
+      const kept = v.order.filter(k => known.includes(k));
+      INS.order = kept.concat(known.filter(k => !kept.includes(k)));
+    }
+    if (v.sort && INS_COLS.some(c => c.k === v.sort.k)) INS.sort = { k: v.sort.k, dir: v.sort.dir < 0 ? -1 : 1 };
+  } catch (_) {}
+}
+insLoad();
+function insCols() { return INS.order.map(k => INS_COLS.find(c => c.k === k)).filter(c => c && !INS.hidden.has(c.k)); }
+async function insGet(qs) { try { return await fetchJSON('/api/insiders' + (qs || '')); } catch (e) { return { ok: false, error: e.message || 'fetch failed' }; } }
+async function insPost(body) {
+  try { const r = await fetch('/api/insiders', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    return await r.json(); } catch (e) { return { ok: false, error: e.message || 'post failed' }; }
+}
+async function openInsiders() {
+  const out = el('insiders-body'); if (!out) return;
+  if (!INS.rows.length) out.innerHTML = '<div class="msg">reading Form 4 transactions…</div>';
+  const p = ['feed=1', 'limit=' + INS_PAGE, 'offset=' + (INS.page * INS_PAGE),
+    'sort=' + encodeURIComponent(INS.sort.k), 'dir=' + INS.sort.dir];
+  if (INS.q.trim()) p.push('q=' + encodeURIComponent(INS.q.trim()));
+  if (INS.codes.size) p.push('codes=' + [...INS.codes].join(','));
+  if (INS.plan) p.push('plan=' + INS.plan);
+  if (INS.role) p.push('role=' + encodeURIComponent(INS.role));
+  if (INS.minValue > 0) p.push('minValue=' + INS.minValue);
+  const r = await insGet('?' + p.join('&'));
+  if (!r || !r.ok) { out.innerHTML = `<div class="msg err">${esc((r && r.error) || 'fetch failed')}</div>`; return; }
+  INS.rows = r.feed || []; INS.stat = r.status || null; INS.total = r.total || 0;
+  // A filter or a sort can land the reader past the end of the new result set.
+  if (INS.page && !INS.rows.length && INS.total) { INS.page = Math.max(0, Math.ceil(INS.total / INS_PAGE) - 1); return openInsiders(); }
+  insRender();
+}
+let insT = null;
+function insSearch() { clearTimeout(insT); insT = setTimeout(() => { INS.page = 0; openInsiders(); }, 260); }
+function insNum(v, dp) { return v == null || !isFinite(v) ? '—' : (+v).toLocaleString(undefined, { minimumFractionDigits: dp || 0, maximumFractionDigits: dp || 0 }); }
+function insUsd(v) {
+  if (v == null || !isFinite(v)) return '—';
+  const a = Math.abs(v);
+  return (v < 0 ? '-$' : '$') + (a >= 1e9 ? (a / 1e9).toFixed(2) + 'B' : a >= 1e6 ? (a / 1e6).toFixed(2) + 'M'
+    : a >= 1e3 ? (a / 1e3).toFixed(1) + 'K' : a.toFixed(0));
+}
+function insRender() {
+  const out = el('insiders-body'); if (!out) return;
+  const st = INS.stat || {}, f = st.filings || {}, t = st.tx || {};
+  const shown = insCols();
+  const head = `<div class="whl-head">`
+    + `<span class="whl-hd">INSIDERS · SEC FORM 4</span>`
+    + `<span class="cng-tag" data-tip="Section 16 officers, directors and 10% holders must report their own trades within two business days. This lane reads the ownership XML of every Form 4 the EDGAR rotation sees on the equity roster.">${(f.done || 0).toLocaleString()} filing(s) read · ${(t.n || 0).toLocaleString()} transactions · ${(t.names || 0).toLocaleString()} names</span>`
+    + `<span class="whl-sp"></span>`
+    + `<input id="ins-q" class="cng-in" placeholder="search — insider, ticker, issuer, title" value="${esc(INS.q)}" maxlength="60" autocomplete="off" spellcheck="false" data-tip="runs in SQL over every stored transaction, not over the loaded page. Every word must appear somewhere in the row, in any order — so “ceo intc” and “intc ceo” find the same thing.">`
+    + `<button type="button" class="cng-chip" id="ins-colbtn" data-tip="show or hide columns — and drag any header to reorder. Remembered on this browser.">columns ▾</button>`
+    + `</div>`
+    + `<div class="cng-rates ins-filters">`
+      + INS_CHIPS.map(c => `<button type="button" class="cng-chip${INS.codes.has(c.k) ? ' on' : ''}" data-inscode="${c.k}" data-tip="${esc(c.tip)}">${esc(c.label)}</button>`).join('')
+      + `<span class="ins-sep"></span>`
+      + [['', 'any role'], ['officer', 'officers'], ['director', 'directors'], ['10%', '10% owners']]
+        .map(([v, l]) => `<button type="button" class="cng-chip${INS.role === v ? ' on' : ''}" data-insrole="${esc(v)}" data-tip="${esc(v ? 'only rows where the form ticked ' + l : 'no role filter')}">${esc(l)}</button>`).join('')
+      + `<span class="ins-sep"></span>`
+      + [['', 'plan: any'], ['excl', 'discretionary'], ['only', '10b5-1 only']]
+        .map(([v, l]) => `<button type="button" class="cng-chip${(INS.plan || '') === v ? ' on' : ''}" data-insplan="${esc(v)}" data-tip="${esc(v === 'only' ? 'only rows whose 10b5-1 box is ticked — scheduled in advance' : v === 'excl' ? 'rows NOT marked as plan sales. Includes rows where the box is absent entirely (filings before 2023 had no box), so this is “not marked” rather than a proven discretionary trade.' : 'no plan filter')}">${esc(l)}</button>`).join('')
+      + `<span class="ins-sep"></span>`
+      + [[0, 'any size'], [100000, '≥$100K'], [1000000, '≥$1M'], [10000000, '≥$10M']]
+        .map(([v, l]) => `<button type="button" class="cng-chip${INS.minValue === v ? ' on' : ''}" data-insmin="${v}" data-tip="${esc(v ? 'rows worth at least ' + l.slice(1) + '. A row with no price on the form has no value and is excluded by any size filter — it is not counted as zero.' : 'no size filter')}">${esc(l)}</button>`).join('')
+    + `</div>`
+    + (f.queued || f.failed || t.noPrice ? `<div class="cng-rates">`
+      + (f.queued ? `<span data-tip="Form 4s the EDGAR rotation has found but this lane has not read yet. Worked one per tick; forceable from the admin panel.">queued <b>${(f.queued || 0).toLocaleString()}</b></span>` : '')
+      + (f.failed ? `<span data-tip="filings whose ownership document could not be read. The reason is kept per filing rather than collapsed into a count you would have to trust.">unreadable <b>${(f.failed || 0).toLocaleString()}</b></span>` : '')
+      + (t.noPrice ? `<span data-tip="transactions the form carried no price for — a footnoted weighted average, a range, or a grant. They are shown with a blank price rather than a zero, and are excluded from any size filter.">no price on the form <b>${(t.noPrice || 0).toLocaleString()}</b></span>` : '')
+      + `</div>` : '')
+    + (INS.menu ? `<div class="cng-colmenu">${INS.order.map(k => { const c = INS_COLS.find(x => x.k === k); return c
+        ? `<label><input type="checkbox" data-inscol="${c.k}"${INS.hidden.has(c.k) ? '' : ' checked'}> ${esc(c.label)}</label>` : ''; }).join('')}`
+      + `<button type="button" class="cng-chip" id="ins-colreset" data-tip="back to the default columns and order">reset</button></div>` : '');
+  if (!INS.rows.length) {
+    const why = INS.q.trim() ? 'no transaction matches that search'
+      : INS.codes.size && INS.codes.size < INS_CHIPS.length ? 'no transaction matches those codes — widen the chips'
+      : INS.minValue ? 'nothing this large in the stored set — drop the size filter'
+      : f.queued ? `nothing parsed yet — ${f.queued.toLocaleString()} Form 4(s) queued, read one per tick`
+      : 'no Form 4 transactions stored yet — the EDGAR rotation queues them as it walks the roster';
+    out.innerHTML = head + `<div class="sec" style="padding:10px 2px">${why}</div>`;
+    insBind(); return;
+  }
+  const cell = (k, x) => {
+    if (k === 'filed') return `<td class="l sec">${esc(x.filed ? new Date(x.filed).toISOString().slice(0, 10) : '—')}</td>`;
+    if (k === 'traded') return `<td class="l">${esc(x.txDate || '—')}</td>`;
+    if (k === 'ticker') return `<td class="l">${x.tk ? `<span class="cng-tk" data-tip="the issuer’s symbol as written on the form">${esc(x.tk)}</span>` : '<span class="sec">—</span>'}</td>`;
+    if (k === 'owner') return `<td class="l"><span class="cng-nm" data-tip="${esc((x.owner || '') + (x.title ? ' — ' + x.title : ''))}">${esc((x.owner || '—').slice(0, 24))}</span></td>`;
+    if (k === 'role') return `<td class="l">${x.role ? `<span class="ins-role" data-tip="${esc(x.role + (x.title ? ' · ' + x.title : ''))}">${esc(x.role.replace(' · ', '/'))}</span>` : '<span class="sec">—</span>'}</td>`;
+    if (k === 'act') {
+      const d = x.code === 'P' ? 'p' : x.code === 'S' ? 's' : 'e';
+      // The derivative marker rides HERE rather than on the form column, which starts hidden. It
+      // is a statement about what this table is NOT showing, and a disclosure that only appears
+      // once the reader goes looking for it is not one.
+      return `<td class="l"><span class="cng-act ${d}" data-tip="${esc('transaction code ' + (x.code || '?') + (x.ad ? ' · ' + (x.ad === 'A' ? 'acquired' : 'disposed') : ''))}">${esc(x.act || x.code || '—')}</span>`
+        + (x.nDeriv ? `<span class="ins-dv" data-tip="${esc('the same filing also carried ' + x.nDeriv + ' derivative transaction(s) — options, and their exercise prices. They are NOT in this table: a derivative row’s “price” is a strike, and letting it into the price column would silently mix two different quantities. Open the form to read them.')}">+${x.nDeriv}D</span>` : '')
+        + `</td>`;
+    }
+    if (k === 'shares') return `<td class="r">${insNum(x.shares)}</td>`;
+    if (k === 'price') return `<td class="r">${x.price == null ? '<span class="sec" data-tip="the form carried no price for this row — a footnoted weighted average, a range, or a grant. Not a zero.">—</span>' : '$' + insNum(x.price, 2)}</td>`;
+    if (k === 'value') return `<td class="r">${x.value == null ? '<span class="sec">—</span>' : `<b class="${x.code === 'P' ? 'pos' : x.code === 'S' ? 'neg' : ''}">${insUsd(x.value)}</b>`}</td>`;
+    if (k === 'pct') {
+      // Share of the resulting holding. Only computable where the form carries the post-transaction
+      // figure, which not every row does.
+      const p = x.own != null && x.shares != null && x.own > 0 ? (x.shares / x.own) * 100 : null;
+      return `<td class="r">${p == null ? '<span class="sec">—</span>'
+        : `<span data-tip="${esc('this trade was ' + p.toFixed(1) + '% of the ' + insNum(x.own) + ' shares they held afterwards')}">${p >= 100 ? '≥100' : p.toFixed(p < 10 ? 1 : 0)}%</span>`}</td>`;
+    }
+    if (k === 'own') return `<td class="r">${x.own == null ? '<span class="sec">—</span>'
+      : `${insNum(x.own)}${x.dir ? `<span class="ins-dir" data-tip="${esc(x.dir === 'D' ? 'held directly' : 'held indirectly — through a trust, a partnership or a family entity')}">${esc(x.dir)}</span>` : ''}`}</td>`;
+    if (k === 'plan') return `<td class="l">${x.plan == null ? '<span class="sec" data-tip="the form does not say — the 10b5-1 box did not exist before 2023, and where a filing carries several transactions the flag is only read when it can be attributed to one of them without guessing">—</span>'
+      : x.plan ? '<span class="ins-plan" data-tip="ticked: made under a Rule 10b5-1 plan, arranged in advance">10b5-1</span>'
+      : '<span class="ins-plan off" data-tip="the box is present and NOT ticked — a discretionary trade">discr</span>'}</td>`;
+    if (k === 'sec') return `<td class="l sec">${esc((x.sec || '—').slice(0, 24))}</td>`;
+    if (k === 'issuer') return `<td class="l sec">${esc((x.issuer || '—').slice(0, 26))}</td>`;
+    if (k === 'form') return `<td class="l sec">${esc(x.form || '—')}</td>`;
+    return `<td class="l">${x.url ? `<a class="cng-src" href="${esc(x.url)}" target="_blank" rel="noopener">form 4</a>` : ''}</td>`;
+  };
+  const arrow = (k) => INS.sort.k === k ? `<span class="cng-arr">${INS.sort.dir > 0 ? '▲' : '▼'}</span>` : '';
+  out.innerHTML = head
+    + `<div class="tblwrap"><table class="whl-tbl cng-tbl ins-tbl"><thead><tr>`
+    + shown.map(col => `<th class="${col.cls} cng-th ins-th" draggable="true" data-inssort="${col.k}" data-tip="${esc(col.tip + ' · click to sort, drag to move the column')}">${esc(col.label)}${arrow(col.k)}</th>`).join('')
+    + `</tr></thead><tbody>`
+    + INS.rows.map(x => `<tr class="whl-worow"${x.tk ? ` data-instk="${esc(x.tk)}"` : ''}>${shown.map(col => cell(col.k, x)).join('')}</tr>`).join('')
+    + `</tbody></table></div>`
+    + insPager()
+    + `<div class="whl-foot">${INS.rows.length.toLocaleString()} shown of ${INS.total.toLocaleString()} matching transaction(s) · source: SEC Form 4, filed under Section 16 · shares, price and date are the filer’s own figures — nothing on this tab is derived, banded or estimated, which is the difference from the CONGRESS tab, where the form discloses a range and no price at all · Table I (share) transactions only; derivative rows are counted per filing, never priced into this table · a blank price is a price the form did not carry, never a zero</div>`;
+  insBind();
+}
+function insPager() {
+  const pages = Math.max(1, Math.ceil(INS.total / INS_PAGE));
+  if (pages <= 1) return '';
+  const from = INS.page * INS_PAGE + 1, to = Math.min(INS.total, (INS.page + 1) * INS_PAGE);
+  return `<div class="cng-pager">`
+    + `<button type="button" class="cng-chip" data-inspage="first"${INS.page ? '' : ' disabled'}>« first</button>`
+    + `<button type="button" class="cng-chip" data-inspage="prev"${INS.page ? '' : ' disabled'}>‹ prev</button>`
+    + `<span class="cng-pnum">${from.toLocaleString()}–${to.toLocaleString()} of ${INS.total.toLocaleString()}</span>`
+    + `<button type="button" class="cng-chip" data-inspage="next"${INS.page + 1 < pages ? '' : ' disabled'}>next ›</button>`
+    + `<button type="button" class="cng-chip" data-inspage="last"${INS.page + 1 < pages ? '' : ' disabled'}>last »</button>`
+    + `<span class="sec">page ${INS.page + 1} / ${pages.toLocaleString()}</span></div>`;
+}
+function insBind() {
+  const out = el('insiders-body'); if (!out) return;
+  const q = el('ins-q');
+  if (q) { q.oninput = () => { INS.q = q.value; insSearch(); }; }
+  // Sorting is a CLICK; reordering is a DRAG. Both live on the same <th>, so the click handler
+  // has to know a drag happened — otherwise every column move also re-sorts the table under the
+  // reader, which reads as the drag having done something else entirely.
+  out.querySelectorAll('[data-inssort]').forEach(th => {
+    th.onclick = () => {
+      if (th.__moved) { th.__moved = 0; return; }
+      const k = th.dataset.inssort;
+      if (INS.sort.k === k) INS.sort.dir = -INS.sort.dir;
+      else INS.sort = { k, dir: k === 'owner' || k === 'ticker' || k === 'role' || k === 'issuer' || k === 'sec' ? 1 : -1 };
+      INS.page = 0;                     // a new ordering makes the old page number meaningless
+      insSave(); openInsiders();
+    };
+    th.addEventListener('dragstart', e => { INS.drag = th.dataset.inssort; th.classList.add('dragging');
+      try { e.dataTransfer.setData('text/plain', INS.drag); e.dataTransfer.effectAllowed = 'move'; } catch (_) {} });
+    th.addEventListener('dragend', () => { th.classList.remove('dragging'); INS.drag = null; });
+    th.addEventListener('dragover', e => {
+      if (!INS.drag || INS.drag === th.dataset.inssort) return;
+      e.preventDefault();
+      const over = th.dataset.inssort;
+      const ord = INS.order.filter(k => k !== INS.drag);
+      const at = ord.indexOf(over);
+      if (at < 0) return;
+      const r = th.getBoundingClientRect();
+      ord.splice(e.clientX < r.left + r.width / 2 ? at : at + 1, 0, INS.drag);
+      if (ord.join() === INS.order.join()) return;
+      INS.order = ord;
+      th.__moved = 1;                   // suppress the click that ends this drag
+      insSave(); insRender();
+    });
+  });
+  out.querySelectorAll('[data-inspage]').forEach(b => b.onclick = () => {
+    const pages = Math.max(1, Math.ceil(INS.total / INS_PAGE)), w = b.dataset.inspage;
+    INS.page = w === 'first' ? 0 : w === 'prev' ? Math.max(0, INS.page - 1) : w === 'next' ? Math.min(pages - 1, INS.page + 1) : pages - 1;
+    openInsiders();
+  });
+  out.querySelectorAll('[data-inscode]').forEach(b => b.onclick = () => {
+    const c = b.dataset.inscode;
+    if (INS.codes.has(c)) INS.codes.delete(c); else INS.codes.add(c);
+    INS.page = 0; openInsiders();
+  });
+  out.querySelectorAll('[data-insrole]').forEach(b => b.onclick = () => { INS.role = b.dataset.insrole; INS.page = 0; openInsiders(); });
+  out.querySelectorAll('[data-insplan]').forEach(b => b.onclick = () => { INS.plan = b.dataset.insplan || null; INS.page = 0; openInsiders(); });
+  out.querySelectorAll('[data-insmin]').forEach(b => b.onclick = () => { INS.minValue = +b.dataset.insmin || 0; INS.page = 0; openInsiders(); });
+  const cb = el('ins-colbtn'); if (cb) cb.onclick = () => { INS.menu = !INS.menu; insRender(); };
+  const rs = el('ins-colreset'); if (rs) rs.onclick = () => {
+    INS.order = INS_COLS.map(c => c.k); INS.hidden = new Set(INS_HIDE_DEFAULT);
+    insSave(); insRender();
+  };
+  out.querySelectorAll('[data-inscol]').forEach(inp => inp.onchange = () => {
+    const k = inp.dataset.inscol;
+    if (inp.checked) INS.hidden.delete(k); else INS.hidden.add(k);
+    // Never hide every column: an empty table is not a view, it is a broken one.
+    if (INS.hidden.size >= INS_COLS.length) INS.hidden.delete(k);
+    insSave(); insRender();
+  });
+  out.querySelectorAll('tr[data-instk]').forEach(tr => tr.onclick = (ev) => {
+    if (ev.target.closest('a,button,th')) return;
+    const c = 'xyz:' + tr.dataset.instk;
+    if (state.rows.has(c)) openDetail(c);          // in-place drawer — no tab switch
+  });
+}
+// The insiders lane's operator surface. The tab reads; this is how you make it read FASTER — the
+// steady-state tick takes one queued Form 4 every 45s, which is right for a lane fed hourly by the
+// EDGAR rotation and wrong for a cold start with a few hundred filings behind it.
+async function termInsiders(args){
+  const sub=(args[0]||'status').toLowerCase();
+  if(sub==='status'||!sub){
+    const r=await insGet('?limit=1');
+    if(!r||!r.ok) return termErr(tesc((r&&r.error)||'failed'));
+    const s2=r.status||{}, f=s2.filings||{}, t=s2.tx||{};
+    const L=[`<span class="tp-hd">insiders</span> <span class="tp-trans">\u00b7 SEC Form 4, Section 16 \u00b7 ${s2.roster||0} name(s) on the EDGAR rotation</span>`];
+    L.push(`  ${tpad('filings',12)} <b>${(f.n||0).toLocaleString()}</b> known \u00b7 ${(f.done||0).toLocaleString()} read \u00b7 ${(f.queued||0).toLocaleString()} queued \u00b7 ${(f.failed||0).toLocaleString()} unreadable`);
+    L.push(`  ${tpad('transactions',12)} <b>${(t.n||0).toLocaleString()}</b> across ${(t.names||0).toLocaleString()} name(s)\u00b7 ${(t.noPrice||0).toLocaleString()} with no price on the form`);
+    if(s2.codes&&s2.codes.length) L.push(`  ${tpad('codes',12)} ${s2.codes.map(c=>`${tesc(c.code||'?')} <b>${c.n}</b>`).join('  ')}`);
+    if(s2.lastErr) L.push(`  ${tpad('last error',12)} <span class="neg">${tesc(s2.lastErr)}</span>`);
+    if(s2.notes&&s2.notes.length) L.push(`  ${tpad('why',12)} ${s2.notes.map(n=>`${tesc(String(n.note||'').slice(0,40))} <b>\u00d7${n.n}</b>`).join('  ')}`);
+    return termOut(L.join('\n')+`\n<span class="tp-deep" data-tview="insiders">open insiders tab \u25b8</span>`);
+  }
+  if(!IS_ADMIN) return termErr('insiders parse/requeue is admin-only');
+  if(sub==='parse'){
+    const r=await insPost({op:'parse',n:+(args[1]||0)||undefined});
+    return r&&r.ok?termOut(`<span class="pos">parse run started</span> <span class="tp-trans">\u00b7 ${tesc(r.note||'')}</span>`):termErr(tesc((r&&r.error)||'failed'));
+  }
+  if(sub==='requeue'){
+    const r=await insPost({op:'requeue',all:(args[1]||'').toLowerCase()==='all'});
+    return r&&r.ok?termOut(`<span class="pos">${r.requeued||0} filing(s) requeued</span>`):termErr(tesc((r&&r.error)||'failed'));
+  }
+  return termErr('usage: insiders [status | parse [n] | requeue [all]]');
+}
 async function termCongress(args){
   const sub=(args[0]||'status').toLowerCase();
   if(!IS_ADMIN) return termErr('congress is admin-only while the lane soaks');

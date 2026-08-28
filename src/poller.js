@@ -30,7 +30,7 @@ const { hourlyPickTier, hourlyPickBetter } = require("./compute");
 const { parse13FInfotable, whaleBook, whaleDelta, whaleNameKey, whaleIssuerKey, whaleWindow, whaleQOfPeriod, whaleSeason, whale13FScale } = require("./compute");
 const { PTR_TICKERABLE, PTR_NO_TICKER } = require("./compute");
 const { NAV_VIEW_ORDER, navGroupKeys, navLabelClean, navConfigSanitize, resolveNavGroups } = require("./compute");
-const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, levelHit, PUSH_CLASSES, PUSH_DEFAULT_CLASSES, PUSH_ADMIN_CLASSES, PUSH_CODE_ALPHABET, inQuietWindow, quietEndsAt, piercesQuiet, validateQuiet,
+const { parseForm4, form4DocName, carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, levelHit, PUSH_CLASSES, PUSH_DEFAULT_CLASSES, PUSH_ADMIN_CLASSES, PUSH_CODE_ALPHABET, inQuietWindow, quietEndsAt, piercesQuiet, validateQuiet,
   RULE_METRICS, RULE_BY_K, RULE_OPS, RULE_OP_LABEL, ruleEval, ruleLabel, ruleFmtValue, validateRule } = require("./compute");
 const { classify, nameAliases, companyName, displayName, macroLane, setSectorOverlay, PREIPO, homeMkt, homeAdr } = require("./sectors");
 
@@ -4787,6 +4787,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         const { items } = parseEdgarAtom(await res.text(), m.ticker, now);
         edgarStat.ok++; edgarStat.lastOk = now; edgarStat.lastItems = items.length;
         got = got.concat(items);
+        // The ownership forms in this same response feed the INSIDERS lane. Queue only — reading
+        // the documents is its own paced tick, so a slow SEC never stalls the filings rotation.
+        try { insidersQueueFrom(items); }
+        catch (e3) { log("insiders queue failed (isolated, filings still land): " + (e3 && e3.message)); }
         try { filingScan(items); }
         catch (e2) { log("filingScan failed (isolated, filings still land in the news tab): " + (e2 && e2.message)); }
       } catch (e) {
@@ -4803,6 +4807,98 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
   }
 
+  // ---- INSIDERS: SEC Form 4 transactions (build 2026.08.27-38) --------------------------------
+  // Two stages, deliberately separate, exactly as the congress lane learned to be:
+  //   DISCOVERY rides the EDGAR atom rotation that already runs above. Those feeds are pulled with
+  //     owner=include, so every Form 3/4/5 on the roster ALREADY arrives — the ownership forms have
+  //     been landing in the news tab under the "ownership" chip since that lane shipped. All this
+  //     does is queue the 4s for reading. No new fetch, no new rate-limit budget.
+  //   PARSE walks the queue on its own slow tick: two HTTP GETs per filing (the accession's own
+  //     directory listing, then the ownership XML), paced well inside SEC fair access.
+  //
+  // Why the atom feed alone is not enough: it carries the ENVELOPE — form type, filer name, a link
+  // and a timestamp. The share count, the price and the transaction code live in the XML inside the
+  // accession, and they are the entire point. "INTC's CEO filed a Form 4" is not information;
+  // "INTC's CEO bought 500,000 shares at $20" is.
+  const INS_PARSE_MS = 45 * 1000;       // one filing per tick — the queue is small in steady state
+  const INS_PARSE_GAP = 900;            // between the two GETs of one filing
+  let insBusy = false, insLastErr = null, insStat = { ok: 0, fail: 0, tx: 0, lastOk: null };
+  // Ownership forms worth reading. 3 (initial statement) and 5 (annual catch-up) carry holdings and
+  // late-reported transactions; 4 is the timely one and the reason this lane exists. Amendments
+  // ride along under the same accession rules — a 4/A REPLACES its rows on re-parse rather than
+  // adding a second copy of the trade.
+  const INS_FORMS = new Set(["4", "4/A"]);
+  // Reports what it LOOKED AT (seen) as well as what it took (queued) and what was new (added).
+  // A discovery step that only counts its own output cannot answer "is it seeing the filings and
+  // rejecting them, or not seeing them at all" — the first question asked of an empty tab.
+  function insidersQueueFrom(items) {
+    const seen = (items || []).length;
+    if (!store.insidersReady || !store.insidersReady()) return { seen, queued: 0, added: 0 };
+    const rows = [];
+    for (const it of items || []) {
+      if (!it || !it.own || !INS_FORMS.has(String(it.form || ""))) continue;
+      const acc = String(it.id || "").replace(/^sec:/, "");
+      if (!/^\d{10}-\d{2}-\d{6}$/.test(acc)) continue;
+      rows.push({ acc, tk: it.tk, form: it.form, filed: it.pub, url: it.url });
+    }
+    const r = rows.length ? store.insidersQueue(rows) : { added: 0 };
+    return { seen, queued: rows.length, added: r.added || 0 };
+  }
+  // The accession's files live under /Archives/edgar/data/<cik>/<acc without dashes>/. The atom
+  // link is the index page for exactly that directory, so the CIK is READ from it rather than
+  // looked up: an ownership filing's own URL is the authority on where its documents are, and a
+  // ticker->CIK lookup would be answering a different question (the ISSUER's cik, which for a
+  // filing made by the insider is not necessarily the path).
+  function insidersDir(url, acc) {
+    const m = String(url || "").match(/\/Archives\/edgar\/data\/(\d+)\//);
+    if (!m) return null;
+    return "https://www.sec.gov/Archives/edgar/data/" + m[1] + "/" + String(acc).replace(/-/g, "");
+  }
+  async function insidersParseTick(n) {
+    if (insBusy) return { ok: false, error: "a parse run is already going" };
+    if (!store.insidersReady || !store.insidersReady()) return { ok: false, error: "sqlite unavailable in this runtime" };
+    insBusy = true;
+    let done = 0, rows = 0;
+    try {
+      for (const f of store.insidersPending(n || 1)) {
+        store.insidersBumpTry(f.acc);
+        const dir = insidersDir(f.url, f.acc);
+        if (!dir) { store.insidersMark(f.acc, 2, "no archive path in the filing url"); continue; }
+        const idx = await extGet(dir + "/index.json", "json");
+        if (!idx.ok) { insStat.fail++; insLastErr = "index: " + idx.error; continue; }   // transient: stays queued, retried
+        const doc = form4DocName(idx.body);
+        if (!doc) { store.insidersMark(f.acc, 2, "no ownership xml in the accession"); continue; }
+        await sleep(INS_PARSE_GAP);
+        const xr = await extGet(dir + "/" + doc, "xml");
+        if (!xr.ok) { insStat.fail++; insLastErr = "doc: " + xr.error; continue; }
+        const p = parseForm4(xr.body);
+        if (!p.ok) { store.insidersMark(f.acc, 2, "unparseable: " + (p.error || "?")); continue; }
+        // A filing with no Table I rows is READ, not failed: an option-only Form 4 is a real
+        // filing that simply has no share transaction to show. It is marked done with nTx 0 so it
+        // leaves the queue, and the derivative count says what was in it instead.
+        const head = { tk: p.issuer.tk || f.tk, issuer: p.issuer.name, period: p.period,
+          owner: p.owner.name, role: p.owner.role, title: p.owner.title, nDeriv: p.nDeriv };
+        rows += store.insidersSave(f.acc, head, p.tx);
+        if (!p.tx.length) store.insidersMark(f.acc, 1, p.nDeriv ? "derivative rows only" : "no transactions on the form");
+        insStat.ok++; insStat.tx += p.tx.length; insStat.lastOk = Date.now();
+        done++;
+        await sleep(INS_PARSE_GAP);
+      }
+      store.insidersMetaSet("lastParse", String(Date.now()));
+      insLastErr = insStat.fail && insLastErr ? insLastErr : null;
+      return { ok: true, filings: done, tx: rows };
+    } catch (e) {
+      insLastErr = e && e.message;
+      return { ok: false, error: insLastErr };
+    } finally { insBusy = false; }
+  }
+  function insidersStatusFull() {
+    const s = store.insidersStatus ? store.insidersStatus() : { ready: 0 };
+    return Object.assign({}, s, { busy: insBusy ? 1 : 0, lastErr: insLastErr, run: insStat,
+      // The roster this lane can ever see: EDGAR feeds are pulled per equity in the universe, so a
+      // name outside it has no filings here and is absent rather than empty.
+      roster: earnEligible().size });
+  }
   // ---- SEC EDGAR fundamentals + ETF holdings (on-demand, terminal-driven) --------------------
   // Two pull lanes for the ask terminal: `fund <T>` (latest filed balance sheet + income facts
   // via XBRL companyfacts) and `etf <SYM>` (latest N-PORT portfolio). On-demand only — nothing
@@ -7663,6 +7759,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     setTimeout(() => { whale13fTick().catch(() => {}); }, 90 * 1000);
     setInterval(() => { congressTick().catch((e) => log("congress tick failed (isolated): " + (e && e.message))); }, 6 * HOUR);
     setTimeout(() => { congressTick().catch(() => {}); }, 120 * 1000);
+    // Insiders: one queued Form 4 per tick. The queue is fed by the EDGAR rotation, which covers
+    // the roster roughly hourly, so a slow drain is the steady state rather than a backlog — and a
+    // cold start walks its way in newest-first instead of hammering sec.gov to catch up.
+    setInterval(() => { insidersParseTick(1).catch((e) => log("insiders parse failed (isolated): " + (e && e.message))); }, INS_PARSE_MS);
     setTimeout(() => { whaleTick().catch((e) => log("whale first tick failed (isolated): " + (e && e.message))); }, 20 * 1000);
     const restored = hydrateFeatures();
     if (restored) log(`Restored cached features for ${restored} market(s) — serving warm`);
@@ -13695,6 +13795,13 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     congressFeed: (o) => (store.congressFeed ? store.congressFeed(o) : []),
     congressFeedCount: (o) => (store.congressFeedCount ? store.congressFeedCount(o) : 0),
     congressTickerRoll: (t) => (store.congressTickerRoll ? store.congressTickerRoll(t) : null),
+    insidersFeed: (o) => (store.insidersFeed ? store.insidersFeed(o) : []),
+    insidersFeedCount: (o) => (store.insidersFeedCount ? store.insidersFeedCount(o) : 0),
+    insidersStatus: insidersStatusFull,
+    insidersTickerRoll: (t, d) => (store.insidersTickerRoll ? store.insidersTickerRoll(t, d) : null),
+    insidersParseNow: insidersParseTick,
+    insidersRequeueNow: (all) => ({ ok: true, requeued: store.insidersRequeue ? store.insidersRequeue(!!all) : 0 }),
+    insidersQueueNow: insidersQueueFrom,          // harness: push atom items through the REAL discovery path
     houseIndexUrls,                              // harness: the candidate list is pinned by test
     congressAssetName,                           // harness: issuer-name cleaning, pinned by test
     congressResolveNow: congressResolve,         // harness: full issuer-name -> ticker resolution, pinned by test
