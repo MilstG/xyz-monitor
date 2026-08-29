@@ -1,4 +1,4 @@
-# Trade[XYZ] — Hyperliquid HIP-3 Markets Monitor
+# Milst Screener — Hyperliquid HIP-3 Markets Monitor
 
 A monitor for the HIP-3 perp markets on the `xyz` dex on Hyperliquid.
 

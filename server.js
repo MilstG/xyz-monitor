@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.27-44";
+const VERSION = "2026.08.29-45";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -352,7 +352,7 @@ function loginFail(ip) {
 // Basic-auth popup). Styling mirrors the app's dark palette.
 const LOGIN_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>xyz-monitor — sign in</title>
+<title>Milst Screener — sign in</title>
 <style>
 :root{--bg:#0E1116;--panel:#151A21;--border:#262E39;--text:#E8E3D7;--muted:#7E8794;--accent:#E3A53C;--down:#E5604D;
 --mono:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;--disp:'Space Grotesk',system-ui,sans-serif}
@@ -371,7 +371,7 @@ button:disabled{opacity:.55;cursor:default}
 .err{color:var(--down);font-size:12.5px;min-height:17px;margin-top:10px;font-family:var(--mono)}
 </style></head><body>
 <div class="card">
-  <div class="wm">xyz<b>·</b>monitor</div>
+  <div class="wm">Milst <b>Screener</b></div>
   <div class="sub">private terminal — enter the shared password</div>
   <label for="pw">password</label>
   <input id="pw" type="password" autocomplete="current-password" autofocus>
@@ -559,11 +559,11 @@ async function main() {
   // network untouched — a caching SW is exactly the stale-client failure class the version-stamped
   // shell was built to kill (-84), and we are not reintroducing it for offline support nobody asked for.
   const PWA_MANIFEST = JSON.stringify({
-    name: "Trade[XYZ] Markets Monitor", short_name: "Trade[XYZ]",
+    name: "Milst Screener", short_name: "Milst",
     start_url: "/", display: "standalone", background_color: "#0E1116", theme_color: "#0E1116",
     icons: [{ src: "/icon.svg", sizes: "any", type: "image/svg+xml", purpose: "any" }],
   });
-  const PWA_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="96" fill="#0E1116"/><rect x="24" y="24" width="464" height="464" rx="80" fill="none" stroke="#262E39" stroke-width="8"/><text x="256" y="300" text-anchor="middle" font-family="monospace" font-size="132" font-weight="700" fill="#E8B44B">[XYZ]</text></svg>`;
+  const PWA_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="96" fill="#0E1116"/><rect x="24" y="24" width="464" height="464" rx="80" fill="none" stroke="#262E39" stroke-width="8"/><text x="256" y="330" text-anchor="middle" font-family="monospace" font-size="210" font-weight="700" fill="#E8B44B">MS</text></svg>`;
   const PWA_SW = "self.addEventListener('install',()=>self.skipWaiting());self.addEventListener('activate',e=>e.waitUntil(self.clients.claim()));self.addEventListener('fetch',()=>{});";
   fastify.get("/manifest.webmanifest", async (req, reply) => reply.type("application/manifest+json").header("cache-control", "no-cache").send(PWA_MANIFEST));
   fastify.get("/icon.svg", async (req, reply) => reply.type("image/svg+xml").header("cache-control", "no-cache").send(PWA_ICON));

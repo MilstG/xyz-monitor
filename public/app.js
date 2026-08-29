@@ -3304,7 +3304,7 @@ function fireAlert(rule,r,v,m){ const A=state.alerts;
   const text=`${r.ticker} · ${m.label} ${rule.op} ${rule.value} · now ${vs}`;
   A.log.unshift({t:Date.now(), text}); if(A.log.length>60) A.log.pop();
   A.unseen++; updateBell(); pushToast(text);
-  if(A.notify && typeof Notification!=='undefined' && Notification.permission==='granted'){ try{ new Notification('Trade[XYZ] alert',{body:text}); }catch(_){} }
+  if(A.notify && typeof Notification!=='undefined' && Notification.permission==='granted'){ try{ new Notification('Milst Screener alert',{body:text}); }catch(_){} }
   if(!el('alertpop').hidden) buildAlertsPanel(); }
 function pushToast(text){ const w=el('toastwrap'); const t=document.createElement('div'); t.className='toast'; t.textContent=text; w.appendChild(t);
   setTimeout(()=>{ t.style.transition='opacity .3s'; t.style.opacity='0'; setTimeout(()=>t.remove(),300); }, 6500); }
@@ -4599,10 +4599,12 @@ function fhFmts(tz){ if(_fhFmtTz!==tz){ const z=tz==='UTC'?'UTC':'America/New_Yo
     _fhFmtTz=tz; }
   return {d:_fhFmtD,h:_fhFmtH}; }
 // Percent at the precision the grid deserves. The whole mean column shares ONE dp, derived from
-// that timeframe's colour cap (two significant figures at the cap), so the numbers line up and a
-// 1h grid is not forced into the same decimals as a 24h one. A value that rounds away prints as
+// that timeframe's colour cap (THREE significant figures at the cap), so the numbers line up and a
+// 1h grid is not forced into the same decimals as a 24h one. Three, not two: at 8h the cap sits
+// near 0.1%, and two figures collapsed a whole book into "+0.01%" — the third decimal is what
+// separates one row's carry from the next. A value that rounds away prints as
 // "~0%" rather than "-0.0000%" — a string of zeros still claims a direction the number lacks.
-function fhDp(cap){ const c=Math.abs((cap||0)*100)||1e-9; return clamp(1-Math.floor(Math.log10(c)),2,6); }
+function fhDp(cap){ const c=Math.abs((cap||0)*100)||1e-9; return clamp(2-Math.floor(Math.log10(c)),3,6); }
 function fhPct(v,dp){
   if(v==null||!isFinite(v)) return '\u2014';
   const body=Math.abs(v*100).toFixed(dp==null?4:dp);
@@ -4626,6 +4628,9 @@ function fhSortRows(rows,tf,sort){
 // differs from the bucket before it; sub-daily grids top up the gaps with clock ticks. Labels are
 // then packed newest-first and only kept where they physically fit, so nothing ever overprints.
 function fhTicks(ax,f,nb,cw){
+  // Deliberately generous against the 8px axis type: the packer keeps every label that FITS, so
+  // a tighter estimate would just crowd the axis with dates nobody asked for. Breathing room
+  // is the point of the smaller type, not more ticks.
   const wOf=(lab)=>lab.length*6+12;
   const day=[]; let prev=null;
   for(let i=0;i<nb;i++){ const d=f.d.format(ax.t0+i*ax.width); if(d!==prev){ day.push(i); prev=d; } }
@@ -4643,7 +4648,12 @@ function fhTicks(ax,f,nb,cw){
 function fhHeatSvg(fh,rows,tf){
   const ax=(fh.axis||{})[tf]; if(!ax||!rows.length) return '<div class="msg">No funding grid yet.</div>';
   const nb=ax.buckets, cap=ax.cap, f=fhFmts(fh.tz), dp=fhDp(cap), zero=0.5*Math.pow(10,-dp)/100;
-  const lx=54, rx=62, pt=22, ch=16, pb=30, W=780;
+  // Geometry is deliberately tight: the grid must fit a laptop screen without scrolling, and the
+  // SVG scales to its container, so a shorter row against the same width is what shrinks it.
+  // The label gutter is measured, not guessed: a fixed one clipped the longest ticker on the
+  // book (BRENTOIL read as "3RENTOIL"), and a half-drawn ticker is worse than a narrower grid.
+  let mtk=0; for(const r of rows) if(r.ticker&&r.ticker.length>mtk) mtk=r.ticker.length;
+  const lx=clamp(Math.ceil(mtk*5.7)+9,40,86), rx=64, pt=18, ch=13, pb=26, W=780;
   const cw=(W-lx-rx)/nb, H=pt+ch*rows.length+pb;
   const pid='fhg'+(++_hoverSeq);   // one hatch pattern per render — ids must not collide across redraws
   let s=`<svg viewBox="0 0 ${W} ${H.toFixed(1)}" class="sheat fheat" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`+
@@ -4653,7 +4663,7 @@ function fhHeatSvg(fh,rows,tf){
     `<text x="${W-4}" y="13" text-anchor="end" class="fh-hd">mean / ${esc(tf)}</text>`;
   rows.forEach((r,ri)=>{
     const y=pt+ri*ch, cells=(r.tf&&r.tf[tf])||[], mean=fhMean(r,tf);
-    s+=`<text x="${lx-7}" y="${(y+ch/2+3.5).toFixed(1)}" text-anchor="end" class="fh-tk">${esc(r.ticker)}</text>`;
+    s+=`<text x="${lx-7}" y="${(y+ch/2+3.3).toFixed(1)}" text-anchor="end" class="fh-tk">${esc(r.ticker)}</text>`;
     for(let i=0;i<nb;i++){
       const x=lx+i*cw, v=cells[i], col=fhColor(v,cap);
       const t0=ax.t0+i*ax.width, when=f.d.format(t0)+(ax.bucketHours>=24?'':' '+f.h.format(t0));
@@ -4665,16 +4675,16 @@ function fhHeatSvg(fh,rows,tf){
     // Direct label: the row's signed mean per bucket. The sign is the whole point — it says which
     // way the carry runs without asking the reader to separate red from green.
     const flat = mean==null||Math.abs(mean)<zero;   // rounds away -> it is not a direction, so it wears neither colour
-    s+=`<text x="${W-4}" y="${(y+ch/2+3.5).toFixed(1)}" text-anchor="end" class="fh-nv ${flat?'sec':(mean>0?'neg':'pos')}">${esc(fhPct(mean,dp))}</text>`;
+    s+=`<text x="${W-4}" y="${(y+ch/2+3.3).toFixed(1)}" text-anchor="end" class="fh-nv ${flat?'sec':(mean>0?'neg':'pos')}">${esc(fhPct(mean,dp))}</text>`;
   });
   const ay=pt+ch*rows.length;
   s+=`<line x1="${lx}" y1="${(ay+3).toFixed(1)}" x2="${(W-rx).toFixed(1)}" y2="${(ay+3).toFixed(1)}" stroke="var(--grid)" stroke-width="1"/>`;
   for(const t of fhTicks(ax,f,nb,cw)){
     const x=lx+t.i*cw+cw/2;
     s+=`<line x1="${x.toFixed(1)}" y1="${(ay+3).toFixed(1)}" x2="${x.toFixed(1)}" y2="${(ay+6).toFixed(1)}" stroke="var(--faint)" stroke-width="1"/>`+
-       `<text x="${x.toFixed(1)}" y="${(ay+16).toFixed(1)}" text-anchor="middle" class="lc-tick">${esc(t.lab)}</text>`;
+       `<text x="${x.toFixed(1)}" y="${(ay+14).toFixed(1)}" text-anchor="middle" class="lc-tick">${esc(t.lab)}</text>`;
   }
-  s+=`<text x="${((lx+W-rx)/2).toFixed(1)}" y="${(ay+26).toFixed(1)}" text-anchor="middle" class="lc-ax">${esc(fh.tz)} \u00b7 ${ax.bucketHours}h buckets \u00b7 oldest left</text>`;
+  s+=`<text x="${((lx+W-rx)/2).toFixed(1)}" y="${(ay+23).toFixed(1)}" text-anchor="middle" class="lc-ax">${esc(fh.tz)} \u00b7 ${ax.bucketHours}h buckets \u00b7 oldest left</text>`;
   return s+'</svg>';
 }
 function renderFundHeat(fh){
@@ -6885,7 +6895,7 @@ function fireTrigger(ev){
   const A=state.alerts;
   updateBell(); pushTrigToast(ev);
   if(A.notify && typeof Notification!=='undefined' && Notification.permission==='granted'){
-    try{ new Notification('Trade[XYZ] — new trigger',{body:alertText(ev)}); }catch(_){} }
+    try{ new Notification('Milst Screener — new trigger',{body:alertText(ev)}); }catch(_){} }
   if(!el('alertpop').hidden) buildAlertsPanel();
 }
 // Richer than pushToast's one-liner: a trigger is only useful with its geometry attached, and the
@@ -6932,7 +6942,7 @@ function fireLedger(ev){
     const text=alertText(ev);
     pushToast(text);
     if(A.notify && typeof Notification!=='undefined' && Notification.permission==='granted'){
-      try{ new Notification('Trade[XYZ] \u2014 void taken',{body:text}); }catch(_){} }
+      try{ new Notification('Milst Screener \u2014 void taken',{body:text}); }catch(_){} }
   }
   if(!el('alertpop').hidden) buildAlertsPanel();
 }
@@ -11041,7 +11051,7 @@ function termAutoGrow(el){ if(!el) return; el.style.height='auto'; el.style.heig
   document.addEventListener('keydown',e=>{ if((e.key==='`'||e.key==='~')&&document.activeElement.tagName!=='INPUT'&&document.activeElement.tagName!=='TEXTAREA'){ e.preventDefault(); termToggle(); } });
 }
 { const s=termEl('termScroll'); if(s&&!s.dataset.boot){ s.dataset.boot='1';
-  s.innerHTML=`<div class="tp-blk"><span class="tp-line"><span class="amber">Trade[XYZ] terminal</span> <span class="tp-trans">· ask the board in plain English — the app answers from live data, badged </span><span class="tp-badge c">computed</span></div><div class="tp-blk"><span class="tp-line tp-trans">try <span class="ex" data-tcmd="most crowded shorts">most crowded shorts</span>, a ticker, or <span class="ex" data-tcmd="help">help</span></span></div>`;
+  s.innerHTML=`<div class="tp-blk"><span class="tp-line"><span class="amber">Milst Screener terminal</span> <span class="tp-trans">· ask the board in plain English — the app answers from live data, badged </span><span class="tp-badge c">computed</span></div><div class="tp-blk"><span class="tp-line tp-trans">try <span class="ex" data-tcmd="most crowded shorts">most crowded shorts</span>, a ticker, or <span class="ex" data-tcmd="help">help</span></span></div>`;
   termHint(); } }
 
 (async ()=>{

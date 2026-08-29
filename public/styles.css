@@ -521,13 +521,16 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 
 /* Funding heatmap — row labels, the signed per-row direct label (the sign is the colour-free
    half of the encoding, so it never dims), and the legend's swatch for an unknown bucket. */
-.fheat .fh-hd{font-size:9px;fill:var(--faint);letter-spacing:.5px;text-transform:uppercase}
-.fheat .fh-tk{font-size:10.5px;fill:var(--muted)}
-.fheat .fh-nv{font-size:10px;fill:var(--muted)}
+.fheat .fh-hd{font-size:8px;fill:var(--faint);letter-spacing:.5px;text-transform:uppercase}
+.fheat .fh-tk{font-size:9.5px;fill:var(--muted)}
+.fheat .fh-nv{font-size:9px;fill:var(--muted)}
 .fheat .fh-nv.pos{fill:var(--up)}
 .fheat .fh-nv.neg{fill:var(--down)}
 .fheat .fh-nv.sec{fill:var(--faint)}
 .fheat rect:hover{stroke:var(--text);stroke-width:1.2}
+/* the grid carries far more rows than the other studies, so its axis type runs a step below
+   the shared chart scale — one screenful, no scroll */
+.fheat .lc-tick,.fheat .lc-ax{font-size:8px}
 .s-leg .fh-gapsw{width:15px;height:10px;border-radius:2px;display:inline-block;background:var(--panel2);
   background-image:repeating-linear-gradient(45deg,transparent,transparent 3px,rgba(124,135,148,.45) 3px,rgba(124,135,148,.45) 4px)}
 

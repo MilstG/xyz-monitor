@@ -10546,7 +10546,9 @@ test("client: the feed is the record — fire* interrupt only, and read state is
   // One formatter, shared by the toast path and the panel.
   assert.ok(/function alertText\(ev\)/.test(app));
   for (const k of ["'ops'", "'ledger'"]) assert.ok(app.includes("if(k===" + k), `alertText must handle the ${k} class`);
-  assert.ok(/new Notification\('Trade\[XYZ\] — new trigger',\{body:alertText\(ev\)\}\)/.test(app),
+  // The title is the product name and may be rebranded; the BODY is the load-bearing half — it
+  // must come from alertText(ev), never a string this call site writes for itself.
+  assert.ok(/new Notification\('[^']+ — new trigger',\{body:alertText\(ev\)\}\)/.test(app),
     "the notification body comes from the shared formatter, not a private string");
 
   // Unread survives a reload because it is a persisted sequence watermark, not a counter.
@@ -13295,7 +13297,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.27-44"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.29-45"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
