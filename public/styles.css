@@ -2229,3 +2229,59 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
   border:1px dashed var(--border);border-radius:6px;padding:11px 12px;margin-top:11px;
   word-break:break-all;line-height:1.6}
 .acc-note{font-family:var(--mono);font-size:10.5px;color:var(--faint);line-height:1.6;margin-top:9px}
+
+/* ---- messages v2: groups, attachments, reactions, search, typing --------------------------- */
+.dm-search{padding:0 12px 10px}
+.dm-search input{width:100%;background:var(--panel2);border:1px solid var(--border);border-radius:6px;
+  color:var(--text);font-family:var(--mono);font-size:11.5px;padding:6px 9px;outline:none}
+.dm-search input:focus{border-color:var(--accent)}
+.dm-grp{color:var(--accent);font-family:var(--mono);font-weight:700}
+.dm-sys{align-self:center;font-family:var(--mono);font-size:10px;color:var(--faint);
+  text-align:center;padding:2px 10px;max-width:80%}
+.dm-typing{font-family:var(--mono);font-size:10.5px;color:var(--muted);padding:0 16px 8px;font-style:italic}
+.dm-gform{padding:8px 13px 12px;display:flex;flex-direction:column;gap:6px}
+.dm-gform input[type=text],.dm-gform input#dm-gtitle{background:var(--bg);border:1px solid var(--border);
+  border-radius:6px;color:var(--text);font-family:var(--mono);font-size:12px;padding:7px 9px;outline:none}
+.dm-gform input#dm-gtitle:focus{border-color:var(--accent)}
+.dm-gopt{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text);cursor:pointer}
+.dm-manage{border-bottom:1px solid var(--border);background:var(--bg);padding:11px 16px 13px}
+.dm-mrow{display:flex;align-items:center;gap:9px;padding:4px 0;font-size:12.5px}
+.dm-mrow .grow{flex:1;min-width:80px}
+.dm-mrow input{flex:1;background:var(--panel2);border:1px solid var(--border);border-radius:5px;
+  color:var(--text);font-family:var(--mono);font-size:12px;padding:5px 8px;outline:none}
+.dm-leave{color:var(--down)}
+/* reactions: a fixed vocabulary, shown with who — a count alone is a vote, not a conversation */
+.dm-rxrow{display:flex;gap:5px;margin-top:5px;flex-wrap:wrap;align-items:center}
+.dm-msg.out .dm-rxrow{justify-content:flex-end}
+.dm-rx{background:var(--panel2);border:1px solid var(--border);border-radius:11px;color:var(--muted);
+  font-size:11px;padding:1px 7px;cursor:pointer;line-height:1.6}
+.dm-rx:hover{border-color:var(--muted)}
+.dm-rx.mine{border-color:var(--accent);color:var(--accent)}
+.dm-rxbtn{opacity:0;transition:opacity .12s}
+.dm-msg:hover .dm-rxbtn{opacity:1}
+.dm-rxadd{position:relative;display:inline-flex}
+.dm-rxmenu{display:none;position:absolute;bottom:100%;left:0;z-index:5;background:var(--panel);
+  border:1px solid var(--border);border-radius:8px;padding:4px;gap:2px;margin-bottom:4px;
+  box-shadow:0 6px 18px rgba(0,0,0,.45)}
+.dm-rxmenu.open{display:flex}
+.dm-rxopt{background:none;border:none;font-size:15px;cursor:pointer;padding:2px 4px;border-radius:5px}
+.dm-rxopt:hover{background:var(--panel2)}
+/* attachments */
+.dm-img{display:block;margin-top:8px;max-width:280px}
+.dm-img img{display:block;max-width:100%;height:auto;border:1px solid var(--border);border-radius:6px}
+.dm-att{display:flex;align-items:center;gap:9px;margin-top:8px;background:var(--bg);
+  border:1px solid var(--border);border-radius:6px;padding:8px 10px;text-decoration:none}
+.dm-att:hover{border-color:var(--accent)}
+.dm-att-i{color:var(--accent);font-family:var(--mono)}
+.dm-att-n{color:var(--text);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dm-att-s{color:var(--faint);font-family:var(--mono);font-size:10px;margin-left:auto}
+.dm-clip{display:flex;align-items:center;justify-content:center;width:32px;height:32px;flex:none;
+  border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:14px;background:var(--bg)}
+.dm-clip:hover{border-color:var(--accent)}
+.dm-clip.off{opacity:.4;cursor:default}
+.dm-clip input{display:none}
+.dm-pending{font-family:var(--mono);font-size:10.5px;color:var(--muted);padding:0 14px 10px}
+/* search results */
+.dm-res{border:1px solid var(--border);border-radius:7px;padding:9px 11px;cursor:pointer;background:var(--panel2)}
+.dm-res:hover{border-color:var(--accent)}
+.dm-res .dm-b{background:none;border:none;padding:4px 0 0;font-size:12.5px}

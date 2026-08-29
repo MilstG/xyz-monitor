@@ -150,15 +150,33 @@ CREATE TABLE IF NOT EXISTS invite (
 ) STRICT;
 CREATE INDEX IF NOT EXISTS invite_created ON invite(createdAt);
 
+-- One table for both shapes (build 2026.08.31-47). A 1-to-1 is not a special case of a group here,
+-- it is a group whose membership is frozen at two and whose identity is the PAIR — which is what
+-- pairKey encodes: the two uids sorted and joined, UNIQUE, so "open a DM with X" stays one index
+-- hit and stays idempotent. A group carries NULL there (SQLite lets a UNIQUE index hold many NULLs,
+-- which is exactly the semantics wanted: groups are never deduplicated by membership).
 CREATE TABLE IF NOT EXISTS dm_thread (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  a TEXT NOT NULL,                 -- canonical ordering: a < b, so a pair has exactly one thread
-  b TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'dm',        -- 'dm' | 'group'
+  pairKey TEXT,                           -- 'uidA|uidB' for a dm, NULL for a group
+  title TEXT,                             -- groups only
+  createdBy TEXT,
   createdAt INTEGER NOT NULL,
   lastMsgId INTEGER NOT NULL DEFAULT 0,
   lastAt INTEGER NOT NULL DEFAULT 0
 ) STRICT;
-CREATE UNIQUE INDEX IF NOT EXISTS dm_pair ON dm_thread(a, b);
+
+-- Membership is a table, not two columns, which is the whole reason groups are possible at all.
+-- leftAt rather than a delete: a departed member's messages stay attributed, and their name still
+-- resolves when somebody scrolls back through the conversation they were part of.
+CREATE TABLE IF NOT EXISTS dm_member (
+  thread INTEGER NOT NULL,
+  uid TEXT NOT NULL,
+  joinedAt INTEGER NOT NULL,
+  leftAt INTEGER,
+  owner INTEGER NOT NULL DEFAULT 0,       -- group creator: can rename, add, remove
+  PRIMARY KEY (thread, uid)
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS dm_msg (
   id INTEGER PRIMARY KEY AUTOINCREMENT,   -- global monotonic: this IS the sync cursor
@@ -169,9 +187,11 @@ CREATE TABLE IF NOT EXISTS dm_msg (
   ref TEXT,                        -- $TICKER coin id, when the message carried one
   refPx REAL,                      -- the mark at send. Written once, never revised.
   editedAt INTEGER,
-  deletedAt INTEGER
+  deletedAt INTEGER,
+  sys TEXT,                        -- system event ('added'/'removed'/'left'/'renamed'), else NULL
+  fileId TEXT,                     -- attachment, when the message carried one
+  via TEXT                         -- 'telegram' when it came in over the bridge, else NULL
 ) STRICT;
-CREATE INDEX IF NOT EXISTS dm_by_thread ON dm_msg(thread, id);
 
 CREATE TABLE IF NOT EXISTS dm_read (
   thread INTEGER NOT NULL,
@@ -181,6 +201,71 @@ CREATE TABLE IF NOT EXISTS dm_read (
   notifiedMsgId INTEGER NOT NULL DEFAULT 0,   -- highest id already escalated to Telegram
   PRIMARY KEY (thread, uid)
 ) STRICT, WITHOUT ROWID;
+
+-- Reactions are (message, person, emoji) and nothing else. No free text: a reaction is a fixed
+-- vocabulary, or it is a message wearing a smaller font.
+CREATE TABLE IF NOT EXISTS dm_reaction (
+  msg INTEGER NOT NULL,
+  uid TEXT NOT NULL,
+  emoji TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  PRIMARY KEY (msg, uid, emoji)
+) STRICT, WITHOUT ROWID;
+
+-- The row is the record; the bytes live on the volume under dm-files/<id>. mime is what WE sniffed
+-- from the first bytes, never what the uploader claimed — see safeMime.
+CREATE TABLE IF NOT EXISTS dm_file (
+  id TEXT PRIMARY KEY,
+  thread INTEGER NOT NULL,
+  uid TEXT NOT NULL,
+  name TEXT NOT NULL,
+  mime TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  inline INTEGER NOT NULL DEFAULT 0,      -- 1 only for image types we verified by magic bytes
+  createdAt INTEGER NOT NULL
+) STRICT;
+`);
+
+  // ---- migration from the pair-columns schema --------------------------------------------------
+  // Phase 1 shipped dm_thread(a, b). This lifts such a database onto the membership table in place,
+  // once, idempotently. It is a no-op on a fresh volume — but a schema change that silently drops
+  // conversations is not something to find out about in production.
+  // CREATE TABLE IF NOT EXISTS does nothing to a table that already exists, so every column added
+  // after a table shipped has to be added by hand. Table-driven rather than a list of one-off
+  // ALTERs: the next column added to the schema above only has to be named here, and forgetting is
+  // what produced "table dm_msg has no column named sys" the first time round.
+  const ADDED_COLUMNS = {
+    dm_thread: [["kind", "TEXT NOT NULL DEFAULT 'dm'"], ["pairKey", "TEXT"], ["title", "TEXT"], ["createdBy", "TEXT"]],
+    dm_msg: [["sys", "TEXT"], ["fileId", "TEXT"], ["via", "TEXT"]],
+  };
+  for (const [table, cols] of Object.entries(ADDED_COLUMNS)) {
+    const have = db.prepare("PRAGMA table_info(" + table + ")").all().map((c) => c.name);
+    if (!have.length) continue;
+    for (const [name, decl] of cols)
+      if (!have.includes(name)) db.exec("ALTER TABLE " + table + " ADD COLUMN " + name + " " + decl);
+  }
+  (() => {
+    const cols = db.prepare("PRAGMA table_info(dm_thread)").all().map((c) => c.name);
+    if (!cols.includes("a")) return;
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const t of db.prepare("SELECT id, a, b, createdAt FROM dm_thread WHERE a IS NOT NULL").all()) {
+        const [x, y] = t.a < t.b ? [t.a, t.b] : [t.b, t.a];
+        db.prepare("UPDATE dm_thread SET kind='dm', pairKey=? WHERE id=?").run(x + "|" + y, t.id);
+        for (const uid of [t.a, t.b])
+          db.prepare("INSERT OR IGNORE INTO dm_member (thread, uid, joinedAt) VALUES (?,?,?)").run(t.id, uid, t.createdAt);
+      }
+      db.exec("COMMIT");
+    } catch (e) { try { db.exec("ROLLBACK"); } catch (_) {} throw e; }
+  })();
+
+  // Indexes last: on a migrated database the columns they cover only exist as of the block above.
+  db.exec(`
+CREATE UNIQUE INDEX IF NOT EXISTS dm_pairkey ON dm_thread(pairKey);
+CREATE INDEX IF NOT EXISTS dm_member_uid ON dm_member(uid, leftAt);
+CREATE INDEX IF NOT EXISTS dm_by_thread ON dm_msg(thread, id);
+CREATE INDEX IF NOT EXISTS dm_by_sender ON dm_msg(sender, ts);
+CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
 `);
 
   // ---- statements ------------------------------------------------------------------------------
@@ -203,22 +288,39 @@ CREATE TABLE IF NOT EXISTS dm_read (
     invRevoke: db.prepare("UPDATE invite SET revokedAt = ? WHERE code = ? AND usedBy IS NULL"),
     invList: db.prepare("SELECT * FROM invite ORDER BY createdAt DESC LIMIT 200"),
 
-    thrFind: db.prepare("SELECT * FROM dm_thread WHERE a = ? AND b = ?"),
+    thrByPair: db.prepare("SELECT * FROM dm_thread WHERE pairKey = ?"),
     thrById: db.prepare("SELECT * FROM dm_thread WHERE id = ?"),
-    thrIns: db.prepare("INSERT INTO dm_thread (a, b, createdAt) VALUES (?,?,?)"),
-    thrMine: db.prepare("SELECT * FROM dm_thread WHERE a = ? OR b = ? ORDER BY lastAt DESC"),
+    thrInsDm: db.prepare("INSERT INTO dm_thread (kind, pairKey, createdAt) VALUES ('dm',?,?)"),
+    thrInsGroup: db.prepare("INSERT INTO dm_thread (kind, title, createdBy, createdAt) VALUES ('group',?,?,?)"),
+    thrRename: db.prepare("UPDATE dm_thread SET title = ? WHERE id = ? AND kind = 'group'"),
     thrTouch: db.prepare("UPDATE dm_thread SET lastMsgId = ?, lastAt = ? WHERE id = ?"),
+    thrMine: db.prepare(`SELECT t.* FROM dm_thread t JOIN dm_member m ON m.thread = t.id
+      WHERE m.uid = ? AND m.leftAt IS NULL ORDER BY t.lastAt DESC`),
+    thrActive: db.prepare("SELECT * FROM dm_thread WHERE lastAt > 0"),
 
-    msgIns: db.prepare("INSERT INTO dm_msg (thread, sender, ts, body, ref, refPx) VALUES (?,?,?,?,?,?)"),
+    memAdd: db.prepare("INSERT INTO dm_member (thread, uid, joinedAt, owner) VALUES (?,?,?,?) ON CONFLICT(thread, uid) DO UPDATE SET leftAt = NULL, joinedAt = excluded.joinedAt"),
+    memGet: db.prepare("SELECT * FROM dm_member WHERE thread = ? AND uid = ?"),
+    // Ordered, not incidental: leaveGroup promotes the first row when the last owner walks out, so
+    // an unordered read would hand ownership to an arbitrary member and do it differently each run.
+    memOf: db.prepare("SELECT * FROM dm_member WHERE thread = ? AND leftAt IS NULL ORDER BY joinedAt, uid"),
+    memAll: db.prepare("SELECT * FROM dm_member WHERE thread = ?"),
+    memLeave: db.prepare("UPDATE dm_member SET leftAt = ? WHERE thread = ? AND uid = ? AND leftAt IS NULL"),
+
+    msgIns: db.prepare("INSERT INTO dm_msg (thread, sender, ts, body, ref, refPx, sys, fileId, via) VALUES (?,?,?,?,?,?,?,?,?)"),
     msgById: db.prepare("SELECT * FROM dm_msg WHERE id = ?"),
     msgEdit: db.prepare("UPDATE dm_msg SET body = ?, ref = ?, editedAt = ? WHERE id = ? AND sender = ? AND deletedAt IS NULL"),
-    msgDrop: db.prepare("UPDATE dm_msg SET deletedAt = ?, body = '' WHERE id = ? AND sender = ?"),
+    msgDrop: db.prepare("UPDATE dm_msg SET deletedAt = ?, body = '', fileId = NULL WHERE id = ? AND sender = ?"),
     msgPage: db.prepare("SELECT * FROM dm_msg WHERE thread = ? AND id < ? ORDER BY id DESC LIMIT ?"),
     msgSince: db.prepare("SELECT * FROM dm_msg WHERE thread = ? AND id > ? ORDER BY id LIMIT ?"),
     msgLast: db.prepare("SELECT * FROM dm_msg WHERE thread = ? ORDER BY id DESC LIMIT 1"),
-    msgUnread: db.prepare("SELECT COUNT(*) AS n FROM dm_msg WHERE thread = ? AND id > ? AND sender <> ? AND deletedAt IS NULL"),
+    msgUnread: db.prepare("SELECT COUNT(*) AS n FROM dm_msg WHERE thread = ? AND id > ? AND sender <> ? AND deletedAt IS NULL AND sys IS NULL"),
     msgBurst: db.prepare("SELECT COUNT(*) AS n FROM dm_msg WHERE sender = ? AND ts > ?"),
     msgMaxId: db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM dm_msg"),
+    // Search is scoped by a JOIN on membership, never by a thread id the caller supplied: the
+    // filter IS the authorization, so there is no way to phrase a query that reaches outside it.
+    msgSearch: db.prepare(`SELECT s.* FROM dm_msg s JOIN dm_member m ON m.thread = s.thread
+      WHERE m.uid = ? AND m.leftAt IS NULL AND s.deletedAt IS NULL AND s.sys IS NULL
+        AND s.body LIKE ? ESCAPE '\\' ORDER BY s.id DESC LIMIT ?`),
 
     readGet: db.prepare("SELECT * FROM dm_read WHERE thread = ? AND uid = ?"),
     readUp: db.prepare(`INSERT INTO dm_read (thread, uid, readMsgId) VALUES (?,?,?)
@@ -227,6 +329,14 @@ CREATE TABLE IF NOT EXISTS dm_read (
       ON CONFLICT(thread, uid) DO UPDATE SET muted = excluded.muted`),
     readNotified: db.prepare(`INSERT INTO dm_read (thread, uid, notifiedMsgId) VALUES (?,?,?)
       ON CONFLICT(thread, uid) DO UPDATE SET notifiedMsgId = MAX(notifiedMsgId, excluded.notifiedMsgId)`),
+
+    reactAdd: db.prepare("INSERT OR IGNORE INTO dm_reaction (msg, uid, emoji, at) VALUES (?,?,?,?)"),
+    reactDrop: db.prepare("DELETE FROM dm_reaction WHERE msg = ? AND uid = ? AND emoji = ?"),
+    reactOf: db.prepare("SELECT * FROM dm_reaction WHERE msg = ?"),
+    reactMine: db.prepare("SELECT 1 AS x FROM dm_reaction WHERE msg = ? AND uid = ? AND emoji = ?"),
+
+    fileIns: db.prepare("INSERT INTO dm_file (id, thread, uid, name, mime, size, inline, createdAt) VALUES (?,?,?,?,?,?,?,?)"),
+    fileById: db.prepare("SELECT * FROM dm_file WHERE id = ?"),
   };
 
   // ---- in-memory user index --------------------------------------------------------------------
@@ -518,45 +628,268 @@ CREATE TABLE IF NOT EXISTS dm_read (
   let markFor = options.markFor || (() => null);
   function setMarkSource(fn) { if (typeof fn === "function") markFor = fn; }
 
-  const pair = (x, y) => (x < y ? [x, y] : [y, x]);
+  // ---- threads: one shape for a pair, one for a group ------------------------------------------
+  const pairKeyOf = (x, y) => (x < y ? x + "|" + y : y + "|" + x);
   function threadFor(uidA, uidB, create) {
-    const [a, b] = pair(uidA, uidB);
-    let t = S.thrFind.get(a, b);
+    const key = pairKeyOf(uidA, uidB);
+    let t = S.thrByPair.get(key);
     if (!t && create) {
-      try { S.thrIns.run(a, b, Date.now()); } catch (_) {}
-      t = S.thrFind.get(a, b);
+      const now = Date.now();
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        // Re-check inside the lock: two people opening each other simultaneously would otherwise
+        // both insert, and the UNIQUE index would surface as a crash rather than one thread.
+        t = S.thrByPair.get(key);
+        if (!t) {
+          const r = S.thrInsDm.run(key, now);
+          const id = Number(r.lastInsertRowid);
+          S.memAdd.run(id, uidA, now, 0);
+          S.memAdd.run(id, uidB, now, 0);
+        }
+        db.exec("COMMIT");
+      } catch (e) { try { db.exec("ROLLBACK"); } catch (_) {} }
+      t = S.thrByPair.get(key);
     }
     return t || null;
   }
-  const inThread = (t, uid) => !!t && (t.a === uid || t.b === uid);
-  // Who to wake when this thread moves. Used by the SSE fan-out so a poke reaches the two people in
-  // the conversation and nobody else.
-  function threadPeers(id) { const t = S.thrById.get(+id); return t ? [t.a, t.b] : []; }
-  const peerOf = (t, uid) => (t.a === uid ? t.b : t.a);
+  // Joining a conversation marks whatever was already said as read. The backscroll stays fully
+  // readable — this is a small desk, not a compliance boundary — but being added to a group with
+  // 500 messages in it should not open on "500 unread". You are not behind; you just arrived.
+  function seedRead(threadId, uid) {
+    const last = S.msgLast.get(+threadId);
+    if (last) S.readUp.run(+threadId, uid, last.id);
+  }
+  const isMember = (threadId, uid) => {
+    const m = S.memGet.get(+threadId, uid);
+    return !!m && !m.leftAt;
+  };
+  const memberUids = (threadId) => S.memOf.all(+threadId).map((m) => m.uid);
+  function threadPeers(id) { return memberUids(id); }
+  const peerOf = (t, uid) => memberUids(t.id).find((u) => u !== uid) || "";
 
+  // A thread's name depends on who is looking: a pair is "the other person", a group is its title.
+  function threadName(t, uid) {
+    if (t.kind === "group") return t.title || "untitled group";
+    const p = users.get(peerOf(t, uid));
+    return p ? p.display : "—";
+  }
+
+  const GROUP_TITLE_MAX = 48, GROUP_MAX_MEMBERS = 50;
+  function createGroup(uid, title, uids) {
+    if (!users.get(uid)) return { ok: false, error: "not signed in" };
+    const name = String(title == null ? "" : title).replace(/\s+/g, " ").trim().slice(0, GROUP_TITLE_MAX);
+    if (!name) return { ok: false, error: "give the group a name" };
+    const want = [...new Set([uid].concat(Array.isArray(uids) ? uids : []))]
+      .filter((u) => users.get(u) && !users.get(u).disabledAt);
+    if (want.length < 2) return { ok: false, error: "a group needs somebody else in it" };
+    if (want.length > GROUP_MAX_MEMBERS) return { ok: false, error: "that is too many people for one group" };
+    const now = Date.now();
+    let id;
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      id = Number(S.thrInsGroup.run(name, uid, now).lastInsertRowid);
+      for (const u of want) S.memAdd.run(id, u, now, u === uid ? 1 : 0);
+      db.exec("COMMIT");
+    } catch (e) { try { db.exec("ROLLBACK"); } catch (_) {} return { ok: false, error: "could not create the group" }; }
+    sysMessage(id, uid, "created", name);
+    return { ok: true, thread: id };
+  }
+
+  // System lines are ordinary rows with `sys` set. They ride the same cursor as everything else, so
+  // "gustavo added lena" arrives through the same sync a message does — no second channel, and no
+  // way for the membership story to drift from the message history.
+  function sysMessage(threadId, actor, kind, detail) {
+    const now = Date.now();
+    const id = Number(S.msgIns.run(+threadId, actor || "", now, String(detail || ""), null, null, kind, null, null).lastInsertRowid);
+    S.thrTouch.run(id, now, +threadId);
+    return id;
+  }
+
+  function groupGuard(threadId, uid, needOwner) {
+    const t = S.thrById.get(+threadId);
+    if (!t) return { ok: false, error: "no such conversation" };
+    if (t.kind !== "group") return { ok: false, error: "that is a direct message, not a group" };
+    const m = S.memGet.get(+threadId, uid);
+    if (!m || m.leftAt) return { ok: false, error: "no such conversation" };
+    if (needOwner && !m.owner) return { ok: false, error: "only the person who made this group can do that" };
+    return { ok: true, thread: t, member: m };
+  }
+  function addMembers(uid, threadId, uids) {
+    const g = groupGuard(threadId, uid, true);
+    if (!g.ok) return g;
+    const now = Date.now(), added = [];
+    for (const u of (Array.isArray(uids) ? uids : [])) {
+      const who = users.get(u);
+      if (!who || who.disabledAt || isMember(threadId, u)) continue;
+      if (memberUids(threadId).length >= GROUP_MAX_MEMBERS) break;
+      S.memAdd.run(+threadId, u, now, 0);
+      seedRead(threadId, u);
+      added.push(who.display);
+    }
+    if (!added.length) return { ok: false, error: "nobody to add" };
+    sysMessage(threadId, uid, "added", added.join(", "));
+    return { ok: true, thread: +threadId, added };
+  }
+  function removeMember(uid, threadId, target) {
+    const g = groupGuard(threadId, uid, true);
+    if (!g.ok) return g;
+    if (target === uid) return { ok: false, error: "leave the group instead" };
+    if (!isMember(threadId, target)) return { ok: false, error: "they are not in this group" };
+    S.memLeave.run(Date.now(), +threadId, target);
+    sysMessage(threadId, uid, "removed", (users.get(target) || {}).display || "someone");
+    return { ok: true, thread: +threadId };
+  }
+  function leaveGroup(uid, threadId) {
+    const g = groupGuard(threadId, uid, false);
+    if (!g.ok) return g;
+    S.memLeave.run(Date.now(), +threadId, uid);
+    sysMessage(threadId, uid, "left", (users.get(uid) || {}).display || "someone");
+    // The last owner out hands ownership to whoever has been there longest, so a group can never
+    // end up with members and nobody who can manage it.
+    const left = S.memOf.all(+threadId);
+    if (left.length && !left.some((m) => m.owner))
+      db.prepare("UPDATE dm_member SET owner = 1 WHERE thread = ? AND uid = ?").run(+threadId, left[0].uid);
+    return { ok: true, thread: +threadId };
+  }
+  function renameGroup(uid, threadId, title) {
+    const g = groupGuard(threadId, uid, true);
+    if (!g.ok) return g;
+    const name = String(title == null ? "" : title).replace(/\s+/g, " ").trim().slice(0, GROUP_TITLE_MAX);
+    if (!name) return { ok: false, error: "give the group a name" };
+    S.thrRename.run(name, +threadId);
+    sysMessage(threadId, uid, "renamed", name);
+    return { ok: true, thread: +threadId, title: name };
+  }
+
+  // ---- reactions --------------------------------------------------------------------------------
+  // A fixed vocabulary on purpose. Free text here would be a second, worse message field: unbounded,
+  // unsearchable, and rendered in a place with no room for it.
+  const REACTIONS = ["\u{1F44D}", "\u{1F44E}", "\u{1F440}", "\u{1F525}", "✅", "\u{1F914}", "\u{1F4C8}", "\u{1F4C9}"];
+  function react(uid, msgId, emoji) {
+    const m = S.msgById.get(+msgId);
+    if (!m || !isMember(m.thread, uid)) return { ok: false, error: "no such message" };
+    if (m.deletedAt) return { ok: false, error: "that message was deleted" };
+    if (!REACTIONS.includes(String(emoji))) return { ok: false, error: "not a reaction" };
+    const had = S.reactMine.get(+msgId, uid, String(emoji));
+    if (had) S.reactDrop.run(+msgId, uid, String(emoji));
+    else S.reactAdd.run(+msgId, uid, String(emoji), Date.now());
+    return { ok: true, thread: m.thread, message: wire(S.msgById.get(+msgId), uid) };
+  }
+  // {emoji: {n, mine, who}} — `who` is what makes a reaction accountable rather than a vote count.
+  function reactionsOf(msgId, uid) {
+    const rows = S.reactOf.all(+msgId);
+    if (!rows.length) return null;
+    const out = {};
+    for (const r of rows) {
+      const e = out[r.emoji] || (out[r.emoji] = { n: 0, mine: false, who: [] });
+      e.n++;
+      if (r.uid === uid) e.mine = true;
+      if (e.who.length < 8) e.who.push((users.get(r.uid) || {}).display || "—");
+    }
+    return out;
+  }
+
+  // ---- attachments ------------------------------------------------------------------------------
+  // The uploader's claimed content type is never trusted. We sniff the first bytes ourselves and
+  // render INLINE only for the four raster formats that cannot carry script. Everything else —
+  // including SVG, which is a document with a <script> element in it — is served as a download.
+  const FILE_MAX = 8 * 1024 * 1024;
+  const fileDir = path.join(dataDir, "dm-files");
+  function safeMime(buf, name) {
+    const b = buf;
+    const startsWith = (...bytes) => bytes.every((v, i) => b[i] === v);
+    if (startsWith(0x89, 0x50, 0x4E, 0x47)) return { mime: "image/png", inline: 1 };
+    if (startsWith(0xFF, 0xD8, 0xFF)) return { mime: "image/jpeg", inline: 1 };
+    if (startsWith(0x47, 0x49, 0x46, 0x38)) return { mime: "image/gif", inline: 1 };
+    if (startsWith(0x52, 0x49, 0x46, 0x46) && b.length > 11 &&
+        b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return { mime: "image/webp", inline: 1 };
+    if (startsWith(0x25, 0x50, 0x44, 0x46)) return { mime: "application/pdf", inline: 0 };
+    // Unknown bytes: octet-stream and a forced download. Naming it by extension would hand an
+    // attacker the content type, which is the whole hole this closes.
+    return { mime: "application/octet-stream", inline: 0 };
+  }
+  // Filtered by code point, like cleanBody, and for the same reason. Path separators go too:
+  // the stored filename is only ever a LABEL — the bytes live under a random id — but a name
+  // that can contain a slash is one refactor away from being joined to a path.
+  function fileNameClean(raw) {
+    let out = "";
+    for (const ch of String(raw == null ? "" : raw)) {
+      const c = ch.codePointAt(0);
+      if (c < 32 || c === 127) continue;
+      if (ch === "/" || ch === "\\") continue;
+      out += ch;
+    }
+    return out.trim().slice(0, 120) || "file";
+  }
+  function putFile(uid, threadId, name, buf) {
+    if (!isMember(threadId, uid)) return { ok: false, error: "no such conversation" };
+    if (!buf || !buf.length) return { ok: false, error: "that file is empty" };
+    if (buf.length > FILE_MAX) return { ok: false, error: "that file is too large (8 MB maximum)" };
+    const sniff = safeMime(buf, name);
+    const id = crypto.randomBytes(16).toString("hex");
+    try {
+      fs.mkdirSync(fileDir, { recursive: true });
+      const tmp = path.join(fileDir, id + ".tmp");
+      fs.writeFileSync(tmp, buf);
+      fs.renameSync(tmp, path.join(fileDir, id));
+    } catch (_) { return { ok: false, error: "could not store that file" }; }
+    S.fileIns.run(id, +threadId, uid, fileNameClean(name), sniff.mime, buf.length, sniff.inline, Date.now());
+    return { ok: true, file: S.fileById.get(id) };
+  }
+  // Reading a file is a membership check, never a "knows the id" check: an id in a URL is not a
+  // capability, and a forwarded link must not become an access grant.
+  function readFile(uid, fileId) {
+    const f = S.fileById.get(String(fileId || ""));
+    if (!f || !isMember(f.thread, uid)) return { ok: false, error: "no such file" };
+    const p = path.join(fileDir, f.id);
+    if (!fs.existsSync(p)) return { ok: false, error: "that file is no longer stored" };
+    return { ok: true, file: f, path: p };
+  }
+  const fileWire = (id) => {
+    if (!id) return null;
+    const f = S.fileById.get(id);
+    return f ? { id: f.id, name: f.name, mime: f.mime, size: f.size, inline: !!f.inline } : null;
+  };
+
+  // ---- the wire shape ---------------------------------------------------------------------------
   function wire(m, uid) {
     return { id: m.id, thread: m.thread, mine: m.sender === uid,
-      sender: (users.get(m.sender) || {}).display || "—",
+      senderUid: m.sender || null,
+      sender: m.sender ? ((users.get(m.sender) || {}).display || "—") : "",
       ts: m.ts, body: m.deletedAt ? "" : m.body,
       ref: m.ref || null, refPx: m.refPx == null ? null : m.refPx,
       px: m.ref ? markFor(m.ref) : null,          // live mark, derived at read — never stored
-      edited: !!m.editedAt, deleted: !!m.deletedAt };
+      edited: !!m.editedAt, deleted: !!m.deletedAt,
+      sys: m.sys || null, via: m.via || null,
+      file: m.deletedAt ? null : fileWire(m.fileId),
+      reactions: m.deletedAt ? null : reactionsOf(m.id, uid) };
   }
 
-  function send(fromUid, toUid, body, coinResolve) {
-    const from = users.get(fromUid), to = users.get(toUid);
+  // ---- sending ----------------------------------------------------------------------------------
+  // One path for a pair and a group: `to` is either a uid (opening or reusing the pair thread) or a
+  // thread id. Two entry points would be two places for the membership check to be wrong.
+  function send(fromUid, target, body, coinResolve, opts) {
+    const o = opts || {};
+    const from = users.get(fromUid);
     if (!from) return { ok: false, error: "not signed in" };
-    if (!to || to.disabledAt) return { ok: false, error: "no such member" };
-    if (to.uid === from.uid) return { ok: false, error: "you can't message yourself" };
+    let t = null;
+    if (o.thread) {
+      t = S.thrById.get(+o.thread);
+      if (!t || !isMember(t.id, fromUid)) return { ok: false, error: "no such conversation" };
+    } else {
+      const to = users.get(String(target || ""));
+      if (!to || to.disabledAt) return { ok: false, error: "no such member" };
+      if (to.uid === from.uid) return { ok: false, error: "you can't message yourself" };
+      t = threadFor(fromUid, to.uid, true);
+      if (!t) return { ok: false, error: "could not open that conversation" };
+    }
     const text = cleanBody(body);
-    if (!text) return { ok: false, error: "write something first" };
+    const file = o.fileId ? S.fileById.get(o.fileId) : null;
+    if (!text && !file) return { ok: false, error: "write something first" };
+    if (file && (file.thread !== t.id || file.uid !== fromUid)) return { ok: false, error: "that attachment is not yours" };
     if (S.msgBurst.get(fromUid, Date.now() - DM_BURST_MS).n >= DM_BURST_N)
       return { ok: false, error: "slow down — too many messages at once", retry: true };
 
-    const t = threadFor(fromUid, toUid, true);
-    if (!t) return { ok: false, error: "could not open that conversation" };
-    // The stamp: resolve $TICKER to a coin id the snapshot knows, then read its mark. A symbol the
-    // server doesn't recognise is left as plain text rather than stamped with nothing.
     const sym = firstTickerRef(text);
     let ref = null, refPx = null;
     if (sym) {
@@ -564,17 +897,15 @@ CREATE TABLE IF NOT EXISTS dm_read (
       if (coin) { ref = coin; const px = markFor(coin); refPx = Number.isFinite(px) && px > 0 ? px : null; }
     }
     const now = Date.now();
-    const r = S.msgIns.run(t.id, fromUid, now, text, ref, refPx);
-    const id = Number(r.lastInsertRowid);
+    const id = Number(S.msgIns.run(t.id, fromUid, now, text, ref, refPx, null, file ? file.id : null, o.via || null).lastInsertRowid);
     S.thrTouch.run(id, now, t.id);
     S.readUp.run(t.id, fromUid, id);            // your own message is read by definition
-    const msg = S.msgById.get(id);
-    return { ok: true, id, thread: t.id, peer: toUid, message: wire(msg, fromUid) };
+    return { ok: true, id, thread: t.id, message: wire(S.msgById.get(id), fromUid) };
   }
 
   function edit(uid, id, body) {
     const m = S.msgById.get(+id);
-    if (!m || m.sender !== uid) return { ok: false, error: "that isn't your message" };
+    if (!m || m.sender !== uid || m.sys) return { ok: false, error: "that isn't your message" };
     if (m.deletedAt) return { ok: false, error: "that message was deleted" };
     const text = cleanBody(body);
     if (!text) return { ok: false, error: "write something first" };
@@ -586,38 +917,54 @@ CREATE TABLE IF NOT EXISTS dm_read (
   }
   function drop(uid, id) {
     const m = S.msgById.get(+id);
-    if (!m || m.sender !== uid) return { ok: false, error: "that isn't your message" };
+    if (!m || m.sender !== uid || m.sys) return { ok: false, error: "that isn't your message" };
     // Tombstone, never a delete: the row's id is a cursor position on the other side, and removing
     // it would make their next sync silently skip a beat.
     S.msgDrop.run(Date.now(), +id, uid);
     return { ok: true, thread: m.thread, message: wire(S.msgById.get(+id), uid) };
   }
 
-  function threads(uid) {
-    const out = [];
-    for (const t of S.thrMine.all(uid, uid)) {
-      const peer = users.get(peerOf(t, uid));
-      if (!peer) continue;
-      const rd = S.readGet.get(t.id, uid) || { readMsgId: 0, muted: 0 };
-      const last = S.msgLast.get(t.id);
-      out.push({
-        id: t.id, peer: peer.uid, handle: peer.display, disabled: !!peer.disabledAt,
-        lastAt: t.lastAt, muted: !!rd.muted,
-        unread: S.msgUnread.get(t.id, rd.readMsgId, uid).n,
-        preview: last ? (last.deletedAt ? "message deleted"
-          : (last.ref ? "$" + last.ref + " · " + last.body : last.body)).slice(0, 90) : "",
-      });
-    }
-    return out;
+  // ---- reading ----------------------------------------------------------------------------------
+  function threadInfo(t, uid) {
+    const rd = S.readGet.get(t.id, uid) || { readMsgId: 0, muted: 0 };
+    const last = S.msgLast.get(t.id);
+    const mem = S.memOf.all(t.id);
+    const me = S.memGet.get(t.id, uid);
+    const preview = last
+      ? (last.sys ? sysLine(last) : last.deletedAt ? "message deleted"
+        : ((last.ref ? "$" + last.ref + " · " : "") + (last.body || (last.fileId ? "sent a file" : ""))))
+      : "";
+    return {
+      id: t.id, kind: t.kind, title: t.title || null,
+      name: threadName(t, uid),
+      peer: t.kind === "dm" ? peerOf(t, uid) : null,
+      handle: threadName(t, uid),
+      members: mem.map((m) => ({ uid: m.uid, display: (users.get(m.uid) || {}).display || "—", owner: !!m.owner })),
+      owner: !!(me && me.owner),
+      disabled: t.kind === "dm" ? !!(users.get(peerOf(t, uid)) || {}).disabledAt : false,
+      lastAt: t.lastAt, muted: !!rd.muted,
+      unread: S.msgUnread.get(t.id, rd.readMsgId, uid).n,
+      preview: String(preview).slice(0, 90),
+    };
   }
+  const sysLine = (m) => {
+    const who = (users.get(m.sender) || {}).display || "someone";
+    if (m.sys === "created") return who + " created “" + m.body + "”";
+    if (m.sys === "added") return who + " added " + m.body;
+    if (m.sys === "removed") return who + " removed " + m.body;
+    if (m.sys === "left") return m.body + " left";
+    if (m.sys === "renamed") return who + " renamed this to “" + m.body + "”";
+    return "";
+  };
+  function threads(uid) { return S.thrMine.all(uid).map((t) => threadInfo(t, uid)); }
 
   function history(uid, threadId, before, limit) {
     const t = S.thrById.get(+threadId);
-    if (!inThread(t, uid)) return { ok: false, error: "no such conversation" };
+    if (!t || !isMember(t.id, uid)) return { ok: false, error: "no such conversation" };
     const b = Number.isFinite(+before) && +before > 0 ? +before : Number.MAX_SAFE_INTEGER;
     const n = Math.min(Math.max(+limit || 50, 1), 200);
     const rows = S.msgPage.all(t.id, b, n).reverse().map((m) => wire(m, uid));
-    return { ok: true, thread: t.id, peer: peerOf(t, uid), messages: rows,
+    return { ok: true, thread: t.id, info: threadInfo(t, uid), messages: rows,
       more: rows.length === n, cursor: S.msgMaxId.get().m };
   }
 
@@ -627,16 +974,31 @@ CREATE TABLE IF NOT EXISTS dm_read (
     const s = Number.isFinite(+since) && +since >= 0 ? +since : 0;
     const n = Math.min(Math.max(+limit || 200, 1), 500);
     const out = [];
-    for (const t of S.thrMine.all(uid, uid)) {
+    for (const t of S.thrMine.all(uid)) {
       for (const m of S.msgSince.all(t.id, s, n)) out.push(wire(m, uid));
     }
     out.sort((a, b) => a.id - b.id);
     return { ok: true, cursor: S.msgMaxId.get().m, messages: out.slice(0, n), threads: threads(uid) };
   }
 
+  // Search runs over the caller's own membership by JOIN, so the scope IS the authorization — there
+  // is no thread id to tamper with. LIKE rather than FTS5: no extension dependency, and at a desk's
+  // volume of messages the scan is far cheaper than the index would be to maintain.
+  function search(uid, q, limit) {
+    const raw = String(q == null ? "" : q).trim();
+    if (raw.length < 2) return { ok: true, q: raw, results: [] };
+    const esc = raw.replace(/[\\%_]/g, (c) => "\\" + c);
+    const n = Math.min(Math.max(+limit || 50, 1), 100);
+    const rows = S.msgSearch.all(uid, "%" + esc + "%", n);
+    return { ok: true, q: raw, results: rows.map((m) => {
+      const t = S.thrById.get(m.thread);
+      return Object.assign(wire(m, uid), { threadName: t ? threadName(t, uid) : "—", kind: t ? t.kind : "dm" });
+    }) };
+  }
+
   function markRead(uid, threadId, upTo) {
     const t = S.thrById.get(+threadId);
-    if (!inThread(t, uid)) return { ok: false, error: "no such conversation" };
+    if (!t || !isMember(t.id, uid)) return { ok: false, error: "no such conversation" };
     // Clamp to what actually exists. An unclamped cursor from the client would let a caller mark
     // itself read PAST messages not yet sent, permanently zeroing its own unread count and
     // silencing every future escalation on the thread — a read receipt for the future.
@@ -648,13 +1010,13 @@ CREATE TABLE IF NOT EXISTS dm_read (
   }
   function setMuted(uid, threadId, on) {
     const t = S.thrById.get(+threadId);
-    if (!inThread(t, uid)) return { ok: false, error: "no such conversation" };
+    if (!t || !isMember(t.id, uid)) return { ok: false, error: "no such conversation" };
     S.readMute.run(t.id, uid, on ? 1 : 0);
     return { ok: true, thread: t.id, muted: !!on };
   }
 
   // ---- offline escalation ----------------------------------------------------------------------
-  // Returns one digest per (recipient, sender) for messages that are still unread, older than
+  // Returns one digest per (recipient, thread) for messages that are still unread, older than
   // `delayMs`, not muted, and not already escalated. The delay is the whole feature: without it two
   // people typing at each other would generate a push per line.
   //
@@ -663,8 +1025,8 @@ CREATE TABLE IF NOT EXISTS dm_read (
   function pendingEscalations(delayMs, isOnline) {
     const now = Date.now(), cut = now - (delayMs == null ? 5 * 60000 : delayMs);
     const out = [];
-    for (const t of db.prepare("SELECT * FROM dm_thread WHERE lastAt > 0").all()) {
-      for (const uid of [t.a, t.b]) {
+    for (const t of S.thrActive.all()) {
+      for (const uid of memberUids(t.id)) {
         const u = users.get(uid);
         if (!u || u.disabledAt) continue;
         if (isOnline && isOnline(uid)) continue;
@@ -672,18 +1034,42 @@ CREATE TABLE IF NOT EXISTS dm_read (
         if (rd.muted) continue;
         const floor = Math.max(rd.readMsgId || 0, rd.notifiedMsgId || 0);
         const rows = S.msgSince.all(t.id, floor, 50)
-          .filter((m) => m.sender !== uid && !m.deletedAt && m.ts <= cut);
+          .filter((m) => m.sender !== uid && !m.deletedAt && !m.sys && m.ts <= cut);
         if (!rows.length) continue;
-        const from = users.get(peerOf(t, uid));
-        out.push({ uid, thread: t.id, from: from ? from.display : "someone",
+        out.push({ uid, thread: t.id, kind: t.kind,
+          from: t.kind === "group" ? threadName(t, uid)
+            : ((users.get(rows[rows.length - 1].sender) || {}).display || "someone"),
           n: rows.length, upTo: rows[rows.length - 1].id,
-          lines: rows.slice(-3).map((m) => (m.ref ? "$" + m.ref + " · " : "") + m.body.slice(0, 90)) });
+          lines: rows.slice(-3).map((m) => ((m.ref ? "$" + m.ref + " · " : "")
+            + (m.body || (m.fileId ? "sent a file" : ""))).slice(0, 90)) });
       }
     }
     return out;
   }
   function markEscalated(uid, threadId, upTo) {
     try { S.readNotified.run(+threadId, uid, +upTo || 0); } catch (_) {}
+  }
+
+  // ---- the Telegram bridge ----------------------------------------------------------------------
+  // Inbound replies are DELIBERATELY command-only. A bare message arriving at the bot must never
+  // become a DM: people already send /start, /stop and stray text to that chat, and turning any of
+  // it into a message posted under their name is the kind of surprise you cannot take back.
+  //   /r <text>            -> the thread the last digest to that chat was about
+  //   /r @handle <text>    -> that person, explicitly
+  function bridgeReply(uid, text, lastThread) {
+    const who = users.get(uid);
+    if (!who || who.disabledAt) return { ok: false, error: "that chat is not linked to an account" };
+    const raw = String(text == null ? "" : text).trim();
+    if (!raw) return { ok: false, error: "nothing to send" };
+    const at = /^@([A-Za-z0-9._-]{2,24})\s+([\s\S]+)$/.exec(raw);
+    if (at) {
+      const target = getUserByHandle(at[1]);
+      if (!target) return { ok: false, error: "no member called @" + at[1] };
+      return send(uid, target.uid, at[2], null, { via: "telegram" });
+    }
+    if (!lastThread || !isMember(lastThread, uid))
+      return { ok: false, error: "reply to a message notification first, or use /r @handle your text" };
+    return send(uid, null, raw, null, { thread: lastThread, via: "telegram" });
   }
 
   function stats() {
@@ -699,7 +1085,10 @@ CREATE TABLE IF NOT EXISTS dm_read (
     // invites
     mintInvite, readInvite, revokeInvite, listInvites, redeem, bootstrap, claim, inviteState,
     // messages
-    setMarkSource, threadFor, threadPeers, send, edit, drop, threads, history, sync, markRead, setMuted,
+    setMarkSource, threadFor, threadPeers, isMember, memberUids, send, edit, drop,
+    threads, history, sync, search, markRead, setMuted,
+    createGroup, addMembers, removeMember, leaveGroup, renameGroup,
+    react, REACTIONS, putFile, readFile, bridgeReply,
     pendingEscalations, markEscalated,
     stats,
     // testing seams
@@ -708,4 +1097,4 @@ CREATE TABLE IF NOT EXISTS dm_read (
 }
 
 module.exports = { openAccounts, mintCode, normCode, handleError, pwError, hashPw, verifyPw,
-  cleanBody, firstTickerRef, CODE_ALPHABET, DM_MAX_LEN, PW_MIN };
+  cleanBody, firstTickerRef, CODE_ALPHABET, DM_MAX_LEN, PW_MIN, FILE_MAX: 8 * 1024 * 1024 };

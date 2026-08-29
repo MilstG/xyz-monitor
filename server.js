@@ -7,13 +7,14 @@ const gzipAsync = require("util").promisify(zlib.gzip);   // -08: threadpool gzi
 const Fastify = require("fastify");
 const { openStore } = require("./src/store");
 const { createPoller } = require("./src/poller");
-const { openAccounts, PW_MIN: ACCOUNT_PW_MIN, DM_MAX_LEN: ACCOUNT_DM_MAX } = require("./src/accounts");
+const { openAccounts, PW_MIN: ACCOUNT_PW_MIN, DM_MAX_LEN: ACCOUNT_DM_MAX,
+  FILE_MAX: ACCOUNT_DM_FILE_MAX } = require("./src/accounts");
 const { featureGateFor, resolveFeatures } = require("./src/compute");
 
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.30-46";
+const VERSION = "2026.08.31-47";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -899,13 +900,36 @@ async function main() {
     ACCOUNTS.touch(me.uid);
     return me;
   };
+
+  // Typing state is in memory and nowhere else. It expires on its own, it is worthless a second
+  // later, and persisting it would mean a restart could claim somebody is mid-sentence.
+  const dmTyping = new Map();            // threadId -> Map(uid -> expiresAt)
+  const DM_TYPING_MS = 6000;
+  function dmTypingSet(threadId, uid) {
+    let m = dmTyping.get(threadId);
+    if (!m) { m = new Map(); dmTyping.set(threadId, m); }
+    m.set(uid, Date.now() + DM_TYPING_MS);
+  }
+  function dmTypingOf(threadId, exceptUid) {
+    const m = dmTyping.get(threadId);
+    if (!m) return [];
+    const now = Date.now(), out = [];
+    for (const [uid, exp] of m) {
+      if (exp <= now) m.delete(uid);
+      else if (uid !== exceptUid) out.push(uid);
+    }
+    if (!m.size) dmTyping.delete(threadId);
+    return out;
+  }
+
   fastify.get("/api/dm", (req, reply) => {
     reply.header("cache-control", "no-store");
     const me = dmMe(req, reply); if (!me) return;
     // The directory is simply the member list: at this size a request-to-connect flow is ceremony.
     return { ok: true, me: ACCOUNTS.pub(me), threads: ACCOUNTS.threads(me.uid),
       members: ACCOUNTS.listUsers().filter((u) => u.uid !== me.uid && !u.disabled),
-      online: [...dmOnline()], maxLen: ACCOUNT_DM_MAX };
+      online: [...dmOnline()], maxLen: ACCOUNT_DM_MAX,
+      reactions: ACCOUNTS.REACTIONS, maxFile: ACCOUNT_DM_FILE_MAX };
   });
   fastify.get("/api/dm/sync", (req, reply) => {
     reply.header("cache-control", "no-store");
@@ -913,28 +937,102 @@ async function main() {
     const q = req.query || {};
     return ACCOUNTS.sync(me.uid, q.since, q.limit);
   });
+  fastify.get("/api/dm/search", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    return ACCOUNTS.search(me.uid, (req.query || {}).q, (req.query || {}).limit);
+  });
+  // Attachments arrive base64 in a JSON body rather than multipart: it costs ~33% on the wire for
+  // an 8 MB ceiling and saves a dependency in a codebase that has deliberately stayed at four.
+  fastify.post("/api/dm/upload", { bodyLimit: 14 * 1024 * 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    const b = req.body || {};
+    let buf;
+    try { buf = Buffer.from(String(b.data || ""), "base64"); }
+    catch (_) { return reply.code(400).send({ ok: false, error: "that upload was malformed" }); }
+    const r = ACCOUNTS.putFile(me.uid, b.thread, b.name, buf);
+    return reply.code(r.ok ? 200 : 400).send(r);
+  });
+  // Downloads are membership-checked, never id-checked: a forwarded link is not an access grant.
+  // Only the four raster formats we verified by magic bytes render inline; everything else — SVG
+  // and HTML above all, which are documents that can carry script — is forced to download.
+  fastify.get("/api/dm/file/:id", (req, reply) => {
+    const me = meOf(req);
+    if (!me) return reply.code(401).header("cache-control", "no-store").send({ ok: false, error: "sign in first" });
+    const r = ACCOUNTS.readFile(me.uid, (req.params || {}).id);
+    if (!r.ok) return reply.code(404).header("cache-control", "no-store").send(r);
+    const dispo = r.file.inline ? "inline" : "attachment";
+    // The filename is quoted and RFC 5987-encoded; a name is a label, never a header injection.
+    const safe = encodeURIComponent(r.file.name).replace(/['()]/g, escape);
+    return reply
+      .header("content-type", r.file.mime)
+      .header("content-length", String(r.file.size))
+      .header("content-disposition", dispo + "; filename*=UTF-8''" + safe)
+      .header("x-content-type-options", "nosniff")
+      .header("content-security-policy", "default-src 'none'; sandbox")
+      .header("cache-control", "private, max-age=86400")
+      .send(fs.createReadStream(r.path));
+  });
   fastify.get("/api/dm/:id", (req, reply) => {
     reply.header("cache-control", "no-store");
     const me = dmMe(req, reply); if (!me) return;
     const q = req.query || {};
     const r = ACCOUNTS.history(me.uid, (req.params || {}).id, q.before, q.limit);
-    return r.ok ? r : reply.code(404).send(r);
+    if (!r.ok) return reply.code(404).send(r);
+    r.typing = dmTypingOf(Number((req.params || {}).id), me.uid);
+    return r;
   });
+  // One route, many verbs in the body — the shape /api/notes and /api/baskets already use, so the
+  // manifest gate covers the whole write surface at once and there is one place that decides who
+  // may do what.
   fastify.post("/api/dm", { bodyLimit: 16 * 1024 }, (req, reply) => {
     reply.header("cache-control", "no-store");
     const me = dmMe(req, reply); if (!me) return;
     const b = req.body || {};
     let r;
-    if (b.read != null || b.markRead) r = ACCOUNTS.markRead(me.uid, b.thread, b.read);
+    if (b.typing) {
+      // Fire and forget: typing is a hint, and a hint that can fail loudly is worse than no hint.
+      if (ACCOUNTS.isMember(b.thread, me.uid)) {
+        dmTypingSet(Number(b.thread), me.uid);
+        dmPoke(b.thread, { typing: { thread: Number(b.thread), uids: dmTypingOf(Number(b.thread), null) } });
+      }
+      return { ok: true };
+    }
+    if (b.group) r = ACCOUNTS.createGroup(me.uid, b.title, b.members);
+    else if (b.addMembers) r = ACCOUNTS.addMembers(me.uid, b.thread, b.members);
+    else if (b.removeMember) r = ACCOUNTS.removeMember(me.uid, b.thread, String(b.uid || ""));
+    else if (b.leave) r = ACCOUNTS.leaveGroup(me.uid, b.thread);
+    else if (b.rename) r = ACCOUNTS.renameGroup(me.uid, b.thread, b.title);
+    else if (b.react) r = ACCOUNTS.react(me.uid, b.id, String(b.emoji || ""));
+    else if (b.read != null || b.markRead) r = ACCOUNTS.markRead(me.uid, b.thread, b.read);
     else if (b.mute != null) r = ACCOUNTS.setMuted(me.uid, b.thread, !!b.mute);
     else if (b.drop && b.id != null) r = ACCOUNTS.drop(me.uid, b.id);
     else if (b.id != null) r = ACCOUNTS.edit(me.uid, b.id, b.body);
-    else r = ACCOUNTS.send(me.uid, String(b.to || ""), b.body, coinForSymbol);
+    else r = ACCOUNTS.send(me.uid, String(b.to || ""), b.body, coinForSymbol,
+      { thread: b.thread || null, fileId: b.fileId || null });
     if (!r.ok) return reply.code(r.retry ? 429 : 400).send(r);
-    // Wake both sides immediately. The frame carries a sequence number, never the message — the
-    // client reacts by running the same sync pull it would have run on its own.
+    // Wake everybody in the conversation. The frame carries a sequence number, never the message —
+    // the client reacts by running the same sync pull it would have run on its own.
     if (r.thread) dmPoke(r.thread);
     return r;
+  });
+
+  // ---- the Telegram reply bridge -----------------------------------------------------------------
+  // Which conversation a bare `/r` answers: the last one this chat was told about. Kept in memory
+  // on purpose — it is a 30-minute convenience, and a stale mapping surviving a restart would route
+  // somebody's reply into a conversation they had forgotten about.
+  const dmReplyTarget = new Map();       // telegram chat id -> { thread, at }
+  const DM_REPLY_CONTEXT_MS = 30 * 60 * 1000;
+  if (poller.setDmBridge) poller.setDmBridge((chat, text) => {
+    const owner = poller.pushOwnerOf ? poller.pushOwnerOf(String(chat)) : "";
+    const me = owner && ACCOUNTS.getUser(owner);
+    if (!me) return { ok: false, error: "This chat is not linked to an account." };
+    const ctx = dmReplyTarget.get(String(chat));
+    const thread = (ctx && Date.now() - ctx.at < DM_REPLY_CONTEXT_MS) ? ctx.thread : 0;
+    const r = ACCOUNTS.bridgeReply(me.uid, text, thread);
+    if (r.ok && r.thread) { dmPoke(r.thread); dmReplyTarget.set(String(chat), { thread: r.thread, at: Date.now() }); }
+    return r.ok ? { ok: true, text: "Sent." } : { ok: false, error: r.error };
   });
 
   fastify.get("/logout", async (req, reply) => {
@@ -1796,10 +1894,12 @@ async function main() {
 
   // Wake exactly the two people in a conversation. Everyone else's stream is untouched — a DM is
   // not an event the group is entitled to know happened.
-  function dmPoke(threadId) {
+  // `extra` lets an ephemeral hint (typing) ride the same targeted fan-out a send uses, rather
+  // than opening a second channel with its own delivery story.
+  function dmPoke(threadId, extra) {
     const peers = ACCOUNTS.threadPeers(threadId);
     if (!peers.length) return;
-    const frame = "data: " + JSON.stringify({ dm: { seq: ACCOUNTS.stats().messages } }) + "\n\n";
+    const frame = "data: " + JSON.stringify({ dm: Object.assign({ seq: ACCOUNTS.stats().messages }, extra || {}) }) + "\n\n";
     for (const uid of peers) {
       const set = sseByUid.get(uid);
       if (set) for (const e of set) sseWrite(e, frame);
@@ -1852,9 +1952,13 @@ async function main() {
       // reusing the xyzown handle as the account id.
       const targets = poller.pushRecipientsFor ? poller.pushRecipientsFor(p.uid) : [];
       if (targets.length) {
-        const head = `<b>${tgEsc(p.from)}</b> · ${p.n} unread message${p.n === 1 ? "" : "s"}`;
+        const head = `<b>${tgEsc(p.from)}</b>${p.kind === "group" ? " (group)" : ""} · ${p.n} unread message${p.n === 1 ? "" : "s"}`;
         const body = p.lines.map((l) => "“" + tgEsc(l) + "”").join("\n");
-        for (const chat of targets) poller.pushEnqueueNow(chat, head + "\n" + body + "\n<i>Reply in the terminal.</i>");
+        for (const chat of targets) {
+          poller.pushEnqueueNow(chat, head + "\n" + body + "\n<i>Reply with /r your message.</i>");
+          // Remember what this chat was last told about, so a bare `/r` has something to answer.
+          dmReplyTarget.set(String(chat), { thread: p.thread, at: Date.now() });
+        }
       }
       // Marked either way. With no Telegram linked there is nothing to send, and leaving it
       // unmarked would re-scan the same backlog every tick forever.

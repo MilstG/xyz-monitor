@@ -9753,7 +9753,10 @@ function startEvents(){ if(typeof EventSource==='undefined'||_sseSrc) return;
     if(d&&d.dataTs&&d.dataTs!==state.dataTs){ loadSnapshot(); nextCycle=Date.now()+_cycleMs(); }
     // The dm frame carries a sequence, never a message. Pull whatever tab is showing: the unread
     // pip has to be right before you look at it, not after you switch to the tab.
-    if(d&&d.dm&&typeof d.dm.seq==='number'&&d.dm.seq>dmState.cursor) dmSync(); };
+    if(d&&d.dm){
+      if(d.dm.typing) dmTypingFrame(d.dm.typing);
+      if(typeof d.dm.seq==='number'&&d.dm.seq>dmState.cursor) dmSync();
+    } };
 }
 function _cycleMs(){ return _sseOk?Math.max(state.refreshMs,120000):state.refreshMs; }
 function startCycle(){ clearInterval(cycleTimer); const ms=_cycleMs(); cycleTimer=setInterval(()=>{ loadSnapshot(); nextCycle=Date.now()+_cycleMs(); }, ms); nextCycle=Date.now()+ms; }
@@ -14239,20 +14242,21 @@ async function termWhale(args){
   return termWhaleFund(sub.toUpperCase(),full);
 }
 
-// ===== MESSAGES tab (build 2026.08.30-46) ======================================================
-// 1-to-1 direct messages between account holders. Two rules shape everything here:
+// ===== MESSAGES tab (build 2026.08.30-46, groups/files/reactions/search 2026.08.31-47) =========
+// Two rules shape everything here:
 //
-//   1. Message bodies are the FIRST attacker-controlled strings this client renders. Every other
-//      value on the board is a server-computed number; a body is prose another person typed. So
-//      every body, handle and preview goes through esc() on every path — the log, the thread rail,
-//      the composer echo. There is no "trusted" rendering path for a message.
-//   2. The stream carries versions, never payloads — same contract as the snapshot push. An SSE
-//      `dm` frame only says "the sequence moved"; this client answers it with an ordinary
-//      /api/dm/sync pull keyed by its own cursor. A dropped frame therefore costs nothing: the
-//      cursor is authoritative and the next pull collects whatever was missed.
+//   1. Message bodies, handles, group titles and filenames are the ONLY attacker-controlled strings
+//      this client renders. Every other value on the board is a server-computed number. So all of
+//      them go through esc() on every path — the log, the rail, the search results, the member
+//      list. There is no "trusted" rendering path for anything a person typed.
+//   2. The stream carries versions, never payloads — the same contract as the snapshot push. An SSE
+//      `dm` frame says "the sequence moved" (and may carry an ephemeral typing hint); this client
+//      answers it with an ordinary /api/dm/sync pull keyed by its own cursor. A dropped frame costs
+//      nothing: the cursor is authoritative and the next pull collects whatever was missed.
 const dmState = { me: null, threads: [], members: [], online: new Set(),
-  sel: null, msgs: new Map(), cursor: 0, loaded: false, err: '', sending: false,
-  composing: '', picking: false, editing: null };
+  sel: null, msgs: new Map(), info: new Map(), cursor: 0, loaded: false, err: '', sending: false,
+  picking: false, editing: null, pendingPeer: null, reactions: [], maxLen: 4000, maxFile: 8388608,
+  typing: new Map(), q: '', results: null, searching: false, manage: false, pendingFile: null };
 
 function dmSignedIn(){ return !!(window.__ME && window.__ME.uid); }
 function dmUnreadTotal(){ return dmState.threads.reduce((a,t)=>a+(t.muted?0:(t.unread||0)),0); }
@@ -14267,8 +14271,8 @@ function dmUpdatePip(){
 
 function dmThread(id){ return dmState.threads.find(t=>t.id===id)||null; }
 function dmMsgs(id){ let a=dmState.msgs.get(id); if(!a){ a=[]; dmState.msgs.set(id,a); } return a; }
-// Merge by id, newest wins: an edit or a tombstone arrives as the same id with new fields, so a
-// blind push would render the message twice — once stale.
+// Merge by id, newest wins: an edit, a reaction or a tombstone arrives as the same id with new
+// fields, so a blind push would render the message twice — once stale.
 function dmMerge(list){
   for(const m of (list||[])){
     const arr=dmMsgs(m.thread);
@@ -14285,7 +14289,9 @@ async function dmLoad(){
     const d=await fetchJSON('/api/dm');
     if(!d||!d.ok) throw new Error((d&&d.error)||'could not load messages');
     dmState.me=d.me; dmState.threads=d.threads||[]; dmState.members=d.members||[];
-    dmState.online=new Set(d.online||[]); dmState.maxLen=d.maxLen||4000; dmState.loaded=true; dmState.err='';
+    dmState.online=new Set(d.online||[]); dmState.maxLen=d.maxLen||4000;
+    dmState.maxFile=d.maxFile||8388608; dmState.reactions=d.reactions||[];
+    dmState.loaded=true; dmState.err='';
   }catch(e){ dmState.err=e.message||String(e); }
   dmUpdatePip();
 }
@@ -14309,12 +14315,29 @@ async function dmSync(){
   finally{ _dmSyncing=false; }
 }
 
+// Ephemeral, and treated as such: a typing hint that arrives is shown for its own lifetime and
+// never stored, never merged into a thread, never survives a reload.
+function dmTypingFrame(t){
+  if(!t||!t.thread) return;
+  dmState.typing.set(t.thread,{uids:(t.uids||[]).filter(u=>u!==(dmState.me&&dmState.me.uid)),at:Date.now()});
+  if(state.view==='dm'&&dmState.sel===t.thread) dmRender();
+  setTimeout(()=>{ const e=dmState.typing.get(t.thread);
+    if(e&&Date.now()-e.at>=5500){ dmState.typing.delete(t.thread); if(state.view==='dm') dmRender(); } },6000);
+}
+function dmTypingLine(threadId){
+  const e=dmState.typing.get(threadId);
+  if(!e||Date.now()-e.at>6000||!e.uids.length) return '';
+  const names=e.uids.map(u=>{ const m=dmState.members.find(x=>x.uid===u); return m?m.display:'someone'; });
+  return '<div class="dm-typing">'+esc(names.join(', '))+(names.length===1?' is':' are')+' typing…</div>';
+}
+
 async function dmOpenThread(id){
-  dmState.sel=id; dmState.editing=null; dmState.picking=false;
+  dmState.sel=id; dmState.editing=null; dmState.picking=false; dmState.manage=false;
+  dmState.results=null; dmState.pendingPeer=null; dmState.pendingFile=null;
   dmRender();
   try{
     const d=await fetchJSON('/api/dm/'+encodeURIComponent(id));
-    if(d&&d.ok){ dmMerge(d.messages); dmRender(); }
+    if(d&&d.ok){ dmMerge(d.messages); if(d.info) dmState.info.set(id,d.info); dmRender(); }
   }catch(_){ }
   dmMarkRead(id);
 }
@@ -14338,22 +14361,43 @@ async function dmPost(body){
   return {ok:r.ok&&d&&d.ok!==false,d:d};
 }
 
+// ---- sending -----------------------------------------------------------------------------------
 async function dmSend(){
-  const ta=el('dm-input'); if(!ta) return;
+  const ta=el('dm-input'); if(!ta||dmState.sending) return;
   const text=ta.value.trim();
-  if(!text||dmState.sending) return;
-  const t=dmThread(dmState.sel);
-  if(!t) return;
+  const file=dmState.pendingFile;
+  if(!text&&!file) return;
+  const t=dmThread(dmState.sel), peer=dmState.pendingPeer;
+  if(!t&&!peer) return;
   dmState.sending=true; dmState.err=''; dmRender();
-  const res=await dmPost(dmState.editing?{id:dmState.editing,body:text}:{to:t.peer,body:text});
+
+  let fileId=null;
+  if(file){
+    // The thread has to exist before a file can belong to it, so a first message with an
+    // attachment sends the text first and attaches on the follow-up rather than inventing a
+    // pre-thread upload slot.
+    const threadId=t?t.id:null;
+    if(threadId){
+      const up=await dmUpload(threadId,file);
+      if(!up.ok){ dmState.err=up.error||'could not attach that file'; dmState.sending=false; dmRender(); return; }
+      fileId=up.id;
+    }else{ dmState.err='say something first, then attach'; dmState.sending=false; dmRender(); return; }
+  }
+
+  const body=dmState.editing?{id:dmState.editing,body:text}
+    :t?{thread:t.id,body:text,fileId:fileId}
+    :{to:peer,body:text};
+  const res=await dmPost(body);
   dmState.sending=false;
   if(res.ok){
-    // Keep nothing in the box on success; on failure the text stays exactly where it was, because
-    // a dropped connection must never eat something somebody typed.
-    ta.value=''; dmState.composing=''; dmState.editing=null;
+    // Nothing is kept in the box on success; on failure the text stays exactly where it was,
+    // because a dropped connection must never eat something somebody typed.
+    ta.value=''; dmState.editing=null; dmState.pendingFile=null; dmState.pendingPeer=null;
+    _dmClearOnNextRender=true;
     if(res.d.message) dmMerge([res.d.message]);
     if(res.d.thread) dmState.sel=res.d.thread;
     await dmLoad();
+    if(dmState.sel) { try{ const h=await fetchJSON('/api/dm/'+dmState.sel); if(h&&h.ok){ dmMerge(h.messages); dmState.info.set(dmState.sel,h.info); } }catch(_){ } }
     dmRender(); dmScrollBottom();
   }else{
     dmState.err=(res.d&&res.d.error)||'could not send — try again';
@@ -14361,28 +14405,41 @@ async function dmSend(){
   }
 }
 
+async function dmUpload(threadId,file){
+  if(file.size>dmState.maxFile) return {ok:false,error:'that file is too large (8 MB maximum)'};
+  const b64=await new Promise((res,rej)=>{
+    const fr=new FileReader();
+    fr.onload=()=>{ const s=String(fr.result||''); res(s.slice(s.indexOf(',')+1)); };
+    fr.onerror=()=>rej(new Error('could not read that file'));
+    fr.readAsDataURL(file);
+  }).catch(()=>null);
+  if(b64==null) return {ok:false,error:'could not read that file'};
+  try{
+    const r=await fetch('/api/dm/upload',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({thread:threadId,name:file.name,data:b64})});
+    const d=await r.json().catch(()=>({}));
+    return (r.ok&&d.ok)?{ok:true,id:d.file.id}:{ok:false,error:d.error||'upload failed'};
+  }catch(_){ return {ok:false,error:'upload failed'}; }
+}
+
+let _dmTypedAt=0;
+function dmTypingPing(){
+  // One ping every three seconds while typing. Any faster turns a quiet stream into a chatty one
+  // for a hint nobody is reading closely.
+  const now=Date.now();
+  if(!dmState.sel||now-_dmTypedAt<3000) return;
+  _dmTypedAt=now;
+  fetch('/api/dm',{method:'POST',headers:{'content-type':'application/json'},
+    body:JSON.stringify({thread:dmState.sel,typing:true})}).catch(()=>{});
+}
+
 async function dmStartWith(uid){
   const existing=dmState.threads.find(t=>t.peer===uid);
   if(existing){ dmState.picking=false; dmOpenThread(existing.id); return; }
   // No thread until there is a message: an empty conversation in the rail is a row that says
   // nothing happened. The composer targets the member directly and the thread appears on send.
-  dmState.picking=false; dmState.sel=null; dmState.pendingPeer=uid; dmRender();
+  dmState.picking=false; dmState.sel=null; dmState.pendingPeer=uid; dmState.results=null; dmRender();
   const ta=el('dm-input'); if(ta) ta.focus();
-}
-
-async function dmSendNew(){
-  const ta=el('dm-input'); if(!ta||!dmState.pendingPeer) return;
-  const text=ta.value.trim(); if(!text||dmState.sending) return;
-  dmState.sending=true; dmRender();
-  const res=await dmPost({to:dmState.pendingPeer,body:text});
-  dmState.sending=false;
-  if(res.ok){
-    ta.value=''; dmState.pendingPeer=null;
-    if(res.d.message) dmMerge([res.d.message]);
-    await dmLoad();
-    if(res.d.thread) dmState.sel=res.d.thread;
-    dmRender(); dmScrollBottom();
-  }else{ dmState.err=(res.d&&res.d.error)||'could not send'; dmRender(); }
 }
 
 async function dmToggleMute(){
@@ -14400,6 +14457,51 @@ function dmEdit(id){
   dmState.editing=id;
   const ta=el('dm-input'); if(ta){ ta.value=m.body; ta.focus(); }
   dmRender();
+}
+async function dmReact(id,emoji){
+  const res=await dmPost({react:true,id:id,emoji:emoji});
+  if(res.ok&&res.d.message){ dmMerge([res.d.message]); dmRender(); }
+}
+
+// ---- groups --------------------------------------------------------------------------------------
+async function dmNewGroup(){
+  const picked=[...document.querySelectorAll('.dm-gpick:checked')].map(i=>i.value);
+  const title=(el('dm-gtitle')||{}).value||'';
+  if(!title.trim()){ dmState.err='give the group a name'; dmRender(); return; }
+  if(!picked.length){ dmState.err='a group needs somebody else in it'; dmRender(); return; }
+  const res=await dmPost({group:true,title:title,members:picked});
+  if(res.ok){ dmState.picking=false; await dmLoad(); dmOpenThread(res.d.thread); }
+  else { dmState.err=(res.d&&res.d.error)||'could not create the group'; dmRender(); }
+}
+async function dmGroupOp(body,confirmText){
+  if(confirmText&&!confirm(confirmText)) return;
+  const res=await dmPost(body);
+  if(res.ok){
+    await dmLoad();
+    if(body.leave){ dmState.sel=null; dmState.manage=false; dmRender(); return; }
+    if(dmState.sel){ try{ const h=await fetchJSON('/api/dm/'+dmState.sel);
+      if(h&&h.ok){ dmMerge(h.messages); dmState.info.set(dmState.sel,h.info); } }catch(_){ } }
+    dmRender();
+  }else{ dmState.err=(res.d&&res.d.error)||'that did not work'; dmRender(); }
+}
+
+// ---- search ----------------------------------------------------------------------------------------
+let _dmSearchTimer=null;
+function dmSearchInput(v){
+  dmState.q=v;
+  clearTimeout(_dmSearchTimer);
+  if(!v.trim()){ dmState.results=null; dmRender(); return; }
+  _dmSearchTimer=setTimeout(dmRunSearch,250);
+}
+async function dmRunSearch(){
+  const q=dmState.q.trim();
+  if(q.length<2){ dmState.results=null; dmRender(); return; }
+  dmState.searching=true; dmRender();
+  try{
+    const d=await fetchJSON('/api/dm/search?q='+encodeURIComponent(q));
+    dmState.results=(d&&d.ok)?d.results:[];
+  }catch(_){ dmState.results=[]; }
+  dmState.searching=false; dmRender();
 }
 
 function dmScrollBottom(){ const l=el('dm-log'); if(l) l.scrollTop=l.scrollHeight; }
@@ -14435,35 +14537,166 @@ function fmtPx(v){
   const a=Math.abs(v);
   return a>=1000?v.toFixed(0):a>=1?v.toFixed(2):v.toFixed(4);
 }
+function fmtBytes(n){
+  if(!isFinite(n)) return '';
+  if(n<1024) return n+' B';
+  if(n<1024*1024) return (n/1024).toFixed(0)+' KB';
+  return (n/1048576).toFixed(1)+' MB';
+}
+// An attachment renders inline ONLY when the server verified it as a raster image by its magic
+// bytes. Anything else is a download chip — the server forces the disposition too, so this is the
+// second of two locks, not the only one.
+function dmFile(m){
+  if(!m.file) return '';
+  const url='/api/dm/file/'+encodeURIComponent(m.file.id);
+  if(m.file.inline)
+    return '<a class="dm-img" href="'+esc(url)+'" target="_blank" rel="noopener noreferrer">'
+      +'<img src="'+esc(url)+'" alt="'+esc(m.file.name)+'" loading="lazy"></a>';
+  return '<a class="dm-att" href="'+esc(url)+'" rel="noopener noreferrer">'
+    +'<span class="dm-att-i">↓</span><span class="dm-att-n">'+esc(m.file.name)+'</span>'
+    +'<span class="dm-att-s">'+esc(fmtBytes(m.file.size))+'</span></a>';
+}
+function dmReactions(m){
+  const r=m.reactions;
+  const chips=[];
+  if(r) for(const e of Object.keys(r))
+    chips.push('<button type="button" class="dm-rx'+(r[e].mine?' mine':'')+'" data-dmrx="'+m.id+'" data-emoji="'+esc(e)+'"'
+      +' title="'+esc(r[e].who.join(', '))+'">'+esc(e)+' '+r[e].n+'</button>');
+  const picker='<span class="dm-rxadd"><button type="button" class="dm-rx dm-rxbtn" data-dmrxopen="'+m.id+'" title="React">+</button>'
+    +'<span class="dm-rxmenu">'+dmState.reactions.map(e=>
+      '<button type="button" class="dm-rxopt" data-dmrx="'+m.id+'" data-emoji="'+esc(e)+'">'+esc(e)+'</button>').join('')+'</span></span>';
+  return '<div class="dm-rxrow">'+chips.join('')+picker+'</div>';
+}
+
+function dmMessageHtml(m,t){
+  if(m.sys) return '<div class="dm-sys">'+esc(dmSysLine(m,t))+'</div>';
+  const own=m.mine;
+  const who=own?'you':(m.sender||'—');
+  const meta=esc(who)+' · '+dmWhen(m.ts)
+    +(m.via==='telegram'?' · <span class="sec" title="sent from Telegram">via telegram</span>':'')
+    +(m.edited&&!m.deleted?' · <span class="sec">edited</span>':'');
+  const tools=(own&&!m.deleted)?'<span class="dm-tools">'
+    +'<button type="button" class="dm-tool" data-dmedit="'+m.id+'" title="Edit — the price stamp stays at what it was sent at">edit</button>'
+    +'<button type="button" class="dm-tool" data-dmdel="'+m.id+'" title="Delete">delete</button></span>':'';
+  const body=m.deleted
+    ? '<div class="dm-b dm-del">message deleted</div>'
+    : '<div class="dm-b">'+(m.body?esc(m.body).replace(/\n/g,'<br>'):'')+dmFile(m)+dmStamp(m)+'</div>';
+  return '<div class="dm-msg'+(own?' out':'')+'"><div class="dm-meta">'+meta+tools+'</div>'
+    +body+(m.deleted?'':dmReactions(m))+'</div>';
+}
+function dmSysLine(m,t){
+  const who=m.mine?'you':(m.sender||'someone');
+  if(m.sys==='created') return who+' created “'+m.body+'”';
+  if(m.sys==='added') return who+' added '+m.body;
+  if(m.sys==='removed') return who+' removed '+m.body;
+  if(m.sys==='left') return m.body+' left';
+  if(m.sys==='renamed') return who+' renamed this to “'+m.body+'”';
+  return '';
+}
+
+function dmRailHtml(){
+  if(!dmState.threads.length) return '<div class="dm-empty">No conversations yet.</div>';
+  return dmState.threads.map(t=>{
+    const grp=t.kind==='group';
+    const dot=grp?'<span class="dm-grp">#</span>'
+      :'<span class="'+(dmState.online.has(t.peer)?'dm-on':'dm-off')+'">●</span>';
+    return '<div class="dm-th'+(t.id===dmState.sel?' sel':'')+'" data-dmth="'+t.id+'">'
+      +'<div class="dm-thn">'+dot+' '+esc(t.name)
+      +(t.muted?' <span class="dm-mute" title="muted — no Telegram escalation">⊘</span>':'')
+      +(t.unread?'<span class="dm-badge">'+(t.unread>99?'99+':t.unread)+'</span>':'')+'</div>'
+      +'<div class="dm-thp">'+esc(t.preview||'no messages yet')+'</div></div>';
+  }).join('');
+}
+
+function dmPickerHtml(){
+  if(!dmState.picking) return '';
+  const people=dmState.members;
+  if(!people.length) return '<div class="dm-pick"><div class="dm-empty">Nobody else has an account yet.</div></div>';
+  return '<div class="dm-pick">'
+    +'<div class="dm-sh">Message one person</div>'
+    +people.map(m=>'<div class="dm-th" data-dmnew="'+esc(m.uid)+'">'
+      +'<div class="dm-thn"><span class="'+(dmState.online.has(m.uid)?'dm-on':'dm-off')+'">●</span> '+esc(m.display)+'</div>'
+      +'<div class="dm-thp">'+(dmState.online.has(m.uid)?'online now':(m.lastSeen?'last seen '+esc(dmWhen(m.lastSeen)):'—'))+'</div></div>').join('')
+    +'<div class="dm-sh" style="margin-top:12px">Or start a group</div>'
+    +'<div class="dm-gform"><input id="dm-gtitle" placeholder="group name" maxlength="48">'
+    +people.map(m=>'<label class="dm-gopt"><input type="checkbox" class="dm-gpick" value="'+esc(m.uid)+'"> '+esc(m.display)+'</label>').join('')
+    +'<button type="button" class="btn" id="dm-gmake">Create group</button></div>'
+    +'</div>';
+}
+
+function dmManageHtml(info){
+  if(!dmState.manage||!info||info.kind!=='group') return '';
+  const notIn=dmState.members.filter(m=>!info.members.some(x=>x.uid===m.uid));
+  return '<div class="dm-manage">'
+    +'<div class="dm-sh">Members · '+info.members.length+'</div>'
+    +info.members.map(m=>'<div class="dm-mrow"><span class="grow">'+esc(m.display)
+      +(m.owner?' <span class="mk-chip">owner</span>':'')+'</span>'
+      +(info.owner&&!m.owner?'<button type="button" class="dm-tool" data-dmrm="'+esc(m.uid)+'">remove</button>':'')
+      +'</div>').join('')
+    +(info.owner?'<div class="dm-sh" style="margin-top:10px">Add</div>'
+      +(notIn.length?notIn.map(m=>'<div class="dm-mrow"><span class="grow">'+esc(m.display)+'</span>'
+        +'<button type="button" class="dm-tool" data-dmadd="'+esc(m.uid)+'">add</button></div>').join('')
+        :'<div class="dm-empty">Everyone is already in.</div>')
+      +'<div class="dm-sh" style="margin-top:10px">Rename</div>'
+      +'<div class="dm-mrow"><input id="dm-rename" value="'+esc(info.title||'')+'" maxlength="48">'
+      +'<button type="button" class="dm-tool" id="dm-dorename">save</button></div>':'')
+    +'<div class="dm-mrow" style="margin-top:10px"><button type="button" class="dm-tool dm-leave" id="dm-leave">leave this group</button></div>'
+    +'</div>';
+}
+
+function dmResultsHtml(){
+  const r=dmState.results;
+  if(dmState.searching) return '<div class="dm-log" id="dm-log"><div class="dm-empty">searching…</div></div>';
+  if(!r.length) return '<div class="dm-log" id="dm-log"><div class="dm-empty">Nothing matches “'+esc(dmState.q)+'”.</div></div>';
+  return '<div class="dm-log" id="dm-log">'+r.map(m=>
+    '<div class="dm-res" data-dmres="'+m.thread+'" data-mid="'+m.id+'">'
+    +'<div class="dm-meta">'+esc(m.threadName)+' · '+esc(m.mine?'you':m.sender)+' · '+dmWhen(m.ts)+'</div>'
+    +'<div class="dm-b">'+esc(m.body).replace(/\n/g,' ')+'</div></div>').join('')+'</div>';
+}
+
+// The panel is re-rendered wholesale, which means every render is a chance to destroy something
+// somebody is in the middle of typing — and renders now arrive unprompted: an incoming message, a
+// reaction, somebody else's typing hint. So the composer and the search box are captured before
+// the rebuild and restored after, caret included. Without this, a message landing while you write
+// eats your draft, which is the worst thing a chat client can do.
+function dmCapture(){
+  const ta=el('dm-input'), q=el('dm-q');
+  return { text: ta?ta.value:null, selA: ta?ta.selectionStart:0, selB: ta?ta.selectionEnd:0,
+    focus: document.activeElement===ta?'input':(document.activeElement===q?'q':''),
+    qSelA: q?q.selectionStart:0, qSelB: q?q.selectionEnd:0 };
+}
+let _dmClearOnNextRender=false;
+function dmRestore(c){
+  if(!c) return;
+  // A successful send clears the box; the capture taken before that render still holds the sent
+  // text, so the clear has to win or the message reappears in the composer after sending.
+  if(_dmClearOnNextRender){ _dmClearOnNextRender=false; const t0=el('dm-input'); if(t0) t0.value=''; return; }
+  const ta=el('dm-input');
+  if(ta&&c.text!=null&&!dmState.editing){
+    ta.value=c.text;
+    ta.style.height='auto'; ta.style.height=Math.min(ta.scrollHeight,160)+'px';
+  }
+  if(c.focus==='input'&&ta){ ta.focus(); try{ ta.setSelectionRange(c.selA,c.selB); }catch(_){} }
+  if(c.focus==='q'){ const q=el('dm-q'); if(q){ q.focus(); try{ q.setSelectionRange(c.qSelA,c.qSelB); }catch(_){} } }
+}
 
 function dmRender(){
   const host=el('dm-body'); if(!host) return;
+  const keep=dmCapture();
   if(!dmSignedIn()){
     host.innerHTML='<div class="msg">Messages need an account. '
       +'<a href="/login">Sign in</a> — or ask the operator for an invite link.</div>';
     return;
   }
-  const rail=dmState.threads.map(t=>{
-    const on=dmState.online.has(t.peer);
-    return '<div class="dm-th'+(t.id===dmState.sel?' sel':'')+'" data-dmth="'+t.id+'">'
-      +'<div class="dm-thn"><span class="'+(on?'dm-on':'dm-off')+'">●</span> '+esc(t.handle)
-      +(t.muted?' <span class="dm-mute" title="muted — no Telegram escalation">⊘</span>':'')
-      +(t.unread?'<span class="dm-badge">'+(t.unread>99?'99+':t.unread)+'</span>':'')+'</div>'
-      +'<div class="dm-thp">'+esc(t.preview||'no messages yet')+'</div></div>';
-  }).join('')||'<div class="dm-empty">No conversations yet.</div>';
-
-  const others=dmState.members.filter(m=>!dmState.threads.some(t=>t.peer===m.uid));
-  const picker=dmState.picking?('<div class="dm-pick">'
-    +(dmState.members.length?dmState.members.map(m=>'<div class="dm-th" data-dmnew="'+esc(m.uid)+'">'
-      +'<div class="dm-thn"><span class="'+(dmState.online.has(m.uid)?'dm-on':'dm-off')+'">●</span> '+esc(m.display)+'</div>'
-      +'<div class="dm-thp">'+(dmState.online.has(m.uid)?'online now':'last seen '+(m.lastSeen?dmWhen(m.lastSeen):'—'))+'</div></div>').join('')
-      :'<div class="dm-empty">Nobody else has an account yet.</div>')
-    +'</div>'):'';
-
   const t=dmThread(dmState.sel);
+  const info=t?dmState.info.get(t.id):null;
   const pendingPeer=dmState.pendingPeer?dmState.members.find(m=>m.uid===dmState.pendingPeer):null;
+
   let main;
-  if(pendingPeer){
+  if(dmState.results){
+    main='<div class="dm-hd"><b>Search</b><span class="sec">'+esc(dmState.q)+'</span>'
+      +'<button type="button" class="btn dm-mutebtn" id="dm-clearsearch">clear</button></div>'+dmResultsHtml();
+  }else if(pendingPeer){
     main='<div class="dm-hd"><b>'+esc(pendingPeer.display)+'</b>'
       +'<span class="sec" style="margin-left:auto">new conversation</span></div>'
       +'<div class="dm-log" id="dm-log"><div class="dm-empty">Say something to start.</div></div>';
@@ -14472,56 +14705,64 @@ function dmRender(){
       +(dmState.threads.length?'Pick a conversation.':'No conversations yet — press <b>+ new</b>.')+'</div></div>';
   }else{
     const arr=dmMsgs(t.id);
-    const log=arr.length?arr.map(m=>{
-      const own=m.mine;
-      const meta=esc(own?'you':t.handle)+' · '+dmWhen(m.ts)
-        +(m.edited&&!m.deleted?' · <span class="sec">edited</span>':'');
-      const bodyHtml=m.deleted
-        ? '<div class="dm-b dm-del">message deleted</div>'
-        : '<div class="dm-b">'+esc(m.body).replace(/\n/g,'<br>')+dmStamp(m)+'</div>';
-      const tools=(own&&!m.deleted)?'<span class="dm-tools">'
-        +'<button type="button" class="dm-tool" data-dmedit="'+m.id+'" title="Edit — the price stamp stays at what it was sent at">edit</button>'
-        +'<button type="button" class="dm-tool" data-dmdel="'+m.id+'" title="Delete">delete</button></span>':'';
-      return '<div class="dm-msg'+(own?' out':'')+'"><div class="dm-meta">'+meta+tools+'</div>'+bodyHtml+'</div>';
-    }).join(''):'<div class="dm-empty">No messages yet.</div>';
-    main='<div class="dm-hd"><b>'+esc(t.handle)+'</b>'
-      +'<span class="mk-chip '+(dmState.online.has(t.peer)?'dm-chip-on':'')+'">'
-      +(dmState.online.has(t.peer)?'online':'away')+'</span>'
+    const log=arr.length?arr.map(m=>dmMessageHtml(m,t)).join(''):'<div class="dm-empty">No messages yet.</div>';
+    const grp=t.kind==='group';
+    main='<div class="dm-hd">'+(grp?'<span class="dm-grp">#</span> ':'')+'<b>'+esc(t.name)+'</b>'
+      +(grp?'<span class="mk-chip">'+(info?info.members.length:t.members?t.members.length:0)+' members</span>'
+        :'<span class="mk-chip '+(dmState.online.has(t.peer)?'dm-chip-on':'')+'">'
+          +(dmState.online.has(t.peer)?'online':'away')+'</span>')
       +(t.disabled?'<span class="sec">account disabled</span>':'')
+      +(grp?'<button type="button" class="btn dm-mutebtn" id="dm-managebtn">'+(dmState.manage?'close':'members')+'</button>':'')
       +'<button type="button" class="btn dm-mutebtn" id="dm-mute" title="Muted conversations never escalate to Telegram">'
       +(t.muted?'unmute':'mute')+'</button></div>'
-      +'<div class="dm-log" id="dm-log">'+log+'</div>';
+      +dmManageHtml(info)
+      +'<div class="dm-log" id="dm-log">'+log+'</div>'+dmTypingLine(t.id);
   }
 
-  const canWrite=!!(t||pendingPeer);
+  const canWrite=!!(t||pendingPeer)&&!dmState.results;
+  const attach=dmState.pendingFile
+    ? '<div class="dm-pending">📎 '+esc(dmState.pendingFile.name)+' <button type="button" class="dm-tool" id="dm-unattach">remove</button></div>'
+    : '';
   const composer='<div class="dm-cmp">'
-    +'<textarea id="dm-input" rows="1" maxlength="'+(dmState.maxLen||4000)+'" '
+    +'<label class="dm-clip'+(canWrite&&t?'':' off')+'" title="Attach a file (8 MB maximum)">📎'
+    +'<input type="file" id="dm-file"'+(canWrite&&t?'':' disabled')+'></label>'
+    +'<textarea id="dm-input" rows="1" maxlength="'+dmState.maxLen+'" '
     +(canWrite?'':'disabled ')+'placeholder="'
-    +(canWrite?'message '+esc((t&&t.handle)||(pendingPeer&&pendingPeer.display)||'')+'…  (type $TICKER to attach the mark)':'pick a conversation first')
+    +(canWrite?'message '+esc((t&&t.name)||(pendingPeer&&pendingPeer.display)||'')+'…  (type $TICKER to attach the mark)':'pick a conversation first')
     +'"></textarea>'
     +'<button type="button" class="btn dm-send" id="dm-send"'+(canWrite?'':' disabled')+'>'
     +(dmState.sending?'…':(dmState.editing?'Save':'Send'))+'</button></div>'
+    +attach
     +(dmState.editing?'<div class="dm-editing">Editing — the original timestamp and price stamp stand. '
       +'<button type="button" class="dm-tool" id="dm-canceledit">cancel</button></div>':'')
     +(dmState.err?'<div class="dm-err">'+esc(dmState.err)+'</div>':'');
 
   host.innerHTML='<div class="dm-wrap">'
-    +'<div class="dm-side"><div class="dm-sh">Conversations</div>'+rail
-    +'<div class="dm-new" id="dm-newbtn">'+(dmState.picking?'× close':'+ new message')+'</div>'+picker+'</div>'
+    +'<div class="dm-side">'
+      +'<div class="dm-search"><input id="dm-q" placeholder="search messages…" value="'+esc(dmState.q)+'"></div>'
+      +'<div class="dm-sh">Conversations</div>'+dmRailHtml()
+      +'<div class="dm-new" id="dm-newbtn">'+(dmState.picking?'× close':'+ new message')+'</div>'+dmPickerHtml()+'</div>'
     +'<div class="dm-main">'+main+composer+'</div></div>';
 
   const ta=el('dm-input');
   if(ta){
     if(dmState.editing){ const m=dmMsgs(dmState.sel).find(x=>x.id===dmState.editing); if(m) ta.value=m.body; }
-    ta.addEventListener('input',()=>{ dmState.composing=ta.value;
-      ta.style.height='auto'; ta.style.height=Math.min(ta.scrollHeight,160)+'px'; });
+    ta.addEventListener('input',()=>{
+      ta.style.height='auto'; ta.style.height=Math.min(ta.scrollHeight,160)+'px';
+      dmTypingPing(); });
     ta.addEventListener('keydown',(e)=>{
       // Enter sends, Shift+Enter is a newline. A chat box that needs a mouse to send is a form.
-      if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); pendingPeer?dmSendNew():dmSend(); }
+      if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); dmSend(); }
       if(e.key==='Escape'&&dmState.editing){ dmState.editing=null; ta.value=''; dmRender(); }
     });
   }
-  dmScrollBottom();
+  const q=el('dm-q');
+  if(q){ q.addEventListener('input',()=>dmSearchInput(q.value));
+    q.addEventListener('keydown',(e)=>{ if(e.key==='Escape'){ dmState.q=''; dmState.results=null; dmRender(); } }); }
+  const f=el('dm-file');
+  if(f) f.addEventListener('change',()=>{ if(f.files&&f.files[0]){ dmState.pendingFile=f.files[0]; dmState.err=''; dmRender(); } });
+  dmRestore(keep);
+  if(!dmState.results) dmScrollBottom();
 }
 
 // One delegated listener for the whole tab — the panel is re-rendered wholesale on every change,
@@ -14530,12 +14771,29 @@ function dmWire(){
   const host=el('dm-body'); if(!host||host._dmWired) return;
   host._dmWired=true;
   host.addEventListener('click',(e)=>{
+    const rx=e.target.closest('[data-dmrx]');
+    if(rx){ dmReact(+rx.dataset.dmrx,rx.dataset.emoji); return; }
+    const rxo=e.target.closest('[data-dmrxopen]');
+    if(rxo){ const menu=rxo.parentElement.querySelector('.dm-rxmenu');
+      if(menu) menu.classList.toggle('open'); return; }
+    const res=e.target.closest('[data-dmres]');
+    if(res){ dmState.q=''; dmState.results=null; dmOpenThread(+res.dataset.dmres); return; }
     const th=e.target.closest('[data-dmth]');
     if(th){ dmOpenThread(+th.dataset.dmth); return; }
     const nw=e.target.closest('[data-dmnew]');
     if(nw){ dmStartWith(nw.dataset.dmnew); return; }
+    const add=e.target.closest('[data-dmadd]');
+    if(add){ dmGroupOp({addMembers:true,thread:dmState.sel,members:[add.dataset.dmadd]}); return; }
+    const rm=e.target.closest('[data-dmrm]');
+    if(rm){ dmGroupOp({removeMember:true,thread:dmState.sel,uid:rm.dataset.dmrm},'Remove them from this group?'); return; }
+    if(e.target.closest('#dm-gmake')){ dmNewGroup(); return; }
+    if(e.target.closest('#dm-managebtn')){ dmState.manage=!dmState.manage; dmRender(); return; }
+    if(e.target.closest('#dm-dorename')){ dmGroupOp({rename:true,thread:dmState.sel,title:(el('dm-rename')||{}).value||''}); return; }
+    if(e.target.closest('#dm-leave')){ dmGroupOp({leave:true,thread:dmState.sel},'Leave this group? You stop seeing it.'); return; }
+    if(e.target.closest('#dm-clearsearch')){ dmState.q=''; dmState.results=null; dmRender(); return; }
+    if(e.target.closest('#dm-unattach')){ dmState.pendingFile=null; dmRender(); return; }
     if(e.target.closest('#dm-newbtn')){ dmState.picking=!dmState.picking; dmRender(); return; }
-    if(e.target.closest('#dm-send')){ dmState.pendingPeer?dmSendNew():dmSend(); return; }
+    if(e.target.closest('#dm-send')){ dmSend(); return; }
     if(e.target.closest('#dm-mute')){ dmToggleMute(); return; }
     if(e.target.closest('#dm-canceledit')){ dmState.editing=null; dmRender(); return; }
     const ed=e.target.closest('[data-dmedit]'); if(ed){ dmEdit(+ed.dataset.dmedit); return; }

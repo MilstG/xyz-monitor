@@ -13312,7 +13312,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.30-46"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.31-47"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -22742,7 +22742,7 @@ test("congress -04: parse queue — scans marked once, transient failures retrie
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-// ===== accounts, invites and direct messages (build 2026.08.30-46) =============================
+// ===== accounts, invites and direct messages (build 2026.08.31-47) =============================
 // The shared password had one door and one key. These cover the replacement: per-person accounts,
 // single-use invites, and the revocation lever that makes removing one member cost nobody else
 // anything. Every case here is one that would otherwise be discovered in production.
@@ -22995,14 +22995,30 @@ test("messages: the client escapes every rendered body, handle and preview", () 
   // on the board is a server-computed number. There is no trusted rendering path for a message.
   const fs = require("fs"), path = require("path");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
-  const dm = app.slice(app.indexOf("function dmRender()"));
-  const body = dm.slice(0, dm.indexOf("function dmWire()"));
-  assert.ok(/esc\(m\.body\)/.test(body), "message bodies go through esc()");
-  assert.ok(/esc\(t\.handle\)/.test(body), "peer handles go through esc()");
-  assert.ok(/esc\(t\.preview/.test(body), "thread previews go through esc()");
-  assert.ok(!/innerHTML\s*=\s*[^;]*\bm\.body\b(?![^;]*esc)/.test(body), "no raw body reaches innerHTML");
+  const dm = app.slice(app.indexOf("// ===== MESSAGES tab"), app.indexOf("// ===== admin panel: access"));
+  assert.ok(dm.length > 4000, "found the messages tab source");
+  // Every string a PERSON can author has to go through esc() on the way to innerHTML. The list
+  // grew with groups and attachments, and each addition is a fresh way to get this wrong.
+  for (const [expr, what] of [
+    ["esc\\(m\\.body\\)", "message bodies"],
+    ["esc\\(t\\.name\\)", "thread names (a group title is user-authored)"],
+    ["esc\\(t\\.preview", "thread previews"],
+    ["esc\\(m\\.file\\.name\\)", "attachment filenames"],
+    ["esc\\(m\\.threadName\\)", "thread names in search results"],
+    ["esc\\(m\\.display\\)", "member display names"],
+    ["esc\\(dmState\\.q\\)", "the search query echoed back"],
+    ["esc\\(dmSysLine", "system lines, which interpolate a group title"],
+  ]) assert.ok(new RegExp(expr).test(dm), what + " must go through esc()");
+  assert.ok(!/innerHTML\s*=\s*[^;]*\bm\.body\b(?![^;]*esc)/.test(dm), "no raw body reaches innerHTML");
+  // Reaction emoji come back from the server but originate in a request body — escape them too.
+  assert.ok(/esc\(e\)/.test(dm), "reaction emoji are escaped");
   const stamp = app.slice(app.indexOf("function dmStamp("), app.indexOf("function fmtPx("));
   assert.ok(/esc\(m\.ref\)/.test(stamp), "the ticker on a stamp is escaped too — it is client-supplied text");
+  // A draft must survive a re-render. Renders now arrive unprompted (an incoming message, a
+  // reaction, somebody else's typing hint), and a wholesale innerHTML rebuild would eat what the
+  // person is mid-way through writing — which is exactly what happened before this existed.
+  assert.ok(/function dmCapture\(\)/.test(dm) && /function dmRestore\(/.test(dm), "the composer is captured and restored across renders");
+  assert.ok(/const keep=dmCapture\(\)/.test(dm) && /dmRestore\(keep\)/.test(dm), "every render captures before and restores after");
 });
 
 test("server: the invite door strips the code from the URL before anything renders", () => {
@@ -23031,7 +23047,202 @@ test("server: the invite door strips the code from the URL before anything rende
   assert.ok((dm.match(/cache-control", "no-store"/g) || []).length >= 4, "every DM route is no-store");
 
   // Fan-out is targeted. A DM is not an event the group is entitled to know happened.
-  assert.ok(/function dmPoke\(threadId\)[\s\S]{0,600}ACCOUNTS\.threadPeers\(threadId\)/.test(srv), "pokes resolve the two participants");
-  assert.ok(/const frame = "data: " \+ JSON\.stringify\(\{ dm: \{ seq:/.test(srv), "the frame carries a sequence, never a body");
+  assert.ok(/function dmPoke\(threadId, extra\)[\s\S]{0,600}ACCOUNTS\.threadPeers\(threadId\)/.test(srv),
+    "pokes resolve the conversation's members and nobody else");
+  assert.ok(/const frame = "data: " \+ JSON\.stringify\(\{ dm: Object\.assign\(\{ seq:/.test(srv),
+    "the frame carries a sequence (plus at most an ephemeral hint), never a body");
+  assert.ok(!/JSON\.stringify\(\{ dm:[^)]*body/.test(srv), "no message body may ride the stream");
+  // Attachments: the only inline types are the ones sniffed from magic bytes, and the download
+  // headers are belt to that braces. An SVG served inline is a stored XSS with extra steps.
+  const acct = fs.readFileSync(path.join(__dirname, "..", "src", "accounts.js"), "utf8");
+  assert.ok(/function safeMime\(/.test(acct), "uploads are typed by OUR sniff, never the client's claim");
+  assert.ok(!/image\/svg/.test(acct), "svg must never be an inline type");
+  assert.ok(/x-content-type-options", "nosniff"/.test(srv), "downloads are nosniff");
+  assert.ok(/content-security-policy", "default-src 'none'; sandbox"/.test(srv), "downloads are sandboxed");
+  assert.ok(/dispo \+ "; filename\*=UTF-8''"/.test(srv), "the filename is encoded into the header, never interpolated raw");
   assert.ok(/const SSE_PER_USER = 4/.test(srv), "a per-member connection cap, so one person's tabs cannot eat the pool");
+});
+
+// ===== messages v2: groups, attachments, reactions, search, bridge (build 2026.08.31-47) =======
+function seedDesk(marks) {
+  const A = freshAccounts(marks);
+  const g = A.bootstrap("gus", "correct-horse-battery").user;
+  const mk = (h) => A.redeem(A.mintInvite(g.uid, null, 7, "join").invite.code, h, "another-long-password").user;
+  return { A, g, l: mk("lena"), m: mk("marco"), d: mk("dan") };
+}
+
+test("groups: membership is a table, and it is the authorization", () => {
+  const { A, g, l, m, d } = seedDesk();
+  const T = A.createGroup(g.uid, "  Desk   Chat ", [l.uid, m.uid]).thread;
+  assert.equal(A.history(g.uid, T).info.title, "Desk Chat", "whitespace in a title is normalised at the write");
+  assert.ok(!A.createGroup(g.uid, "alone", []).ok, "a group needs somebody else in it");
+  assert.ok(!A.createGroup(g.uid, "  ", [l.uid]).ok, "a group needs a name");
+
+  // The outsider checks are the whole feature: a thread id is a row name, never a grant.
+  assert.ok(!A.history(d.uid, T).ok, "an outsider cannot read it");
+  assert.ok(!A.send(d.uid, null, "hi", null, { thread: T }).ok, "an outsider cannot post to it");
+  assert.ok(!A.markRead(d.uid, T, 1).ok, "an outsider cannot mark it read");
+  assert.ok(!A.setMuted(d.uid, T, true).ok, "an outsider cannot mute it");
+  assert.equal(A.sync(d.uid, 0).messages.filter((x) => x.thread === T).length, 0, "and sync hands them nothing from it");
+
+  const sent = A.send(g.uid, null, "morning all", null, { thread: T });
+  assert.ok(sent.ok, sent.error);
+  assert.ok(A.sync(m.uid, 0).messages.some((x) => x.id === sent.id), "every member receives it");
+});
+
+test("groups: only the owner manages, and ownership is never stranded", () => {
+  const { A, g, l, m, d } = seedDesk();
+  const T = A.createGroup(g.uid, "Desk", [l.uid, m.uid]).thread;
+  assert.ok(!A.addMembers(l.uid, T, [d.uid]).ok, "a member cannot add");
+  assert.ok(!A.removeMember(l.uid, T, m.uid).ok, "a member cannot remove");
+  assert.ok(!A.renameGroup(l.uid, T, "hijack").ok, "a member cannot rename");
+  assert.ok(A.addMembers(g.uid, T, [d.uid]).ok, "the owner can");
+  assert.ok(!A.removeMember(g.uid, T, g.uid).ok, "the owner cannot remove themselves — that is what leaving is");
+
+  // Membership changes are ordinary rows with `sys` set, so they ride the same cursor a message
+  // does. A second channel for them would be a second thing to keep in sync.
+  assert.ok(A.history(g.uid, T).messages.some((x) => x.sys === "added" && x.body.includes("dan")),
+    "adding somebody is recorded in the conversation itself");
+  assert.equal(A.threads(d.uid).find((t) => t.id === T).unread, 0,
+    "arriving in a group does not open on a wall of unread backscroll");
+  assert.ok(A.history(d.uid, T).messages.some((x) => x.body === "morning all") ||
+            A.history(d.uid, T).ok, "but the backscroll is readable");
+
+  A.removeMember(g.uid, T, d.uid);
+  assert.ok(!A.history(d.uid, T).ok, "a removed member loses the thread entirely");
+  A.leaveGroup(g.uid, T);
+  // WHICH member inherits is deliberately not asserted — it is the longest-standing one, and with
+  // a tie at group creation that is arbitrary. What must always hold is that somebody has it.
+  const survivors = A.history(l.uid, T);
+  assert.ok(survivors.ok, "the group outlives its creator");
+  assert.ok(survivors.info.members.some((x) => x.owner),
+    "the last owner leaving hands ownership on, so a group is never unmanageable");
+  assert.ok(!A.renameGroup(g.uid, A.threadFor(g.uid, l.uid, true).id, "no").ok, "a direct message is not a group");
+});
+
+test("reactions: a fixed vocabulary, and it names who", () => {
+  const { A, g, l, m } = seedDesk();
+  const s = A.send(g.uid, l.uid, "the print was ugly");
+  const r = A.react(l.uid, s.id, "\u{1F44D}");
+  assert.ok(r.ok, r.error);
+  assert.equal(r.message.reactions["\u{1F44D}"].n, 1);
+  assert.equal(r.message.reactions["\u{1F44D}"].mine, true);
+  assert.equal(r.message.reactions["\u{1F44D}"].who[0], "lena", "a count alone is a vote; who reacted is the information");
+  assert.equal(A.react(l.uid, s.id, "\u{1F44D}").message.reactions, null, "reacting again toggles it off");
+  // Free text here would be a second, worse message field: unbounded and rendered where there is
+  // no room for it.
+  assert.ok(!A.react(l.uid, s.id, "<script>alert(1)</script>").ok, "arbitrary text is not a reaction");
+  assert.ok(!A.react(l.uid, s.id, "").ok, "nor is nothing");
+  assert.ok(!A.react(m.uid, s.id, "\u{1F44D}").ok, "somebody outside the thread cannot react to it");
+});
+
+test("attachments: the type comes from OUR sniff, and svg never renders inline", () => {
+  const { A, g, l, m } = seedDesk();
+  const T = A.threadFor(g.uid, l.uid, true).id;
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4E, 0x47, 13, 10, 26, 10]), Buffer.alloc(32)]);
+
+  const good = A.putFile(g.uid, T, "chart.png", png);
+  assert.ok(good.ok && good.file.mime === "image/png" && good.file.inline === 1, "a real png renders inline");
+
+  // The two that matter. An SVG is a document with a <script> element in it, and a claimed
+  // extension is not evidence of anything — both must land as an octet-stream download.
+  const svg = A.putFile(g.uid, T, "logo.svg", Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'));
+  assert.equal(svg.file.mime, "application/octet-stream", "svg is never given an image type");
+  assert.equal(svg.file.inline, 0, "and never renders inline");
+  const liar = A.putFile(g.uid, T, "totally.png", Buffer.from("<html><script>alert(1)</script></html>"));
+  assert.equal(liar.file.inline, 0, "a lying extension buys nothing — the bytes decide");
+
+  assert.ok(A.putFile(g.uid, T, "../../etc/passwd", png).file.name.indexOf("/") < 0,
+    "a filename is a label, and cannot contain a path separator");
+  assert.ok(!A.putFile(g.uid, T, "x", Buffer.alloc(0)).ok, "an empty file is refused");
+  assert.ok(!A.putFile(g.uid, T, "x", Buffer.alloc(9 * 1024 * 1024)).ok, "an oversized file is refused");
+  assert.ok(!A.putFile(m.uid, T, "x", png).ok, "somebody outside the thread cannot upload into it");
+
+  // Reading is a membership check, never a "knows the id" check: a forwarded link is not a grant.
+  assert.ok(A.readFile(l.uid, good.file.id).ok, "the other member can read it");
+  assert.ok(!A.readFile(m.uid, good.file.id).ok, "an outsider cannot, even holding the id");
+  assert.ok(!A.send(l.uid, null, "mine now", null, { thread: T, fileId: good.file.id }).ok,
+    "and cannot attach somebody else's upload to their own message");
+
+  const msg = A.send(g.uid, null, "here", null, { thread: T, fileId: good.file.id });
+  assert.equal(msg.message.file.name, "chart.png");
+  A.drop(g.uid, msg.id);
+  assert.equal(A.history(l.uid, T).messages.find((x) => x.id === msg.id).file, null,
+    "deleting a message takes its attachment off the wire with it");
+});
+
+test("search: the scope is the authorization", () => {
+  const { A, g, l, m } = seedDesk();
+  A.send(g.uid, l.uid, "the funding print was ugly");
+  A.send(g.uid, m.uid, "a different conversation entirely");
+  assert.equal(A.search(l.uid, "funding").results.length, 1, "finds your own messages");
+  assert.ok(A.search(l.uid, "funding").results[0].threadName, "and says which conversation they were in");
+  assert.equal(A.search(m.uid, "funding").results.length, 0, "and cannot reach a thread you are not in");
+  assert.equal(A.search(l.uid, "f").results.length, 0, "a one-character query is not a search");
+
+  // LIKE means the wildcards are live unless escaped — a query of "%" would otherwise return
+  // every message the caller can see.
+  A.send(g.uid, l.uid, "100% sure");
+  assert.equal(A.search(l.uid, "100%").results.length, 1, "a percent sign is a literal");
+  assert.equal(A.search(l.uid, "%").results.length, 0, "a bare wildcard matches nothing, rather than everything");
+  assert.equal(A.search(l.uid, "a_b").results.length, 0, "an underscore is a literal too");
+  const del = A.send(g.uid, l.uid, "forget I said this");
+  A.drop(g.uid, del.id);
+  assert.equal(A.search(l.uid, "forget I said").results.length, 0, "a deleted message is not searchable");
+});
+
+test("the telegram bridge is command-only, and cannot reach a thread you left", () => {
+  const { A, g, l, m } = seedDesk();
+  const T = A.createGroup(g.uid, "Desk", [l.uid, m.uid]).thread;
+  const dm = A.threadFor(g.uid, l.uid, true).id;
+
+  const byHandle = A.bridgeReply(l.uid, "@gus from my phone", 0);
+  assert.ok(byHandle.ok, byHandle.error);
+  assert.equal(byHandle.message.via, "telegram", "a bridged message says where it came from");
+  assert.ok(!A.bridgeReply(l.uid, "@nobody hello", 0).ok, "an unknown handle is refused");
+  // Without a handle and without context there is nothing to answer — and guessing would be the
+  // worst possible failure, since the message posts under the sender's name.
+  assert.ok(!A.bridgeReply(l.uid, "just talking to myself", 0).ok, "no target means no send");
+  assert.ok(A.bridgeReply(l.uid, "in context", dm).ok, "with context it answers that thread");
+  assert.ok(!A.bridgeReply(l.uid, "   ", dm).ok, "an empty body is refused");
+
+  A.leaveGroup(m.uid, T);
+  assert.ok(!A.bridgeReply(m.uid, "still here?", T).ok, "a stale context cannot reach a thread you have left");
+  A.setDisabled(l.uid, true);
+  assert.ok(!A.bridgeReply(l.uid, "@gus hello", 0).ok, "a disabled account cannot send over the bridge");
+});
+
+test("the pair schema migrates onto the membership table without losing a conversation", () => {
+  // Phase 1 shipped dm_thread(a, b). A schema change that silently drops conversations is not
+  // something to discover in production, so the lift is exercised on a database built the old way.
+  const fs = require("fs"), os = require("os"), path = require("path");
+  const { DatabaseSync } = require("node:sqlite");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acct-mig-"));
+  const db = new DatabaseSync(path.join(dir, "accounts.db"));
+  db.exec(`CREATE TABLE user (uid TEXT PRIMARY KEY, handle TEXT NOT NULL, display TEXT NOT NULL,
+    pw TEXT NOT NULL, epoch INTEGER NOT NULL DEFAULT 1, isAdmin INTEGER NOT NULL DEFAULT 0,
+    createdAt INTEGER NOT NULL, invitedBy TEXT, lastSeen INTEGER NOT NULL DEFAULT 0, disabledAt INTEGER) STRICT;
+    CREATE TABLE dm_thread (id INTEGER PRIMARY KEY AUTOINCREMENT, a TEXT NOT NULL, b TEXT NOT NULL,
+      createdAt INTEGER NOT NULL, lastMsgId INTEGER NOT NULL DEFAULT 0, lastAt INTEGER NOT NULL DEFAULT 0) STRICT;
+    CREATE TABLE dm_msg (id INTEGER PRIMARY KEY AUTOINCREMENT, thread INTEGER NOT NULL, sender TEXT NOT NULL,
+      ts INTEGER NOT NULL, body TEXT NOT NULL, ref TEXT, refPx REAL, editedAt INTEGER, deletedAt INTEGER) STRICT;
+    CREATE TABLE dm_read (thread INTEGER NOT NULL, uid TEXT NOT NULL, readMsgId INTEGER NOT NULL DEFAULT 0,
+      muted INTEGER NOT NULL DEFAULT 0, notifiedMsgId INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (thread, uid)) STRICT, WITHOUT ROWID;`);
+  const now = Date.now();
+  const { hashPw } = require("../src/accounts");
+  for (const [uid, h] of [["uidA", "ann"], ["uidB", "bo"]])
+    db.prepare("INSERT INTO user (uid, handle, display, pw, createdAt) VALUES (?,?,?,?,?)").run(uid, h, h, hashPw("another-long-password"), now);
+  db.prepare("INSERT INTO dm_thread (a, b, createdAt, lastMsgId, lastAt) VALUES (?,?,?,?,?)").run("uidB", "uidA", now, 1, now);
+  db.prepare("INSERT INTO dm_msg (thread, sender, ts, body) VALUES (1,'uidA',?, 'said before the migration')").run(now);
+  db.close();
+
+  const { openAccounts } = require("../src/accounts");
+  const A = openAccounts(dir, {});
+  const t = A.threads("uidA");
+  assert.equal(t.length, 1, "the conversation survived");
+  assert.equal(t[0].name, "bo", "and still knows who it is with");
+  assert.equal(A.threadFor("uidA", "uidB", false).id, 1, "the pair still resolves to the same thread, in either order");
+  assert.ok(A.history("uidB", 1).messages.some((x) => x.body === "said before the migration"), "with its messages");
+  assert.ok(A.send("uidA", null, "and after", null, { thread: 1 }).ok, "and it still works");
+  fs.rmSync(dir, { recursive: true, force: true });
 });
