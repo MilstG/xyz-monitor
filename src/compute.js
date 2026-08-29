@@ -5320,7 +5320,10 @@ const NAV_GROUPS = [
 // markets is pin:true and is where every load lands; admin is the locked panel itself. Both stay
 // flat in the row and are deliberately NOT movable — a one-item menu, or a home two clicks away,
 // is pure cost, and neither is a decision worth exposing as a mistake someone can make.
-const NAV_PINNED = ["markets", "admin"];
+// dm joins them for a different reason: it carries an unread pip, and a live counter buried
+// inside a collapsed menu is a counter nobody sees. Pinning it is what makes the badge mean
+// anything. Hiding the tab entirely is still one flag away in the switchboard.
+const NAV_PINNED = ["markets", "admin", "dm"];
 // Canonical order, used to lay out a group after a move: a tab that arrives keeps its place in this
 // list rather than landing wherever the write happened to put it, so two admins making the same
 // moves in a different sequence end up with the same ribbon.
@@ -5415,6 +5418,12 @@ const FEATURES = [
   // the coverage numbers on the tab have to be real before the group reads them, same doctrine the
   // congress lane shipped under. The POST rechecks admin regardless of this flag.
   { key: "insiders",   kind: "tab", label: "Insiders",    def: "admin",  routes: ["/api/insiders"] },
+  // MESSAGES (build 2026.08.30-46): 1-to-1 direct messages between account holders. Public in the
+  // manifest, but every route underneath it needs a SIGNED-IN account regardless — the flag decides
+  // whether the tab exists, the session decides whether it answers. Its sub-paths (/api/dm/sync,
+  // /api/dm/<thread>) are covered by the prefix rule below, because a gated tab whose history
+  // endpoint still answered would be a gate in name only.
+  { key: "dm",         kind: "tab", label: "Messages",    def: "public", routes: ["/api/dm"] },
   { key: "report",     kind: "tab", label: "AI Report",   def: "public", routes: ["/api/ai-report", "/api/ai-reports"] },
   { key: "actionable", kind: "tab", label: "Actionable",  def: "admin",  routes: ["/api/actionable"] },
   { key: "backtest",   kind: "tab", label: "Backtest",    def: "admin",  routes: ["/api/duel"] },
@@ -5580,11 +5589,23 @@ const FEATURE_ROUTES = featureRouteIndex();
 // Returns the feature key BLOCKING this request, or null when it may proceed. Method-specific
 // mapping wins over the path-wide one: POST /api/ai-report is gated by ai.generate even though the
 // GET on the same path belongs to the (possibly public) report tab.
+// Routes whose sub-paths belong to the same feature as their parent. The manifest maps literal
+// paths, which cannot express a dynamic segment — so without this, gating a tab would leave its
+// per-id endpoints answering, and the gate would be one in name only.
+const FEATURE_ROUTE_PREFIXES = [["/api/dm/", "/api/dm"]];
+function featureRouteKeyFor(m, p) {
+  const direct = FEATURE_ROUTES.exact.get(m + " " + p) || FEATURE_ROUTES.any.get(p);
+  if (direct) return direct;
+  for (const [prefix, parent] of FEATURE_ROUTE_PREFIXES) {
+    if (p.startsWith(prefix)) return FEATURE_ROUTES.exact.get(m + " " + parent) || FEATURE_ROUTES.any.get(parent) || null;
+  }
+  return null;
+}
 function featureGateFor(method, url, flags, isAdmin) {
   const p = String(url || "").split("?")[0];
   if (FEATURE_NEVER_GATE.has(p)) return null;
   const m = String(method || "GET").toUpperCase();
-  const key = FEATURE_ROUTES.exact.get(m + " " + p) || FEATURE_ROUTES.any.get(p);
+  const key = featureRouteKeyFor(m, p);
   if (!key) return null;                                  // unclaimed route — see the ASYMMETRY note
   return featureVisible(flags, key, isAdmin) ? null : key;
 }

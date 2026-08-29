@@ -3750,10 +3750,17 @@ test("AI access model: open to authenticated users with per-user caps; xyzai is 
   // Authentication is still mandatory on the AI-cost paths.
   assert.ok(/AI_COST_PATHS[\s\S]{0,400}reqAuthed\(req\)/.test(srv), "AI-cost hook must still require authentication");
   // Identity threading: one aiWho helper (xyzown owner + xyzai/xyzadm admin) feeds all three surfaces.
-  assert.ok(/const aiWho = \(req, reply\) => \(\{ owner: ensureOwner\(req, reply\)/.test(srv), "aiWho helper missing");
+  assert.ok(/const aiWho = \(req, reply\) => \(\{ owner: ownerFor\(req, reply\)/.test(srv), "aiWho helper missing");
+  // With accounts, "who" is the signed-in uid and only falls back to the anonymous browser handle.
+  // Every per-user surface must resolve it the SAME way or the quota shown differs from the quota
+  // spent — so ensureOwner survives only as ownerFor's fallback, never as a call site of its own.
+  assert.ok(/const ownerFor = \(req, reply\) => \{[\s\S]{0,400}return ensureOwner\(req, reply\);/.test(srv),
+    "ownerFor must prefer the session uid and fall back to the signed cookie");
+  assert.equal(srv.split("ensureOwner(req, reply)").length - 1, 2,
+    "ensureOwner may appear only in its own definition and inside ownerFor's fallback");
   assert.ok(srv.includes("poller.generateAiReport(String(b.coin || \"\"), aiWho(req, reply))"), "generation must carry who");
   assert.ok(srv.includes('poller.askBoard(b.q || "", b.ctx || {}, aiWho(req, reply))'), "ask must carry who");
-  assert.ok(srv.includes("poller.getAiQuota(ensureOwner(req, reply), admin)"), "ai-status must surface the caller's quota");
+  assert.ok(srv.includes("poller.getAiQuota(ownerFor(req, reply), admin)"), "ai-status must surface the caller's quota");
   // Poller: per-user constants pinned (3/day, 20/month reports; 5/day asks), soft-cap honesty noted.
   assert.ok(/AI_USER_PER_DAY = Math\.max\(1, Number\(process\.env\.AI_USER_PER_DAY\) \|\| 3\)/.test(pol), "per-user report day cap must default to 3");
   assert.ok(/AI_USER_PER_MONTH = Math\.max\(1, Number\(process\.env\.AI_USER_PER_MONTH\) \|\| 20\)/.test(pol), "per-user report month cap must default to 20");
@@ -9382,7 +9389,13 @@ test("server: admin-view lease is a distinct secret from the AI unlock, fails cl
   assert.ok(/"xyzadm=" \+ \(token \|\| "x"\)[\s\S]{0,120}HttpOnly/.test(srv), "the xyzadm token cookie must be HttpOnly");
   assert.ok(srv.includes('"xyzadmin=1"'), "a JS-visible marker must exist so the client can render the Admin affordance");
   // No header/Basic path to admin: isAdmin reads the cookie and nothing else.
-  assert.ok(/const isAdmin = \(req\) => adminViewOk\(getCookie\(req, "xyzadm"\)\)/.test(srv), "isAdmin must be cookie-only (no header bypass)");
+  // Two ways to be admin now: the isAdmin flag on your own account, or the ADMIN_PASSWORD-derived
+  // cookie kept as break-glass. Neither is a header, which is the invariant this guards.
+  assert.ok(/const isAdmin = \(req\) => \{[\s\S]{0,300}adminViewOk\(getCookie\(req, "xyzadm"\)\)/.test(srv),
+    "isAdmin must still resolve from the session or the xyzadm cookie");
+  assert.ok(/const isAdmin = \(req\) => \{[\s\S]{0,300}me\.isAdmin/.test(srv),
+    "an account flagged admin must be admin without needing the break-glass cookie");
+  assert.ok(!/authorization[\s\S]{0,80}isAdmin/i.test(srv), "isAdmin must never read an auth header");
   assert.ok(!/x-admin/i.test(srv), "there must be no header bypass for admin");
   // The login damper is spent, not the terminal-unlock lockout — otherwise a group member with a fat
   // finger could lock the operator out of the panel.
@@ -9443,7 +9456,9 @@ test("client flags: the injection slot exists, is pre-paint, and the server's co
   // Split once at boot, concat per request — not a 23 KB string scan on every hit.
   assert.ok(srv.includes("const [INDEX_HEAD, INDEX_TAIL]"), "the shell must be split once at boot");
   assert.ok(/INDEX_HEAD \+ boot \+ INDEX_TAIL/.test(srv), "serveIndex must concat the injected boot script");
-  assert.ok(/serveIndex[\s\S]{0,600}resolveFeatures\(poller\.getFlags\(\), admin\)/.test(srv), "the injected set must be server-resolved for THIS caller");
+  assert.ok(/const bootScript = \(admin, me\) =>[\s\S]{0,300}resolveFeatures\(poller\.getFlags\(\), admin\)/.test(srv), "the injected set must be server-resolved for THIS caller");
+  assert.ok(/const bootScript = \(admin, me\) =>[\s\S]{0,400}window\.__ME=/.test(srv), "identity must be injected pre-paint alongside the flags");
+  assert.ok(/const boot = bootScript\(admin, meOf\(req\)\)/.test(srv), "serveIndex must build the boot script for the calling session");
   // Per-audience body is only safe because the shell is uncacheable. If this header ever goes, a
   // shared cache could hand a public visitor the admin shell.
   assert.ok(/serveIndex = \(req, reply\) => \{[\s\S]{0,700}cache-control", "no-store"/.test(srv), "the audience-specific shell MUST stay no-store");
@@ -13297,7 +13312,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.29-45"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.30-46"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -16984,7 +16999,7 @@ test("sse push 2026.07.29-07: server — route once, versions-only frames, 1s wa
   // Watcher + heartbeat both unref'd — push infrastructure must never keep a dying process alive.
   assert.ok(srv.includes("}, 1000).unref()"), "1s change watcher, unref'd");
   assert.ok(srv.includes("}, 25000).unref()"), "25s heartbeat, unref'd");
-  assert.ok(srv.includes('res.write(": hb\\n\\n")'), "heartbeat is a comment frame — proxies stay open, clients parse nothing");
+  assert.ok(srv.includes('sseWrite(e, ": hb\\n\\n")'), "heartbeat is a comment frame — proxies stay open, clients parse nothing");
   assert.ok(srv.includes("if (ts === sseLastTs && av === sseLastAlert) return;"), "broadcast only on a real change of either clock");
   // Hijacked stream = Fastify pipeline (compress, onSend) never touches it, so headers are manual.
   assert.ok(srv.includes("reply.hijack()"), "stream must be hijacked out of the send pipeline");
@@ -16992,7 +17007,7 @@ test("sse push 2026.07.29-07: server — route once, versions-only frames, 1s wa
     assert.ok(srv.includes(hdr), `manual SSE header missing: ${hdr}`);
   assert.ok(srv.includes("const SSE_MAX = 200") && srv.includes('reply.code(503).send({ error: "sse-full" })'),
     "connection cap with an explicit 503 — the poll fallback fully serves an overflowing client");
-  assert.ok(srv.includes("try { res.write(sseFrame()); } catch (_) {}"), "initial sync frame on connect");
+  assert.ok(srv.includes("try { res.write(sseHelloFrame(me)); } catch (_) {}"), "initial sync frame on connect");
   assert.ok(/req\.raw\.on\("close", drop\);\s*\n\s*req\.raw\.on\("error", drop\)/.test(srv), "client set cleaned on close AND error");
   const shut = srv.slice(srv.indexOf("async function shutdown()"), srv.indexOf('process.on("SIGTERM"'));
   assert.ok(shut.includes("sseClients.clear()"), "shutdown ends every stream — the reconnect's first frame is the deploy notice");
@@ -22725,4 +22740,298 @@ test("congress -04: parse queue — scans marked once, transient failures retrie
   assert.equal(p2.congressStatus().parse.parsed, 0, "so a mapping fix can replay it");
   fs.rmSync(dir2, { recursive: true, force: true });
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ===== accounts, invites and direct messages (build 2026.08.30-46) =============================
+// The shared password had one door and one key. These cover the replacement: per-person accounts,
+// single-use invites, and the revocation lever that makes removing one member cost nobody else
+// anything. Every case here is one that would otherwise be discovered in production.
+function freshAccounts(marks) {
+  const fs = require("fs"), os = require("os"), path = require("path");
+  const { openAccounts } = require("../src/accounts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acct-test-"));
+  const m = marks || {};
+  const A = openAccounts(dir, { markFor: (c) => (m[c] == null ? null : m[c]), sessionDays: 30 });
+  A._dir = dir;
+  return A;
+}
+function seedTwo(A) {
+  const g = A.bootstrap("gustavo", "correct-horse-battery");
+  const code = A.mintInvite(g.user.uid, "for lena", 7, "join").invite.code;
+  const l = A.redeem(code, "lena", "another-long-password");
+  return { g: g.user, l: l.user, gTok: g.token, lTok: l.token };
+}
+
+test("accounts: the first account is the operator, and bootstrap closes behind it", () => {
+  const A = freshAccounts();
+  assert.equal(A.countUsers(), 0, "a fresh volume has no accounts");
+  const first = A.bootstrap("gustavo", "correct-horse-battery");
+  assert.ok(first.ok && first.user.isAdmin, "account #1 is the operator — otherwise a fresh deploy has nobody who can invite");
+  assert.ok(!A.bootstrap("someone", "correct-horse-battery").ok, "bootstrap must refuse once any account exists");
+  // Handle rules: the identity is lowercase, the display keeps what was typed, reserved names are out.
+  const code = A.mintInvite(first.user.uid, null, 7, "join").invite.code;
+  assert.ok(!A.redeem(code, "Admin", "another-long-password").ok, "reserved handles are refused — 'admin' in a DM list is a phishing surface");
+  assert.ok(!A.redeem(code, "x", "another-long-password").ok, "a one-character handle is refused");
+  assert.ok(!A.redeem(code, "lena", "short").ok, "a short password is refused");
+  assert.equal(A.readInvite(code).state, "open", "a REFUSED attempt must not burn the invite — otherwise a typo costs a link");
+  const good = A.redeem(code, "Lena", "another-long-password");
+  assert.ok(good.ok && good.user.display === "Lena" && good.user.handle === "lena",
+    "display keeps its case, the handle is the lowercase identity");
+});
+
+test("invites: single-use is enforced by the write, not the check", () => {
+  const A = freshAccounts();
+  const g = A.bootstrap("gustavo", "correct-horse-battery");
+  const code = A.mintInvite(g.user.uid, "for lena", 7, "join").invite.code;
+  // Both callers read `usedBy IS NULL` before either writes — which is exactly the race the
+  // transaction exists for. The second must lose, and must lose with a message, not a crash.
+  assert.ok(A.redeem(code, "lena", "another-long-password").ok);
+  const second = A.redeem(code, "marco", "another-long-password");
+  assert.ok(!second.ok && /already been used/.test(second.error), "the loser gets 'already used', not a duplicate account");
+  assert.equal(A.countUsers(), 2, "exactly one account came out of one invite");
+  assert.equal(A.readInvite(code).state, "used");
+
+  // Expiry and revocation are separate exits, and neither deletes the row: "who let whom in" has
+  // to stay answerable a year later.
+  const dead = A.mintInvite(g.user.uid, null, 7, "join").invite.code;
+  assert.ok(A.revokeInvite(dead).ok);
+  assert.equal(A.readInvite(dead).state, "revoked");
+  assert.ok(!A.redeem(dead, "zed", "another-long-password").ok, "a revoked link stops working immediately");
+  assert.ok(!A.revokeInvite(code).ok, "an already-spent invite cannot be revoked");
+  assert.ok(A.listInvites().length >= 2, "spent and revoked rows are kept as the audit trail");
+});
+
+test("invites: a code survives being read down a phone line", () => {
+  const { mintCode, normCode } = require("../src/accounts");
+  const c = mintCode();
+  assert.ok(/^MILST(-[0-9A-HJKMNP-TV-Z]{4}){3}$/.test(c), "Crockford base32 in four groups, no I/L/O/U");
+  assert.equal(normCode(c.toLowerCase()), c, "lowercase is accepted");
+  assert.equal(normCode(c.replace(/-/g, " ")), c, "spaces for dashes are accepted");
+  assert.equal(normCode("milst-OIOI-2345-6789"), "MILST-0101-2345-6789", "O and I are coerced to 0 and 1, which is why they are not in the alphabet");
+  assert.equal(normCode("nonsense"), "", "a malformed code is rejected, not guessed at");
+});
+
+test("accounts: an invite adopts the browser's existing alert handle as the uid", () => {
+  // This is the whole migration. Every alert recipient and every alert rule is keyed by the signed
+  // xyzown handle; reusing it as the account id carries them across with no rewrite at all. Get
+  // this wrong and every early member silently loses their Telegram links.
+  const A = freshAccounts();
+  const g = A.bootstrap("gustavo", "correct-horse-battery");
+  const code = A.mintInvite(g.user.uid, null, 7, "join").invite.code;
+  const PRIOR = "aLegacyOwnerHandle";
+  const r = A.redeem(code, "lena", "another-long-password", PRIOR);
+  assert.ok(r.ok && r.adopted, "redeem reports that it carried the handle over");
+  assert.equal(r.user.uid, PRIOR, "the uid IS the old handle — nothing to migrate");
+
+  // But never at the cost of colliding with an account that already holds it.
+  const code2 = A.mintInvite(g.user.uid, null, 7, "join").invite.code;
+  const r2 = A.redeem(code2, "marco", "another-long-password", PRIOR);
+  assert.ok(r2.ok && r2.user.uid !== PRIOR, "a taken handle falls back to a fresh id instead of colliding");
+});
+
+test("sessions: the epoch field is the whole revocation story", () => {
+  const A = freshAccounts();
+  const { l } = seedTwo(A);
+  const tok = A.login("lena", "another-long-password").token;
+  assert.ok(A.sessionUser(tok), "a fresh token verifies");
+  assert.equal(A.sessionUser(tok.slice(0, -2) + "xy"), null, "a tampered mac is refused");
+  assert.equal(A.sessionUser("nonsense"), null, "garbage is refused");
+  assert.equal(A.sessionUser(""), null, "an empty token is refused");
+
+  A.signOutEverywhere(l.uid);
+  assert.equal(A.sessionUser(tok), null, "signing out everywhere kills outstanding tokens — stateless, but revocable");
+  const tok2 = A.login("lena", "another-long-password").token;
+  assert.ok(A.sessionUser(tok2), "and a fresh sign-in works immediately after");
+
+  A.setDisabled(l.uid, true);
+  assert.equal(A.sessionUser(tok2), null, "a disabled account's live sessions stop verifying");
+  assert.ok(!A.login("lena", "another-long-password").ok, "and it cannot sign back in");
+  A.setDisabled(l.uid, false);
+  assert.ok(A.login("lena", "another-long-password").ok, "re-enabling restores it");
+
+  // Changing a password must invalidate everything else, or it is not a reset.
+  const before = A.login("lena", "another-long-password").token;
+  A.setPassword(l.uid, "brand-new-password-9");
+  assert.equal(A.sessionUser(before), null, "a password change signs out every other device");
+  assert.ok(!A.login("lena", "another-long-password").ok, "the old password is dead");
+  assert.ok(A.login("lena", "brand-new-password-9").ok, "the new one works");
+});
+
+test("revocation costs nobody else anything", () => {
+  // The point of the whole exercise. Under the shared password, removing one person meant rotating
+  // SITE_PASSWORD — which also re-derived OWNER_SECRET and orphaned EVERY member's alert links.
+  const A = freshAccounts();
+  const { g, l } = seedTwo(A);
+  const gTok = A.login("gustavo", "correct-horse-battery").token;
+  A.setDisabled(l.uid, true);
+  assert.ok(A.sessionUser(gTok), "disabling one member leaves everyone else signed in");
+  assert.equal(A.getUser(g.uid).epoch, 1, "and does not touch anybody else's epoch");
+});
+
+test("messages: a message carries the mark it was sent at", () => {
+  // The one thing Telegram cannot do, and the reason this tab exists at all.
+  const marks = { PLTR: 113.9 };
+  const A = freshAccounts(marks);
+  const { g, l } = seedTwo(A);
+  const resolve = (sym) => (marks[sym] ? sym : null);
+  const sent = A.send(g.uid, l.uid, "funding on $PLTR just flipped hard", resolve);
+  assert.ok(sent.ok);
+  assert.equal(sent.message.ref, "PLTR");
+  assert.equal(sent.message.refPx, 113.9, "the stamp is the mark at send");
+
+  // The move since is DERIVED at read, never stored — otherwise it would need a write every 15s.
+  marks.PLTR = 118.5;
+  const read = A.sync(l.uid, 0).messages[0];
+  assert.equal(read.refPx, 113.9, "the stamp never moves");
+  assert.equal(read.px, 118.5, "the live mark is read fresh");
+
+  // An edit rewrites the body and nothing else: the claim was made at that price.
+  A.edit(g.uid, sent.id, "funding on $PLTR flipped, taking the other side");
+  const edited = A.sync(l.uid, 0).messages[0];
+  assert.equal(edited.refPx, 113.9, "editing does not relocate the claim");
+  assert.ok(edited.edited, "but the rewrite is disclosed");
+
+  // A symbol the server does not know stays plain text rather than being stamped with nothing.
+  const plain = A.send(g.uid, l.uid, "what about $NOTACOIN", resolve);
+  assert.equal(plain.message.ref, null, "an unknown symbol is not stamped");
+  assert.equal(A.send(g.uid, l.uid, "it cost $5", resolve).message.ref, null, "a dollar amount is not a ticker");
+});
+
+test("messages: a thread belongs to exactly two people and nobody else", () => {
+  const A = freshAccounts();
+  const { g, l } = seedTwo(A);
+  const m = A.redeem(A.mintInvite(g.uid, null, 7, "join").invite.code, "marco", "another-long-password").user;
+  const sent = A.send(g.uid, l.uid, "between us");
+  const tid = sent.thread;
+
+  assert.equal(A.threadFor(g.uid, l.uid, false).id, A.threadFor(l.uid, g.uid, false).id,
+    "canonical pair ordering means one thread per pair, whichever way round you ask");
+  assert.equal(A.threads(m.uid).length, 0, "a third party sees no thread");
+  assert.ok(!A.history(m.uid, tid).ok, "cannot read it by id");
+  assert.ok(!A.markRead(m.uid, tid, 1).ok, "cannot mark it read");
+  assert.ok(!A.setMuted(m.uid, tid, true).ok, "cannot mute it");
+  assert.equal(A.sync(m.uid, 0).messages.length, 0, "and sync hands them nothing");
+  assert.ok(!A.edit(l.uid, sent.id, "hijacked").ok, "cannot edit somebody else's message");
+  assert.ok(!A.drop(l.uid, sent.id).ok, "cannot delete somebody else's message");
+  assert.ok(!A.send(g.uid, g.uid, "hello me").ok, "cannot message yourself");
+});
+
+test("messages: delete is a tombstone, because the id is the other side's cursor", () => {
+  const A = freshAccounts();
+  const { g, l } = seedTwo(A);
+  const a = A.send(g.uid, l.uid, "first");
+  const b = A.send(g.uid, l.uid, "second");
+  A.drop(g.uid, a.id);
+  const seen = A.sync(l.uid, 0).messages;
+  assert.equal(seen.length, 2, "the row survives — removing it would make their next sync skip a beat");
+  assert.ok(seen[0].deleted && seen[0].body === "", "the body is gone but the position is not");
+  assert.equal(seen[1].id, b.id);
+});
+
+test("messages: the sync cursor is authoritative, so a dropped frame costs nothing", () => {
+  const A = freshAccounts();
+  const { g, l } = seedTwo(A);
+  A.send(g.uid, l.uid, "one"); A.send(g.uid, l.uid, "two");
+  const first = A.sync(l.uid, 0);
+  assert.equal(first.messages.length, 2);
+  assert.ok(first.messages.every((m, i, arr) => i === 0 || arr[i - 1].id < m.id), "ordered by the global id");
+  assert.equal(A.sync(l.uid, first.cursor).messages.length, 0, "nothing new past the cursor");
+  A.send(g.uid, l.uid, "three");
+  assert.equal(A.sync(l.uid, first.cursor).messages.length, 1, "a client that missed a push catches up from its own cursor");
+});
+
+test("messages: unread counting, and a read cursor that cannot run into the future", () => {
+  const A = freshAccounts();
+  const { g, l } = seedTwo(A);
+  A.send(g.uid, l.uid, "one"); A.send(g.uid, l.uid, "two");
+  assert.equal(A.threads(l.uid)[0].unread, 2, "the recipient has two unread");
+  assert.equal(A.threads(g.uid)[0].unread, 0, "your own messages are read by definition");
+
+  // An unclamped cursor from the client would let a caller mark itself read PAST messages that do
+  // not exist yet — permanently zeroing its own unread count and silencing every future escalation.
+  A.markRead(l.uid, A.threads(l.uid)[0].id, 999999);
+  assert.equal(A.threads(l.uid)[0].unread, 0);
+  A.send(g.uid, l.uid, "three");
+  assert.equal(A.threads(l.uid)[0].unread, 1, "a read receipt for the future must not suppress real messages");
+});
+
+test("messages: escalation waits, skips whoever is online, and never repeats", () => {
+  const A = freshAccounts();
+  const { g, l } = seedTwo(A);
+  A.send(g.uid, l.uid, "are you there");
+  const nobodyOnline = () => false;
+
+  assert.equal(A.pendingEscalations(60000, nobodyOnline).length, 0,
+    "the delay IS the feature — without it two people typing at each other push per line");
+  const due = A.pendingEscalations(0, nobodyOnline).filter((e) => e.uid === l.uid);
+  assert.equal(due.length, 1, "past the delay it is due");
+  assert.equal(due[0].n, 1);
+  assert.ok(due[0].lines[0].includes("are you there"), "the digest carries the text, truncated");
+
+  assert.ok(A.pendingEscalations(0, (uid) => uid === l.uid).every((e) => e.uid !== l.uid),
+    "somebody with the terminal open is not missing anything");
+
+  due.forEach((e) => A.markEscalated(e.uid, e.thread, e.upTo));
+  assert.ok(A.pendingEscalations(0, nobodyOnline).every((e) => e.uid !== l.uid), "and it never fires twice for the same messages");
+
+  A.setMuted(l.uid, A.threads(l.uid)[0].id, true);
+  A.send(g.uid, l.uid, "still here");
+  assert.ok(A.pendingEscalations(0, nobodyOnline).every((e) => e.uid !== l.uid), "a muted thread never escalates");
+});
+
+test("messages: bodies are cleaned at the write and never stored pre-escaped", () => {
+  const { cleanBody, DM_MAX_LEN } = require("../src/accounts");
+  assert.equal(cleanBody("a" + String.fromCharCode(7) + "b"), "ab", "control characters are stripped");
+  assert.equal(cleanBody("one\r\ntwo"), "one\ntwo", "CRLF is normalised");
+  assert.equal(cleanBody("one\n\n\n\n\n\ntwo"), "one\n\n\ntwo", "runs of blank lines collapse but paragraphs survive");
+  assert.equal(cleanBody("x".repeat(99999)).length, DM_MAX_LEN, "bodies are capped");
+  // Escaping belongs at render. Storing pre-escaped text means every other consumer — the Telegram
+  // digest, a future export — has to un-escape it first, and one of them will forget.
+  assert.equal(cleanBody("<b>not markup</b>"), "<b>not markup</b>", "markup is stored verbatim, escaped by the renderer");
+});
+
+test("messages: the client escapes every rendered body, handle and preview", () => {
+  // Message bodies are the FIRST attacker-controlled strings this client renders — everything else
+  // on the board is a server-computed number. There is no trusted rendering path for a message.
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const dm = app.slice(app.indexOf("function dmRender()"));
+  const body = dm.slice(0, dm.indexOf("function dmWire()"));
+  assert.ok(/esc\(m\.body\)/.test(body), "message bodies go through esc()");
+  assert.ok(/esc\(t\.handle\)/.test(body), "peer handles go through esc()");
+  assert.ok(/esc\(t\.preview/.test(body), "thread previews go through esc()");
+  assert.ok(!/innerHTML\s*=\s*[^;]*\bm\.body\b(?![^;]*esc)/.test(body), "no raw body reaches innerHTML");
+  const stamp = app.slice(app.indexOf("function dmStamp("), app.indexOf("function fmtPx("));
+  assert.ok(/esc\(m\.ref\)/.test(stamp), "the ticker on a stamp is escaped too — it is client-supplied text");
+});
+
+test("server: the invite door strips the code from the URL before anything renders", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const join = srv.slice(srv.indexOf('fastify.get("/join/:code"'), srv.indexOf("const deadInvitePage"));
+  // The redirect is the security step: after it the code is not in the address bar, the history,
+  // or any Referer a later request carries.
+  assert.ok(/inviteCookie\(reply, req, r\.invite\.code\)/.test(join), "the code moves into a cookie");
+  assert.ok(/reply\.redirect\(302, "\/join"\)/.test(join), "and the URL is redirected to a bare /join");
+  assert.ok(!/authPage\(\{ mode: "join"/.test(join), "GET /join/:code must never render the claim page itself");
+  assert.ok(/xyzinv=[\s\S]{0,120}HttpOnly/.test(srv), "the invite cookie is HttpOnly");
+  assert.ok(/log\("invite: opened \(code redacted\)"\)/.test(srv), "the one log line that sees a code redacts it");
+
+  // Per-user payloads must never touch the shared keyed cache: its Map is keyed by a plain string,
+  // so a uid-less key would serve one member's threads to the next caller.
+  const dmStart = srv.indexOf("// ===== direct messages");
+  const dmEnd = srv.indexOf('fastify.get("/logout"', dmStart);
+  assert.ok(dmStart > 0 && dmEnd > dmStart, "the DM route block is where the test thinks it is");
+  const dm = srv.slice(dmStart, dmEnd);
+  // The call, not the word: the block deliberately NAMES serveKeyed in a comment explaining why it
+  // must not be used here, and a bare substring check would match that comment forever.
+  const dmCode = dm.replace(/^\s*\/\/.*$/gm, "");
+  assert.ok(!/serveKeyed\s*\(/.test(dmCode), "no DM route may go through serveKeyed");
+  assert.ok(/serveKeyed/.test(dm), "and the reason it must not be used stays written down next to the routes");
+  assert.ok((dm.match(/cache-control", "no-store"/g) || []).length >= 4, "every DM route is no-store");
+
+  // Fan-out is targeted. A DM is not an event the group is entitled to know happened.
+  assert.ok(/function dmPoke\(threadId\)[\s\S]{0,600}ACCOUNTS\.threadPeers\(threadId\)/.test(srv), "pokes resolve the two participants");
+  assert.ok(/const frame = "data: " \+ JSON\.stringify\(\{ dm: \{ seq:/.test(srv), "the frame carries a sequence, never a body");
+  assert.ok(/const SSE_PER_USER = 4/.test(srv), "a per-member connection cap, so one person's tabs cannot eat the pool");
 });

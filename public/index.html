@@ -82,7 +82,8 @@
   <button class="tab" data-view="insiders" id="tab-insiders" title="Section 16 insider transactions — officers, directors and 10% holders reporting their own trades on SEC Form 4, within two business days. Exact share count, exact price per share, exact date: nothing here is a band or an estimate. Opens on open-market share buys and sales (codes P and S); grants, option exercises and tax withholding are one chip away, as is the form&#39;s derivative half — options and their strikes, kept in columns of their own because an exercise price is not a transaction price. A sale marked under a Rule 10b5-1 plan was scheduled in advance and says less than a discretionary one.">Insiders</button>
   <button class="tab" data-view="notes" id="tab-notes" title="Your own written notes, per ticker — every note across every name, newest first, searchable and #tag-filterable. Each note is stamped with the mark it was written at, so it carries the move since. Written in the ticker drawer; the markets table shows a post-it on any name you have written on.">Notes</button>
   <button class="tab" data-view="report" title="AI analyst report — everything this server holds on one ticker (trend ladder, signals &amp; track record, positioning, earnings, flags) compiled and synthesized by an AI analyst (Claude or GPT, per server config) into a plain-language read with scenarios, R/R and an annotated chart. Cached for everyone; regenerate unlocks on TTL expiry or material change.">Report</button>
-  <button class="tab" data-view="admin" id="tab-admin" title="Feature visibility — choose what the group sees and what stays admin-only. Server-enforced: a gated tab is absent from the markup and its routes 403.">Admin</button>
+  <button class="tab" data-view="dm" id="tab-dm" title="Direct messages between account holders — one conversation per person, price-stamped. Type $TICKER in a message and it carries the mark it was sent at, so a call made at 113.90 and read at 118.50 says so on its face. Unread messages escalate to your linked Telegram after five minutes if you are not at the terminal.">Messages</button>
+<button class="tab" data-view="admin" id="tab-admin" title="Feature visibility — choose what the group sees and what stays admin-only. Server-enforced: a gated tab is absent from the markup and its routes 403.">Admin</button>
   <!-- Everything before this spacer is a tab; everything after it is a control. It is the single
        insertion anchor for saved tab order and for the self-installing Treemap tab, so neither
        depends on whichever button happens to sit first in the right-hand cluster. -->
@@ -347,6 +348,9 @@
 <section id="view-congress" hidden>
   <div id="congress-body"></div>
 </section>
+<section id="view-dm" hidden>
+  <div id="dm-body"></div>
+</section>
 <section id="view-notes" hidden>
   <div id="notes-body"></div>
 </section>
@@ -394,6 +398,10 @@
 <section id="view-admin" hidden>
   <!-- Event-loop latency row (Phase 0 of the perf batch): live-window chips + the persisted 7d
        p99 ring with the 50ms worker-thread decision gate drawn as a dashed line. -->
+  <!-- Access: members, invites, and the operator actions that revoke one person without touching
+       anybody else. First in the panel because it is the only box here that decides WHO gets in;
+       everything below it decides what they see once they are. -->
+  <div class="adm-navgrp" id="admAccessBox"></div>
   <div class="adm-loop" id="admLoop" hidden></div>
   <!-- Morning brief controls. Deliberately OUTSIDE the recipients accordion: the first version put
        them inside it and they were invisible until you happened to expand a collapsed section, which

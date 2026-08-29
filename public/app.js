@@ -3595,13 +3595,13 @@ function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch
   if(d.open&&typeof d.open==='object') state.alerts.open=Object.assign(state.alerts.open,d.open); }
 
 function setHash(h){ try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} }
-const HASH_VIEWS=new Set(['markets','focus','funds','trend','charts','sectors','corr','funding','sessions','signals','earnings','news','backtest','report','actionable','admin','housing','liquidity','notes','congress','insiders']);
+const HASH_VIEWS=new Set(['markets','focus','funds','trend','charts','sectors','corr','funding','sessions','signals','earnings','news','backtest','report','actionable','admin','housing','liquidity','notes','congress','insiders','dm']);
 // ===== admin panel: feature visibility switchboard =============================================
 // Reads /api/features (manifest + raw states + BOTH resolved audiences). Writes one key per call and
 // rolls back on failure — a batch write would make a partial failure ambiguous, and there is no save
 // button because a draft state is another way for the panel and the server to disagree.
 let _adm=null, _admVap=false, _admBusy='';
-async function openAdmin(){ if(!IS_ADMIN) return; renderAdmLoop(_lastHealth); updateFreshTray(); renderAdmin(); renderAudit(); loadAudit(); renderAdmFloors(); loadAdmFloors(); await loadAdmin(); }
+async function openAdmin(){ if(!IS_ADMIN) return; renderAdmLoop(_lastHealth); updateFreshTray(); renderAdmin(); renderAudit(); loadAudit(); renderAdmFloors(); loadAdmFloors(); accWire(); renderAccess(); loadAccess(); await loadAdmin(); }
 async function loadAdmin(){
   try{ _adm=await fetchJSON('/api/features'); }
   catch(e){ _adm={error:String(e&&e.message||e)}; }
@@ -6287,6 +6287,7 @@ function showView(v){
   setHidden('view-earnings', v!=='earnings');
   setHidden('view-news', v!=='news');
   setHidden('view-notes', v!=='notes');
+  setHidden('view-dm', v!=='dm');
   setHidden('view-congress', v!=='congress');
   setHidden('view-insiders', v!=='insiders');
   setHidden('view-backtest', v!=='backtest');
@@ -6306,6 +6307,7 @@ function showView(v){
   if(v==='earnings'){ if(el('view-earnings')) openEarnings(); else { showView('markets'); return; } }
   if(v==='news'){ if(el('view-news')) openNews(); else { showView('markets'); return; } }
   if(v==='notes'){ if(el('view-notes')) openNotes(); else { showView('markets'); return; } }
+  if(v==='dm'){ if(el('view-dm')) openDM(); else { showView('markets'); return; } }
   if(v==='congress'){ if(el('view-congress')) openCongress(); else { showView('markets'); return; } }
   if(v==='insiders'){ if(el('view-insiders')) openInsiders(); else { showView('markets'); return; } }
   if(v==='backtest'){ if(el('view-backtest')) renderBacktest_load(); else { showView('markets'); return; } }
@@ -9748,7 +9750,10 @@ function startEvents(){ if(typeof EventSource==='undefined'||_sseSrc) return;
     // A pushed dataTs we already hold is a no-op (the initial sync frame, typically). A new one —
     // including the new `v` a redeploy pushes via the reconnect's first frame — pulls immediately;
     // applySnapshot's own short-circuit and alertVer handling then do exactly what they do on a poll.
-    if(d&&d.dataTs&&d.dataTs!==state.dataTs){ loadSnapshot(); nextCycle=Date.now()+_cycleMs(); } };
+    if(d&&d.dataTs&&d.dataTs!==state.dataTs){ loadSnapshot(); nextCycle=Date.now()+_cycleMs(); }
+    // The dm frame carries a sequence, never a message. Pull whatever tab is showing: the unread
+    // pip has to be right before you look at it, not after you switch to the tab.
+    if(d&&d.dm&&typeof d.dm.seq==='number'&&d.dm.seq>dmState.cursor) dmSync(); };
 }
 function _cycleMs(){ return _sseOk?Math.max(state.refreshMs,120000):state.refreshMs; }
 function startCycle(){ clearInterval(cycleTimer); const ms=_cycleMs(); cycleTimer=setInterval(()=>{ loadSnapshot(); nextCycle=Date.now()+_cycleMs(); }, ms); nextCycle=Date.now()+ms; }
@@ -10038,6 +10043,10 @@ applyTabOrder(); buildTabGroups(); applyTabVisibility(); wireTabDrag();
 { const vb=el('admVap'); if(vb) vb.addEventListener('click',toggleViewAsPublic); }
 // Logout button: only meaningful when the server set the JS-visible auth marker at login.
 { const lb=el('logoutBtn'); if(lb && /(^|;\s*)xyzauth=1/.test(document.cookie)){ lb.hidden=false;
+    // Name the account the button would sign out of. With accounts, "sign out" is no longer a
+    // single shared door — knowing WHICH identity you are about to drop is the whole point.
+    if(window.__ME&&window.__ME.handle){ lb.title='Signed in as '+window.__ME.display+' — sign out of this device';
+      lb.textContent='\u23CF '+window.__ME.display; }
     lb.addEventListener('click',()=>{ location.href='/logout'; }); } }
 applyScope();
 // ===== theme + density: one of each, no toggles ===============================================
@@ -14228,4 +14237,464 @@ async function termWhale(args){
   }
   const full=(args[1]||'').toLowerCase()==='full';
   return termWhaleFund(sub.toUpperCase(),full);
+}
+
+// ===== MESSAGES tab (build 2026.08.30-46) ======================================================
+// 1-to-1 direct messages between account holders. Two rules shape everything here:
+//
+//   1. Message bodies are the FIRST attacker-controlled strings this client renders. Every other
+//      value on the board is a server-computed number; a body is prose another person typed. So
+//      every body, handle and preview goes through esc() on every path — the log, the thread rail,
+//      the composer echo. There is no "trusted" rendering path for a message.
+//   2. The stream carries versions, never payloads — same contract as the snapshot push. An SSE
+//      `dm` frame only says "the sequence moved"; this client answers it with an ordinary
+//      /api/dm/sync pull keyed by its own cursor. A dropped frame therefore costs nothing: the
+//      cursor is authoritative and the next pull collects whatever was missed.
+const dmState = { me: null, threads: [], members: [], online: new Set(),
+  sel: null, msgs: new Map(), cursor: 0, loaded: false, err: '', sending: false,
+  composing: '', picking: false, editing: null };
+
+function dmSignedIn(){ return !!(window.__ME && window.__ME.uid); }
+function dmUnreadTotal(){ return dmState.threads.reduce((a,t)=>a+(t.muted?0:(t.unread||0)),0); }
+
+// The tab pip. Painted from the thread list rather than a separate counter so it can never
+// disagree with what the rail shows.
+function dmUpdatePip(){
+  const b=el('tab-dm'); if(!b) return;
+  const n=dmUnreadTotal();
+  b.innerHTML='Messages'+(n?'<span class="tabpip">'+(n>99?'99+':n)+'</span>':'');
+}
+
+function dmThread(id){ return dmState.threads.find(t=>t.id===id)||null; }
+function dmMsgs(id){ let a=dmState.msgs.get(id); if(!a){ a=[]; dmState.msgs.set(id,a); } return a; }
+// Merge by id, newest wins: an edit or a tombstone arrives as the same id with new fields, so a
+// blind push would render the message twice — once stale.
+function dmMerge(list){
+  for(const m of (list||[])){
+    const arr=dmMsgs(m.thread);
+    const i=arr.findIndex(x=>x.id===m.id);
+    if(i>=0) arr[i]=m; else arr.push(m);
+    if(m.id>dmState.cursor) dmState.cursor=m.id;
+  }
+  for(const [,arr] of dmState.msgs) arr.sort((a,b)=>a.id-b.id);
+}
+
+async function dmLoad(){
+  if(!dmSignedIn()) return;
+  try{
+    const d=await fetchJSON('/api/dm');
+    if(!d||!d.ok) throw new Error((d&&d.error)||'could not load messages');
+    dmState.me=d.me; dmState.threads=d.threads||[]; dmState.members=d.members||[];
+    dmState.online=new Set(d.online||[]); dmState.maxLen=d.maxLen||4000; dmState.loaded=true; dmState.err='';
+  }catch(e){ dmState.err=e.message||String(e); }
+  dmUpdatePip();
+}
+
+// The pull the SSE frame triggers. Runs whatever tab is showing — the unread pip has to be right
+// before you look at it, not after.
+let _dmSyncing=false;
+async function dmSync(){
+  if(!dmSignedIn()||_dmSyncing) return;
+  _dmSyncing=true;
+  try{
+    const d=await fetchJSON('/api/dm/sync?since='+encodeURIComponent(dmState.cursor||0));
+    if(d&&d.ok){
+      dmMerge(d.messages);
+      if(d.threads) dmState.threads=d.threads;
+      if(d.cursor>dmState.cursor) dmState.cursor=d.cursor;
+      dmUpdatePip();
+      if(state.view==='dm') dmRender();
+    }
+  }catch(_){ /* the next frame or the next open retries; a failed sync is never fatal */ }
+  finally{ _dmSyncing=false; }
+}
+
+async function dmOpenThread(id){
+  dmState.sel=id; dmState.editing=null; dmState.picking=false;
+  dmRender();
+  try{
+    const d=await fetchJSON('/api/dm/'+encodeURIComponent(id));
+    if(d&&d.ok){ dmMerge(d.messages); dmRender(); }
+  }catch(_){ }
+  dmMarkRead(id);
+}
+
+async function dmMarkRead(id){
+  const arr=dmMsgs(id); if(!arr.length) return;
+  const last=arr[arr.length-1].id;
+  const t=dmThread(id); if(t&&!t.unread) return;
+  try{
+    await fetch('/api/dm',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({thread:id,read:last})});
+    if(t) t.unread=0;
+    dmUpdatePip(); dmRender();
+  }catch(_){ }
+}
+
+async function dmPost(body){
+  const r=await fetch('/api/dm',{method:'POST',headers:{'content-type':'application/json'},
+    body:JSON.stringify(body)});
+  const d=await r.json().catch(()=>({}));
+  return {ok:r.ok&&d&&d.ok!==false,d:d};
+}
+
+async function dmSend(){
+  const ta=el('dm-input'); if(!ta) return;
+  const text=ta.value.trim();
+  if(!text||dmState.sending) return;
+  const t=dmThread(dmState.sel);
+  if(!t) return;
+  dmState.sending=true; dmState.err=''; dmRender();
+  const res=await dmPost(dmState.editing?{id:dmState.editing,body:text}:{to:t.peer,body:text});
+  dmState.sending=false;
+  if(res.ok){
+    // Keep nothing in the box on success; on failure the text stays exactly where it was, because
+    // a dropped connection must never eat something somebody typed.
+    ta.value=''; dmState.composing=''; dmState.editing=null;
+    if(res.d.message) dmMerge([res.d.message]);
+    if(res.d.thread) dmState.sel=res.d.thread;
+    await dmLoad();
+    dmRender(); dmScrollBottom();
+  }else{
+    dmState.err=(res.d&&res.d.error)||'could not send — try again';
+    dmRender();
+  }
+}
+
+async function dmStartWith(uid){
+  const existing=dmState.threads.find(t=>t.peer===uid);
+  if(existing){ dmState.picking=false; dmOpenThread(existing.id); return; }
+  // No thread until there is a message: an empty conversation in the rail is a row that says
+  // nothing happened. The composer targets the member directly and the thread appears on send.
+  dmState.picking=false; dmState.sel=null; dmState.pendingPeer=uid; dmRender();
+  const ta=el('dm-input'); if(ta) ta.focus();
+}
+
+async function dmSendNew(){
+  const ta=el('dm-input'); if(!ta||!dmState.pendingPeer) return;
+  const text=ta.value.trim(); if(!text||dmState.sending) return;
+  dmState.sending=true; dmRender();
+  const res=await dmPost({to:dmState.pendingPeer,body:text});
+  dmState.sending=false;
+  if(res.ok){
+    ta.value=''; dmState.pendingPeer=null;
+    if(res.d.message) dmMerge([res.d.message]);
+    await dmLoad();
+    if(res.d.thread) dmState.sel=res.d.thread;
+    dmRender(); dmScrollBottom();
+  }else{ dmState.err=(res.d&&res.d.error)||'could not send'; dmRender(); }
+}
+
+async function dmToggleMute(){
+  const t=dmThread(dmState.sel); if(!t) return;
+  const res=await dmPost({thread:t.id,mute:!t.muted});
+  if(res.ok){ t.muted=!t.muted; dmUpdatePip(); dmRender(); }
+}
+async function dmDrop(id){
+  if(!confirm('Delete this message? The other side sees that it was deleted.')) return;
+  const res=await dmPost({id:id,drop:true});
+  if(res.ok&&res.d.message){ dmMerge([res.d.message]); dmRender(); }
+}
+function dmEdit(id){
+  const m=dmMsgs(dmState.sel).find(x=>x.id===id); if(!m) return;
+  dmState.editing=id;
+  const ta=el('dm-input'); if(ta){ ta.value=m.body; ta.focus(); }
+  dmRender();
+}
+
+function dmScrollBottom(){ const l=el('dm-log'); if(l) l.scrollTop=l.scrollHeight; }
+
+// ---- rendering ---------------------------------------------------------------------------------
+function dmWhen(ts){
+  try{
+    const d=new Date(ts), now=new Date();
+    const sameDay=d.toDateString()===now.toDateString();
+    return sameDay ? d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false})
+                   : d.toLocaleDateString('en-US',{month:'short',day:'numeric'})+' '
+                     +d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false});
+  }catch(_){ return ''; }
+}
+// The price stamp. refPx is what the market showed when the message was sent and never changes;
+// px is read live at render. The move between them is the entire reason this feature exists, so
+// it is computed here and nowhere else.
+function dmStamp(m){
+  if(!m.ref) return '';
+  const at=m.refPx, now=m.px;
+  const has=at!=null&&isFinite(at)&&at>0;
+  const live=now!=null&&isFinite(now)&&now>0;
+  const chg=(has&&live)?(now/at-1):null;
+  const cls=chg==null?'':(chg>0?'pos':(chg<0?'neg':'sec'));
+  const right=chg==null?'<span class="dm-tk-d sec" title="this market is no longer listed">—</span>'
+    :'<span class="dm-tk-d '+cls+'">'+(chg>0?'+':'')+(chg*100).toFixed(1)+'%</span>';
+  const sub=has?('sent at '+fmtPx(at)+(live?'':' · no longer listed')):'no mark at send';
+  return '<div class="dm-tk"><div><div class="dm-tk-s">'+esc(m.ref)+'</div>'
+    +'<div class="dm-tk-m">'+esc(sub)+'</div></div>'+right+'</div>';
+}
+function fmtPx(v){
+  if(v==null||!isFinite(v)) return '—';
+  const a=Math.abs(v);
+  return a>=1000?v.toFixed(0):a>=1?v.toFixed(2):v.toFixed(4);
+}
+
+function dmRender(){
+  const host=el('dm-body'); if(!host) return;
+  if(!dmSignedIn()){
+    host.innerHTML='<div class="msg">Messages need an account. '
+      +'<a href="/login">Sign in</a> — or ask the operator for an invite link.</div>';
+    return;
+  }
+  const rail=dmState.threads.map(t=>{
+    const on=dmState.online.has(t.peer);
+    return '<div class="dm-th'+(t.id===dmState.sel?' sel':'')+'" data-dmth="'+t.id+'">'
+      +'<div class="dm-thn"><span class="'+(on?'dm-on':'dm-off')+'">●</span> '+esc(t.handle)
+      +(t.muted?' <span class="dm-mute" title="muted — no Telegram escalation">⊘</span>':'')
+      +(t.unread?'<span class="dm-badge">'+(t.unread>99?'99+':t.unread)+'</span>':'')+'</div>'
+      +'<div class="dm-thp">'+esc(t.preview||'no messages yet')+'</div></div>';
+  }).join('')||'<div class="dm-empty">No conversations yet.</div>';
+
+  const others=dmState.members.filter(m=>!dmState.threads.some(t=>t.peer===m.uid));
+  const picker=dmState.picking?('<div class="dm-pick">'
+    +(dmState.members.length?dmState.members.map(m=>'<div class="dm-th" data-dmnew="'+esc(m.uid)+'">'
+      +'<div class="dm-thn"><span class="'+(dmState.online.has(m.uid)?'dm-on':'dm-off')+'">●</span> '+esc(m.display)+'</div>'
+      +'<div class="dm-thp">'+(dmState.online.has(m.uid)?'online now':'last seen '+(m.lastSeen?dmWhen(m.lastSeen):'—'))+'</div></div>').join('')
+      :'<div class="dm-empty">Nobody else has an account yet.</div>')
+    +'</div>'):'';
+
+  const t=dmThread(dmState.sel);
+  const pendingPeer=dmState.pendingPeer?dmState.members.find(m=>m.uid===dmState.pendingPeer):null;
+  let main;
+  if(pendingPeer){
+    main='<div class="dm-hd"><b>'+esc(pendingPeer.display)+'</b>'
+      +'<span class="sec" style="margin-left:auto">new conversation</span></div>'
+      +'<div class="dm-log" id="dm-log"><div class="dm-empty">Say something to start.</div></div>';
+  }else if(!t){
+    main='<div class="dm-log" id="dm-log"><div class="dm-empty">'
+      +(dmState.threads.length?'Pick a conversation.':'No conversations yet — press <b>+ new</b>.')+'</div></div>';
+  }else{
+    const arr=dmMsgs(t.id);
+    const log=arr.length?arr.map(m=>{
+      const own=m.mine;
+      const meta=esc(own?'you':t.handle)+' · '+dmWhen(m.ts)
+        +(m.edited&&!m.deleted?' · <span class="sec">edited</span>':'');
+      const bodyHtml=m.deleted
+        ? '<div class="dm-b dm-del">message deleted</div>'
+        : '<div class="dm-b">'+esc(m.body).replace(/\n/g,'<br>')+dmStamp(m)+'</div>';
+      const tools=(own&&!m.deleted)?'<span class="dm-tools">'
+        +'<button type="button" class="dm-tool" data-dmedit="'+m.id+'" title="Edit — the price stamp stays at what it was sent at">edit</button>'
+        +'<button type="button" class="dm-tool" data-dmdel="'+m.id+'" title="Delete">delete</button></span>':'';
+      return '<div class="dm-msg'+(own?' out':'')+'"><div class="dm-meta">'+meta+tools+'</div>'+bodyHtml+'</div>';
+    }).join(''):'<div class="dm-empty">No messages yet.</div>';
+    main='<div class="dm-hd"><b>'+esc(t.handle)+'</b>'
+      +'<span class="mk-chip '+(dmState.online.has(t.peer)?'dm-chip-on':'')+'">'
+      +(dmState.online.has(t.peer)?'online':'away')+'</span>'
+      +(t.disabled?'<span class="sec">account disabled</span>':'')
+      +'<button type="button" class="btn dm-mutebtn" id="dm-mute" title="Muted conversations never escalate to Telegram">'
+      +(t.muted?'unmute':'mute')+'</button></div>'
+      +'<div class="dm-log" id="dm-log">'+log+'</div>';
+  }
+
+  const canWrite=!!(t||pendingPeer);
+  const composer='<div class="dm-cmp">'
+    +'<textarea id="dm-input" rows="1" maxlength="'+(dmState.maxLen||4000)+'" '
+    +(canWrite?'':'disabled ')+'placeholder="'
+    +(canWrite?'message '+esc((t&&t.handle)||(pendingPeer&&pendingPeer.display)||'')+'…  (type $TICKER to attach the mark)':'pick a conversation first')
+    +'"></textarea>'
+    +'<button type="button" class="btn dm-send" id="dm-send"'+(canWrite?'':' disabled')+'>'
+    +(dmState.sending?'…':(dmState.editing?'Save':'Send'))+'</button></div>'
+    +(dmState.editing?'<div class="dm-editing">Editing — the original timestamp and price stamp stand. '
+      +'<button type="button" class="dm-tool" id="dm-canceledit">cancel</button></div>':'')
+    +(dmState.err?'<div class="dm-err">'+esc(dmState.err)+'</div>':'');
+
+  host.innerHTML='<div class="dm-wrap">'
+    +'<div class="dm-side"><div class="dm-sh">Conversations</div>'+rail
+    +'<div class="dm-new" id="dm-newbtn">'+(dmState.picking?'× close':'+ new message')+'</div>'+picker+'</div>'
+    +'<div class="dm-main">'+main+composer+'</div></div>';
+
+  const ta=el('dm-input');
+  if(ta){
+    if(dmState.editing){ const m=dmMsgs(dmState.sel).find(x=>x.id===dmState.editing); if(m) ta.value=m.body; }
+    ta.addEventListener('input',()=>{ dmState.composing=ta.value;
+      ta.style.height='auto'; ta.style.height=Math.min(ta.scrollHeight,160)+'px'; });
+    ta.addEventListener('keydown',(e)=>{
+      // Enter sends, Shift+Enter is a newline. A chat box that needs a mouse to send is a form.
+      if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); pendingPeer?dmSendNew():dmSend(); }
+      if(e.key==='Escape'&&dmState.editing){ dmState.editing=null; ta.value=''; dmRender(); }
+    });
+  }
+  dmScrollBottom();
+}
+
+// One delegated listener for the whole tab — the panel is re-rendered wholesale on every change,
+// so per-element handlers would leak on each paint.
+function dmWire(){
+  const host=el('dm-body'); if(!host||host._dmWired) return;
+  host._dmWired=true;
+  host.addEventListener('click',(e)=>{
+    const th=e.target.closest('[data-dmth]');
+    if(th){ dmOpenThread(+th.dataset.dmth); return; }
+    const nw=e.target.closest('[data-dmnew]');
+    if(nw){ dmStartWith(nw.dataset.dmnew); return; }
+    if(e.target.closest('#dm-newbtn')){ dmState.picking=!dmState.picking; dmRender(); return; }
+    if(e.target.closest('#dm-send')){ dmState.pendingPeer?dmSendNew():dmSend(); return; }
+    if(e.target.closest('#dm-mute')){ dmToggleMute(); return; }
+    if(e.target.closest('#dm-canceledit')){ dmState.editing=null; dmRender(); return; }
+    const ed=e.target.closest('[data-dmedit]'); if(ed){ dmEdit(+ed.dataset.dmedit); return; }
+    const dl=e.target.closest('[data-dmdel]'); if(dl){ dmDrop(+dl.dataset.dmdel); return; }
+  });
+}
+
+async function openDM(){
+  dmWire();
+  dmRender();                     // paint the shell immediately, fill it as data lands
+  await dmLoad();
+  if(!dmState.sel&&dmState.threads.length) { await dmOpenThread(dmState.threads[0].id); return; }
+  await dmSync();
+  dmRender();
+  if(dmState.sel) dmMarkRead(dmState.sel);
+}
+
+// Messages boot with the app, not with the tab: the pip must be accurate on the first paint, and a
+// signed-in member who never opens the tab still needs their Telegram escalation cancelled by the
+// simple fact of being here.
+if(dmSignedIn()){ dmLoad().then(dmSync); }
+else { const b=el('tab-dm'); if(b) b.hidden=true; }
+
+// ===== admin panel: access (members + invites) =================================================
+// The only box in the admin panel that decides WHO gets in. Everything else there decides what
+// they see once they are in, which is why this sits at the top.
+//
+// The freshly minted link is shown ONCE here, in full, at mint time — and stays copyable while the
+// invite is pending, because the code is stored in plaintext deliberately. Hashing it would buy
+// nothing (anyone who can read the volume already holds the session secret and can forge a session
+// directly) and would cost the operator the ability to re-send a link they minted an hour ago.
+let _acc=null,_accBusy=false,_accMinted='';
+async function loadAccess(){
+  if(!IS_ADMIN) return;
+  try{ _acc=await fetchJSON('/api/access'); }
+  catch(e){ _acc={error:String(e&&e.message||e)}; }
+  renderAccess();
+}
+async function accPost(body){
+  if(_accBusy) return {ok:false};
+  _accBusy=true; renderAccess();
+  let out={ok:false};
+  try{
+    const r=await fetch('/api/access',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify(body)});
+    const d=await r.json().catch(()=>({}));
+    out={ok:r.ok&&d.ok,d:d};
+    if(!out.ok&&d&&d.error) alert(d.error);
+  }catch(e){ alert('network error — try again'); }
+  _accBusy=false;
+  await loadAccess();
+  return out;
+}
+function accWhen(ts){
+  if(!ts) return '—';
+  const d=Math.round((Date.now()-ts)/86400000);
+  if(d<=0) return 'today';
+  return d===1?'yesterday':d+'d ago';
+}
+function accUntil(ts){
+  const ms=ts-Date.now();
+  if(ms<=0) return 'expired';
+  const d=Math.round(ms/86400000);
+  return d<=0?'under a day':'in '+d+'d';
+}
+function accLink(code){ return location.origin+'/join/'+code; }
+
+function renderAccess(){
+  const box=el('admAccessBox'); if(!box) return;
+  if(!IS_ADMIN){ box.innerHTML=''; return; }
+  if(!_acc){ box.innerHTML='<div class="adm-navhd">Access</div><div class="acc-note">loading…</div>'; return; }
+  if(_acc.error){ box.innerHTML='<div class="adm-navhd">Access</div><div class="acc-note">'+esc(_acc.error)+'</div>'; return; }
+
+  const members=(_acc.members||[]).map(u=>{
+    const on=u.disabled?'<span class="acc-mu" style="color:var(--down)">disabled</span>':'';
+    return '<div class="acc-row">'
+      +'<span style="color:'+(u.disabled?'var(--faint)':'var(--up)')+'">●</span>'
+      +'<span class="grow">'+esc(u.display)+(u.isAdmin?' <span class="acc-chip on">♛ operator</span>':'')+'</span>'
+      +'<span class="acc-mu">joined '+accWhen(u.createdAt)+' · seen '+accWhen(u.lastSeen)+'</span>'+on
+      +'<button type="button" class="acc-chip" data-accreset="'+esc(u.uid)+'" title="Mint a one-day reset link for this member. They set a new password, which signs out every one of their devices.">reset link</button>'
+      +'<button type="button" class="acc-chip" data-accsignout="'+esc(u.uid)+'" title="Bump their epoch — every outstanding session on this account stops verifying. Nobody else is affected.">sign out</button>'
+      +'<button type="button" class="acc-chip'+(u.isAdmin?' on':'')+'" data-accadmin="'+esc(u.uid)+'" data-on="'+(u.isAdmin?'0':'1')+'" title="Operators can mint invites, disable accounts and see the admin tabs.">'+(u.isAdmin?'demote':'make operator')+'</button>'
+      +'<button type="button" class="acc-chip'+(u.disabled?'':' warn')+'" data-accdis="'+esc(u.uid)+'" data-on="'+(u.disabled?'0':'1')+'" title="'+(u.disabled?'Let this account sign in again.':'Stop this account signing in. Their notes and rules stay, attributed. Nobody else is signed out.')+'">'+(u.disabled?'enable':'disable')+'</button>'
+      +'</div>';
+  }).join('')||'<div class="acc-note">No accounts yet.</div>';
+
+  const inv=(_acc.invites||[]).filter(i=>i.state==='open');
+  const spent=(_acc.invites||[]).filter(i=>i.state!=='open').slice(0,6);
+  const invRows=inv.map(i=>'<div class="acc-row">'
+    +'<span style="color:var(--accent)">◷</span>'
+    +'<span class="grow">'+(i.label?esc(i.label):'<span class="acc-mu">no label</span>')
+      +(i.kind==='reset'?' <span class="acc-chip">reset · '+esc(i.target||'')+'</span>':'')+'</span>'
+    +'<span class="acc-mu">expires '+accUntil(i.expiresAt)+'</span>'
+    +'<button type="button" class="acc-chip" data-acccopy="'+esc(i.code)+'" title="Copy the full join link to the clipboard">copy link</button>'
+    +'<button type="button" class="acc-chip warn" data-accrevoke="'+esc(i.code)+'" title="Kill this invite. The link stops working immediately.">revoke</button>'
+    +'</div>').join('')||'<div class="acc-note">No invites outstanding.</div>';
+
+  const spentRows=spent.length?('<div class="acc-note">Recently spent: '
+    +spent.map(i=>esc((i.label||i.kind))+' · '+esc(i.state)+(i.usedBy?' by '+esc(i.usedBy):'')).join(' &nbsp;·&nbsp; ')
+    +'</div>'):'';
+
+  const minted=_accMinted?('<div class="acc-link" id="accMintedLink">'+esc(accLink(_accMinted))+'</div>'
+    +'<div class="acc-note">Send this to one person. It works once, and you can copy it again from the list above while it is pending.</div>'):'';
+
+  const legacy=_acc.legacyDoor?('<div class="acc-note" style="color:var(--down)">'
+    +'The shared password is still accepted — existing sessions land on /claim to pick a handle. '
+    +'Once everyone has claimed, set <b>LEGACY_SHARED_PASSWORD=0</b> to close that door for good.</div>'):'';
+
+  box.innerHTML='<div class="adm-navhd">Access '
+    +'<span class="adm-navsub">'+(_acc.stats?esc(_acc.stats.users+' member(s) · '+_acc.stats.invitesOpen+' invite(s) open · '+_acc.stats.messages+' message(s)'):'')+'</span></div>'
+    +'<div class="acc-sec"><div class="dm-sh" style="padding-left:0">Members</div>'+members+'</div>'
+    +'<div class="acc-sec"><div class="dm-sh" style="padding-left:0">Pending invites</div>'+invRows+spentRows+'</div>'
+    +'<div class="acc-sec"><div class="dm-sh" style="padding-left:0">Mint an invite</div>'
+      +'<div class="acc-mint">'
+      +'<input id="accLabel" placeholder="who is this for?" maxlength="64" style="flex:1;min-width:170px">'
+      +'<select id="accDays"><option value="1">1 day</option><option value="7" selected>7 days</option><option value="30">30 days</option></select>'
+      +'<button type="button" class="btn" id="accMint"'+(_accBusy?' disabled':'')+'>Mint</button>'
+      +'</div>'+minted
+      +'<div class="acc-note">The label is your own note — the invitee never sees it, and they still pick their own handle.</div>'
+    +'</div>'
+    +(legacy?'<div class="acc-sec">'+legacy+'</div>':'');
+}
+
+function accWire(){
+  const box=el('admAccessBox'); if(!box||box._accWired) return;
+  box._accWired=true;
+  box.addEventListener('click',async(e)=>{
+    const mint=e.target.closest('#accMint');
+    if(mint){
+      const label=(el('accLabel')||{}).value||'';
+      const days=+((el('accDays')||{}).value||7);
+      const r=await accPost({op:'mint',label:label,days:days});
+      if(r.ok&&r.d&&r.d.invite){ _accMinted=r.d.invite.code; renderAccess(); accCopy(_accMinted,true); }
+      return;
+    }
+    const cp=e.target.closest('[data-acccopy]'); if(cp){ accCopy(cp.dataset.acccopy); return; }
+    const rv=e.target.closest('[data-accrevoke]');
+    if(rv){ if(confirm('Revoke this invite? The link stops working immediately.')) accPost({op:'revoke',code:rv.dataset.accrevoke}); return; }
+    const rs=e.target.closest('[data-accreset]');
+    if(rs){ const r=await accPost({op:'reset-link',uid:rs.dataset.accreset});
+      if(r.ok&&r.d&&r.d.invite){ _accMinted=r.d.invite.code; renderAccess(); accCopy(_accMinted,true); } return; }
+    const so=e.target.closest('[data-accsignout]');
+    if(so){ if(confirm('Sign this member out of every device? They keep their account and password.')) accPost({op:'signout',uid:so.dataset.accsignout}); return; }
+    const ad=e.target.closest('[data-accadmin]');
+    if(ad){ const on=ad.dataset.on==='1';
+      if(confirm(on?'Make this member an operator? They will be able to mint invites and disable accounts.':'Remove operator from this member?'))
+        accPost({op:'admin',uid:ad.dataset.accadmin,on:on}); return; }
+    const ds=e.target.closest('[data-accdis]');
+    if(ds){ const on=ds.dataset.on==='1';
+      if(confirm(on?'Disable this account? They stop being able to sign in. Their notes and rules stay, attributed, and nobody else is signed out.':'Let this account sign in again?'))
+        accPost({op:on?'disable':'enable',uid:ds.dataset.accdis}); return; }
+  });
+}
+
+function accCopy(code,quiet){
+  const link=accLink(code);
+  const done=()=>{ if(!quiet) alert('Invite link copied.'); };
+  try{
+    if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(link).then(done,()=>prompt('Copy this invite link:',link)); return; }
+  }catch(_){ }
+  prompt('Copy this invite link:',link);
 }

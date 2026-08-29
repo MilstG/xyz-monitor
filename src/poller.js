@@ -14074,6 +14074,13 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     pushOpsNow: pushOps,                       // harness + later slices: emit an ops event without a real fault
     pushBindNow: pushBind,                     // harness: bind a chat without a live /start round trip
     hydratePushNow: hydratePush,               // harness: restore recipients without a boot
+    // Direct-message escalation (build 2026.08.30-46) reuses this outbox rather than opening a
+    // second delivery path: quiet hours, the hourly cap and the shared queue all apply for free.
+    pushEnqueueNow: (chat, text) => pushEnqueue(chat, text, false, 0),
+    // A member's own linked chats. `owner` on a recipient is the account uid — which is exactly
+    // why an account reuses its xyzown handle as its id.
+    pushRecipientsFor: (owner) => [...pushRecipients.values()]
+      .filter((r) => r.owner === owner && !r.muted).map((r) => r.chat),
     pushTickNow: pushStreamTick,               // harness: consume the stream on demand
     pushDrainNow: pushDrain,                   // harness: drain the outbox against an injected transport
     pushUpdatesNow: pushUpdatesTick,           // harness: process a getUpdates payload without waiting out the poll

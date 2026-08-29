@@ -7,12 +7,13 @@ const gzipAsync = require("util").promisify(zlib.gzip);   // -08: threadpool gzi
 const Fastify = require("fastify");
 const { openStore } = require("./src/store");
 const { createPoller } = require("./src/poller");
+const { openAccounts, PW_MIN: ACCOUNT_PW_MIN, DM_MAX_LEN: ACCOUNT_DM_MAX } = require("./src/accounts");
 const { featureGateFor, resolveFeatures } = require("./src/compute");
 
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.29-45";
+const VERSION = "2026.08.30-46";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -103,6 +104,17 @@ const ADMIN_DAYS = Number(process.env.ADMIN_DAYS || 30);
 function log(msg) { console.log(new Date().toISOString() + " " + msg); }
 
 const store = openStore(DATA_DIR);
+// ---- accounts, invites and direct messages --------------------------------------------------
+// Its own SQLite file on the same volume. Deliberately separate from the market caches: none of
+// this is market data, none of it is on the 15s path, and all of it wants transactions rather
+// than the whole-file tmp+rename discipline the JSON caches use.
+const ACCOUNTS = openAccounts(DATA_DIR, { sessionDays: SESSION_DAYS });
+// How long a DM sits unread before it is worth interrupting somebody's evening over. The delay IS
+// the feature: without it two people typing at each other generate a push per line.
+const DM_ESCALATE_MS = Number(process.env.DM_ESCALATE_MS || 5 * 60 * 1000);
+// The legacy shared-password door. Once accounts exist it stays open only while the operator is
+// still migrating people, and it lands them on the claim page rather than straight into the app.
+const LEGACY_DOOR = process.env.LEGACY_SHARED_PASSWORD !== "0";
 // Definitive volume-persistence check: boot #1 on every deploy = the data dir is ephemeral
 // (DATA_DIR not pointing at the volume mount, or no volume attached). Boot #N, first boot
 // dating back days = the volume is fine and every warm cache above it can be trusted.
@@ -348,56 +360,130 @@ function loginFail(ip) {
   loginFails.set(ip, e);
 }
 
-// The login page, served inline for any unauthenticated navigation (no extra file, no native
-// Basic-auth popup). Styling mirrors the app's dark palette.
-const LOGIN_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Milst Screener — sign in</title>
-<style>
-:root{--bg:#0E1116;--panel:#151A21;--border:#262E39;--text:#E8E3D7;--muted:#7E8794;--accent:#E3A53C;--down:#E5604D;
---mono:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;--disp:'Space Grotesk',system-ui,sans-serif}
-*{box-sizing:border-box}html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:var(--disp)}
-body{display:flex;align-items:center;justify-content:center;padding:20px}
-.card{width:100%;max-width:360px;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:28px 26px 22px}
-.wm{font-size:24px;font-weight:700;letter-spacing:-.5px}.wm b{color:var(--accent)}
-.sub{color:var(--muted);font-size:12.5px;margin:4px 0 22px}
-label{display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.9px;color:var(--muted);margin-bottom:6px}
-input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);
-font-family:var(--mono);font-size:15px;padding:10px 12px;outline:none}
-input:focus{border-color:var(--accent)}
-button{width:100%;margin-top:14px;background:var(--accent);border:none;border-radius:6px;color:#000;
-font-family:var(--disp);font-size:14px;font-weight:600;padding:11px;cursor:pointer}
-button:disabled{opacity:.55;cursor:default}
-.err{color:var(--down);font-size:12.5px;min-height:17px;margin-top:10px;font-family:var(--mono)}
-</style></head><body>
-<div class="card">
-  <div class="wm">Milst <b>Screener</b></div>
-  <div class="sub">private terminal — enter the shared password</div>
-  <label for="pw">password</label>
-  <input id="pw" type="password" autocomplete="current-password" autofocus>
-  <button id="go">Enter</button>
-  <div class="err" id="err"></div>
-</div>
-<script>
-var pw=document.getElementById('pw'),go=document.getElementById('go'),err=document.getElementById('err');
-async function submit(){ if(!pw.value||go.disabled) return; go.disabled=true; err.textContent='';
-  try{ var r=await fetch('/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({password:pw.value})});
-    var d=await r.json().catch(function(){return {};});
-    if(r.ok&&d.ok){ location.replace('/'); return; }
-    err.textContent=(d&&d.error)||('HTTP '+r.status); }
-  catch(e){ err.textContent='network error — try again'; }
-  go.disabled=false; pw.select(); }
-go.addEventListener('click',submit);
-pw.addEventListener('keydown',function(e){ if(e.key==='Enter') submit(); });
-</script></body></html>`;
+// ===== auth pages (sign in / join / reset / claim) ============================================
+// One inline template, five modes. Served for any unauthenticated navigation, exactly as the
+// shared-password login page was: no extra file, no native Basic-auth popup, and the app's own
+// palette so the door does not look like a different product from the room behind it.
+//
+// Modes:
+//   signin    handle + password — the everyday door
+//   join      an open invite: pick a handle and a password, account created on submit
+//   reset     a reset link: new password only, the account is already named
+//   claim     an existing member arriving on a legacy shared-password session
+//   bootstrap the very first account, opened with ADMIN_PASSWORD when the user table is empty
+//   dead      an invite that cannot be used, and why
+function authPage(o) {
+  const mode = o.mode || "signin";
+  const esc = (x) => String(x == null ? "" : x)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const wantsHandle = mode === "join" || mode === "claim" || mode === "signin" || mode === "bootstrap";
+  const wantsPw = mode !== "dead";
+  const newAccount = mode === "join" || mode === "claim" || mode === "bootstrap";
+  const action = mode === "signin" ? "/login" : mode === "claim" ? "/claim"
+    : mode === "bootstrap" ? "/bootstrap" : "/join";
+  const sub = {
+    signin: "private terminal",
+    join: esc(o.inviter || "the operator") + " invited you to the terminal",
+    reset: "set a new password for " + esc(o.handle || "your account"),
+    claim: "this terminal now has accounts — claim yours",
+    bootstrap: "first account — this one is the operator",
+    dead: esc(o.reason || "this link cannot be used"),
+  }[mode];
+  const foot = {
+    signin: "Lost your password? Ask the operator for a reset link.",
+    join: newAccountFoot(o),
+    reset: "Setting a new password signs out every other device.",
+    claim: "Your alerts, rules and notes carry over — they are already yours.",
+    bootstrap: "You are creating the operator account. Everyone else joins by invite.",
+    dead: esc(o.hint || "Ask the operator for a fresh link."),
+  }[mode];
+  const rows = [];
+  if (wantsHandle) rows.push(
+    '<label for="h">handle</label>' +
+    '<input id="h" autocomplete="' + (newAccount ? "username" : "username") + '" autocapitalize="off" ' +
+    'autocorrect="off" spellcheck="false" value="' + esc(o.handle || "") + '"' +
+    (newAccount ? ' placeholder="what everyone else will see you as"' : "") + ' autofocus>');
+  if (wantsPw) rows.push(
+    '<label for="p">' + (newAccount || mode === "reset" ? "choose a password" : "password") + '</label>' +
+    '<input id="p" type="password" autocomplete="' + (newAccount || mode === "reset" ? "new-password" : "current-password") + '"' +
+    (wantsHandle ? "" : " autofocus") + '>');
+  const btn = { signin: "Sign in", join: "Create account", reset: "Set password",
+    claim: "Claim account", bootstrap: "Create operator account", dead: "" }[mode];
+
+  return '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
+'<meta name="viewport" content="width=device-width,initial-scale=1">' +
+'<meta name="referrer" content="same-origin">' +
+'<title>Milst Screener — ' + (mode === "signin" ? "sign in" : mode === "dead" ? "invite" : "join") + '</title>' +
+'<style>' + AUTH_CSS + '</style></head><body>' +
+'<div class="card">' +
+  '<div class="wm">Milst <b>Screener</b></div>' +
+  '<div class="sub">' + sub + '</div>' +
+  rows.join("") +
+  (btn ? '<button id="go">' + btn + '</button>' : "") +
+  '<div class="err" id="err">' + esc(o.error || "") + '</div>' +
+  '<div class="foot">' + foot + '</div>' +
+  (mode === "dead" ? '<a class="alt" href="/login">Go to sign in</a>' : "") +
+  (mode === "join" || mode === "reset" ? '<a class="alt" href="/login">Already have an account? Sign in</a>' : "") +
+'</div>' +
+'<script>' + AUTH_JS + '</script>' +
+'<script>window.__AUTH=' + JSON.stringify({ action, mode }) + ';authInit();</script>' +
+'</body></html>';
+}
+function newAccountFoot(o) {
+  const d = o.expiresAt ? Math.max(0, Math.round((o.expiresAt - Date.now()) / 86400000)) : 0;
+  return "Passwords are " + ACCOUNT_PW_MIN + " characters or more. " +
+    (o.expiresAt ? ("This invite works once and expires in " + (d <= 1 ? "under a day" : d + " days") + ".") : "");
+}
+const AUTH_CSS =
+":root{--bg:#0E1116;--panel:#151A21;--border:#262E39;--text:#E8E3D7;--muted:#7E8794;--faint:#4C5662;--accent:#E3A53C;--down:#E5604D;" +
+"--mono:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;--disp:'Space Grotesk',system-ui,sans-serif}" +
+"*{box-sizing:border-box}html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:var(--disp)}" +
+"body{display:flex;align-items:center;justify-content:center;padding:20px}" +
+".card{width:100%;max-width:370px;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:28px 26px 22px}" +
+".wm{font-size:24px;font-weight:700;letter-spacing:-.5px}.wm b{color:var(--accent)}" +
+".sub{color:var(--muted);font-size:12.5px;margin:4px 0 22px;line-height:1.5}" +
+"label{display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.9px;color:var(--muted);margin:0 0 6px}" +
+"input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);" +
+"font-family:var(--mono);font-size:15px;padding:10px 12px;outline:none;margin-bottom:14px}" +
+"input:focus{border-color:var(--accent)}input::placeholder{color:var(--faint);font-size:12.5px}" +
+"input.bad{border-color:var(--down)}" +
+"button{width:100%;margin-top:2px;background:var(--accent);border:none;border-radius:6px;color:#000;" +
+"font-family:var(--disp);font-size:14px;font-weight:600;padding:11px;cursor:pointer}" +
+"button:disabled{opacity:.55;cursor:default}" +
+".err{color:var(--down);font-size:12.5px;min-height:17px;margin-top:10px;font-family:var(--mono);line-height:1.45}" +
+".foot{color:var(--faint);font-size:11px;font-family:var(--mono);line-height:1.6;margin-top:12px}" +
+".alt{display:block;margin-top:14px;color:var(--muted);font-size:11.5px;font-family:var(--mono);text-decoration:none}" +
+".alt:hover{color:var(--accent)}";
+const AUTH_JS =
+"function authInit(){var A=window.__AUTH||{},h=document.getElementById('h'),p=document.getElementById('p')," +
+"go=document.getElementById('go'),err=document.getElementById('err');if(!go)return;" +
+"function submit(){if(go.disabled)return;go.disabled=true;err.textContent='';" +
+"if(h)h.classList.remove('bad');if(p)p.classList.remove('bad');" +
+"var body={};if(h)body.handle=h.value;if(p)body.password=p.value;" +
+"fetch(A.action,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)})" +
+".then(function(r){return r.json().catch(function(){return {};}).then(function(d){return {r:r,d:d};});})" +
+".then(function(x){if(x.r.ok&&x.d.ok){location.replace(x.d.next||'/');return;}" +
+"err.textContent=(x.d&&x.d.error)||('HTTP '+x.r.status);" +
+"var f=x.d&&x.d.field;if(f==='handle'&&h){h.classList.add('bad');h.focus();h.select();}" +
+"else if(p){p.classList.add('bad');p.focus();p.select();}go.disabled=false;})" +
+".catch(function(){err.textContent='network error — try again';go.disabled=false;});}" +
+"go.addEventListener('click',submit);" +
+"[h,p].forEach(function(e){if(e)e.addEventListener('keydown',function(ev){if(ev.key==='Enter')submit();});});}";
+const LOGIN_HTML = authPage({ mode: "signin" });
 
 async function main() {
   const fastify = Fastify({ logger: false });
 
   // True when a request carries a valid session cookie or correct HTTP Basic creds. Shared by the
   // optional site gate below AND the always-on AI-cost guard, so "authenticated" means one thing.
+  // The account session is checked FIRST and is the only path that carries a "who". The legacy
+  // shared-password token stays valid underneath it so the accounts migration does not log the
+  // group out on the deploy that introduces it; it authenticates without identifying, which is
+  // exactly why a legacy caller is bounced to /claim before it can reach anything personal.
+  const meOf = (req) => ACCOUNTS.sessionUser(getCookie(req, "xyzsess"));
   const reqAuthed = (req) => {
-    if (sessionOk(getCookie(req, "xyzsess"))) return true;
+    if (meOf(req)) return true;
+    if (LEGACY_DOOR && sessionOk(getCookie(req, "xyzsess"))) return true;
     const hdr = req.headers.authorization || "";
     const [scheme, enc] = hdr.split(" ");
     if (scheme === "Basic" && enc) {
@@ -410,7 +496,45 @@ async function main() {
 
   // True when the caller holds a valid admin-view cookie. Browser-only by design: there is no header
   // or Basic-auth path to admin, so a leaked script credential cannot flip feature visibility.
-  const isAdmin = (req) => adminViewOk(getCookie(req, "xyzadm"));
+  // Two independent ways to be admin now: the isAdmin flag on your own account, or the legacy
+  // ADMIN_PASSWORD-derived cookie kept as break-glass. The flag is the one that survives; the
+  // cookie is what lets an operator back in when they have locked themselves out of their account.
+  const isAdmin = (req) => {
+    const me = meOf(req);
+    if (me && me.isAdmin) return true;
+    return adminViewOk(getCookie(req, "xyzadm"));
+  };
+  // ---- the price stamp -------------------------------------------------------------------------
+  // A $TICKER in a message is resolved and priced off the SAME snapshot object the markets table
+  // is painted from, so the number frozen into a message is by construction the number the sender
+  // was looking at. Rebuilt only when the content clock moves — a message send costs a Map lookup,
+  // never a fetch, which is the whole reason this feature is cheap enough to be worth having.
+  let markTs = -1, markByCoin = new Map(), coinBySym = new Map();
+  function refreshMarks() {
+    const s = poller.getSnapshot();
+    if (!s || s.dataTs === markTs) return;
+    markTs = s.dataTs;
+    const bc = new Map(), cs = new Map();
+    for (const m of (s.markets || [])) {
+      if (m.px != null) bc.set(m.coin, m.px);
+      if (m.ticker) cs.set(String(m.ticker).toUpperCase(), m.coin);
+      cs.set(String(m.coin).toUpperCase(), m.coin);
+    }
+    markByCoin = bc; coinBySym = cs;
+  }
+  const markForCoin = (coin) => { refreshMarks(); const v = markByCoin.get(coin); return Number.isFinite(v) ? v : null; };
+  // A symbol the server does not know stays plain text rather than being stamped with nothing.
+  const coinForSymbol = (sym) => { refreshMarks(); return coinBySym.get(String(sym || "").toUpperCase()) || null; };
+  ACCOUNTS.setMarkSource(markForCoin);
+
+  // The alert-ownership handle. A signed-in member IS their uid — which is precisely why redeem()
+  // reuses an existing xyzown handle as the uid: every recipient and rule keyed by that string
+  // keeps working with no migration at all. Only a caller with no account falls back to the cookie.
+  const ownerFor = (req, reply) => {
+    const me = meOf(req);
+    if (me) { ACCOUNTS.touch(me.uid); return me.uid; }
+    return ensureOwner(req, reply);
+  };
 
   // Always-on guard for the paid AI-escalation endpoints. These spend real OpenAI/Anthropic budget,
   // so they must never answer an unauthenticated caller — including when SITE_PASSWORD is UNSET, a
@@ -434,7 +558,7 @@ async function main() {
   });
   // One place computes "who is asking" for the AI-cost routes: the signed xyzown handle keys the
   // per-user quota; admin = AI unlock OR admin view (both are ADMIN_PASSWORD-derived cookies).
-  const aiWho = (req, reply) => ({ owner: ensureOwner(req, reply),
+  const aiWho = (req, reply) => ({ owner: ownerFor(req, reply),
     admin: aiUnlockOk(getCookie(req, "xyzai")) || isAdmin(req) });
 
   // Optional shared-password gate. Disabled unless SITE_PASSWORD is set. Two ways in:
@@ -446,8 +570,22 @@ async function main() {
   if (SITE_PASSWORD) {
     fastify.addHook("onRequest", async (req, reply) => {
       const u = req.url.split("?")[0];
-      if (u === "/api/health" || u === "/logout" || (u === "/login" && req.method === "POST")) return;
-      if (reqAuthed(req)) return;
+      // The doors themselves must pass or nobody could ever authenticate. /join is on the list
+      // because an invited person has, by definition, no session yet.
+      if (u === "/api/health" || u === "/logout" || u === "/login"
+          || u === "/join" || u.startsWith("/join/") || u === "/claim" || u === "/bootstrap") return;
+      // A legacy shared-password session authenticates but does not IDENTIFY. Once accounts exist,
+      // send those callers to /claim rather than into an app where every personal surface would
+      // 401 at them with no explanation. Break-glass admins are exempt: ADMIN_PASSWORD is how an
+      // operator gets back in when they have locked themselves out of their own account.
+      if (reqAuthed(req)) {
+        if (!meOf(req) && ACCOUNTS.countUsers() > 0 && !adminViewOk(getCookie(req, "xyzadm"))) {
+          if (u.startsWith("/api/")) return reply.code(401).header("cache-control", "no-store")
+            .send({ error: "claim-account", detail: "this terminal now has accounts — visit /claim" });
+          return reply.redirect(302, "/claim");
+        }
+        return;
+      }
       // CRITICAL: in an async hook, reply.send() alone does NOT stop the lifecycle — the
       // route handler still runs and double-sends (here: @fastify/static also answered "/",
       // corrupting the response into a body-less 401 that hangs the browser). Returning the
@@ -519,33 +657,286 @@ async function main() {
     return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : r.error === "write-failed" ? 503 : 400)).send(r);
   });
 
-  // Login/logout exist regardless of the gate so a stale xyzauth cookie can always be cleared.
-  // One prompt, two outcomes: the shared password grants a session, ADMIN_PASSWORD grants a session
-  // AND the admin-view lease. Admin implies site access, so there is no third password and no second
-  // login screen. The admin branch is checked FIRST and independently of SITE_PASSWORD, so the panel
-  // is still reachable in the deliberately-open posture where no site password is set.
-  fastify.post("/login", async (req, reply) => {
+  // ===== identity: sign in, join, claim, bootstrap ==============================================
+  // Session cookies are minted in exactly one place so a route can never accidentally issue one
+  // with the wrong lifetime, and the JS-visible marker always travels with the real token.
+  const signIn = (reply, req, user, token) => {
+    setSessionCookies(reply, req, SESSION_DAYS * 86400, token);
+    // An account-flagged admin gets the view lease too, so the Admin tab paints on the first frame
+    // instead of after a round trip. It is a mirror of the flag, never the source of it.
+    if (user && user.isAdmin) setAdminCookies(reply, req, ADMIN_DAYS * 86400, signAdminView(Date.now() + ADMIN_DAYS * 864e5));
+  };
+  const inviteCookie = (reply, req, code) =>
+    reply.header("set-cookie", "xyzinv=" + encodeURIComponent(code) + cookieAttrs(req, code ? 900 : 0) + "; HttpOnly");
+  const htmlNoStore = (reply) => reply.header("cache-control", "no-store").type("text/html; charset=utf-8");
+
+  fastify.get("/login", (req, reply) => {
+    if (meOf(req)) return reply.redirect(302, "/");
+    return htmlNoStore(reply).send(authPage({ mode: "signin" }));
+  });
+
+  // One prompt, four outcomes, checked in this order:
+  //   1. handle + password matches an account      -> that account's session
+  //   2. ADMIN_PASSWORD                            -> break-glass session + admin lease
+  //      (and, when no account exists yet, the bootstrap door)
+  //   3. the legacy shared password                -> a session that can ONLY reach /claim
+  //   4. nothing                                   -> 401, and the IP damper counts it
+  fastify.post("/login", { bodyLimit: 8 * 1024 }, async (req, reply) => {
     const ip = String(req.headers["x-forwarded-for"] || req.ip).split(",")[0].trim();
     const lockedMin = loginLockedFor(ip);
     if (lockedMin) { reply.code(429); return { ok: false, error: `too many attempts — locked for ${lockedMin} min` }; }
     const b = req.body || {};
+    const handle = String(b.handle == null ? "" : b.handle).trim();
     const pw = String(b.password == null ? "" : b.password);
+
+    if (handle) {
+      const r = ACCOUNTS.login(handle, pw);
+      if (r.ok) {
+        loginFails.delete(ip);
+        signIn(reply, req, r.user, r.token);
+        log(`sign-in: ${r.user.handle}${r.user.isAdmin ? " (admin)" : ""}`);
+        return { ok: true, next: "/" };
+      }
+      // Fall through to the password-only doors below rather than failing here: an operator typing
+      // ADMIN_PASSWORD into a form that also has a handle box should still get in.
+    }
+
     if (adminPwOk(pw)) {
       loginFails.delete(ip);
       setSessionCookies(reply, req, SESSION_DAYS * 86400, signSession(Date.now() + SESSION_DAYS * 864e5));
       setAdminCookies(reply, req, ADMIN_DAYS * 86400, signAdminView(Date.now() + ADMIN_DAYS * 864e5));
-      log("admin view granted via login");
-      return { ok: true, admin: true };
+      const empty = ACCOUNTS.countUsers() === 0;
+      log("admin view granted via login" + (empty ? " (no accounts yet — routed to bootstrap)" : ""));
+      return { ok: true, admin: true, next: empty ? "/bootstrap" : "/" };
     }
-    if (!SITE_PASSWORD) return { ok: true, admin: false };   // gate disabled — nothing further to check
-    const user = (b.user == null || b.user === "") ? SITE_USER : String(b.user);   // page sends password only; SITE_USER is implied
-    if (!credsOk(user, pw)) {
-      loginFail(ip); reply.code(401); return { ok: false, error: "wrong password" };
+
+    if (LEGACY_DOOR && SITE_PASSWORD && credsOk(handle || SITE_USER, pw)) {
+      loginFails.delete(ip);
+      setSessionCookies(reply, req, SESSION_DAYS * 86400, signSession(Date.now() + SESSION_DAYS * 864e5));
+      return { ok: true, next: "/claim" };
     }
-    loginFails.delete(ip);
-    setSessionCookies(reply, req, SESSION_DAYS * 86400, signSession(Date.now() + SESSION_DAYS * 864e5));
-    return { ok: true, admin: false };
+
+    if (handle || pw) loginFail(ip);
+    reply.code(401);
+    return { ok: false, error: handle ? "wrong handle or password" : "wrong password" };
   });
+
+  // ---- the invite door -------------------------------------------------------------------------
+  // GET /join/:code does not render anything. It validates, moves the code into an HttpOnly cookie
+  // and redirects to a bare /join. That redirect IS the security step: after it the code is no
+  // longer in the address bar, the browser history, or any Referer header a later request carries.
+  // The one access-log line that does hold it is written with the code redacted.
+  fastify.get("/join/:code", (req, reply) => {
+    const raw = String((req.params && req.params.code) || "");
+    const r = ACCOUNTS.readInvite(raw);
+    if (!r.ok) {
+      inviteCookie(reply, req, "");
+      log(`invite: rejected a ${r.state} code`);
+      return htmlNoStore(reply).code(410).send(deadInvitePage(r.state));
+    }
+    log("invite: opened (code redacted)");
+    inviteCookie(reply, req, r.invite.code);
+    return reply.redirect(302, "/join");
+  });
+
+  const deadInvitePage = (state) => authPage({ mode: "dead",
+    reason: state === "used" ? "this invite has already been used"
+      : state === "expired" ? "this invite has expired"
+      : state === "revoked" ? "this invite was revoked"
+      : "that invite link isn't valid",
+    hint: state === "used" ? "Invites work once. If that was you, sign in instead."
+      : state === "revoked" ? "Ask the operator for a fresh link."
+      : "Ask the operator for a fresh link." });
+
+  fastify.get("/join", (req, reply) => {
+    const code = decodeURIComponent(getCookie(req, "xyzinv") || "");
+    const r = ACCOUNTS.readInvite(code);
+    if (!r.ok) { inviteCookie(reply, req, ""); return htmlNoStore(reply).code(410).send(deadInvitePage(r.state)); }
+    // Somebody already signed in who opens an invite must NOT silently burn it — that is a fresh
+    // link spent because a member clicked their own forward twice.
+    const me = meOf(req);
+    if (me && r.invite.kind === "join") {
+      return htmlNoStore(reply).send(authPage({ mode: "dead",
+        reason: "you are already signed in as " + me.display,
+        hint: "This invite is for somebody else. Sign out first if you meant to use it." }));
+    }
+    if (r.invite.kind === "reset")
+      return htmlNoStore(reply).send(authPage({ mode: "reset", handle: r.target ? r.target.display : "your account" }));
+    return htmlNoStore(reply).send(authPage({ mode: "join", inviter: r.inviter, expiresAt: r.invite.expiresAt }));
+  });
+
+  fastify.post("/join", { bodyLimit: 8 * 1024 }, async (req, reply) => {
+    const ip = String(req.headers["x-forwarded-for"] || req.ip).split(",")[0].trim();
+    if (loginLockedFor(ip)) { reply.code(429); return { ok: false, error: "too many attempts — try again shortly" }; }
+    const code = decodeURIComponent(getCookie(req, "xyzinv") || "");
+    const b = req.body || {};
+    // The prior signed handle is what makes the migration free: it becomes the new uid, so every
+    // alert recipient and rule already keyed to it belongs to the account without being rewritten.
+    const prior = ownerOf(getCookie(req, "xyzown"));
+    const r = ACCOUNTS.redeem(code, b.handle, b.password, prior);
+    if (!r.ok) {
+      if (r.state) loginFail(ip);
+      reply.code(r.state ? 410 : 400);
+      return { ok: false, error: r.error, field: r.field || null };
+    }
+    inviteCookie(reply, req, "");
+    signIn(reply, req, r.user, r.token);
+    log(r.reset ? `password reset completed for ${r.user.handle}`
+      : `account created: ${r.user.handle}${r.adopted ? " (carried over existing alerts)" : ""}`);
+    return { ok: true, next: "/" };
+  });
+
+  // ---- legacy migration --------------------------------------------------------------------------
+  // An existing member arriving on a shared-password session. Same account creation as an invite
+  // redemption, no invite required, and only while the operator leaves the legacy door open.
+  fastify.get("/claim", (req, reply) => {
+    if (meOf(req)) return reply.redirect(302, "/");
+    if (!LEGACY_DOOR || !sessionOk(getCookie(req, "xyzsess"))) return reply.redirect(302, "/login");
+    return htmlNoStore(reply).send(authPage({ mode: "claim" }));
+  });
+  fastify.post("/claim", { bodyLimit: 8 * 1024 }, async (req, reply) => {
+    if (meOf(req)) { reply.code(409); return { ok: false, error: "you already have an account" }; }
+    if (!LEGACY_DOOR || !sessionOk(getCookie(req, "xyzsess"))) { reply.code(401); return { ok: false, error: "sign in first" }; }
+    const b = req.body || {};
+    const r = ACCOUNTS.claim(b.handle, b.password, ownerOf(getCookie(req, "xyzown")));
+    if (!r.ok) { reply.code(400); return { ok: false, error: r.error, field: r.field || null }; }
+    signIn(reply, req, r.user, r.token);
+    log(`account claimed: ${r.user.handle}${r.adopted ? " (carried over existing alerts)" : ""}`);
+    return { ok: true, next: "/" };
+  });
+
+  // ---- bootstrap ---------------------------------------------------------------------------------
+  // Account #1, created by whoever holds ADMIN_PASSWORD, because there is nobody yet who could have
+  // issued an invite. Closes for good the moment any account exists.
+  fastify.get("/bootstrap", (req, reply) => {
+    if (ACCOUNTS.countUsers() > 0) return reply.redirect(302, "/login");
+    if (!adminViewOk(getCookie(req, "xyzadm"))) return reply.redirect(302, "/login");
+    return htmlNoStore(reply).send(authPage({ mode: "bootstrap" }));
+  });
+  fastify.post("/bootstrap", { bodyLimit: 8 * 1024 }, async (req, reply) => {
+    if (!adminViewOk(getCookie(req, "xyzadm"))) { reply.code(403); return { ok: false, error: "forbidden" }; }
+    const b = req.body || {};
+    const r = ACCOUNTS.bootstrap(b.handle, b.password, ownerOf(getCookie(req, "xyzown")));
+    if (!r.ok) { reply.code(400); return { ok: false, error: r.error, field: r.field || null }; }
+    signIn(reply, req, r.user, r.token);
+    log(`operator account created: ${r.user.handle}`);
+    return { ok: true, next: "/" };
+  });
+
+  // ---- who am I ----------------------------------------------------------------------------------
+  fastify.get("/api/account", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = meOf(req);
+    return { ok: true, me: me ? ACCOUNTS.pub(me) : null, legacy: !me && LEGACY_DOOR && sessionOk(getCookie(req, "xyzsess")),
+      accounts: ACCOUNTS.countUsers(), pwMin: ACCOUNT_PW_MIN };
+  });
+  // Changing your own password bumps your epoch, which is what makes every other device sign out.
+  fastify.post("/api/account", { bodyLimit: 8 * 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = meOf(req);
+    if (!me) return reply.code(401).send({ ok: false, error: "sign in first" });
+    const b = req.body || {};
+    const r = ACCOUNTS.login(me.handle, String(b.current == null ? "" : b.current));
+    if (!r.ok) return reply.code(403).send({ ok: false, error: "current password is wrong", field: "current" });
+    const set = ACCOUNTS.setPassword(me.uid, b.password);
+    if (!set.ok) return reply.code(400).send({ ok: false, error: set.error, field: "password" });
+    signIn(reply, req, set.user, set.token);   // keep THIS device signed in; the epoch bump drops the rest
+    return { ok: true, signedOutOthers: true };
+  });
+
+  // ===== admin: the access panel ==================================================================
+  fastify.get("/api/access", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    if (!isAdmin(req)) return reply.code(403).send({ error: "forbidden" });
+    const me = meOf(req);
+    return { ok: true, me: me ? ACCOUNTS.pub(me) : null,
+      members: ACCOUNTS.listUsers(), invites: ACCOUNTS.listInvites(),
+      legacyDoor: LEGACY_DOOR && !!SITE_PASSWORD, ttls: [1, 7, 30], stats: ACCOUNTS.stats() };
+  });
+  // One route, several verbs in the body — the shape /api/notes and /api/baskets already use, so
+  // the manifest gate covers the whole write surface at once.
+  fastify.post("/api/access", { bodyLimit: 8 * 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "forbidden" });
+    const me = meOf(req);
+    const by = me ? me.uid : "legacy-admin";
+    const b = req.body || {};
+    const op = String(b.op || "");
+    const uid = String(b.uid || "");
+    // An operator must not be able to lock themselves out with one misclick, and the last admin
+    // standing must not be able to remove the only account that can issue the next invite.
+    const lastAdmin = (target) => {
+      const admins = ACCOUNTS.listUsers().filter((u) => u.isAdmin && !u.disabled);
+      return admins.length <= 1 && admins.some((u) => u.uid === target);
+    };
+    let r;
+    if (op === "mint") r = ACCOUNTS.mintInvite(by, b.label, b.days, "join");
+    else if (op === "reset-link") {
+      if (!ACCOUNTS.getUser(uid)) r = { ok: false, error: "no such account" };
+      else r = ACCOUNTS.mintInvite(by, "reset for " + ACCOUNTS.getUser(uid).display, 1, "reset", uid);
+    }
+    else if (op === "revoke") r = ACCOUNTS.revokeInvite(String(b.code || ""));
+    else if (op === "signout") r = ACCOUNTS.signOutEverywhere(uid);
+    else if (op === "disable") r = lastAdmin(uid) ? { ok: false, error: "that is the last operator — promote somebody else first" } : ACCOUNTS.setDisabled(uid, true);
+    else if (op === "enable") r = ACCOUNTS.setDisabled(uid, false);
+    else if (op === "admin") r = (!b.on && lastAdmin(uid)) ? { ok: false, error: "that is the last operator — promote somebody else first" } : ACCOUNTS.setAdmin(uid, !!b.on);
+    else r = { ok: false, error: "unknown operation" };
+    if (r.ok && op === "mint") log(`invite minted by ${me ? me.handle : "admin"}${b.label ? " for " + String(b.label).slice(0, 32) : ""}`);
+    if (r.ok && (op === "disable" || op === "admin" || op === "signout")) log(`access: ${op} on ${(ACCOUNTS.getUser(uid) || {}).handle || uid}`);
+    return reply.code(r.ok ? 200 : 400).send(r);
+  });
+
+  // ===== direct messages ==========================================================================
+  // Every route resolves the uid from the session and filters by participation. A thread id from
+  // the client names a row; it never grants access to one.
+  //
+  // NOTE: none of these go through serveKeyed. Its keyedCache is a single shared Map keyed by a
+  // string, so a per-user payload cached under a uid-less key would be served to the next caller —
+  // exactly the leak this feature must not have. no-store, always.
+  const dmMe = (req, reply) => {
+    const me = meOf(req);
+    if (!me) { reply.code(401).header("cache-control", "no-store").send({ ok: false, error: "sign in to use messages" }); return null; }
+    ACCOUNTS.touch(me.uid);
+    return me;
+  };
+  fastify.get("/api/dm", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    // The directory is simply the member list: at this size a request-to-connect flow is ceremony.
+    return { ok: true, me: ACCOUNTS.pub(me), threads: ACCOUNTS.threads(me.uid),
+      members: ACCOUNTS.listUsers().filter((u) => u.uid !== me.uid && !u.disabled),
+      online: [...dmOnline()], maxLen: ACCOUNT_DM_MAX };
+  });
+  fastify.get("/api/dm/sync", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    const q = req.query || {};
+    return ACCOUNTS.sync(me.uid, q.since, q.limit);
+  });
+  fastify.get("/api/dm/:id", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    const q = req.query || {};
+    const r = ACCOUNTS.history(me.uid, (req.params || {}).id, q.before, q.limit);
+    return r.ok ? r : reply.code(404).send(r);
+  });
+  fastify.post("/api/dm", { bodyLimit: 16 * 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    const b = req.body || {};
+    let r;
+    if (b.read != null || b.markRead) r = ACCOUNTS.markRead(me.uid, b.thread, b.read);
+    else if (b.mute != null) r = ACCOUNTS.setMuted(me.uid, b.thread, !!b.mute);
+    else if (b.drop && b.id != null) r = ACCOUNTS.drop(me.uid, b.id);
+    else if (b.id != null) r = ACCOUNTS.edit(me.uid, b.id, b.body);
+    else r = ACCOUNTS.send(me.uid, String(b.to || ""), b.body, coinForSymbol);
+    if (!r.ok) return reply.code(r.retry ? 429 : 400).send(r);
+    // Wake both sides immediately. The frame carries a sequence number, never the message — the
+    // client reacts by running the same sync pull it would have run on its own.
+    if (r.thread) dmPoke(r.thread);
+    return r;
+  });
+
   fastify.get("/logout", async (req, reply) => {
     setSessionCookies(reply, req, 0, null);   // Max-Age=0 deletes both cookies
     setAdminCookies(reply, req, 0, null);     // signing out drops elevation — never leave a stale admin lease
@@ -674,13 +1065,18 @@ async function main() {
     if (i < 0) { log("WARN: index.html flag slot missing — feature visibility will not be injected (server gate still enforces; tabs may show and 403)"); return [h, ""]; }
     return [h.slice(0, i), h.slice(i + FLAG_SLOT.length)];
   })();
+  // The pre-paint boot script, resolved for THIS caller: feature set, admin flag, nav labels and
+  // identity. Nav labels ride it because the ribbon must paint with the admin's names on the FIRST
+  // frame, or every load flashes the defaults before a fetch could correct them; identity rides it
+  // for the same reason, so the header never shows a signed-out state to a signed-in member.
+  const bootScript = (admin, me) =>
+    "window.__FLAGS=" + JSON.stringify(resolveFeatures(poller.getFlags(), admin)) +
+    ";window.__ADMIN=" + (admin ? "true" : "false") +
+    ";window.__NAVGROUPS=" + JSON.stringify(poller.getNavGroups()) +
+    ";window.__ME=" + JSON.stringify(me ? ACCOUNTS.pub(me) : null) + ";";
   const serveIndex = (req, reply) => {
     const admin = isAdmin(req);
-    // Nav labels ride the same injection: the ribbon must paint with the admin's names on the
-    // FIRST frame, or every load would flash the defaults before a fetch could correct them.
-    const boot = "window.__FLAGS=" + JSON.stringify(resolveFeatures(poller.getFlags(), admin)) +
-      ";window.__ADMIN=" + (admin ? "true" : "false") +
-      ";window.__NAVGROUPS=" + JSON.stringify(poller.getNavGroups()) + ";";
+    const boot = bootScript(admin, meOf(req));
     // Already no-store, so there is no cache to poison with the wrong audience's shell — the reason
     // this per-request body is safe where a cached one would not be.
     return reply.header("cache-control", "no-store").type("text/html; charset=utf-8").send(INDEX_HEAD + boot + INDEX_TAIL);
@@ -749,7 +1145,7 @@ async function main() {
     const since = req.query && req.query.since;
     // Owner-scoped: rule events belong to whoever wrote the rule and must not appear in anyone
     // else's bell log. Market and server events are shared and unaffected.
-    return reply.header("cache-control", "no-store").send(poller.getTriggers(since, ensureOwner(req, reply), isAdmin(req)));
+    return reply.header("cache-control", "no-store").send(poller.getTriggers(since, ownerFor(req, reply), isAdmin(req)));
   });
 
   // ---- alert delivery (telegram push, slice A) ------------------------------------------------
@@ -757,7 +1153,7 @@ async function main() {
   // last delivery outcomes. no-store — the whole payload is "what is true right now", and a link
   // code served from a cache is a code that has already expired.
   fastify.get("/api/alerts", (req, reply) => {
-    const own = ensureOwner(req, reply);
+    const own = ownerFor(req, reply);
     return reply.header("cache-control", "no-store").send(poller.getPush(own, isAdmin(req)));
   });
   // Mint a single-use link code. The code, not the chat id, is what the human carries into the DM:
@@ -765,33 +1161,33 @@ async function main() {
   fastify.post("/api/alerts/link", { bodyLimit: 4 * 1024 }, (req, reply) => {
     // The code carries the minting browser's handle, so whoever redeems it in Telegram is bound to
     // THAT browser — the link and the ownership are established in one step, unforgeably.
-    const r = poller.pushMintCode(ensureOwner(req, reply), isAdmin(req));
+    const r = poller.pushMintCode(ownerFor(req, reply), isAdmin(req));
     return reply.code(r.ok ? 200 : 400).send(r);
   });
   fastify.post("/api/alerts/claim", { bodyLimit: 4 * 1024 }, (req, reply) => {
-    const r = poller.pushClaim(String((req.body && req.body.chat) || ""), ensureOwner(req, reply), isAdmin(req));
+    const r = poller.pushClaim(String((req.body && req.body.chat) || ""), ownerFor(req, reply), isAdmin(req));
     return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : 400)).send(r);
   });
   fastify.post("/api/alerts/unlink", { bodyLimit: 4 * 1024 }, (req, reply) => {
-    const r = poller.pushUnlink(String((req.body && req.body.chat) || ""), ensureOwner(req, reply), isAdmin(req));
+    const r = poller.pushUnlink(String((req.body && req.body.chat) || ""), ownerFor(req, reply), isAdmin(req));
     return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : 400)).send(r);
   });
   // Per-recipient quiet hours and digest time. Separate from the class selection because they are
   // scheduling, not subscription — the same event can be wanted and still not wanted at 3am.
   fastify.post("/api/alerts/prefs", { bodyLimit: 8 * 1024 }, (req, reply) => {
     const b = req.body || {};
-    const r = poller.pushSetPrefs(String(b.chat || ""), b, ensureOwner(req, reply), isAdmin(req));
+    const r = poller.pushSetPrefs(String(b.chat || ""), b, ownerFor(req, reply), isAdmin(req));
     return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : 400)).send(r);
   });
   fastify.post("/api/alerts/classes", { bodyLimit: 8 * 1024 }, (req, reply) => {
     const b = req.body || {};
-    const r = poller.pushSetClasses(String(b.chat || ""), Array.isArray(b.classes) ? b.classes : null, ensureOwner(req, reply), isAdmin(req));
+    const r = poller.pushSetClasses(String(b.chat || ""), Array.isArray(b.classes) ? b.classes : null, ownerFor(req, reply), isAdmin(req));
     return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : 400)).send(r);
   });
   // Test fire: the only way to prove the wire without waiting for a real setup — and the only way
   // I can hand over a feature whose transport I cannot reach from a dev sandbox.
   fastify.post("/api/alerts/test", { bodyLimit: 4 * 1024 }, (req, reply) => {
-    const r = poller.pushTest((req.body && req.body.chat) || null, ensureOwner(req, reply), isAdmin(req));
+    const r = poller.pushTest((req.body && req.body.chat) || null, ownerFor(req, reply), isAdmin(req));
     if (!r.ok && r.error === "cooldown") return reply.code(429).send(r);
     return reply.code(r.ok ? 200 : 400).send(r);
   });
@@ -806,7 +1202,7 @@ async function main() {
     if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "admin only" });
     const b = req.body || {};
     const fn = b.kind === "landscape" ? poller.landTest : poller.briefTest;
-    const r = await fn(b.chat || null, ensureOwner(req, reply), true, !!b.fresh, !!b.operator || !!b.mine);
+    const r = await fn(b.chat || null, ownerFor(req, reply), true, !!b.fresh, !!b.operator || !!b.mine);
     return reply.code(r.ok ? 200 : 400).send(r);
   });
 
@@ -814,12 +1210,12 @@ async function main() {
   // keep firing with every tab closed. no-store — the list is small and edits must be visible to
   // the next reader immediately.
   fastify.get("/api/alerts/rules", (req, reply) => {
-    const own = ensureOwner(req, reply);
+    const own = ownerFor(req, reply);
     return reply.header("cache-control", "no-store").send(poller.getRules(own, isAdmin(req)));
   });
   fastify.post("/api/alerts/rules", { bodyLimit: 16 * 1024 }, (req, reply) => {
     const b = req.body || {};
-    const own = ensureOwner(req, reply);
+    const own = ownerFor(req, reply);
     const r = b.del != null ? poller.deleteRule(b.del, own, isAdmin(req)) : poller.addRule(b, own);
     return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : 400)).send(r);
   });
@@ -1293,7 +1689,7 @@ async function main() {
     // prompting for a password on generation and shows the caller's own remaining budget.
     const admin = aiUnlockOk(getCookie(req, "xyzai")) || isAdmin(req);
     return Object.assign({ gated: false, unlocked: admin, admin: isAdmin(req) },
-      poller.getAiQuota(ensureOwner(req, reply), admin));
+      poller.getAiQuota(ownerFor(req, reply), admin));
   });
   // Live GICS sectors with >=3 equity members — feeds the terminal's `report sector` command
   // and any picker UI. Cheap (curated classification over in-memory rows), session-gated.
@@ -1336,6 +1732,12 @@ async function main() {
   // code-path contract is untouched. Alert latency drops from poll-cadence to ~1s; idle clients
   // during off-hours (frozen content clock) cost heartbeats only.
   //
+  // Direct messages ride the SAME contract (build 2026.08.30-46). A send pushes `{dm:{seq}}` to the
+  // two participants' connections ONLY, and they answer it with an ordinary /api/dm/sync pull. The
+  // message body never travels on the stream, so a dropped frame loses nothing: the client's cursor
+  // is authoritative and the next pull picks up whatever was missed. That is also why there is no
+  // WebSocket here — sends are POSTs, and one-directional notification is all the stream owes us.
+  //
   // The change detector is a 1s unref'd watcher over the SAME snapshotCache object clients fetch,
   // deliberately NOT an emitter threaded through poller.js: buildSnapshot has many call sites, a
   // missed one would be a silent latency regression, and a property read per second is free. The
@@ -1343,12 +1745,39 @@ async function main() {
   // Streams are hijacked from Fastify's pipeline (compress/onSend never touch them), so the
   // baseline security headers are written by hand here. Connection cap prevents fd exhaustion —
   // client #201 gets a 503 and its EventSource retry keeps it on the poll fallback, fully served.
-  const sseClients = new Set();
+  const sseClients = new Set();          // entries: { res, uid }
+  const sseByUid = new Map();            // uid -> Set(entry), for targeted delivery
   const SSE_MAX = 200;
+  // A per-member cap on top of the global one: without it a single person with a wall of tabs open
+  // can eat the whole pool and lock everybody else onto the poll fallback.
+  const SSE_PER_USER = 4;
+  function sseAttach(entry) {
+    sseClients.add(entry);
+    if (!entry.uid) return;
+    let set = sseByUid.get(entry.uid);
+    if (!set) { set = new Set(); sseByUid.set(entry.uid, set); }
+    set.add(entry);
+  }
+  function sseDetach(entry) {
+    sseClients.delete(entry);
+    const set = entry.uid && sseByUid.get(entry.uid);
+    if (set) { set.delete(entry); if (!set.size) sseByUid.delete(entry.uid); }
+  }
+  // Presence, deliberately in memory and nowhere else: a live stream IS the signal, so there is
+  // nothing to persist, nothing to expire, and nothing to be wrong across a restart.
+  const dmOnline = () => new Set(sseByUid.keys());
   function sseFrame() {
     const s = poller.getSnapshot();
     return "data: " + JSON.stringify({ dataTs: s ? s.dataTs : 0, alertVer: s ? s.alertVer : 0, v: VERSION }) + "\n\n";
   }
+  // The connect frame is the version frame plus the caller's OWN dm cursor, so a tab that slept
+  // through a conversation catches up on its first byte instead of waiting for the next send.
+  function sseHelloFrame(me) {
+    const s = poller.getSnapshot();
+    return "data: " + JSON.stringify({ dataTs: s ? s.dataTs : 0, alertVer: s ? s.alertVer : 0,
+      v: VERSION, dm: me ? { seq: ACCOUNTS.stats().messages } : undefined }) + "\n\n";
+  }
+  const sseWrite = (entry, frame) => { try { entry.res.write(frame); } catch (_) {} };
   let sseLastTs = -1, sseLastAlert = -1;
   setInterval(() => {
     if (!sseClients.size) return;
@@ -1357,15 +1786,32 @@ async function main() {
     if (ts === sseLastTs && av === sseLastAlert) return;
     sseLastTs = ts; sseLastAlert = av;
     const frame = sseFrame();
-    for (const res of sseClients) { try { res.write(frame); } catch (_) {} }
+    for (const e of sseClients) sseWrite(e, frame);
   }, 1000).unref();
   // One shared heartbeat, comment frames only: keeps proxies (Railway's edge included) from
   // reaping quiet streams, which off-hours streams otherwise always are.
   setInterval(() => {
-    for (const res of sseClients) { try { res.write(": hb\n\n"); } catch (_) {} }
+    for (const e of sseClients) sseWrite(e, ": hb\n\n");
   }, 25000).unref();
+
+  // Wake exactly the two people in a conversation. Everyone else's stream is untouched — a DM is
+  // not an event the group is entitled to know happened.
+  function dmPoke(threadId) {
+    const peers = ACCOUNTS.threadPeers(threadId);
+    if (!peers.length) return;
+    const frame = "data: " + JSON.stringify({ dm: { seq: ACCOUNTS.stats().messages } }) + "\n\n";
+    for (const uid of peers) {
+      const set = sseByUid.get(uid);
+      if (set) for (const e of set) sseWrite(e, frame);
+    }
+  }
+
   fastify.get("/api/events", (req, reply) => {
     if (sseClients.size >= SSE_MAX) { reply.code(503).send({ error: "sse-full" }); return; }
+    const me = meOf(req);
+    if (me && (sseByUid.get(me.uid) || { size: 0 }).size >= SSE_PER_USER) {
+      reply.code(503).send({ error: "sse-per-user-full" }); return;
+    }
     reply.hijack();
     const res = reply.raw;
     res.writeHead(200, {
@@ -1377,14 +1823,48 @@ async function main() {
       "x-frame-options": "DENY",
       "referrer-policy": "same-origin",
     });
+    // Identity is resolved ONCE, at connect. A session that expires mid-stream keeps delivering to
+    // that connection until it drops, which is the same lifetime the browser tab already has.
+    const entry = { res, uid: me ? me.uid : "" };
     // Initial frame on connect: the client syncs immediately instead of waiting for the first
     // change — and a reconnect after a missed deploy sees the new `v` on its first byte.
-    try { res.write(sseFrame()); } catch (_) {}
-    sseClients.add(res);
-    const drop = () => { sseClients.delete(res); try { res.end(); } catch (_) {} };
+    try { res.write(sseHelloFrame(me)); } catch (_) {}
+    sseAttach(entry);
+    const drop = () => { sseDetach(entry); try { res.end(); } catch (_) {} };
     req.raw.on("close", drop);
     req.raw.on("error", drop);
   });
+
+  // ===== offline escalation to Telegram ==========================================================
+  // A DM to somebody with no live stream, still unread after DM_ESCALATE_MS, goes to their linked
+  // Telegram as ONE digest per sender rather than one push per message. It reuses the outbox that
+  // already exists — recipients, hourly caps and quiet hours all apply without a line of new
+  // delivery code. Muted threads never escalate, and opening the terminal before the delay elapses
+  // cancels it, because by then the member is online and the sweep skips them.
+  setInterval(() => {
+    if (!poller.pushEnqueueNow) return;
+    let pending;
+    try { pending = ACCOUNTS.pendingEscalations(DM_ESCALATE_MS, (uid) => sseByUid.has(uid)); }
+    catch (e) { log("dm escalation sweep failed (isolated): " + (e && e.message)); return; }
+    if (!pending.length) return;
+    for (const p of pending) {
+      // Their own recipients only. `owner` on a recipient IS the uid, which is the whole point of
+      // reusing the xyzown handle as the account id.
+      const targets = poller.pushRecipientsFor ? poller.pushRecipientsFor(p.uid) : [];
+      if (targets.length) {
+        const head = `<b>${tgEsc(p.from)}</b> · ${p.n} unread message${p.n === 1 ? "" : "s"}`;
+        const body = p.lines.map((l) => "“" + tgEsc(l) + "”").join("\n");
+        for (const chat of targets) poller.pushEnqueueNow(chat, head + "\n" + body + "\n<i>Reply in the terminal.</i>");
+      }
+      // Marked either way. With no Telegram linked there is nothing to send, and leaving it
+      // unmarked would re-scan the same backlog every tick forever.
+      ACCOUNTS.markEscalated(p.uid, p.thread, p.upTo);
+    }
+  }, 60 * 1000).unref();
+  // Telegram sends with parse_mode HTML, so a message body is untrusted markup on that wire exactly
+  // as it is in the browser. Escaped here, at the boundary, never stored escaped.
+  const tgEsc = (x) => String(x == null ? "" : x)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
   fastify.get("/api/health", () => ({ ok: true, version: VERSION, volume: { boots: HEARTBEAT.boots, firstBoot: HEARTBEAT.firstBoot, dataDir: DATA_DIR },
     // Live histogram read (current, still-open window) + the closed-window ring + worst-ever. The
