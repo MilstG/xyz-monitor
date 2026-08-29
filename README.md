@@ -85,6 +85,63 @@ instant, and the per-IP rate limit stops being a per-user problem.
   clicking opens the drawer. `◢ noted` in the filter menu narrows the table to noted names, the way
   ★-only already does. The markers cost the 15s poll nothing: every snapshot row carries a three-field
   digest (`nt:{n, ts, px}`) and the bodies load once with the drawer.
+- **Accounts and invites** (`/join/<code>`, `/api/access`) — the terminal has per-person accounts
+  instead of one shared password. An operator mints a **single-use invite link** from Admin ›
+  Access; opening it validates the code, moves it into a 15-minute HttpOnly cookie and redirects to
+  a bare `/join`, so the code leaves the address bar before anything renders and never reaches a
+  `Referer` header or the browser history. The invite is burned inside one SQLite transaction
+  (`BEGIN IMMEDIATE` + `WHERE usedBy IS NULL`), so two people opening the same link race safely: the
+  loser sees "already used", not a second account. Sessions are still stateless HMAC tokens, now
+  carrying `uid` and a per-user `epoch` — bumping that epoch is what makes "sign out everywhere",
+  password reset and disabling an account work **without touching anybody else**. Under the shared
+  password, removing one person meant rotating `SITE_PASSWORD`, which re-derived `OWNER_SECRET` and
+  orphaned *every* member's Telegram links and alert rules; that is the failure this replaces.
+  Migration is free by construction: an account reuses the browser's existing signed `xyzown`
+  handle as its `uid`, so every recipient and rule already keyed to it belongs to the account with
+  nothing rewritten. Existing shared-password sessions land on `/claim` to pick a handle; set
+  `LEGACY_SHARED_PASSWORD=0` once everyone has, and the shared door is closed for good. Account #1
+  is bootstrapped with `ADMIN_PASSWORD`, which stays as break-glass. Password reset is an
+  operator-minted one-day reset link (Telegram OTP is the obvious next step, not shipped).
+- **Messages tab** (`/api/dm`) — 1-to-1 direct messages between account holders. The reason it
+  exists rather than a Telegram group: **a message carries the mark it was sent at**. Type
+  `$TICKER` and the server stamps the price straight off the snapshot it already rebuilt seconds
+  ago (no fetch, no new polling), so a call made at 113.90 and read at 118.50 says `sent at 113.90
+  · +4.0%` on its face — the same discipline Notes applies, for the same reason. The stamp is
+  written once and an edit never relocates it; the move since is derived at read and never stored.
+  Delivery rides the **existing SSE stream** on its existing contract — versions, never payloads: a
+  send pushes `{dm:{seq}}` to the two participants' connections only, and they answer with an
+  ordinary `/api/dm/sync` pull keyed by their own cursor, so a dropped frame costs nothing and no
+  WebSocket is needed. Storage is SQLite (`accounts.db`), because the whole-file tmp+rename
+  discipline the JSON caches use is O(history) per message on an append-only log. Threads are
+  canonical pairs, message ids are the global sync cursor, deletes are tombstones (the id is the
+  other side's cursor position), and every route resolves the uid from the session and filters by
+  participation. Unread messages escalate to a member's linked Telegram after 5 minutes as one
+  digest per sender, reusing the outbox's quiet hours and caps — muted threads never do, and being
+  online cancels it. Deliberately out of scope for v1: group threads, attachments, reactions,
+  typing indicators, search, and replying from Telegram.
+- **Group threads, attachments, reactions and search** (messages v2) — a 1-to-1 is not a special
+  case here: both shapes are one `dm_thread` row, and what makes a DM a DM is `pairKey` (the two
+  uids sorted, UNIQUE), so "open a DM with X" stays one index hit and stays idempotent while a
+  group carries NULL there. Membership is its own table with `leftAt` rather than a delete, so a
+  departed member's messages stay attributed and their name still resolves in the backscroll.
+  Adding, removing, renaming and leaving are recorded as ordinary message rows with `sys` set —
+  they ride the same cursor a message does, so the membership story can never drift from the
+  history. Joining marks what was already said as read: the backscroll is fully readable, but being
+  added to a busy group should not open on "500 unread". Only the creator manages a group, and the
+  last owner leaving hands ownership to the longest-standing member so a group is never
+  unmanageable. **Attachments** are typed by the server's own magic-byte sniff, never the
+  uploader's claim: only png/jpeg/gif/webp render inline, and everything else — SVG above all,
+  which is a document that can carry script — is served `Content-Disposition: attachment` with
+  `nosniff` and a sandboxed CSP. Reading a file is a membership check, not a knows-the-id check, so
+  a forwarded link is not an access grant. **Reactions** are a fixed vocabulary of eight and name
+  who reacted, because a bare count is a vote rather than a conversation. **Search** is scoped by a
+  JOIN on membership — the scope IS the authorization, so there is no thread id to tamper with —
+  and uses LIKE with escaped wildcards rather than FTS5, which costs nothing at a desk's volume and
+  avoids an extension dependency. **Typing indicators** live in memory only and expire on their
+  own; they ride the same targeted SSE fan-out a send does. **Replying from Telegram** is
+  command-only on purpose (`/r your message`, or `/r @handle your message`): people already send
+  stray text to that chat, and turning any of it into a message posted under their name is a
+  surprise you cannot take back.
 - **Saved layouts** — named views of the markets table (column order + visibility, sort,
   analysis window, vol/OI filters, ★-only), saved and switched from the Layouts menu. Stored
   per browser in localStorage; the active layout shows a • when the live view has unsaved changes.

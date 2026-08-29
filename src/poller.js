@@ -11260,6 +11260,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   let pushHoldUntil = 0;            // global send pacing / 429 backoff
   let pushSending = false, pushDirty = false, pushBootAt = Date.now();
   let pushDropped = 0, pushLog = [], pushLastErr = null, pushLastTest = 0, pushVer = 0;
+  // Set by server.js. Left null here so the poller has no opinion about accounts or messages: it
+  // owns the Telegram wire, and forwarding a command is the whole of its involvement.
+  let dmBridge = null;
   let pushStall = false;            // edge state for the poller-stall ops alert
 
   function hydratePush() {
@@ -11442,10 +11445,28 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         pushEnqueue(String(chat), had ? "<b>Unlinked.</b>\nNo further alerts will be sent here." : "You weren't linked.", true);
         continue;
       }
+      // Direct-message reply bridge (build 2026.08.31-47). COMMAND-ONLY, deliberately: people
+      // already send stray text to this chat, and turning any of it into a message posted under
+      // their name in the terminal is a surprise you cannot take back. The bridge itself lives in
+      // server.js — this only forwards, so the poller never learns what an account is.
+      const rm = /^\/r(?:@\S+)?(?:\s+([\s\S]+))?$/i.exec(txt);
+      if (rm) {
+        const body = (rm[1] || "").trim();
+        if (!dmBridge) pushEnqueue(String(chat), "Messages aren't available on this deployment.", true);
+        else if (!body) pushEnqueue(String(chat), "Send <code>/r your message</code>, or <code>/r @handle your message</code>.", true);
+        else {
+          let res;
+          try { res = dmBridge(String(chat), body); }
+          catch (e) { res = { ok: false, error: "That didn't send \u2014 try again." }; }
+          pushEnqueue(String(chat), res && res.ok ? "\u2713 Sent." : "\u26a0 " + ((res && res.error) || "Could not send."), true);
+        }
+        continue;
+      }
       if (/^\/(status|help)(?:@\S+)?$/i.test(txt)) {
         const r2 = pushRecipients.get(String(chat));
         pushEnqueue(String(chat), r2
           ? "<b>Linked</b> \u00b7 classes: " + (r2.classes && r2.classes.length ? r2.classes.join(", ") : "all")
+            + "\n/r &lt;message&gt; replies to your last message notification \u00b7 /r @handle &lt;message&gt; picks the person."
             + "\n/stop to unlink."
           : "Not linked. Open the alerts panel for a link code, then send /start CODE.", true);
       }
@@ -14074,6 +14095,18 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     pushOpsNow: pushOps,                       // harness + later slices: emit an ops event without a real fault
     pushBindNow: pushBind,                     // harness: bind a chat without a live /start round trip
     hydratePushNow: hydratePush,               // harness: restore recipients without a boot
+    // Direct-message escalation (build 2026.08.30-46) reuses this outbox rather than opening a
+    // second delivery path: quiet hours, the hourly cap and the shared queue all apply for free.
+    pushEnqueueNow: (chat, text) => pushEnqueue(chat, text, false, 0),
+    // The inbound half of the same wire: server.js installs the handler that turns /r into a message.
+    setDmBridge: (fn) => { dmBridge = typeof fn === "function" ? fn : null; },
+    // chat -> the account handle that linked it. `owner` IS the uid, which is why an account
+    // reuses its xyzown handle as its id.
+    pushOwnerOf: (chat) => { const r = pushRecipients.get(String(chat)); return r ? (r.owner || "") : ""; },
+    // A member's own linked chats. `owner` on a recipient is the account uid — which is exactly
+    // why an account reuses its xyzown handle as its id.
+    pushRecipientsFor: (owner) => [...pushRecipients.values()]
+      .filter((r) => r.owner === owner && !r.muted).map((r) => r.chat),
     pushTickNow: pushStreamTick,               // harness: consume the stream on demand
     pushDrainNow: pushDrain,                   // harness: drain the outbox against an injected transport
     pushUpdatesNow: pushUpdatesTick,           // harness: process a getUpdates payload without waiting out the poll
