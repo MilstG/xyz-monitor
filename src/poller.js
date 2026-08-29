@@ -14097,7 +14097,9 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     hydratePushNow: hydratePush,               // harness: restore recipients without a boot
     // Direct-message escalation (build 2026.08.30-46) reuses this outbox rather than opening a
     // second delivery path: quiet hours, the hourly cap and the shared queue all apply for free.
-    pushEnqueueNow: (chat, text) => pushEnqueue(chat, text, false, 0),
+    // `force` bypasses the per-recipient hourly cap AND the quiet window. Used only for things
+    // that are not alerts: a password-reset code that waits until 8am is not a password reset.
+    pushEnqueueNow: (chat, text, force) => pushEnqueue(chat, text, !!force, 0),
     // The inbound half of the same wire: server.js installs the handler that turns /r into a message.
     setDmBridge: (fn) => { dmBridge = typeof fn === "function" ? fn : null; },
     // chat -> the account handle that linked it. `owner` IS the uid, which is why an account

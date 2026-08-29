@@ -13312,7 +13312,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.31-47"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.01-48"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -22742,7 +22742,7 @@ test("congress -04: parse queue — scans marked once, transient failures retrie
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-// ===== accounts, invites and direct messages (build 2026.08.31-47) =============================
+// ===== accounts, invites and direct messages (build 2026.09.01-48) =============================
 // The shared password had one door and one key. These cover the replacement: per-person accounts,
 // single-use invites, and the revocation lever that makes removing one member cost nobody else
 // anything. Every case here is one that would otherwise be discovered in production.
@@ -23063,7 +23063,7 @@ test("server: the invite door strips the code from the URL before anything rende
   assert.ok(/const SSE_PER_USER = 4/.test(srv), "a per-member connection cap, so one person's tabs cannot eat the pool");
 });
 
-// ===== messages v2: groups, attachments, reactions, search, bridge (build 2026.08.31-47) =======
+// ===== messages v2: groups, attachments, reactions, search, bridge (build 2026.09.01-48) =======
 function seedDesk(marks) {
   const A = freshAccounts(marks);
   const g = A.bootstrap("gus", "correct-horse-battery").user;
@@ -23245,4 +23245,107 @@ test("the pair schema migrates onto the membership table without losing a conver
   assert.ok(A.history("uidB", 1).messages.some((x) => x.body === "said before the migration"), "with its messages");
   assert.ok(A.send("uidA", null, "and after", null, { thread: 1 }).ok, "and it still works");
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ===== self-serve password reset by one-time code (build 2026.09.01-48) ========================
+// No mail server exists here and adding one for a ten-person desk is not worth it — but the
+// Telegram outbox already does delivery, with recipients, quiet hours and caps. These cover the
+// half that is ours: issuing, throttling, and refusing.
+test("reset codes: issued, single-use, and they sign out every other device", () => {
+  // Each concern gets its own account: three sends an hour is a real ceiling, and sharing one
+  // account across the assertions would spend it before the interesting ones ran.
+  const { A, l, m, d } = seedDesk();
+  const r = A.otpRequest("lena");
+  assert.ok(r.sent && /^\d{6}$/.test(r.code), "a six-digit code is issued");
+  assert.equal(r.uid, l.uid, "bound to the account, not to whatever the form says later");
+  assert.ok(A.otpRequest("MARCO").sent, "the handle is matched case-insensitively");
+
+  // One live code per account: asking again replaces the last one, so a stale code sitting in
+  // somebody's chat history stops working the moment a new one is requested.
+  const first = A.otpRequest("dan"), second = A.otpRequest("dan");
+  assert.ok(!A.otpVerify("dan", first.code, "brand-new-password-1").ok, "the superseded code is dead");
+  const done = A.otpVerify("dan", second.code, "brand-new-password-1");
+  assert.ok(done.ok, done.error);
+  assert.ok(!A.login("dan", "another-long-password").ok, "the old password is gone");
+  assert.ok(A.login("dan", "brand-new-password-1").ok, "the new one works");
+  assert.ok(!A.otpVerify("dan", second.code, "brand-new-password-2").ok, "and the code is burned");
+
+  const tok = A.login("marco", "another-long-password").token;
+  const again = A.otpRequest("marco");
+  assert.ok(again.sent, "marco still has sends left");
+  A.otpVerify("marco", again.code, "brand-new-password-3");
+  assert.equal(A.sessionUser(tok), null, "a reset that leaves the old sessions alive is not a reset");
+});
+
+test("reset codes: a six-digit secret needs the ceilings around it", () => {
+  const { A } = seedDesk();
+  // 1e6 is small. The attempt ceiling is what makes it safe, not the length.
+  const c = A.otpRequest("lena");
+  for (let i = 0; i < 5; i++) assert.ok(!A.otpVerify("lena", "000000", "brand-new-password-1").ok);
+  assert.ok(!A.otpVerify("lena", c.code, "brand-new-password-1").ok,
+    "five wrong guesses kill the code, even though the sixth attempt is correct");
+
+  let sent = 0;
+  for (let i = 0; i < 6; i++) if (A.otpRequest("marco").sent) sent++;
+  assert.equal(sent, 3, "three sends an hour, so this cannot be used to spam somebody's phone");
+  assert.ok(A.otpRequest("marco").ok, "and being throttled still looks like success from outside");
+
+  // Enumeration: an unknown handle must be indistinguishable from a known one.
+  const ghost = A.otpRequest("nobody-at-all");
+  assert.deepEqual({ ok: ghost.ok, sent: ghost.sent }, { ok: true, sent: false },
+    "an unknown handle answers exactly as a known one does");
+  assert.ok(!ghost.code, "and no code comes back for it");
+
+  const dis = seedDesk().A; const disabled = dis.getUserByHandle("lena");
+  dis.setDisabled(disabled.uid, true);
+  assert.ok(!dis.otpRequest("lena").sent, "a disabled account cannot request a code");
+  assert.ok(!dis.otpVerify("lena", "123456", "brand-new-password-1").ok, "nor verify one");
+});
+
+test("reset codes: expiry, and a typo in the password does not cost you the code", () => {
+  const { A, l } = seedDesk();
+  const c = A.otpRequest("lena");
+  A._db.prepare("UPDATE otp SET expiresAt = ? WHERE uid = ?").run(Date.now() - 1, l.uid);
+  assert.ok(!A.otpVerify("lena", c.code, "brand-new-password-1").ok, "an expired code is refused");
+
+  // The password is checked only after the code is proved, so a weak-password error cannot be used
+  // to confirm a guessed code — and the code survives, because a short password is the user's own
+  // typo rather than an attack.
+  const c2 = A.otpRequest("lena");
+  const weak = A.otpVerify("lena", c2.code, "short");
+  assert.ok(!weak.ok && weak.field === "password", "a weak password is refused on its own terms");
+  assert.equal(weak.codeOk, true, "and the caller is told the code was fine");
+  assert.ok(A.otpVerify("lena", c2.code, "brand-new-password-9").ok, "so the same code still works");
+});
+
+test("server: the reset flow binds its two steps and does not enumerate handles", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const block = srv.slice(srv.indexOf("// ---- self-serve password reset"), srv.indexOf("// ---- legacy migration"));
+  assert.ok(block.length > 800, "found the reset routes");
+
+  // The handle travels between the two steps in an HttpOnly cookie, for the same reason the invite
+  // code does: it keeps step two bound to step one, so nobody can request a code for their own
+  // account and then verify against somebody else's.
+  assert.ok(/xyzotp=[\s\S]{0,120}HttpOnly/.test(srv), "the handle is carried in an HttpOnly cookie");
+  assert.ok(/const handle = decodeURIComponent\(getCookie\(req, "xyzotp"\) \|\| ""\)/.test(block),
+    "the verify step reads the handle from that cookie, never from the form");
+  assert.ok(!/b\.handle/.test(block.slice(block.indexOf('fastify.post("/reset/code"'))),
+    "the verify step must not trust a handle in its own body");
+
+  // One answer for every outcome — exists, no Telegram, throttled, unknown.
+  const req = block.slice(block.indexOf('fastify.post("/reset"'), block.indexOf('fastify.get("/reset/code"'));
+  assert.equal((req.match(/return \{ ok: true, next: "\/reset\/code" \}/g) || []).length, 1,
+    "the request step has exactly one success return, so the outcomes are indistinguishable");
+  assert.ok(!/no such (account|handle)/i.test(req), "and never says whether the handle exists");
+
+  // A reset code is not an alert: it must not wait out a quiet window or a cap.
+  assert.ok(/pushEnqueueNow\(chat, text, true\)/.test(block), "the code is sent with the cap and quiet hours bypassed");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/pushEnqueueNow: \(chat, text, force\) => pushEnqueue\(chat, text, !!force, 0\)/.test(pol),
+    "and the outbox forwards that flag");
+  // A wrong password on a right code is a typo, not an attack — spending the IP damper on it would
+  // lock somebody out of their own reset.
+  assert.ok(/if \(!r\.codeOk\) loginFail\(ip\)/.test(block), "only a bad CODE spends the brute-force damper");
+  assert.ok(/u === "\/reset" \|\| u === "\/reset\/code"/.test(srv), "both reset doors pass the site gate");
 });

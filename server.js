@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.31-47";
+const VERSION = "2026.09.01-48";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -377,23 +377,29 @@ function authPage(o) {
   const mode = o.mode || "signin";
   const esc = (x) => String(x == null ? "" : x)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-  const wantsHandle = mode === "join" || mode === "claim" || mode === "signin" || mode === "bootstrap";
-  const wantsPw = mode !== "dead";
+  const wantsHandle = mode === "join" || mode === "claim" || mode === "signin" || mode === "bootstrap" || mode === "forgot";
+  const wantsCode = mode === "otp";
+  const wantsPw = mode !== "dead" && mode !== "forgot";
   const newAccount = mode === "join" || mode === "claim" || mode === "bootstrap";
   const action = mode === "signin" ? "/login" : mode === "claim" ? "/claim"
-    : mode === "bootstrap" ? "/bootstrap" : "/join";
+    : mode === "bootstrap" ? "/bootstrap" : mode === "forgot" ? "/reset"
+    : mode === "otp" ? "/reset/code" : "/join";
   const sub = {
     signin: "private terminal",
     join: esc(o.inviter || "the operator") + " invited you to the terminal",
     reset: "set a new password for " + esc(o.handle || "your account"),
+    forgot: "we'll send a code to your linked Telegram",
+    otp: "enter the code sent to your Telegram",
     claim: "this terminal now has accounts — claim yours",
     bootstrap: "first account — this one is the operator",
     dead: esc(o.reason || "this link cannot be used"),
   }[mode];
   const foot = {
-    signin: "Lost your password? Ask the operator for a reset link.",
+    signin: '<a class="altin" href="/reset">Forgot your password?</a>',
     join: newAccountFoot(o),
     reset: "Setting a new password signs out every other device.",
+    forgot: "No Telegram linked, or no code arrives? Ask the operator for a reset link instead.",
+    otp: "The code is good for " + (o.ttlMin || 10) + " minutes and works once. Setting a new password signs out every other device.",
     claim: "Your alerts, rules and notes carry over — they are already yours.",
     bootstrap: "You are creating the operator account. Everyone else joins by invite.",
     dead: esc(o.hint || "Ask the operator for a fresh link."),
@@ -404,11 +410,16 @@ function authPage(o) {
     '<input id="h" autocomplete="' + (newAccount ? "username" : "username") + '" autocapitalize="off" ' +
     'autocorrect="off" spellcheck="false" value="' + esc(o.handle || "") + '"' +
     (newAccount ? ' placeholder="what everyone else will see you as"' : "") + ' autofocus>');
+  if (wantsCode) rows.push(
+    '<label for="c">code</label>' +
+    '<input id="c" inputmode="numeric" autocomplete="one-time-code" maxlength="6" ' +
+    'style="letter-spacing:.34em;text-align:center" autofocus>');
   if (wantsPw) rows.push(
-    '<label for="p">' + (newAccount || mode === "reset" ? "choose a password" : "password") + '</label>' +
-    '<input id="p" type="password" autocomplete="' + (newAccount || mode === "reset" ? "new-password" : "current-password") + '"' +
-    (wantsHandle ? "" : " autofocus") + '>');
+    '<label for="p">' + (newAccount || mode === "reset" || mode === "otp" ? "choose a password" : "password") + '</label>' +
+    '<input id="p" type="password" autocomplete="' + (newAccount || mode === "reset" || mode === "otp" ? "new-password" : "current-password") + '"' +
+    (wantsHandle || wantsCode ? "" : " autofocus") + '>');
   const btn = { signin: "Sign in", join: "Create account", reset: "Set password",
+    forgot: "Send a code", otp: "Set password",
     claim: "Claim account", bootstrap: "Create operator account", dead: "" }[mode];
 
   return '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
@@ -424,7 +435,8 @@ function authPage(o) {
   '<div class="err" id="err">' + esc(o.error || "") + '</div>' +
   '<div class="foot">' + foot + '</div>' +
   (mode === "dead" ? '<a class="alt" href="/login">Go to sign in</a>' : "") +
-  (mode === "join" || mode === "reset" ? '<a class="alt" href="/login">Already have an account? Sign in</a>' : "") +
+  (mode === "join" || mode === "reset" || mode === "forgot" || mode === "otp"
+    ? '<a class="alt" href="/login">Back to sign in</a>' : "") +
 '</div>' +
 '<script>' + AUTH_JS + '</script>' +
 '<script>window.__AUTH=' + JSON.stringify({ action, mode }) + ';authInit();</script>' +
@@ -454,22 +466,26 @@ const AUTH_CSS =
 ".err{color:var(--down);font-size:12.5px;min-height:17px;margin-top:10px;font-family:var(--mono);line-height:1.45}" +
 ".foot{color:var(--faint);font-size:11px;font-family:var(--mono);line-height:1.6;margin-top:12px}" +
 ".alt{display:block;margin-top:14px;color:var(--muted);font-size:11.5px;font-family:var(--mono);text-decoration:none}" +
-".alt:hover{color:var(--accent)}";
+".alt:hover{color:var(--accent)}" +
+".altin{color:var(--muted);text-decoration:none}.altin:hover{color:var(--accent)}";
 const AUTH_JS =
 "function authInit(){var A=window.__AUTH||{},h=document.getElementById('h'),p=document.getElementById('p')," +
+"c=document.getElementById('c')," +
 "go=document.getElementById('go'),err=document.getElementById('err');if(!go)return;" +
 "function submit(){if(go.disabled)return;go.disabled=true;err.textContent='';" +
 "if(h)h.classList.remove('bad');if(p)p.classList.remove('bad');" +
 "var body={};if(h)body.handle=h.value;if(p)body.password=p.value;" +
+"if(c)body.code=c.value;" +
 "fetch(A.action,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)})" +
 ".then(function(r){return r.json().catch(function(){return {};}).then(function(d){return {r:r,d:d};});})" +
 ".then(function(x){if(x.r.ok&&x.d.ok){location.replace(x.d.next||'/');return;}" +
 "err.textContent=(x.d&&x.d.error)||('HTTP '+x.r.status);" +
 "var f=x.d&&x.d.field;if(f==='handle'&&h){h.classList.add('bad');h.focus();h.select();}" +
+"else if(f==='code'&&c){c.classList.add('bad');c.focus();c.select();}" +
 "else if(p){p.classList.add('bad');p.focus();p.select();}go.disabled=false;})" +
 ".catch(function(){err.textContent='network error — try again';go.disabled=false;});}" +
 "go.addEventListener('click',submit);" +
-"[h,p].forEach(function(e){if(e)e.addEventListener('keydown',function(ev){if(ev.key==='Enter')submit();});});}";
+"[h,p,c].forEach(function(e){if(e)e.addEventListener('keydown',function(ev){if(ev.key==='Enter')submit();});});}";
 const LOGIN_HTML = authPage({ mode: "signin" });
 
 async function main() {
@@ -574,7 +590,8 @@ async function main() {
       // The doors themselves must pass or nobody could ever authenticate. /join is on the list
       // because an invited person has, by definition, no session yet.
       if (u === "/api/health" || u === "/logout" || u === "/login"
-          || u === "/join" || u.startsWith("/join/") || u === "/claim" || u === "/bootstrap") return;
+          || u === "/join" || u.startsWith("/join/") || u === "/claim" || u === "/bootstrap"
+          || u === "/reset" || u === "/reset/code") return;
       // A legacy shared-password session authenticates but does not IDENTIFY. Once accounts exist,
       // send those callers to /claim rather than into an app where every personal surface would
       // 401 at them with no explanation. Break-glass admins are exempt: ADMIN_PASSWORD is how an
@@ -784,6 +801,68 @@ async function main() {
     signIn(reply, req, r.user, r.token);
     log(r.reset ? `password reset completed for ${r.user.handle}`
       : `account created: ${r.user.handle}${r.adopted ? " (carried over existing alerts)" : ""}`);
+    return { ok: true, next: "/" };
+  });
+
+
+  // ---- self-serve password reset by one-time code ------------------------------------------------
+  // There is no mail server here, and adding one for a ten-person desk is not worth it. The
+  // Telegram outbox already exists, with recipients, quiet hours and caps — so the code goes there.
+  // A reset code is not an alert, so it is sent with the cap and the quiet window bypassed: a
+  // password reset that waits until 8am is not a password reset.
+  //
+  // The handle travels in a short-lived HttpOnly cookie between the two steps rather than in a form
+  // field, for the same reason the invite code does: it keeps the second step bound to the first,
+  // so nobody can request a code for themselves and then verify against a different account.
+  const otpCookie = (reply, req, handle) =>
+    reply.header("set-cookie", "xyzotp=" + encodeURIComponent(handle || "") + cookieAttrs(req, handle ? 900 : 0) + "; HttpOnly");
+
+  fastify.get("/reset", (req, reply) => {
+    if (meOf(req)) return reply.redirect(302, "/");
+    return htmlNoStore(reply).send(authPage({ mode: "forgot" }));
+  });
+  fastify.post("/reset", { bodyLimit: 4 * 1024 }, async (req, reply) => {
+    const ip = String(req.headers["x-forwarded-for"] || req.ip).split(",")[0].trim();
+    if (loginLockedFor(ip)) { reply.code(429); return { ok: false, error: "too many attempts — try again shortly" }; }
+    const handle = String((req.body || {}).handle || "").trim();
+    const r = ACCOUNTS.otpRequest(handle);
+    // The SAME answer whether the handle exists, has no Telegram linked, or is over its send cap.
+    // Anything else turns this endpoint into a directory of who has an account.
+    otpCookie(reply, req, handle);
+    if (r.sent) {
+      const targets = poller.pushRecipientsFor ? poller.pushRecipientsFor(r.uid) : [];
+      if (targets.length) {
+        const text = "<b>Password reset</b>\nYour code is <b>" + r.code + "</b>\n"
+          + "<i>Good for " + r.ttlMin + " minutes, and works once. If you didn't ask for this, tell the operator — "
+          + "somebody knows your handle.</i>";
+        for (const chat of targets) poller.pushEnqueueNow(chat, text, true);   // force: past quiet hours and the cap
+        log("reset code sent to " + r.display);
+      } else log("reset requested for " + r.display + " — no Telegram linked, nothing sent");
+    }
+    return { ok: true, next: "/reset/code" };
+  });
+  fastify.get("/reset/code", (req, reply) => {
+    if (meOf(req)) return reply.redirect(302, "/");
+    if (!getCookie(req, "xyzotp")) return reply.redirect(302, "/reset");
+    return htmlNoStore(reply).send(authPage({ mode: "otp" }));
+  });
+  fastify.post("/reset/code", { bodyLimit: 8 * 1024 }, async (req, reply) => {
+    const ip = String(req.headers["x-forwarded-for"] || req.ip).split(",")[0].trim();
+    if (loginLockedFor(ip)) { reply.code(429); return { ok: false, error: "too many attempts — try again shortly" }; }
+    const handle = decodeURIComponent(getCookie(req, "xyzotp") || "");
+    if (!handle) { reply.code(400); return { ok: false, error: "start again from the reset page" }; }
+    const b = req.body || {};
+    const r = ACCOUNTS.otpVerify(handle, b.code, b.password);
+    if (!r.ok) {
+      // A wrong password on a CORRECT code is the user's own typo, not an attack — spending the IP
+      // damper on it would lock somebody out of their own reset for fifteen minutes.
+      if (!r.codeOk) loginFail(ip);
+      reply.code(400);
+      return { ok: false, error: r.error, field: r.field || "code" };
+    }
+    otpCookie(reply, req, "");
+    signIn(reply, req, r.user, r.token);
+    log("password reset by code: " + r.user.handle);
     return { ok: true, next: "/" };
   });
 
