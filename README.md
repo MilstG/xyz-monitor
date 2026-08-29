@@ -100,8 +100,15 @@ instant, and the per-IP rate limit stops being a per-user problem.
   handle as its `uid`, so every recipient and rule already keyed to it belongs to the account with
   nothing rewritten. Existing shared-password sessions land on `/claim` to pick a handle; set
   `LEGACY_SHARED_PASSWORD=0` once everyone has, and the shared door is closed for good. Account #1
-  is bootstrapped with `ADMIN_PASSWORD`, which stays as break-glass. Password reset is an
-  operator-minted one-day reset link (Telegram OTP is the obvious next step, not shipped).
+  is bootstrapped with `ADMIN_PASSWORD`, which stays as break-glass. **Password reset is self-serve** over the wire that already
+  exists: `/reset` takes a handle and sends a six-digit code to that member's linked Telegram, with
+  the hourly cap and the quiet window bypassed (a reset that waits until 8am is not a reset). The
+  code is good for 10 minutes, works once, dies after five wrong guesses, and is capped at three
+  sends an hour per account; requesting a new one kills the old one. The handle travels between the
+  two steps in a short-lived HttpOnly cookie rather than a form field, so step two stays bound to
+  step one. Every outcome — unknown handle, no Telegram linked, throttled — returns the same answer,
+  so the endpoint is not a directory of who has an account. A member with no Telegram linked falls
+  back to an operator-minted reset link, which is the same invite table with `kind='reset'`.
 - **Messages tab** (`/api/dm`) — 1-to-1 direct messages between account holders. The reason it
   exists rather than a Telegram group: **a message carries the mark it was sent at**. Type
   `$TICKER` and the server stamps the price straight off the snapshot it already rebuilt seconds

@@ -155,6 +155,24 @@ CREATE INDEX IF NOT EXISTS invite_created ON invite(createdAt);
 -- pairKey encodes: the two uids sorted and joined, UNIQUE, so "open a DM with X" stays one index
 -- hit and stays idempotent. A group carries NULL there (SQLite lets a UNIQUE index hold many NULLs,
 -- which is exactly the semantics wanted: groups are never deduplicated by membership).
+-- Self-serve password reset, delivered to the member's own linked Telegram. One live code per
+-- account: requesting again replaces the previous one, which is both the rate-limit anchor and the
+-- reason an old code in somebody's chat history stops working the moment a new one is asked for.
+--
+-- Stored in the clear, for the same reason invite codes are: anyone who can read this volume also
+-- holds the session secret and can mint a session for any uid directly, so hashing a 6-digit code
+-- protects nothing they do not already have. The defences that matter are the short TTL, the
+-- attempt ceiling and the send ceiling below.
+CREATE TABLE IF NOT EXISTS otp (
+  uid TEXT PRIMARY KEY,
+  code TEXT NOT NULL,
+  createdAt INTEGER NOT NULL,
+  expiresAt INTEGER NOT NULL,
+  tries INTEGER NOT NULL DEFAULT 0,
+  sends INTEGER NOT NULL DEFAULT 0,       -- within the current window
+  windowStart INTEGER NOT NULL
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE IF NOT EXISTS dm_thread (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   kind TEXT NOT NULL DEFAULT 'dm',        -- 'dm' | 'group'
@@ -287,6 +305,14 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     invBurn: db.prepare("UPDATE invite SET usedBy = ?, usedAt = ? WHERE code = ? AND usedBy IS NULL AND revokedAt IS NULL"),
     invRevoke: db.prepare("UPDATE invite SET revokedAt = ? WHERE code = ? AND usedBy IS NULL"),
     invList: db.prepare("SELECT * FROM invite ORDER BY createdAt DESC LIMIT 200"),
+
+    otpGet: db.prepare("SELECT * FROM otp WHERE uid = ?"),
+    otpPut: db.prepare(`INSERT INTO otp (uid, code, createdAt, expiresAt, tries, sends, windowStart)
+      VALUES (?,?,?,?,0,?,?) ON CONFLICT(uid) DO UPDATE SET code = excluded.code,
+      createdAt = excluded.createdAt, expiresAt = excluded.expiresAt, tries = 0,
+      sends = excluded.sends, windowStart = excluded.windowStart`),
+    otpTry: db.prepare("UPDATE otp SET tries = tries + 1 WHERE uid = ?"),
+    otpBurn: db.prepare("DELETE FROM otp WHERE uid = ?"),
 
     thrByPair: db.prepare("SELECT * FROM dm_thread WHERE pairKey = ?"),
     thrById: db.prepare("SELECT * FROM dm_thread WHERE id = ?"),
@@ -584,6 +610,59 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     hydrate();
     const nu = users.get(uid);
     return { ok: true, user: pub(nu), token: tokenFor(nu, options.sessionDays || 30), adopted: uid === priorOwner };
+  }
+
+  // ---- self-serve reset by one-time code -------------------------------------------------------
+  // There is no mail server here and adding one for a ten-person desk is not worth it. There IS a
+  // delivery wire already: the Telegram outbox, with recipients, quiet hours and caps. So the code
+  // goes there — and because a reset code is not an alert, it is sent with the cap and the quiet
+  // window bypassed. Delivery itself is the CALLER's job: this module returns the code and never
+  // learns that Telegram exists.
+  const OTP_TTL_MS = 10 * 60 * 1000;
+  const OTP_MAX_TRIES = 5;               // per code, then it dies — 6 digits is 1e6, not enough alone
+  const OTP_MAX_SENDS = 3;               // per hour, per account
+  const OTP_WINDOW_MS = 60 * 60 * 1000;
+  function otpRequest(handle) {
+    const u = getUserByHandle(handle);
+    // A missing or disabled account is reported as "nothing to send" rather than an error: the
+    // caller shows one message either way, so a stranger cannot use this to enumerate handles.
+    if (!u || u.disabledAt) return { ok: true, sent: false };
+    const now = Date.now();
+    const prev = S.otpGet.get(u.uid);
+    let sends = 1, windowStart = now;
+    if (prev && now - prev.windowStart < OTP_WINDOW_MS) {
+      if (prev.sends >= OTP_MAX_SENDS) return { ok: true, sent: false, throttled: true, uid: u.uid };
+      sends = prev.sends + 1; windowStart = prev.windowStart;
+    }
+    // randomInt is uniform; a modulo of random bytes would not be, and a 6-digit space is small
+    // enough for the bias to be worth avoiding.
+    const code = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+    S.otpPut.run(u.uid, code, now, now + OTP_TTL_MS, sends, windowStart);
+    return { ok: true, sent: true, uid: u.uid, code, display: u.display, ttlMin: Math.round(OTP_TTL_MS / 60000) };
+  }
+  function otpVerify(handle, code, password) {
+    const u = getUserByHandle(handle);
+    const bad = { ok: false, error: "that code is wrong or has expired" };
+    if (!u || u.disabledAt) return bad;
+    const row = S.otpGet.get(u.uid);
+    if (!row) return bad;
+    if (row.expiresAt < Date.now()) { S.otpBurn.run(u.uid); return bad; }
+    if (row.tries >= OTP_MAX_TRIES) { S.otpBurn.run(u.uid); return bad; }
+    // Count the attempt BEFORE comparing, so a crash or a race cannot hand out a free guess.
+    S.otpTry.run(u.uid);
+    const given = String(code == null ? "" : code).replace(/\s/g, "");
+    let match = false;
+    try {
+      const a = Buffer.from(given), b = Buffer.from(row.code);
+      match = a.length === b.length && crypto.timingSafeEqual(a, b);
+    } catch (_) { match = false; }
+    if (!match) return bad;
+    // The password is validated only AFTER the code is proved, so a weak-password error cannot be
+    // used to confirm that a guessed code was right.
+    const pwBad = pwError(password);
+    if (pwBad) return { ok: false, error: pwBad, field: "password", codeOk: true };
+    S.otpBurn.run(u.uid);
+    return setPassword(u.uid, password);   // bumps the epoch, so every other device signs out
   }
 
   // Bootstrap: the operator holding ADMIN_PASSWORD creates account #1 with no invite, because there
@@ -1084,6 +1163,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     login, setPassword, signOutEverywhere, setDisabled, setAdmin, touch, hydrate,
     // invites
     mintInvite, readInvite, revokeInvite, listInvites, redeem, bootstrap, claim, inviteState,
+    otpRequest, otpVerify,
     // messages
     setMarkSource, threadFor, threadPeers, isMember, memberUids, send, edit, drop,
     threads, history, sync, search, markRead, setMuted,
