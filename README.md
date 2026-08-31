@@ -149,6 +149,29 @@ instant, and the per-IP rate limit stops being a per-user problem.
   command-only on purpose (`/r your message`, or `/r @handle your message`): people already send
   stray text to that chat, and turning any of it into a message posted under their name is a
   surprise you cannot take back.
+- **The calls record** (`/api/dm/calls`) — every price-stamped message in one place, with the move
+  since it was sent and a per-person summary (how many calls, what fraction went up, the average
+  move). This is what the stamp was FOR: without somewhere to read them together, each call died in
+  the conversation it was made in. An operator can promote any stamped message into the Notes book,
+  and the note keeps the message's own timestamp and price — re-stamping it at "now" would turn
+  last Tuesday's call at 113.90 into a different, false claim about today.
+- **Watched tickers in messages** — a per-person list, separate from the markets watchlist (which
+  lives in localStorage and the server has never seen). A message whose `$TICKER` is on your list
+  escalates to Telegram **immediately** and **pierces a muted conversation**: muting a busy group
+  should not be the same as asking not to be told when somebody mentions the name you are watching.
+- **Read receipts, pins, drafts, export, keyboard** — "seen by" under the last message you sent
+  (the read cursor was already stored for unread counts); pinned messages in a strip at the top of
+  a conversation; drafts that survive a reload, not just a re-render; a JSON export per conversation
+  (a record you cannot get out of the system is one you do not really have); and `/` to focus the
+  conversation search, `j`/`k` to walk the rail, Escape to back out — folded into the app's own
+  global key handler rather than competing with it, so Ctrl+K still belongs to the command palette.
+- **Operator read-through** (`/api/access/dm`) — on this deployment the operator can read every
+  message, including conversations they are not in. It is a **separate, admin-gated surface** from
+  `/api/dm` on purpose: folding a bypass into the membership filter would mean one bug in that
+  filter hands an ordinary member the same reach, so the read-through code never consults membership
+  at all. Every read and every search is written to an audit log shown in the Admin panel, and the
+  Messages tab tells members plainly that the operator can read what they write — people write
+  differently when they believe a message is private, and on this deployment it is not.
 - **Saved layouts** — named views of the markets table (column order + visibility, sort,
   analysis window, vol/OI filters, ★-only), saved and switched from the Layouts menu. Stored
   per browser in localStorage; the active layout shows a • when the live view has unsaved changes.

@@ -13312,7 +13312,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.01-48"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.02-49"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -22742,7 +22742,7 @@ test("congress -04: parse queue — scans marked once, transient failures retrie
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-// ===== accounts, invites and direct messages (build 2026.09.01-48) =============================
+// ===== accounts, invites and direct messages (build 2026.09.02-49) =============================
 // The shared password had one door and one key. These cover the replacement: per-person accounts,
 // single-use invites, and the revocation lever that makes removing one member cost nobody else
 // anything. Every case here is one that would otherwise be discovered in production.
@@ -23063,7 +23063,7 @@ test("server: the invite door strips the code from the URL before anything rende
   assert.ok(/const SSE_PER_USER = 4/.test(srv), "a per-member connection cap, so one person's tabs cannot eat the pool");
 });
 
-// ===== messages v2: groups, attachments, reactions, search, bridge (build 2026.09.01-48) =======
+// ===== messages v2: groups, attachments, reactions, search, bridge (build 2026.09.02-49) =======
 function seedDesk(marks) {
   const A = freshAccounts(marks);
   const g = A.bootstrap("gus", "correct-horse-battery").user;
@@ -23247,7 +23247,7 @@ test("the pair schema migrates onto the membership table without losing a conver
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-// ===== self-serve password reset by one-time code (build 2026.09.01-48) ========================
+// ===== self-serve password reset by one-time code (build 2026.09.02-49) ========================
 // No mail server exists here and adding one for a ten-person desk is not worth it — but the
 // Telegram outbox already does delivery, with recipients, quiet hours and caps. These cover the
 // half that is ours: issuing, throttling, and refusing.
@@ -23348,4 +23348,161 @@ test("server: the reset flow binds its two steps and does not enumerate handles"
   // lock somebody out of their own reset.
   assert.ok(/if \(!r\.codeOk\) loginFail\(ip\)/.test(block), "only a bad CODE spends the brute-force damper");
   assert.ok(/u === "\/reset" \|\| u === "\/reset\/code"/.test(srv), "both reset doors pass the site gate");
+});
+
+// ===== messages v3: the deletion fix, the calls record, watch, receipts, read-through ==========
+test("deleting a message takes its attachment with it", () => {
+  // The first version nulled fileId on the message and stopped there, leaving the row AND the bytes
+  // behind — and because the download route authorizes on thread membership rather than on a live
+  // reference, anyone in the thread who still held the id could keep fetching the attachment of a
+  // "deleted" message. Deleting is not a rendering change.
+  const fs = require("fs"), path = require("path");
+  const A = freshAccounts();
+  const { g, l } = seedTwo(A);
+  const T = A.threadFor(g.uid, l.uid, true).id;
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4E, 0x47, 13, 10, 26, 10]), Buffer.alloc(16)]);
+  const f = A.putFile(g.uid, T, "chart.png", png).file;
+  const bytes = () => fs.existsSync(path.join(A._dir, "dm-files", f.id));
+  const msg = A.send(g.uid, null, "here", null, { thread: T, fileId: f.id });
+  assert.ok(A.readFile(l.uid, f.id).ok && bytes(), "readable while the message stands");
+
+  A.drop(g.uid, msg.id);
+  assert.ok(!A.readFile(l.uid, f.id).ok, "and NOT readable once the message is deleted");
+  assert.ok(!A.readFile(g.uid, f.id).ok, "not even by the person who sent it");
+  assert.ok(!bytes(), "the bytes are off the volume");
+  const row = A.history(l.uid, T).messages.find((m) => m.id === msg.id);
+  assert.ok(row && row.deleted && row.file === null, "the row survives as a tombstone, carrying no attachment");
+});
+
+test("abandoned uploads are swept, referenced ones never are", () => {
+  const fs = require("fs"), path = require("path");
+  const A = freshAccounts();
+  const { g, l } = seedTwo(A);
+  const T = A.threadFor(g.uid, l.uid, true).id;
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4E, 0x47, 13, 10, 26, 10]), Buffer.alloc(16)]);
+  const orphan = A.putFile(g.uid, T, "changed-my-mind.png", png).file;
+  const used = A.putFile(g.uid, T, "sent.png", png).file;
+  A.send(g.uid, null, "with a file", null, { thread: T, fileId: used.id });
+  const on = (id) => fs.existsSync(path.join(A._dir, "dm-files", id));
+
+  // The grace window matters: a file uploaded milliseconds before its message must not be swept
+  // out from under it.
+  assert.equal(A.sweepFiles(), 0, "a fresh orphan is inside the grace window");
+  assert.equal(A.sweepFiles(0), 1, "past it, the abandoned upload goes");
+  assert.ok(!on(orphan.id), "and its bytes with it");
+  assert.ok(on(used.id) && A.readFile(l.uid, used.id).ok, "a referenced file is never touched");
+});
+
+test("a watched ticker jumps the queue and pierces mute", () => {
+  const marks = { PLTR: 113.9 };
+  const A = freshAccounts(marks);
+  const { g, l } = seedTwo(A);
+  const T = A.threadFor(g.uid, l.uid, true).id;
+  const resolve = (x) => (marks[x] ? x : null);
+  const nobody = () => false;
+
+  assert.ok(!A.setWatch(l.uid, "  ", true).ok, "an empty ticker is not a ticker");
+  A.setWatch(l.uid, "pltr", true);
+  assert.deepEqual(A.watchList(l.uid), ["PLTR"], "stored upper-case, however it was typed");
+
+  A.setMuted(l.uid, T, true);
+  A.send(g.uid, null, "just chatter", resolve, { thread: T });
+  assert.ok(A.pendingEscalations(0, nobody).every((e) => e.uid !== l.uid), "a muted thread stays silent");
+
+  A.send(g.uid, null, "look at $PLTR", resolve, { thread: T });
+  const hot = A.pendingEscalations(60000, nobody).filter((e) => e.uid === l.uid);
+  assert.equal(hot.length, 1, "a watched ticker does not wait out the delay");
+  assert.equal(hot[0].hot, true, "and gets through the mute");
+  assert.ok(A.pendingEscalations(0, (u) => u === l.uid).every((e) => e.uid !== l.uid),
+    "but somebody with the terminal open is still not interrupted");
+});
+
+test("read receipts, pins and export", () => {
+  const A = freshAccounts();
+  const { g, l, } = seedTwo(A);
+  const T = A.threadFor(g.uid, l.uid, true).id;
+  const sent = A.send(g.uid, null, "did this land", null, { thread: T });
+
+  const before = A.threads(g.uid).find((t) => t.id === T).seen.find((s) => s.uid === l.uid);
+  assert.ok(before.readMsgId < sent.id, "the sender can see it has not been read");
+  assert.equal(before.handle, "lena", "and by whom");
+  A.markRead(l.uid, T);
+  assert.ok(A.threads(g.uid).find((t) => t.id === T).seen.find((s) => s.uid === l.uid).readMsgId >= sent.id,
+    "and sees it once it has");
+
+  assert.ok(A.pin(g.uid, sent.id, true).ok);
+  assert.equal(A.threads(g.uid).find((t) => t.id === T).pins, 1, "the pin count rides the thread list");
+  const m = A.redeem(A.mintInvite(g.uid, null, 7, "join").invite.code, "marco", "another-long-password").user;
+  assert.ok(!A.pin(m.uid, sent.id, true).ok, "somebody outside the thread cannot pin into it");
+  A.pin(g.uid, sent.id, false);
+  assert.equal(A.pinsOf(T, g.uid).length, 0);
+
+  const ex = A.exportThread(g.uid, T);
+  assert.ok(ex.ok && ex.messages.length >= 1 && ex.members.length === 2, "a member can take the record out");
+  assert.ok(!A.exportThread(m.uid, T).ok, "an outsider cannot");
+});
+
+test("the calls record scores what the price stamp was for", () => {
+  const marks = { PLTR: 100, CRCL: 200 };
+  const A = freshAccounts(marks);
+  const { g, l } = seedTwo(A);
+  const T = A.threadFor(g.uid, l.uid, true).id;
+  const resolve = (x) => (marks[x] ? x : null);
+  A.send(g.uid, null, "long $PLTR", resolve, { thread: T });
+  A.send(l.uid, null, "short $CRCL", resolve, { thread: T });
+  A.send(g.uid, null, "no ticker in this one", resolve, { thread: T });
+
+  marks.PLTR = 110; marks.CRCL = 180;
+  const rec = A.calls(g.uid, {});
+  assert.equal(rec.calls.length, 2, "only stamped messages are calls");
+  const pl = rec.calls.find((c) => c.ref === "PLTR");
+  assert.equal(pl.refPx, 100, "the stamp is what it was sent at");
+  assert.ok(Math.abs(pl.chg - 0.1) < 1e-9, "and the move since is measured against it, live");
+  assert.ok(pl.threadName, "each call says which conversation it was made in");
+
+  const mine = rec.summary.find((x) => x.who === "gustavo");
+  assert.equal(mine.n, 1);
+  assert.equal(mine.upPct, 1, "a per-person record is the only question a call log answers");
+  assert.ok(rec.summary.find((x) => x.who === "lena"), "everyone in the thread is scored");
+  assert.ok(A.calls(g.uid, { by: l.uid }).calls.every((c) => c.senderUid === l.uid), "filterable by author");
+
+  const m = A.redeem(A.mintInvite(g.uid, null, 7, "join").invite.code, "marco", "another-long-password").user;
+  assert.equal(A.calls(m.uid, {}).calls.length, 0, "and it never reaches a conversation you are not in");
+});
+
+test("the operator can read every message, and every read is on the record", () => {
+  // The owner of this deployment decided an operator may read everything. What makes that
+  // defensible rather than merely permitted is that it is a separate surface, it is auditable, and
+  // the people writing are told — all three are asserted here.
+  const A = freshAccounts();
+  const { g, l } = seedTwo(A);
+  const m = A.redeem(A.mintInvite(g.uid, null, 7, "join").invite.code, "marco", "another-long-password").user;
+  const T = A.threadFor(l.uid, m.uid, true).id;
+  A.send(l.uid, null, "something between the two of us", null, { thread: T });
+
+  assert.ok(!A.history(g.uid, T).ok, "the member API still refuses the operator — the bypass is NOT in the membership filter");
+  const seen = A.adminHistory(g.uid, T);
+  assert.ok(seen.ok && seen.messages.some((x) => x.body.includes("between the two of us")),
+    "the admin surface reads it");
+  assert.ok(seen.messages.every((x) => x.mine === false), "and never claims the operator wrote any of it");
+  assert.ok(A.adminThreads().some((t) => t.id === T), "every conversation is listed");
+  assert.equal(A.adminSearch(g.uid, "between the two").results.length, 1, "and searchable");
+
+  const log = A.adminAuditLog();
+  assert.ok(log.some((e) => e.action === "read-thread" && e.thread === T), "the read is recorded");
+  assert.ok(log.some((e) => e.action === "search" && e.detail.includes("between the two")), "so is the search");
+  assert.equal(log[0].who, "gustavo", "with the operator named");
+
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(/fastify\.get\("\/api\/access\/dm"/.test(srv), "read-through lives on its own admin-gated route");
+  const block = srv.slice(srv.indexOf("// ===== operator read-through"), srv.indexOf("// ---- the Telegram reply bridge"));
+  assert.ok(!/isMember|threadPeers/.test(block), "it must not consult membership — that is the point of separating it");
+  assert.equal((block.match(/adminOnly\(req, reply\)/g) || []).length, 4, "every read-through route is gated at the door");
+  // People write differently when they believe a message is private. On this deployment it is not,
+  // so the tab says so rather than letting the assumption stand.
+  assert.ok(/operatorReadsAll: true/.test(srv), "the server states the posture in the payload");
+  assert.ok(/The operator of this terminal can read every message here/.test(app),
+    "and the Messages tab tells members, in the place where they write");
 });

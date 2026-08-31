@@ -208,8 +208,35 @@ CREATE TABLE IF NOT EXISTS dm_msg (
   deletedAt INTEGER,
   sys TEXT,                        -- system event ('added'/'removed'/'left'/'renamed'), else NULL
   fileId TEXT,                     -- attachment, when the message carried one
-  via TEXT                         -- 'telegram' when it came in over the bridge, else NULL
+  via TEXT,                        -- 'telegram' when it came in over the bridge, else NULL
+  pinnedAt INTEGER,                -- a desk channel wants the current levels at the top
+  pinnedBy TEXT
 ) STRICT;
+
+-- Tickers a member wants to hear about even when they are not looking. A message carrying one of
+-- these as its $TICKER reference escalates IMMEDIATELY and pierces a muted thread: "tell me when
+-- anyone mentions PLTR" is worthless if it waits five minutes or is silenced by the mute you set
+-- on a busy group. Deliberately its own list rather than the markets-table watchlist, which lives
+-- in localStorage and the server has never seen.
+CREATE TABLE IF NOT EXISTS dm_watch (
+  uid TEXT NOT NULL,
+  coin TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  PRIMARY KEY (uid, coin)
+) STRICT, WITHOUT ROWID;
+
+-- Every operator read of a conversation they are not in. An operator who can read everything is a
+-- decision the owner made; a record of when they did is what keeps it accountable rather than
+-- silent. Append-only, never served to non-admins.
+CREATE TABLE IF NOT EXISTS dm_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  uid TEXT NOT NULL,
+  action TEXT NOT NULL,
+  thread INTEGER,
+  detail TEXT,
+  at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS dm_audit_at ON dm_audit(at);
 
 CREATE TABLE IF NOT EXISTS dm_read (
   thread INTEGER NOT NULL,
@@ -254,7 +281,7 @@ CREATE TABLE IF NOT EXISTS dm_file (
   // what produced "table dm_msg has no column named sys" the first time round.
   const ADDED_COLUMNS = {
     dm_thread: [["kind", "TEXT NOT NULL DEFAULT 'dm'"], ["pairKey", "TEXT"], ["title", "TEXT"], ["createdBy", "TEXT"]],
-    dm_msg: [["sys", "TEXT"], ["fileId", "TEXT"], ["via", "TEXT"]],
+    dm_msg: [["sys", "TEXT"], ["fileId", "TEXT"], ["via", "TEXT"], ["pinnedAt", "INTEGER"], ["pinnedBy", "TEXT"]],
   };
   for (const [table, cols] of Object.entries(ADDED_COLUMNS)) {
     const have = db.prepare("PRAGMA table_info(" + table + ")").all().map((c) => c.name);
@@ -363,6 +390,33 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
 
     fileIns: db.prepare("INSERT INTO dm_file (id, thread, uid, name, mime, size, inline, createdAt) VALUES (?,?,?,?,?,?,?,?)"),
     fileById: db.prepare("SELECT * FROM dm_file WHERE id = ?"),
+    fileDrop: db.prepare("DELETE FROM dm_file WHERE id = ?"),
+    // Uploaded, then never sent — the person picked a file and changed their mind. Nothing points
+    // at these rows, so without a sweep they and their bytes sit on the volume forever.
+    fileOrphans: db.prepare(`SELECT f.id FROM dm_file f
+      WHERE f.createdAt < ? AND NOT EXISTS (SELECT 1 FROM dm_msg m WHERE m.fileId = f.id) LIMIT 500`),
+
+    pinSet: db.prepare("UPDATE dm_msg SET pinnedAt = ?, pinnedBy = ? WHERE id = ?"),
+    pinsOf: db.prepare("SELECT * FROM dm_msg WHERE thread = ? AND pinnedAt IS NOT NULL AND deletedAt IS NULL ORDER BY pinnedAt DESC LIMIT 20"),
+
+    watchAdd: db.prepare("INSERT OR IGNORE INTO dm_watch (uid, coin, at) VALUES (?,?,?)"),
+    watchDrop: db.prepare("DELETE FROM dm_watch WHERE uid = ? AND coin = ?"),
+    watchOf: db.prepare("SELECT coin FROM dm_watch WHERE uid = ? ORDER BY coin"),
+    watchHas: db.prepare("SELECT 1 AS x FROM dm_watch WHERE uid = ? AND coin = ?"),
+
+    // Every stamped message, newest first. This is the record the price stamp exists to build.
+    callsAll: db.prepare(`SELECT * FROM dm_msg WHERE ref IS NOT NULL AND deletedAt IS NULL
+      ORDER BY id DESC LIMIT ?`),
+    callsMine: db.prepare(`SELECT m.* FROM dm_msg m JOIN dm_member mem ON mem.thread = m.thread
+      WHERE mem.uid = ? AND mem.leftAt IS NULL AND m.ref IS NOT NULL AND m.deletedAt IS NULL
+      ORDER BY m.id DESC LIMIT ?`),
+
+    auditAdd: db.prepare("INSERT INTO dm_audit (uid, action, thread, detail, at) VALUES (?,?,?,?,?)"),
+    auditList: db.prepare("SELECT * FROM dm_audit ORDER BY id DESC LIMIT ?"),
+
+    thrAll: db.prepare("SELECT * FROM dm_thread ORDER BY lastAt DESC LIMIT ?"),
+    msgSearchAll: db.prepare(`SELECT * FROM dm_msg WHERE deletedAt IS NULL AND sys IS NULL
+      AND body LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT ?`),
   };
 
   // ---- in-memory user index --------------------------------------------------------------------
@@ -924,6 +978,8 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (!fs.existsSync(p)) return { ok: false, error: "that file is no longer stored" };
     return { ok: true, file: f, path: p };
   }
+  // A missing row is the normal state for an attachment whose message was deleted, so it reports
+  // "no attachment" rather than a dangling reference the client would render as a broken chip.
   const fileWire = (id) => {
     if (!id) return null;
     const f = S.fileById.get(id);
@@ -939,7 +995,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       ref: m.ref || null, refPx: m.refPx == null ? null : m.refPx,
       px: m.ref ? markFor(m.ref) : null,          // live mark, derived at read — never stored
       edited: !!m.editedAt, deleted: !!m.deletedAt,
-      sys: m.sys || null, via: m.via || null,
+      sys: m.sys || null, via: m.via || null, pinned: !!m.pinnedAt,
       file: m.deletedAt ? null : fileWire(m.fileId),
       reactions: m.deletedAt ? null : reactionsOf(m.id, uid) };
   }
@@ -997,9 +1053,12 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   function drop(uid, id) {
     const m = S.msgById.get(+id);
     if (!m || m.sender !== uid || m.sys) return { ok: false, error: "that isn't your message" };
-    // Tombstone, never a delete: the row's id is a cursor position on the other side, and removing
-    // it would make their next sync silently skip a beat.
+    // Tombstone the ROW, never delete it: the id is a cursor position on the other side, and
+    // removing it would make their next sync silently skip a beat. The ATTACHMENT is a different
+    // matter — it must actually go, row and bytes, or "delete" is a rendering change and anyone who
+    // still holds the id can keep downloading it.
     S.msgDrop.run(Date.now(), +id, uid);
+    removeFile(m.fileId);
     return { ok: true, thread: m.thread, message: wire(S.msgById.get(+id), uid) };
   }
 
@@ -1022,6 +1081,12 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       owner: !!(me && me.owner),
       disabled: t.kind === "dm" ? !!(users.get(peerOf(t, uid)) || {}).disabledAt : false,
       lastAt: t.lastAt, muted: !!rd.muted,
+      // What the OTHER side has read, so "did my call land" is answerable. The data was already
+      // being stored for unread counts; showing it costs a lookup.
+      seen: mem.filter((x) => x.uid !== uid).map((x) => ({
+        uid: x.uid, handle: (users.get(x.uid) || {}).display || "—",
+        readMsgId: (S.readGet.get(t.id, x.uid) || { readMsgId: 0 }).readMsgId })),
+      pins: S.pinsOf.all(t.id).length,
       unread: S.msgUnread.get(t.id, rd.readMsgId, uid).n,
       preview: String(preview).slice(0, 90),
     };
@@ -1094,6 +1159,158 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     return { ok: true, thread: t.id, muted: !!on };
   }
 
+  // ---- attachment lifecycle ----------------------------------------------------------------------
+  // Deleting a message has to take its attachment with it. The first version nulled fileId on the
+  // message and stopped there, which left the row AND the bytes behind — and because /api/dm/file
+  // authorizes on thread membership rather than on a live reference, anyone in the thread who still
+  // had the id in their client cache could keep downloading the attachment of a "deleted" message.
+  // Deleting is not a rendering change.
+  function removeFile(id) {
+    if (!id) return;
+    try { fs.unlinkSync(path.join(fileDir, String(id))); } catch (_) {}
+    try { S.fileDrop.run(String(id)); } catch (_) {}
+  }
+  // An upload only becomes reachable when a message references it, so anything unreferenced and
+  // older than the grace window was abandoned mid-compose. The window matters: a file uploaded
+  // milliseconds before its message must not be swept out from under it.
+  const FILE_ORPHAN_GRACE_MS = 30 * 60 * 1000;
+  function sweepFiles(graceMs) {
+    const cut = Date.now() - (graceMs == null ? FILE_ORPHAN_GRACE_MS : graceMs);
+    const gone = S.fileOrphans.all(cut);
+    for (const f of gone) removeFile(f.id);
+    return gone.length;
+  }
+
+  // ---- ticker watch --------------------------------------------------------------------------------
+  function watchList(uid) { return S.watchOf.all(uid).map((r) => r.coin); }
+  function setWatch(uid, coin, on) {
+    const c = String(coin || "").trim().toUpperCase();
+    if (!c || c.length > 24) return { ok: false, error: "that isn't a ticker" };
+    if (on) S.watchAdd.run(uid, c, Date.now()); else S.watchDrop.run(uid, c);
+    return { ok: true, watching: watchList(uid) };
+  }
+  const watches = (uid, coin) => !!(coin && S.watchHas.get(uid, String(coin).toUpperCase()));
+
+  // ---- pins ----------------------------------------------------------------------------------------
+  function pin(uid, id, on) {
+    const m = S.msgById.get(+id);
+    if (!m || !isMember(m.thread, uid)) return { ok: false, error: "no such message" };
+    if (m.deletedAt || m.sys) return { ok: false, error: "that message cannot be pinned" };
+    S.pinSet.run(on ? Date.now() : null, on ? uid : null, +id);
+    return { ok: true, thread: m.thread, message: wire(S.msgById.get(+id), uid) };
+  }
+  const pinsOf = (threadId, uid) => S.pinsOf.all(+threadId).map((m) => wire(m, uid));
+
+  // ---- the calls record ----------------------------------------------------------------------------
+  // A stamped message is a dated, priced claim with an author — the same shape as a note, which is
+  // why it can be promoted into one. This is what the stamp was for: without somewhere to read them
+  // together, every call dies in the conversation it was made in.
+  function calls(uid, opts) {
+    const o = opts || {};
+    const n = Math.min(Math.max(+o.limit || 200, 1), 500);
+    const rows = o.all ? S.callsAll.all(n) : S.callsMine.all(uid, n);
+    const out = [];
+    for (const m of rows) {
+      if (o.by && m.sender !== o.by) continue;
+      const t = S.thrById.get(m.thread);
+      const live = markFor(m.ref);
+      const at = m.refPx;
+      const has = at != null && isFinite(at) && at > 0;
+      const ok = has && live != null && isFinite(live) && live > 0;
+      out.push({
+        id: m.id, thread: m.thread, ts: m.ts,
+        senderUid: m.sender, sender: (users.get(m.sender) || {}).display || "—",
+        threadName: t ? threadName(t, uid) : "—", kind: t ? t.kind : "dm",
+        body: m.body, ref: m.ref, refPx: has ? at : null, px: ok ? live : null,
+        chg: ok ? live / at - 1 : null,
+      });
+    }
+    // The summary is per person, because "who is right" is the only question a call record answers.
+    const byWho = new Map();
+    for (const c of out) {
+      if (c.chg == null) continue;
+      const e = byWho.get(c.senderUid) || { uid: c.senderUid, who: c.sender, n: 0, up: 0, sum: 0 };
+      e.n++; if (c.chg > 0) e.up++; e.sum += c.chg;
+      byWho.set(c.senderUid, e);
+    }
+    const summary = [...byWho.values()].map((e) => ({
+      uid: e.uid, who: e.who, n: e.n, upPct: e.n ? e.up / e.n : null, avg: e.n ? e.sum / e.n : null,
+    })).sort((a, b) => b.n - a.n);
+    return { ok: true, calls: out, summary };
+  }
+
+  // ---- export ---------------------------------------------------------------------------------------
+  // If messages carry trade calls they are a record, and a record you cannot get out of the system
+  // is a record you do not really have.
+  function exportThread(uid, threadId) {
+    const t = S.thrById.get(+threadId);
+    if (!t || !isMember(t.id, uid)) return { ok: false, error: "no such conversation" };
+    const rows = db.prepare("SELECT * FROM dm_msg WHERE thread = ? ORDER BY id").all(t.id);
+    return { ok: true, thread: t.id, kind: t.kind, name: threadName(t, uid),
+      exportedAt: Date.now(),
+      members: S.memAll.all(t.id).map((m) => ({ handle: (users.get(m.uid) || {}).display || m.uid,
+        joinedAt: m.joinedAt, leftAt: m.leftAt || null })),
+      messages: rows.map((m) => ({ id: m.id, ts: m.ts,
+        from: m.sender ? ((users.get(m.sender) || {}).display || m.sender) : null,
+        body: m.deletedAt ? null : m.body, deleted: !!m.deletedAt, edited: !!m.editedAt,
+        sys: m.sys || null, via: m.via || null,
+        ref: m.ref || null, refPx: m.refPx == null ? null : m.refPx,
+        file: m.fileId ? (fileWire(m.fileId) || { id: m.fileId, missing: true }) : null })) };
+  }
+
+  // ---- operator read-through -------------------------------------------------------------------------
+  // The owner decided an operator may read every message on this terminal. It is a SEPARATE surface
+  // from the member API on purpose: folding an admin bypass into the membership filter would mean
+  // one bug in that filter hands a member the same reach. These functions never consult membership,
+  // and nothing else in the module calls them.
+  function adminAudit(uid, action, thread, detail) {
+    try { S.auditAdd.run(uid, action, thread == null ? null : +thread, detail || null, Date.now()); } catch (_) {}
+  }
+  function adminThreads(limit) {
+    return S.thrAll.all(Math.min(Math.max(+limit || 200, 1), 500)).map((t) => {
+      const mem = S.memAll.all(t.id);
+      const last = S.msgLast.get(t.id);
+      return { id: t.id, kind: t.kind, title: t.title || null, lastAt: t.lastAt,
+        members: mem.map((m) => ({ handle: (users.get(m.uid) || {}).display || m.uid, left: !!m.leftAt })),
+        n: db.prepare("SELECT COUNT(*) AS n FROM dm_msg WHERE thread = ?").get(t.id).n,
+        preview: last ? String(last.sys ? sysLine(last) : last.deletedAt ? "message deleted" : last.body).slice(0, 90) : "" };
+    });
+  }
+  function adminHistory(adminUid, threadId, before, limit) {
+    const t = S.thrById.get(+threadId);
+    if (!t) return { ok: false, error: "no such conversation" };
+    const b = Number.isFinite(+before) && +before > 0 ? +before : Number.MAX_SAFE_INTEGER;
+    const n = Math.min(Math.max(+limit || 100, 1), 300);
+    const rows = S.msgPage.all(t.id, b, n).reverse();
+    adminAudit(adminUid, "read-thread", t.id, "" + rows.length + " message(s)");
+    return { ok: true, thread: t.id, kind: t.kind,
+      name: t.kind === "group" ? (t.title || "untitled group")
+        : S.memAll.all(t.id).map((m) => (users.get(m.uid) || {}).display || m.uid).join(" ↔ "),
+      members: S.memAll.all(t.id).map((m) => ({ uid: m.uid, handle: (users.get(m.uid) || {}).display || m.uid, left: !!m.leftAt })),
+      messages: rows.map((m) => Object.assign(wire(m, adminUid), {
+        // wire() marks `mine` against the reader; for an operator looking into somebody else's
+        // conversation that is meaningless, so the sender is named explicitly instead.
+        mine: false, sender: m.sender ? ((users.get(m.sender) || {}).display || "—") : "" })),
+      more: rows.length === n };
+  }
+  function adminSearch(adminUid, q, limit) {
+    const raw = String(q == null ? "" : q).trim();
+    if (raw.length < 2) return { ok: true, q: raw, results: [] };
+    const esc = raw.replace(/[\\%_]/g, (c) => "\\" + c);
+    const n = Math.min(Math.max(+limit || 100, 1), 200);
+    const rows = S.msgSearchAll.all("%" + esc + "%", n);
+    adminAudit(adminUid, "search", null, raw.slice(0, 64) + " (" + rows.length + " hit(s))");
+    return { ok: true, q: raw, results: rows.map((m) => {
+      const t = S.thrById.get(m.thread);
+      return { id: m.id, thread: m.thread, ts: m.ts, body: m.body,
+        sender: (users.get(m.sender) || {}).display || "—",
+        threadName: t ? (t.kind === "group" ? (t.title || "untitled group")
+          : S.memAll.all(t.id).map((x) => (users.get(x.uid) || {}).display || x.uid).join(" ↔ ")) : "—" };
+    }) };
+  }
+  const adminAuditLog = (limit) => S.auditList.all(Math.min(Math.max(+limit || 100, 1), 500))
+    .map((r) => ({ at: r.at, who: (users.get(r.uid) || {}).display || r.uid, action: r.action, thread: r.thread, detail: r.detail }));
+
   // ---- offline escalation ----------------------------------------------------------------------
   // Returns one digest per (recipient, thread) for messages that are still unread, older than
   // `delayMs`, not muted, and not already escalated. The delay is the whole feature: without it two
@@ -1110,15 +1327,19 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
         if (!u || u.disabledAt) continue;
         if (isOnline && isOnline(uid)) continue;
         const rd = S.readGet.get(t.id, uid) || { readMsgId: 0, muted: 0, notifiedMsgId: 0 };
-        if (rd.muted) continue;
         const floor = Math.max(rd.readMsgId || 0, rd.notifiedMsgId || 0);
-        const rows = S.msgSince.all(t.id, floor, 50)
-          .filter((m) => m.sender !== uid && !m.deletedAt && !m.sys && m.ts <= cut);
+        const fresh = S.msgSince.all(t.id, floor, 50)
+          .filter((m) => m.sender !== uid && !m.deletedAt && !m.sys);
+        // A ticker you asked to hear about jumps the queue: it goes out immediately rather than
+        // waiting out the delay, and it pierces a muted thread. Muting a busy group should not be
+        // the same as asking not to be told when somebody mentions the name you are watching.
+        const hot = fresh.filter((m) => m.ref && watches(uid, m.ref));
+        const rows = hot.length ? hot : (rd.muted ? [] : fresh.filter((m) => m.ts <= cut));
         if (!rows.length) continue;
         out.push({ uid, thread: t.id, kind: t.kind,
           from: t.kind === "group" ? threadName(t, uid)
             : ((users.get(rows[rows.length - 1].sender) || {}).display || "someone"),
-          n: rows.length, upTo: rows[rows.length - 1].id,
+          n: rows.length, upTo: rows[rows.length - 1].id, hot: hot.length > 0,
           lines: rows.slice(-3).map((m) => ((m.ref ? "$" + m.ref + " · " : "")
             + (m.body || (m.fileId ? "sent a file" : ""))).slice(0, 90)) });
       }
@@ -1168,7 +1389,9 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     setMarkSource, threadFor, threadPeers, isMember, memberUids, send, edit, drop,
     threads, history, sync, search, markRead, setMuted,
     createGroup, addMembers, removeMember, leaveGroup, renameGroup,
-    react, REACTIONS, putFile, readFile, bridgeReply,
+    react, REACTIONS, putFile, readFile, removeFile, sweepFiles, bridgeReply,
+    watchList, setWatch, pin, pinsOf, calls, exportThread,
+    adminThreads, adminHistory, adminSearch, adminAuditLog,
     pendingEscalations, markEscalated,
     stats,
     // testing seams
