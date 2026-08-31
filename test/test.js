@@ -13312,7 +13312,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.02-49"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.03-50"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -22742,7 +22742,7 @@ test("congress -04: parse queue — scans marked once, transient failures retrie
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-// ===== accounts, invites and direct messages (build 2026.09.02-49) =============================
+// ===== accounts, invites and direct messages (build 2026.09.03-50) =============================
 // The shared password had one door and one key. These cover the replacement: per-person accounts,
 // single-use invites, and the revocation lever that makes removing one member cost nobody else
 // anything. Every case here is one that would otherwise be discovered in production.
@@ -23063,7 +23063,7 @@ test("server: the invite door strips the code from the URL before anything rende
   assert.ok(/const SSE_PER_USER = 4/.test(srv), "a per-member connection cap, so one person's tabs cannot eat the pool");
 });
 
-// ===== messages v2: groups, attachments, reactions, search, bridge (build 2026.09.02-49) =======
+// ===== messages v2: groups, attachments, reactions, search, bridge (build 2026.09.03-50) =======
 function seedDesk(marks) {
   const A = freshAccounts(marks);
   const g = A.bootstrap("gus", "correct-horse-battery").user;
@@ -23247,7 +23247,7 @@ test("the pair schema migrates onto the membership table without losing a conver
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-// ===== self-serve password reset by one-time code (build 2026.09.02-49) ========================
+// ===== self-serve password reset by one-time code (build 2026.09.03-50) ========================
 // No mail server exists here and adding one for a ten-person desk is not worth it — but the
 // Telegram outbox already does delivery, with recipients, quiet hours and caps. These cover the
 // half that is ours: issuing, throttling, and refusing.
@@ -23505,4 +23505,57 @@ test("the operator can read every message, and every read is on the record", () 
   assert.ok(/operatorReadsAll: true/.test(srv), "the server states the posture in the payload");
   assert.ok(/The operator of this terminal can read every message here/.test(app),
     "and the Messages tab tells members, in the place where they write");
+});
+
+// ===== admin panel: every segment folds, and starts folded (build 2026.09.03-50) ===============
+test("admin panel: every segment is foldable and collapsed in the markup", () => {
+  const fs = require("fs"), path = require("path");
+  const R = (p) => fs.readFileSync(path.join(__dirname, "..", p), "utf8");
+  const html = R("public/index.html"), app = R("public/app.js"), css = R("public/styles.css");
+  const sec = html.slice(html.indexOf('<section id="view-admin"'), html.indexOf("</section>", html.indexOf('<section id="view-admin"')));
+  assert.ok(sec.length > 1000, "found the admin section");
+
+  // Drift guard: the panel grew to eight stacked boxes before this existed, and the next one added
+  // will be just as easy to leave loose. Every top-level box must be inside a fold — or be the
+  // recipients accordion, which already had its own toggle and keeps it.
+  const folds = [...sec.matchAll(/data-fold="([a-z]+)"/g)].map((m) => m[1]);
+  assert.ok(folds.length >= 7, "found the folds (" + folds.length + ")");
+  assert.equal(new Set(folds).size, folds.length, "fold keys are unique — the state map is keyed by them");
+  for (const id of ["admAccessBox", "admDmBox", "admLoop", "admBriefBox", "admFloorsBox", "admAuditBox", "adm-rows"]) {
+    const at = sec.indexOf('id="' + id + '"');
+    assert.ok(at > 0, id + " is still in the panel");
+    const before = sec.slice(0, at);
+    assert.ok(before.lastIndexOf('class="adm-foldbody"') > before.lastIndexOf("</div>\n  </div>") - 400 ||
+      before.lastIndexOf('class="adm-foldbody"') > before.lastIndexOf('data-fold='),
+      id + " must sit inside a fold body");
+  }
+  // Collapsed is the state the markup ships in, not something JS has to apply on first paint.
+  assert.equal((sec.match(/class="adm-foldbody" hidden/g) || []).length, folds.length,
+    "every fold body starts hidden in the HTML");
+
+  // The wrapper must be OUTSIDE the rendered box: every renderer replaces its box's innerHTML, so a
+  // toggle placed inside would be destroyed on the next render.
+  for (const [box, fn] of [["admAccessBox", "renderAccess"], ["admDmBox", "renderAdmDm"]]) {
+    const body = app.slice(app.indexOf("function " + fn + "("));
+    assert.ok(/box\.innerHTML=/.test(body.slice(0, 4000)), fn + " replaces its box wholesale");
+    assert.ok(!/adm-foldbody|adm-foldhd/.test(body.slice(0, 4000)), fn + " must not render the fold itself (" + box + ")");
+  }
+
+  assert.ok(/function admFoldApply\(\)/.test(app) && /function admFoldWire\(\)/.test(app), "the fold logic exists");
+  assert.ok(/admFoldWire\(\);[\s\S]{0,400}admFoldApply\(\)/.test(app), "openAdmin wires then applies");
+  assert.ok(/localStorage\.setItem\(ADM_FOLD_KEY/.test(app), "open folds are remembered per browser");
+  // A header that cannot be reached from the keyboard is a header half the point of which is gone.
+  assert.ok(/<button type="button" class="adm-foldhd"/.test(sec), "fold headers are real buttons");
+  assert.ok(/aria-expanded/.test(app), "and report their state");
+  assert.ok(/\.adm-foldhd:focus-visible/.test(css), "with a visible focus ring");
+
+  // The loop row hides itself until it has data; its fold has to follow or the panel shows a
+  // header over nothing.
+  assert.ok(/fold\.hidden\s*=\s*!!box\.hidden/.test(app), "the loop fold follows the row it wraps");
+
+  // The auth pages point at the icon the app already serves, so a signed-out browser stops falling
+  // back to /favicon.ico and logging the miss — and the gate lets a logo through.
+  const srv = R("server.js");
+  assert.ok(srv.includes('<link rel="icon" href="/icon.svg"'), "the auth pages declare the app icon");
+  assert.ok(/u === "\/icon\.svg" \|\| u === "\/manifest\.webmanifest"/.test(srv), "and the gate does not 401 it");
 });
