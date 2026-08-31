@@ -3601,7 +3601,7 @@ const HASH_VIEWS=new Set(['markets','focus','funds','trend','charts','sectors','
 // rolls back on failure — a batch write would make a partial failure ambiguous, and there is no save
 // button because a draft state is another way for the panel and the server to disagree.
 let _adm=null, _admVap=false, _admBusy='';
-async function openAdmin(){ if(!IS_ADMIN) return; renderAdmLoop(_lastHealth); updateFreshTray(); renderAdmin(); renderAudit(); loadAudit(); renderAdmFloors(); loadAdmFloors(); accWire(); renderAccess(); loadAccess(); await loadAdmin(); }
+async function openAdmin(){ if(!IS_ADMIN) return; renderAdmLoop(_lastHealth); updateFreshTray(); renderAdmin(); renderAudit(); loadAudit(); renderAdmFloors(); loadAdmFloors(); accWire(); renderAccess(); loadAccess(); admDmWire(); renderAdmDm(); loadAdmDm(); await loadAdmin(); }
 async function loadAdmin(){
   try{ _adm=await fetchJSON('/api/features'); }
   catch(e){ _adm={error:String(e&&e.message||e)}; }
@@ -10083,10 +10083,11 @@ document.addEventListener('keydown',e=>{
   if(tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT'||(t&&t.isContentEditable)) return;
   if(e.key==='/'){ e.preventDefault();
     // focus the current tab's primary search; tabs without one fall back to the markets filter
-    const map={markets:'filter',corr:'corrsearch',report:'ai-q'};
+    const map={markets:'filter',corr:'corrsearch',report:'ai-q',dm:'dm-q'};
     let id=map[state.view];
     if(!id){ showView('markets'); id='filter'; }
     const inp=el(id); if(inp){ inp.focus(); inp.select&&inp.select(); } return; }
+  if(state.view==='dm'){ dmKeys(e); return; }                            // j/k walk the conversation rail, Escape backs out a level
   if(state.view!=='markets'||state.detail||mktGrp()!=='names') return;   // j/k/Enter drive the markets NAMES table only — never under an open drawer or a group lens
   if(e.key==='j'){ e.preventDefault(); kmoveSel(1); return; }
   if(e.key==='k'){ e.preventDefault(); kmoveSel(-1); return; }
@@ -14256,7 +14257,8 @@ async function termWhale(args){
 const dmState = { me: null, threads: [], members: [], online: new Set(),
   sel: null, msgs: new Map(), info: new Map(), cursor: 0, loaded: false, err: '', sending: false,
   picking: false, editing: null, pendingPeer: null, reactions: [], maxLen: 4000, maxFile: 8388608,
-  typing: new Map(), q: '', results: null, searching: false, manage: false, pendingFile: null };
+  typing: new Map(), q: '', results: null, searching: false, manage: false, pendingFile: null,
+  watching: [], admin: false, operatorReadsAll: false, calls: null, mode: 'chat', watchAdd: false };
 
 function dmSignedIn(){ return !!(window.__ME && window.__ME.uid); }
 function dmUnreadTotal(){ return dmState.threads.reduce((a,t)=>a+(t.muted?0:(t.unread||0)),0); }
@@ -14291,6 +14293,7 @@ async function dmLoad(){
     dmState.me=d.me; dmState.threads=d.threads||[]; dmState.members=d.members||[];
     dmState.online=new Set(d.online||[]); dmState.maxLen=d.maxLen||4000;
     dmState.maxFile=d.maxFile||8388608; dmState.reactions=d.reactions||[];
+    dmState.watching=d.watching||[]; dmState.admin=!!d.admin; dmState.operatorReadsAll=!!d.operatorReadsAll;
     dmState.loaded=true; dmState.err='';
   }catch(e){ dmState.err=e.message||String(e); }
   dmUpdatePip();
@@ -14332,9 +14335,12 @@ function dmTypingLine(threadId){
 }
 
 async function dmOpenThread(id){
+  // Whatever is in the box belongs to the thread being left, not the one being opened.
+  if(dmState.sel&&dmState.sel!==id){ const ta=el('dm-input'); if(ta) dmDraftSave(dmState.sel,ta.value); }
   dmState.sel=id; dmState.editing=null; dmState.picking=false; dmState.manage=false;
-  dmState.results=null; dmState.pendingPeer=null; dmState.pendingFile=null;
+  dmState.results=null; dmState.pendingPeer=null; dmState.pendingFile=null; dmState.mode='chat';
   dmRender();
+  { const ta=el('dm-input'); if(ta){ ta.value=dmDraftGet(id); } }
   try{
     const d=await fetchJSON('/api/dm/'+encodeURIComponent(id));
     if(d&&d.ok){ dmMerge(d.messages); if(d.info) dmState.info.set(id,d.info); dmRender(); }
@@ -14393,6 +14399,7 @@ async function dmSend(){
     // Nothing is kept in the box on success; on failure the text stays exactly where it was,
     // because a dropped connection must never eat something somebody typed.
     ta.value=''; dmState.editing=null; dmState.pendingFile=null; dmState.pendingPeer=null;
+    dmDraftSave(dmState.sel,'');
     _dmClearOnNextRender=true;
     if(res.d.message) dmMerge([res.d.message]);
     if(res.d.thread) dmState.sel=res.d.thread;
@@ -14421,6 +14428,18 @@ async function dmUpload(threadId,file){
     return (r.ok&&d.ok)?{ok:true,id:d.file.id}:{ok:false,error:d.error||'upload failed'};
   }catch(_){ return {ok:false,error:'upload failed'}; }
 }
+
+// A draft outlives a reload. dmCapture/dmRestore keep it across a re-render; this keeps it across
+// a refresh, a tab switch and a browser restart — the same localStorage the layouts use.
+const DM_DRAFT_KEY='xyz-dm-drafts';
+function dmDrafts(){ try{ return JSON.parse(localStorage.getItem(DM_DRAFT_KEY)||'{}')||{}; }catch(_){ return {}; } }
+function dmDraftSave(id,text){
+  if(!id) return;
+  try{ const d=dmDrafts();
+    if(text&&text.trim()) d[id]=text; else delete d[id];
+    localStorage.setItem(DM_DRAFT_KEY,JSON.stringify(d)); }catch(_){ }
+}
+function dmDraftGet(id){ return (dmDrafts()||{})[id]||''; }
 
 let _dmTypedAt=0;
 function dmTypingPing(){
@@ -14457,6 +14476,25 @@ function dmEdit(id){
   dmState.editing=id;
   const ta=el('dm-input'); if(ta){ ta.value=m.body; ta.focus(); }
   dmRender();
+}
+async function dmWatch(coin,on){
+  const res=await dmPost({watch:coin,on:on});
+  if(res.ok){ dmState.watching=res.d.watching||[]; dmState.watchAdd=false; dmRender(); }
+  else { dmState.err=(res.d&&res.d.error)||'could not change that'; dmRender(); }
+}
+async function dmPin(id,on){
+  const res=await dmPost({pin:id,on:on});
+  if(res.ok&&res.d.message){ dmMerge([res.d.message]); await dmLoad(); dmRender(); }
+}
+async function dmToNote(id){
+  const res=await dmPost({toNote:true,id:id});
+  if(res.ok) alert('Promoted to a note, keeping the price and time it was called at.');
+  else alert((res.d&&res.d.error)||'could not promote that');
+}
+async function dmOpenCalls(){
+  dmState.mode='calls'; dmState.results=null; dmRender();
+  try{ const d=await fetchJSON('/api/dm/calls'); if(d&&d.ok){ dmState.calls=d; dmRender(); } }
+  catch(_){ dmState.calls={calls:[],summary:[]}; dmRender(); }
 }
 async function dmReact(id,emoji){
   const res=await dmPost({react:true,id:id,emoji:emoji});
@@ -14575,9 +14613,14 @@ function dmMessageHtml(m,t){
   const meta=esc(who)+' · '+dmWhen(m.ts)
     +(m.via==='telegram'?' · <span class="sec" title="sent from Telegram">via telegram</span>':'')
     +(m.edited&&!m.deleted?' · <span class="sec">edited</span>':'');
-  const tools=(own&&!m.deleted)?'<span class="dm-tools">'
-    +'<button type="button" class="dm-tool" data-dmedit="'+m.id+'" title="Edit — the price stamp stays at what it was sent at">edit</button>'
-    +'<button type="button" class="dm-tool" data-dmdel="'+m.id+'" title="Delete">delete</button></span>':'';
+  // Pinning is any member's; editing and deleting are the author's; promoting a call to a note is
+  // the operator's, because the notes book itself is operator-only.
+  const tools='<span class="dm-tools">'
+    +(m.deleted?'':'<button type="button" class="dm-tool" data-dmpin="'+m.id+'" data-on="'+(m.pinned?'0':'1')+'" title="'+(m.pinned?'Unpin':'Pin this to the top of the conversation')+'">'+(m.pinned?'unpin':'pin')+'</button>')
+    +((m.ref&&m.refPx!=null&&dmState.admin&&!m.deleted)?'<button type="button" class="dm-tool" data-dmnote="'+m.id+'" title="Write this into the notes book, keeping the price and time it was called at">\u2192 note</button>':'')
+    +((own&&!m.deleted)?'<button type="button" class="dm-tool" data-dmedit="'+m.id+'" title="Edit — the price stamp stays at what it was sent at">edit</button>'
+      +'<button type="button" class="dm-tool" data-dmdel="'+m.id+'" title="Delete — this removes the attachment too">delete</button>':'')
+    +'</span>';
   const body=m.deleted
     ? '<div class="dm-b dm-del">message deleted</div>'
     : '<div class="dm-b">'+(m.body?esc(m.body).replace(/\n/g,'<br>'):'')+dmFile(m)+dmStamp(m)+'</div>';
@@ -14680,6 +14723,30 @@ function dmRestore(c){
   if(c.focus==='q'){ const q=el('dm-q'); if(q){ q.focus(); try{ q.setSelectionRange(c.qSelA,c.qSelB); }catch(_){} } }
 }
 
+// The calls record. Every price-stamped message with the move since it was sent, and a per-person
+// summary — because "who is right" is the only question a call record actually answers.
+function dmCallsHtml(){
+  const d=dmState.calls;
+  if(!d) return '<div class="dm-log" id="dm-log"><div class="dm-empty">loading\u2026</div></div>';
+  if(!d.calls.length) return '<div class="dm-log" id="dm-log"><div class="dm-empty">'
+    +'No calls yet. Type <b>$TICKER</b> in a message and it carries the mark it was sent at \u2014 those land here.</div></div>';
+  const sum=d.summary.map(x=>'<div class="dm-callsum"><span class="grow">'+esc(x.who)+'</span>'
+    +'<span class="acc-mu">'+x.n+' call'+(x.n===1?'':'s')+'</span>'
+    +'<span class="'+(x.upPct>=0.5?'pos':'neg')+'">'+Math.round(x.upPct*100)+'% up</span>'
+    +'<span class="'+(x.avg>=0?'pos':'neg')+'">avg '+(x.avg>=0?'+':'')+(x.avg*100).toFixed(1)+'%</span></div>').join('');
+  const rows=d.calls.map(c=>{
+    const cls=c.chg==null?'sec':(c.chg>0?'pos':'neg');
+    const mv=c.chg==null?'\u2014':((c.chg>0?'+':'')+(c.chg*100).toFixed(1)+'%');
+    return '<div class="dm-callrow" data-dmjump-thread="'+c.thread+'" data-mid="'+c.id+'">'
+      +'<span class="dm-callt">'+esc(c.ref)+'</span>'
+      +'<span class="dm-callb">'+esc(c.body).slice(0,120)+'</span>'
+      +'<span class="acc-mu">'+esc(c.sender)+' \u00b7 '+esc(c.threadName)+' \u00b7 '+dmWhen(c.ts)+'</span>'
+      +'<span class="dm-callpx">'+(c.refPx!=null?fmtPx(c.refPx):'\u2014')+'</span>'
+      +'<span class="dm-callmv '+cls+'">'+mv+'</span></div>';
+  }).join('');
+  return '<div class="dm-log" id="dm-log"><div class="dm-callsums">'+sum+'</div>'+rows+'</div>';
+}
+
 function dmRender(){
   const host=el('dm-body'); if(!host) return;
   const keep=dmCapture();
@@ -14693,7 +14760,11 @@ function dmRender(){
   const pendingPeer=dmState.pendingPeer?dmState.members.find(m=>m.uid===dmState.pendingPeer):null;
 
   let main;
-  if(dmState.results){
+  if(dmState.mode==='calls'){
+    main='<div class="dm-hd"><b>Calls</b>'
+      +'<span class="sec">every price-stamped message, and the move since</span>'
+      +'<button type="button" class="btn dm-mutebtn" id="dm-backchat">back</button></div>'+dmCallsHtml();
+  }else if(dmState.results){
     main='<div class="dm-hd"><b>Search</b><span class="sec">'+esc(dmState.q)+'</span>'
       +'<button type="button" class="btn dm-mutebtn" id="dm-clearsearch">clear</button></div>'+dmResultsHtml();
   }else if(pendingPeer){
@@ -14705,7 +14776,19 @@ function dmRender(){
       +(dmState.threads.length?'Pick a conversation.':'No conversations yet — press <b>+ new</b>.')+'</div></div>';
   }else{
     const arr=dmMsgs(t.id);
-    const log=arr.length?arr.map(m=>dmMessageHtml(m,t)).join(''):'<div class="dm-empty">No messages yet.</div>';
+    // "Seen" only under the LAST message you sent: a receipt on every line is noise, and the only
+    // question it answers is whether the thing you just said has landed.
+    const lastMine=[...arr].reverse().find(x=>x.mine&&!x.sys);
+    const seenBy=(t.seen||[]).filter(x=>lastMine&&x.readMsgId>=lastMine.id).map(x=>x.handle);
+    const receipt=lastMine?('<div class="dm-seen">'+(seenBy.length
+      ?('seen by '+esc(seenBy.join(', ')))
+      :(t.kind==='group'?'sent':'sent \u00b7 not read yet'))+'</div>'):'';
+    const pinned=(t.pins?arr.filter(x=>x.pinned):[]);
+    const pinStrip=pinned.length?('<div class="dm-pinstrip">'+pinned.slice(0,3).map(x=>
+      '<div class="dm-pinrow" data-dmjump="'+x.id+'"><span class="dm-pinicon">\u2691</span>'
+      +'<span class="dm-pintext">'+esc((x.ref?'$'+x.ref+' \u00b7 ':'')+(x.body||'attachment')).slice(0,120)+'</span>'
+      +'<button type="button" class="dm-tool" data-dmpin="'+x.id+'" data-on="0">unpin</button></div>').join('')+'</div>'):'';
+    const log=arr.length?arr.map(m=>dmMessageHtml(m,t)).join('')+receipt:'<div class="dm-empty">No messages yet.</div>';
     const grp=t.kind==='group';
     main='<div class="dm-hd">'+(grp?'<span class="dm-grp">#</span> ':'')+'<b>'+esc(t.name)+'</b>'
       +(grp?'<span class="mk-chip">'+(info?info.members.length:t.members?t.members.length:0)+' members</span>'
@@ -14713,13 +14796,14 @@ function dmRender(){
           +(dmState.online.has(t.peer)?'online':'away')+'</span>')
       +(t.disabled?'<span class="sec">account disabled</span>':'')
       +(grp?'<button type="button" class="btn dm-mutebtn" id="dm-managebtn">'+(dmState.manage?'close':'members')+'</button>':'')
-      +'<button type="button" class="btn dm-mutebtn" id="dm-mute" title="Muted conversations never escalate to Telegram">'
+      +'<a class="btn dm-mutebtn" href="/api/dm/export/'+t.id+'" title="Download this conversation as JSON \u2014 messages, stamps and members">export</a>'
+      +'<button type="button" class="btn dm-mutebtn" id="dm-mute" title="Muted conversations never escalate to Telegram'+(t.muted?'':' \u2014 except tickers you watch, which always come through')+'">'
       +(t.muted?'unmute':'mute')+'</button></div>'
-      +dmManageHtml(info)
+      +dmManageHtml(info)+pinStrip
       +'<div class="dm-log" id="dm-log">'+log+'</div>'+dmTypingLine(t.id);
   }
 
-  const canWrite=!!(t||pendingPeer)&&!dmState.results;
+  const canWrite=!!(t||pendingPeer)&&!dmState.results&&dmState.mode!=='calls';
   const attach=dmState.pendingFile
     ? '<div class="dm-pending">📎 '+esc(dmState.pendingFile.name)+' <button type="button" class="dm-tool" id="dm-unattach">remove</button></div>'
     : '';
@@ -14737,18 +14821,36 @@ function dmRender(){
       +'<button type="button" class="dm-tool" id="dm-canceledit">cancel</button></div>':'')
     +(dmState.err?'<div class="dm-err">'+esc(dmState.err)+'</div>':'');
 
+  const watchChips=(dmState.watching||[]).map(c=>
+    '<span class="dm-wchip">'+esc(c)+'<button type="button" class="dm-wx" data-dmunwatch="'+esc(c)+'" title="stop watching">×</button></span>').join('');
+  const watchBox='<div class="dm-watch">'
+    +'<div class="dm-sh" style="padding:0 0 6px">Tell me about'
+      +'<span class="dm-whelp" data-tip="A message whose $TICKER is on this list reaches you straight away and gets through a muted conversation. Everything else waits out the usual five minutes.">?</span></div>'
+    +(watchChips||'<span class="dm-empty" style="padding:0">nothing yet</span>')
+    +(dmState.watchAdd
+      ? '<input id="dm-wadd" class="dm-winput" placeholder="ticker, then Enter" maxlength="24" autofocus>'
+      : '<button type="button" class="dm-tool" id="dm-waddbtn">+ add a ticker</button>')
+    +'</div>';
+  // Said plainly, where people write. They will assume a direct message is private unless told
+  // otherwise, and on this deployment it is not.
+  const disclosure=dmState.operatorReadsAll
+    ? '<div class="dm-disclose">The operator of this terminal can read every message here.</div>' : '';
   host.innerHTML='<div class="dm-wrap">'
     +'<div class="dm-side">'
       +'<div class="dm-search"><input id="dm-q" placeholder="search messages…" value="'+esc(dmState.q)+'"></div>'
-      +'<div class="dm-sh">Conversations</div>'+dmRailHtml()
-      +'<div class="dm-new" id="dm-newbtn">'+(dmState.picking?'× close':'+ new message')+'</div>'+dmPickerHtml()+'</div>'
-    +'<div class="dm-main">'+main+composer+'</div></div>';
+      +'<div class="dm-sh">Conversations'
+        +'<button type="button" class="dm-tool dm-callsbtn" id="dm-callsbtn" title="Every price-stamped call, and how each has done since">calls \u2197</button></div>'
+      +dmRailHtml()
+      +'<div class="dm-new" id="dm-newbtn">'+(dmState.picking?'× close':'+ new message')+'</div>'+dmPickerHtml()
+      +watchBox+'</div>'
+    +'<div class="dm-main">'+main+composer+disclosure+'</div></div>';
 
   const ta=el('dm-input');
   if(ta){
     if(dmState.editing){ const m=dmMsgs(dmState.sel).find(x=>x.id===dmState.editing); if(m) ta.value=m.body; }
     ta.addEventListener('input',()=>{
       ta.style.height='auto'; ta.style.height=Math.min(ta.scrollHeight,160)+'px';
+      dmDraftSave(dmState.sel,ta.value);
       dmTypingPing(); });
     ta.addEventListener('keydown',(e)=>{
       // Enter sends, Shift+Enter is a newline. A chat box that needs a mouse to send is a form.
@@ -14759,6 +14861,10 @@ function dmRender(){
   const q=el('dm-q');
   if(q){ q.addEventListener('input',()=>dmSearchInput(q.value));
     q.addEventListener('keydown',(e)=>{ if(e.key==='Escape'){ dmState.q=''; dmState.results=null; dmRender(); } }); }
+  { const w=el('dm-wadd');
+    if(w) w.addEventListener('keydown',(e)=>{
+      if(e.key==='Enter'&&w.value.trim()) dmWatch(w.value.trim(),true);
+      if(e.key==='Escape'){ dmState.watchAdd=false; dmRender(); } }); }
   const f=el('dm-file');
   if(f) f.addEventListener('change',()=>{ if(f.files&&f.files[0]){ dmState.pendingFile=f.files[0]; dmState.err=''; dmRender(); } });
   dmRestore(keep);
@@ -14771,6 +14877,20 @@ function dmWire(){
   const host=el('dm-body'); if(!host||host._dmWired) return;
   host._dmWired=true;
   host.addEventListener('click',(e)=>{
+    const pinBtn=e.target.closest('[data-dmpin]');
+    if(pinBtn){ dmPin(+pinBtn.dataset.dmpin, pinBtn.dataset.on==='1'); return; }
+    const noteBtn=e.target.closest('[data-dmnote]');
+    if(noteBtn){ dmToNote(+noteBtn.dataset.dmnote); return; }
+    const unw=e.target.closest('[data-dmunwatch]');
+    if(unw){ dmWatch(unw.dataset.dmunwatch,false); return; }
+    if(e.target.closest('#dm-waddbtn')){ dmState.watchAdd=true; dmRender(); return; }
+    if(e.target.closest('#dm-callsbtn')){ dmOpenCalls(); return; }
+    if(e.target.closest('#dm-backchat')){ dmState.mode='chat'; dmRender(); return; }
+    const jt=e.target.closest('[data-dmjump-thread]');
+    if(jt){ dmState.mode='chat'; dmOpenThread(+jt.dataset.dmjumpThread); return; }
+    const jump=e.target.closest('[data-dmjump]');
+    if(jump){ const n=document.querySelector('.dm-msg [data-dmpin="'+jump.dataset.dmjump+'"]');
+      if(n) n.closest('.dm-msg').scrollIntoView({block:'center'}); return; }
     const rx=e.target.closest('[data-dmrx]');
     if(rx){ dmReact(+rx.dataset.dmrx,rx.dataset.emoji); return; }
     const rxo=e.target.closest('[data-dmrxopen]');
@@ -14799,6 +14919,31 @@ function dmWire(){
     const ed=e.target.closest('[data-dmedit]'); if(ed){ dmEdit(+ed.dataset.dmedit); return; }
     const dl=e.target.closest('[data-dmdel]'); if(dl){ dmDrop(+dl.dataset.dmdel); return; }
   });
+}
+
+// Keyboard. Deliberately NOT its own document listener: the app already has one global keydown
+// handler with an established grammar — `/` focuses the current tab's search, j/k walk a list,
+// Escape backs out a level — and Ctrl+K already belongs to the command palette. This hooks into
+// that handler instead of competing with it, so the conventions stay true across tabs.
+// Called only when the view is `dm`, no modifier is held, and the caret is NOT in a field: the
+// outer handler guarantees all three, which is why none of it is re-checked here.
+function dmKeys(e){
+  if(e.key==='Escape'){
+    if(dmState.mode==='calls'){ dmState.mode='chat'; dmRender(); }
+    else if(dmState.results){ dmState.q=''; dmState.results=null; dmRender(); }
+    else if(dmState.picking||dmState.manage){ dmState.picking=false; dmState.manage=false; dmRender(); }
+    return;
+  }
+  if(e.key==='j'||e.key==='k'){
+    const list=dmState.threads;
+    if(!list.length) return;
+    const i=Math.max(0,list.findIndex(t=>t.id===dmState.sel));
+    const next=e.key==='j'?Math.min(list.length-1,i+1):Math.max(0,i-1);
+    if(list[next]&&list[next].id!==dmState.sel){ e.preventDefault(); dmOpenThread(list[next].id); }
+    return;
+  }
+  // A bare letter is almost always the start of a sentence somebody means to send.
+  if(e.key.length===1){ const ta=el('dm-input'); if(ta&&!ta.disabled) ta.focus(); }
 }
 
 async function openDM(){
@@ -14955,4 +15100,98 @@ function accCopy(code,quiet){
     if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(link).then(done,()=>prompt('Copy this invite link:',link)); return; }
   }catch(_){ }
   prompt('Copy this invite link:',link);
+}
+
+// ===== admin panel: operator read-through ======================================================
+// The owner decided an operator may read every message on this terminal. This is the surface for
+// it — deliberately its own box, and deliberately noisy about the audit trail: a power that leaves
+// no trace is one nobody can hold you to.
+let _admDm=null,_admDmThread=null,_admDmQ='',_admDmAudit=null;
+async function loadAdmDm(){
+  if(!IS_ADMIN) return;
+  try{ _admDm=await fetchJSON('/api/access/dm'); }
+  catch(e){ _admDm={error:String(e&&e.message||e)}; }
+  try{ _admDmAudit=await fetchJSON('/api/access/dm/audit?limit=12'); }catch(_){ _admDmAudit=null; }
+  renderAdmDm();
+}
+async function admDmOpen(id){
+  _admDmThread={loading:true,id:id}; renderAdmDm();
+  try{ _admDmThread=await fetchJSON('/api/access/dm/'+encodeURIComponent(id)); }
+  catch(e){ _admDmThread={error:String(e&&e.message||e)}; }
+  loadAdmDmAudit(); renderAdmDm();
+}
+async function loadAdmDmAudit(){
+  try{ _admDmAudit=await fetchJSON('/api/access/dm/audit?limit=12'); }catch(_){ }
+}
+async function admDmSearch(q){
+  _admDmQ=q;
+  if(!q||q.trim().length<2){ _admDmThread=null; renderAdmDm(); return; }
+  try{ _admDmThread={search:true,...(await fetchJSON('/api/access/dm/search?q='+encodeURIComponent(q)))}; }
+  catch(e){ _admDmThread={error:String(e&&e.message||e)}; }
+  loadAdmDmAudit(); renderAdmDm();
+}
+function admWhen(ts){ try{ return new Date(ts).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false}); }catch(_){ return ''; } }
+
+function renderAdmDm(){
+  const box=el('admDmBox'); if(!box) return;
+  if(!IS_ADMIN){ box.innerHTML=''; return; }
+  if(!_admDm){ box.innerHTML='<div class="adm-navhd">All messages</div><div class="acc-note">loading…</div>'; return; }
+  if(_admDm.error){ box.innerHTML='<div class="adm-navhd">All messages</div><div class="acc-note">'+esc(_admDm.error)+'</div>'; return; }
+
+  const threads=(_admDm.threads||[]).map(t=>
+    '<div class="acc-row" data-admdm="'+t.id+'">'
+    +'<span class="'+(t.kind==='group'?'dm-grp':'sec')+'">'+(t.kind==='group'?'#':'↔')+'</span>'
+    +'<span class="grow">'+esc(t.kind==='group'?(t.title||'untitled group'):t.members.map(m=>m.handle).join(' ↔ '))+'</span>'
+    +'<span class="acc-mu">'+t.n+' message'+(t.n===1?'':'s')+(t.lastAt?' · '+admWhen(t.lastAt):'')+'</span>'
+    +'<button type="button" class="acc-chip" data-admdm="'+t.id+'">read</button></div>').join('')
+    ||'<div class="acc-note">No conversations yet.</div>';
+
+  let panel='';
+  if(_admDmThread&&_admDmThread.loading) panel='<div class="acc-note">reading…</div>';
+  else if(_admDmThread&&_admDmThread.error) panel='<div class="acc-note">'+esc(_admDmThread.error)+'</div>';
+  else if(_admDmThread&&_admDmThread.search){
+    panel='<div class="dm-sh" style="padding-left:0">'+(_admDmThread.results||[]).length+' hit(s) for “'+esc(_admDmQ)+'”</div>'
+      +((_admDmThread.results||[]).map(r=>'<div class="acc-row" data-admdm="'+r.thread+'">'
+        +'<span class="grow">'+esc(r.body).slice(0,140)+'</span>'
+        +'<span class="acc-mu">'+esc(r.sender)+' · '+esc(r.threadName)+' · '+admWhen(r.ts)+'</span></div>').join('')
+        ||'<div class="acc-note">Nothing matches.</div>');
+  } else if(_admDmThread&&_admDmThread.ok){
+    panel='<div class="dm-sh" style="padding-left:0">'+esc(_admDmThread.name)+'</div>'
+      +'<div class="adm-dmlog">'+(_admDmThread.messages||[]).map(m=>
+        m.sys?('<div class="dm-sys">'+esc(dmSysLine(m,null))+'</div>')
+        :('<div class="adm-dmrow"><span class="adm-dmwho">'+esc(m.sender)+'</span>'
+          +'<span class="adm-dmbody">'+esc(m.body||(m.file?('['+m.file.name+']'):'(deleted)')).replace(/\n/g,'<br>')
+          +(m.ref?' <span class="dm-tk-s">$'+esc(m.ref)+'</span>':'')+'</span>'
+          +'<span class="acc-mu">'+admWhen(m.ts)+'</span></div>')).join('')+'</div>';
+  }
+
+  const audit=(_admDmAudit&&_admDmAudit.entries||[]).map(a=>
+    '<div class="acc-note" style="margin:0">'+admWhen(a.at)+' · <b>'+esc(a.who)+'</b> '+esc(a.action)
+    +(a.thread?' #'+a.thread:'')+(a.detail?' · '+esc(a.detail):'')+'</div>').join('')
+    ||'<div class="acc-note" style="margin:0">Nothing read yet.</div>';
+
+  box.innerHTML='<div class="adm-navhd">All messages '
+    +'<span class="adm-navsub">every conversation on this terminal, including ones you are not in</span></div>'
+    +'<div class="acc-sec"><div class="acc-mint" style="margin-top:0">'
+      +'<input id="admDmQ" placeholder="search every message…" value="'+esc(_admDmQ)+'" style="flex:1;min-width:180px">'
+      +'<button type="button" class="btn" id="admDmGo">Search</button>'
+      +(_admDmThread?'<button type="button" class="btn" id="admDmClear">clear</button>':'')+'</div></div>'
+    +'<div class="acc-sec"><div class="dm-sh" style="padding-left:0">Conversations</div>'+threads+'</div>'
+    +(panel?'<div class="acc-sec">'+panel+'</div>':'')
+    +'<div class="acc-sec"><div class="dm-sh" style="padding-left:0">Read log</div>'+audit
+      +'<div class="acc-note">Every read and search above is recorded here. Members are told, in the Messages tab, that the operator can read their messages.</div></div>';
+}
+
+function admDmWire(){
+  const box=el('admDmBox'); if(!box||box._wired) return;
+  box._wired=true;
+  box.addEventListener('click',(e)=>{
+    const t=e.target.closest('[data-admdm]');
+    if(t){ admDmOpen(+t.dataset.admdm); return; }
+    if(e.target.closest('#admDmGo')){ admDmSearch((el('admDmQ')||{}).value||''); return; }
+    if(e.target.closest('#admDmClear')){ _admDmThread=null; _admDmQ=''; renderAdmDm(); return; }
+  });
+  box.addEventListener('keydown',(e)=>{
+    if(e.target&&e.target.id==='admDmQ'&&e.key==='Enter') admDmSearch(e.target.value||'');
+  });
 }

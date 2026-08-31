@@ -10343,7 +10343,12 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const r = rows.get(coin);
     return r && !r.delisted && Number.isFinite(r.px) && r.px > 0 ? r.px : null;
   }
-  function createNote(coin, body, isAdmin) {
+  // `stamp` overrides the price AND the timestamp, and exists for exactly one caller: promoting a
+  // price-stamped message into the notes book. The whole value of that promotion is that the claim
+  // keeps the moment it was actually made — re-stamping it at "now" would turn a call somebody made
+  // last Tuesday at 113.90 into a note written today at the current mark, which is a different and
+  // false claim. Absent (the normal path), the note stamps itself as it always has.
+  function createNote(coin, body, isAdmin, stamp) {
     if (!isAdmin) return { ok: false, error: "not-admin" };
     const c = String(coin || "").trim();
     if (!c) return { ok: false, error: "no coin given" };
@@ -10355,8 +10360,13 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (notes.length >= NOTE_MAX_TOTAL) return { ok: false, error: `note cap reached (${NOTE_MAX_TOTAL})` };
     const mine = notes.filter((n) => n.coin === c).length;
     if (mine >= NOTE_MAX_PER_COIN) return { ok: false, error: `note cap reached on this name (${NOTE_MAX_PER_COIN})` };
-    const def = { id: noteSeq++, coin: c, body: b, at: Date.now(), px: noteMarkFor(c), edited: 0, owner: "admin" };
+    const at = stamp && Number.isFinite(+stamp.at) && +stamp.at > 0 ? +stamp.at : Date.now();
+    const px = stamp && Number.isFinite(+stamp.px) && +stamp.px > 0 ? +stamp.px : noteMarkFor(c);
+    const def = { id: noteSeq++, coin: c, body: b, at, px, edited: 0, owner: "admin" };
     notes.unshift(def);
+    // A promoted call can be older than notes already in the book, and every consumer reads this
+    // list as newest-first. Re-sorting costs nothing at this size and keeps that contract true.
+    notes.sort((a, b2) => b2.at - a.at);
     persistNotes();
     // The id and the name, never the body: a note is the operator's own prose and logs travel.
     log(`note ${def.id} written on ${c}`);

@@ -5381,7 +5381,7 @@ module.exports.navGroupKeys = navGroupKeys;
 module.exports.resolveNavGroups = resolveNavGroups;
 
 const FEATURES = [
-  { key: "admin",      kind: "tab", label: "Admin",       def: "admin",  lock: true, routes: [] },
+  { key: "admin",      kind: "tab", label: "Admin",       def: "admin",  lock: true, routes: ["/api/access", "/api/access/dm"] },
   { key: "markets",    kind: "tab", label: "Markets",     def: "public", pin: true, routes: ["/api/snapshot", "/api/daily", "/api/series", "/api/candles"] },
   { key: "trend",      kind: "tab", label: "Trend",       def: "public", routes: ["/api/trend"] },
   { key: "sectors",    kind: "tab", label: "Sectors",     def: "public", routes: [] },
@@ -5592,7 +5592,13 @@ const FEATURE_ROUTES = featureRouteIndex();
 // Routes whose sub-paths belong to the same feature as their parent. The manifest maps literal
 // paths, which cannot express a dynamic segment — so without this, gating a tab would leave its
 // per-id endpoints answering, and the gate would be one in name only.
-const FEATURE_ROUTE_PREFIXES = [["/api/dm/", "/api/dm"]];
+const FEATURE_ROUTE_PREFIXES = [
+  // Longest prefix first: /api/access/dm/<id> belongs to the locked admin panel, NOT to the
+  // messages tab, and a shorter prefix matching earlier would file it under the wrong feature.
+  ["/api/access/dm/", "/api/access/dm"],
+  ["/api/access/", "/api/access"],
+  ["/api/dm/", "/api/dm"],
+];
 function featureRouteKeyFor(m, p) {
   const direct = FEATURE_ROUTES.exact.get(m + " " + p) || FEATURE_ROUTES.any.get(p);
   if (direct) return direct;

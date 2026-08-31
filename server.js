@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.01-48";
+const VERSION = "2026.09.02-49";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -591,7 +591,10 @@ async function main() {
       // because an invited person has, by definition, no session yet.
       if (u === "/api/health" || u === "/logout" || u === "/login"
           || u === "/join" || u.startsWith("/join/") || u === "/claim" || u === "/bootstrap"
-          || u === "/reset" || u === "/reset/code") return;
+          || u === "/reset" || u === "/reset/code"
+          // A site icon is not protected content, and 401ing it only puts a spurious console
+          // error on the login page of every signed-out visitor.
+          || u === "/favicon.ico" || u === "/apple-touch-icon.png") return;
       // A legacy shared-password session authenticates but does not IDENTIFY. Once accounts exist,
       // send those callers to /claim rather than into an app where every personal surface would
       // 401 at them with no explanation. Break-glass admins are exempt: ADMIN_PASSWORD is how an
@@ -980,6 +983,22 @@ async function main() {
     return me;
   };
 
+  // Promote a price-stamped message into the notes book. The note KEEPS the message's own timestamp
+  // and price: the whole point is that the claim was made then, at that mark — re-stamping it now
+  // would turn last Tuesday's call at 113.90 into a different, false claim about today.
+  // Gated on admin because the notes book itself is (`notes` is def:"admin" in the manifest); this
+  // route must not become a side door into a feature the manifest closed.
+  function promoteToNote(me, req, id) {
+    if (!isAdmin(req)) return { ok: false, error: "the notes book is operator-only on this deployment" };
+    const rec = ACCOUNTS.calls(me.uid, { limit: 500 }).calls.find((c) => c.id === +id);
+    if (!rec) return { ok: false, error: "that message has no ticker stamp to promote" };
+    const body = rec.body + "\n\n— from messages, " + rec.sender + " in " + rec.threadName;
+    const r = poller.createNote(rec.ref, body, true, { at: rec.ts, px: rec.refPx });
+    if (!r.ok) return { ok: false, error: r.error === "not-admin" ? "operator only" : r.error };
+    log("call promoted to note: " + rec.ref + " by " + me.handle);
+    return { ok: true, note: r.note, thread: rec.thread };
+  }
+
   // Typing state is in memory and nowhere else. It expires on its own, it is worthless a second
   // later, and persisting it would mean a restart could claim somebody is mid-sentence.
   const dmTyping = new Map();            // threadId -> Map(uid -> expiresAt)
@@ -1008,7 +1027,12 @@ async function main() {
     return { ok: true, me: ACCOUNTS.pub(me), threads: ACCOUNTS.threads(me.uid),
       members: ACCOUNTS.listUsers().filter((u) => u.uid !== me.uid && !u.disabled),
       online: [...dmOnline()], maxLen: ACCOUNT_DM_MAX,
-      reactions: ACCOUNTS.REACTIONS, maxFile: ACCOUNT_DM_FILE_MAX };
+      reactions: ACCOUNTS.REACTIONS, maxFile: ACCOUNT_DM_FILE_MAX,
+      watching: ACCOUNTS.watchList(me.uid), admin: isAdmin(req),
+      // Said out loud, in the payload the tab renders from. People write differently when they
+      // believe a message is private, and this deployment's operator can read every one of them —
+      // so the tab says so rather than letting the assumption stand.
+      operatorReadsAll: true };
   });
   fastify.get("/api/dm/sync", (req, reply) => {
     reply.header("cache-control", "no-store");
@@ -1053,6 +1077,27 @@ async function main() {
       .header("cache-control", "private, max-age=86400")
       .send(fs.createReadStream(r.path));
   });
+  // The calls record: every price-stamped message, with the move since it was sent. This is what
+  // the stamp is FOR — without somewhere to read them together, each call dies in the conversation
+  // it was made in.
+  fastify.get("/api/dm/calls", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    const q = req.query || {};
+    // An operator can read the whole desk's record; everyone else sees the calls made in the
+    // conversations they are actually in.
+    return ACCOUNTS.calls(me.uid, { by: q.by || null, limit: q.limit, all: isAdmin(req) && q.all === "1" });
+  });
+  fastify.get("/api/dm/export/:id", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    const r = ACCOUNTS.exportThread(me.uid, (req.params || {}).id);
+    if (!r.ok) return reply.code(404).send(r);
+    const stamp = new Date().toISOString().slice(0, 10);
+    return reply
+      .header("content-disposition", 'attachment; filename="messages-' + r.thread + "-" + stamp + '.json"')
+      .send(r);
+  });
   fastify.get("/api/dm/:id", (req, reply) => {
     reply.header("cache-control", "no-store");
     const me = dmMe(req, reply); if (!me) return;
@@ -1078,7 +1123,10 @@ async function main() {
       }
       return { ok: true };
     }
-    if (b.group) r = ACCOUNTS.createGroup(me.uid, b.title, b.members);
+    if (b.watch != null) r = ACCOUNTS.setWatch(me.uid, b.watch, b.on !== false);
+    else if (b.pin != null) r = ACCOUNTS.pin(me.uid, b.pin, b.on !== false);
+    else if (b.toNote && b.id != null) r = promoteToNote(me, req, b.id);
+    else if (b.group) r = ACCOUNTS.createGroup(me.uid, b.title, b.members);
     else if (b.addMembers) r = ACCOUNTS.addMembers(me.uid, b.thread, b.members);
     else if (b.removeMember) r = ACCOUNTS.removeMember(me.uid, b.thread, String(b.uid || ""));
     else if (b.leave) r = ACCOUNTS.leaveGroup(me.uid, b.thread);
@@ -1096,6 +1144,55 @@ async function main() {
     if (r.thread) dmPoke(r.thread);
     return r;
   });
+
+
+  // ===== operator read-through ====================================================================
+  // The owner of this deployment decided an operator may read every message on the terminal. It is
+  // a SEPARATE surface from /api/dm on purpose: folding an admin bypass into the membership filter
+  // would mean one bug in that filter hands an ordinary member the same reach. These routes never
+  // consult membership, they are admin-gated at the door, and every read is written to an audit log
+  // the panel shows — an operator who can read everything should leave a trace when they do.
+  const adminOnly = (req, reply) => {
+    if (isAdmin(req)) return true;
+    reply.code(403).header("cache-control", "no-store").send({ ok: false, error: "forbidden" });
+    return false;
+  };
+  const adminUid = (req) => { const me = meOf(req); return me ? me.uid : "legacy-admin"; };
+
+  fastify.get("/api/access/dm", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    if (!adminOnly(req, reply)) return;
+    return { ok: true, threads: ACCOUNTS.adminThreads((req.query || {}).limit) };
+  });
+  fastify.get("/api/access/dm/search", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    if (!adminOnly(req, reply)) return;
+    return ACCOUNTS.adminSearch(adminUid(req), (req.query || {}).q, (req.query || {}).limit);
+  });
+  fastify.get("/api/access/dm/audit", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    if (!adminOnly(req, reply)) return;
+    return { ok: true, entries: ACCOUNTS.adminAuditLog((req.query || {}).limit) };
+  });
+  fastify.get("/api/access/dm/:id", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    if (!adminOnly(req, reply)) return;
+    const q = req.query || {};
+    const r = ACCOUNTS.adminHistory(adminUid(req), (req.params || {}).id, q.before, q.limit);
+    if (!r.ok) return reply.code(404).send(r);
+    log("operator " + (meOf(req) ? meOf(req).handle : "(break-glass)") + " read thread " + r.thread);
+    return r;
+  });
+
+  // Abandoned uploads — somebody picked a file and changed their mind — are referenced by nothing
+  // and would otherwise sit on the volume forever. Deleting a message takes its attachment with it
+  // at the time of the delete; this is only for the ones that never became a message at all.
+  setInterval(() => {
+    try {
+      const n = ACCOUNTS.sweepFiles();
+      if (n) log("dm: swept " + n + " abandoned upload(s)");
+    } catch (e) { log("dm file sweep failed (isolated): " + (e && e.message)); }
+  }, 30 * 60 * 1000).unref();
 
   // ---- the Telegram reply bridge -----------------------------------------------------------------
   // Which conversation a bare `/r` answers: the last one this chat was told about. Kept in memory

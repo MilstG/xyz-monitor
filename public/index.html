@@ -402,6 +402,10 @@
        anybody else. First in the panel because it is the only box here that decides WHO gets in;
        everything below it decides what they see once they are. -->
   <div class="adm-navgrp" id="admAccessBox"></div>
+  <!-- Operator read-through. Separate box from Access because it is a different kind of power:
+       Access decides who gets in, this reads what they said once they are. Every read here is
+       written to an audit log shown at the bottom of the box. -->
+  <div class="adm-navgrp" id="admDmBox"></div>
   <div class="adm-loop" id="admLoop" hidden></div>
   <!-- Morning brief controls. Deliberately OUTSIDE the recipients accordion: the first version put
        them inside it and they were invisible until you happened to expand a collapsed section, which
