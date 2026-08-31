@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.02-49";
+const VERSION = "2026.09.03-50";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -425,6 +425,7 @@ function authPage(o) {
   return '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
 '<meta name="viewport" content="width=device-width,initial-scale=1">' +
 '<meta name="referrer" content="same-origin">' +
+'<link rel="icon" href="/icon.svg" type="image/svg+xml">' +
 '<title>Milst Screener — ' + (mode === "signin" ? "sign in" : mode === "dead" ? "invite" : "join") + '</title>' +
 '<style>' + AUTH_CSS + '</style></head><body>' +
 '<div class="card">' +
@@ -594,7 +595,7 @@ async function main() {
           || u === "/reset" || u === "/reset/code"
           // A site icon is not protected content, and 401ing it only puts a spurious console
           // error on the login page of every signed-out visitor.
-          || u === "/favicon.ico" || u === "/apple-touch-icon.png") return;
+          || u === "/icon.svg" || u === "/manifest.webmanifest" || u === "/favicon.ico") return;
       // A legacy shared-password session authenticates but does not IDENTIFY. Once accounts exist,
       // send those callers to /claim rather than into an app where every personal surface would
       // 401 at them with no explanation. Break-glass admins are exempt: ADMIN_PASSWORD is how an

@@ -172,6 +172,13 @@ instant, and the per-IP rate limit stops being a per-user problem.
   at all. Every read and every search is written to an audit log shown in the Admin panel, and the
   Messages tab tells members plainly that the operator can read what they write — people write
   differently when they believe a message is private, and on this deployment it is not.
+- **Admin panel folds** — the panel had grown to eight full-height boxes, so reaching the one you
+  wanted meant scrolling past the seven you did not. Every segment is now a collapsed row naming
+  what is inside it, with an expand-all/collapse-all control. Each fold wraps its box from
+  *outside*: every renderer replaces its own box's `innerHTML` and never touches the wrapper, so
+  open/closed state survives a re-render without a single renderer knowing the folds exist. Open
+  folds are remembered per browser — collapsed is the state a fresh browser gets, not one to
+  re-clear every visit. A test fails if a future box is added to the panel without a fold.
 - **Saved layouts** — named views of the markets table (column order + visibility, sort,
   analysis window, vol/OI filters, ★-only), saved and switched from the Layouts menu. Stored
   per browser in localStorage; the active layout shows a • when the live view has unsaved changes.

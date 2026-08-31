@@ -396,47 +396,87 @@
 </section>
 
 <section id="view-admin" hidden>
-  <!-- Event-loop latency row (Phase 0 of the perf batch): live-window chips + the persisted 7d
-       p99 ring with the 50ms worker-thread decision gate drawn as a dashed line. -->
+  <!-- Every segment folds, and every segment starts folded. The panel had grown to eight boxes
+       stacked full-height, so finding the one you wanted meant scrolling past the seven you did
+       not. Each fold wraps its box from OUTSIDE: the renderers below replace their box's innerHTML
+       and never touch the wrapper, so open/closed state survives every re-render without any of
+       them knowing this exists. Open folds are remembered per browser — collapsed is the default
+       you get once, not a state you have to re-clear on every visit. -->
+  <div class="adm-foldbar"><button type="button" class="adm-foldall" id="admFoldAll">expand all</button></div>
+
   <!-- Access: members, invites, and the operator actions that revoke one person without touching
        anybody else. First in the panel because it is the only box here that decides WHO gets in;
        everything below it decides what they see once they are. -->
-  <div class="adm-navgrp" id="admAccessBox"></div>
+  <div class="adm-fold" data-fold="access">
+    <button type="button" class="adm-foldhd"><span class="asec-c">▸</span>Access<span class="adm-foldsub">members · invites · revocation</span></button>
+    <div class="adm-foldbody" hidden><div class="adm-navgrp" id="admAccessBox"></div></div>
+  </div>
+
   <!-- Operator read-through. Separate box from Access because it is a different kind of power:
        Access decides who gets in, this reads what they said once they are. Every read here is
        written to an audit log shown at the bottom of the box. -->
-  <div class="adm-navgrp" id="admDmBox"></div>
-  <div class="adm-loop" id="admLoop" hidden></div>
+  <div class="adm-fold" data-fold="messages">
+    <button type="button" class="adm-foldhd"><span class="asec-c">▸</span>All messages<span class="adm-foldsub">every conversation · the read log</span></button>
+    <div class="adm-foldbody" hidden><div class="adm-navgrp" id="admDmBox"></div></div>
+  </div>
+
+  <!-- Event-loop latency row (Phase 0 of the perf batch): live-window chips + the persisted 7d
+       p99 ring with the 50ms worker-thread decision gate drawn as a dashed line. The row hides
+       itself until it has data, and the fold follows it — a header over nothing is worse than
+       no header. -->
+  <div class="adm-fold" data-fold="loop">
+    <button type="button" class="adm-foldhd"><span class="asec-c">▸</span>Event loop<span class="adm-foldsub">latency now · the 7-day p99 ring</span></button>
+    <div class="adm-foldbody" hidden><div class="adm-loop" id="admLoop" hidden></div></div>
+  </div>
+
   <!-- Morning brief controls. Deliberately OUTSIDE the recipients accordion: the first version put
        them inside it and they were invisible until you happened to expand a collapsed section, which
        is indistinguishable from the feature not shipping. -->
-  <div class="adm-brief" id="admBriefBox"></div>
+  <div class="adm-fold" data-fold="brief">
+    <button type="button" class="adm-foldhd"><span class="asec-c">▸</span>Morning brief<span class="adm-foldsub">schedule · test sends</span></button>
+    <div class="adm-foldbody" hidden><div class="adm-brief" id="admBriefBox"></div></div>
+  </div>
+
   <!-- FOCUS liquidity floors: the two size walls under which a name is never considered for a
        seat. Placed ABOVE the audit box because it is the only control in this panel that changes
        what another tab SELECTS — visibility flags decide who sees a view, this decides what the
        view contains, and burying it under a classification log would hide that difference. -->
-  <div class="adm-floors" id="admFloorsBox"></div>
+  <div class="adm-fold" data-fold="floors">
+    <button type="button" class="adm-foldhd"><span class="asec-c">▸</span>FOCUS liquidity floors<span class="adm-foldsub">the size walls under which a name is never seated</span></button>
+    <div class="adm-foldbody" hidden><div class="adm-floors" id="admFloorsBox"></div></div>
+  </div>
+
   <!-- Weekly classification audit: applied overlay entries (revertable), flagged holds (one-click
        resolvable), and a run-now button. Admin-only by the same route gating as the rest of this view. -->
-  <div class="adm-audit" id="admAuditBox"></div>
+  <div class="adm-fold" data-fold="audit">
+    <button type="button" class="adm-foldhd"><span class="asec-c">▸</span>Classification audit<span class="adm-foldsub">applied overlays · flagged holds</span></button>
+    <div class="adm-foldbody" hidden><div class="adm-audit" id="admAuditBox"></div></div>
+  </div>
+
+  <!-- Alert recipients keeps its OWN accordion rather than being wrapped in a second one: it was
+       already collapsed by default and already remembers nothing, so folding it twice would be a
+       control inside an identical control. Its header is styled to match the folds around it. -->
   <div class="adm-recip">
     <div class="adm-recip-h" id="admRecH"><span class="asec-c">▸</span>Alert recipients <span class="sec" id="admRecN"></span></div>
     <div id="admRecB" hidden></div>
   </div>
-  <div class="adm-head">
-    <div>
-      <div class="adm-title">Feature visibility</div>
-      <div class="adm-sub" id="adm-count">Loading…</div>
+
+  <div class="adm-fold" data-fold="features">
+    <button type="button" class="adm-foldhd"><span class="asec-c">▸</span>Feature visibility<span class="adm-foldsub">what the group sees · tab order and menus</span></button>
+    <div class="adm-foldbody" hidden>
+      <div class="adm-head">
+        <div><div class="adm-sub" id="adm-count">Loading…</div></div>
+        <button class="btn" id="admVap" title="Re-render the whole app with the public feature set, without dropping your admin session. The only reliable way to check what the group actually sees.">◉ view as public</button>
+      </div>
+      <div class="adm-prev">
+        <div class="adm-prevlbl">public nav preview</div>
+        <div class="adm-prevrow" id="adm-prev"></div>
+      </div>
+      <div class="adm-navgrp" id="adm-navgrp"></div>
+      <div id="adm-rows"><div class="msg">Loading…</div></div>
+      <div class="adm-foot" id="adm-foot"></div>
     </div>
-    <button class="btn" id="admVap" title="Re-render the whole app with the public feature set, without dropping your admin session. The only reliable way to check what the group actually sees.">◉ view as public</button>
   </div>
-  <div class="adm-prev">
-    <div class="adm-prevlbl">public nav preview</div>
-    <div class="adm-prevrow" id="adm-prev"></div>
-  </div>
-  <div class="adm-navgrp" id="adm-navgrp"></div>
-  <div id="adm-rows"><div class="msg">Loading…</div></div>
-  <div class="adm-foot" id="adm-foot"></div>
 </section>
 
 <div class="drawer-bg" id="drawerbg"></div>

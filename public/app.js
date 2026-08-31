@@ -3601,7 +3601,15 @@ const HASH_VIEWS=new Set(['markets','focus','funds','trend','charts','sectors','
 // rolls back on failure — a batch write would make a partial failure ambiguous, and there is no save
 // button because a draft state is another way for the panel and the server to disagree.
 let _adm=null, _admVap=false, _admBusy='';
-async function openAdmin(){ if(!IS_ADMIN) return; renderAdmLoop(_lastHealth); updateFreshTray(); renderAdmin(); renderAudit(); loadAudit(); renderAdmFloors(); loadAdmFloors(); accWire(); renderAccess(); loadAccess(); admDmWire(); renderAdmDm(); loadAdmDm(); await loadAdmin(); }
+async function openAdmin(){ if(!IS_ADMIN) return;
+  admFoldWire();
+  renderAdmLoop(_lastHealth); updateFreshTray(); renderAdmin(); renderAudit(); loadAudit();
+  renderAdmFloors(); loadAdmFloors(); accWire(); renderAccess(); loadAccess();
+  admDmWire(); renderAdmDm(); loadAdmDm();
+  // After renderAdmLoop, so the loop fold knows whether its row has anything to show.
+  admFoldApply();
+  await loadAdmin();
+  admFoldApply(); }
 async function loadAdmin(){
   try{ _adm=await fetchJSON('/api/features'); }
   catch(e){ _adm={error:String(e&&e.message||e)}; }
@@ -15193,5 +15201,61 @@ function admDmWire(){
   });
   box.addEventListener('keydown',(e)=>{
     if(e.target&&e.target.id==='admDmQ'&&e.key==='Enter') admDmSearch(e.target.value||'');
+  });
+}
+
+// ===== admin panel: collapsible segments =======================================================
+// The panel had grown to eight full-height boxes, so reaching the one you wanted meant scrolling
+// past the seven you did not. Each segment now folds, and every segment starts folded.
+//
+// The wrapper lives OUTSIDE each box, which is what makes this safe: every renderer in this file
+// replaces its own box's innerHTML and never touches the wrapper, so open/closed state survives a
+// re-render without a single renderer knowing this exists.
+//
+// Open folds are remembered per browser. "Collapsed by default" is the state you get on a fresh
+// browser, not one you have to re-clear every visit — re-collapsing a panel somebody deliberately
+// opened five seconds ago is its own kind of annoying.
+const ADM_FOLD_KEY='xyz-adm-folds';
+function admFoldState(){ try{ return JSON.parse(localStorage.getItem(ADM_FOLD_KEY)||'{}')||{}; }catch(_){ return {}; } }
+function admFoldSave(o){ try{ localStorage.setItem(ADM_FOLD_KEY,JSON.stringify(o)); }catch(_){ } }
+function admFolds(){ return [...document.querySelectorAll('#view-admin .adm-fold')]; }
+
+function admFoldApply(){
+  const st=admFoldState();
+  admFolds().forEach(f=>{
+    const open=!!st[f.dataset.fold];
+    const body=f.querySelector('.adm-foldbody'), caret=f.querySelector('.asec-c'), hd=f.querySelector('.adm-foldhd');
+    if(body) body.hidden=!open;
+    if(caret) caret.textContent=open?'▾':'▸';
+    if(hd) hd.setAttribute('aria-expanded',open?'true':'false');
+    f.classList.toggle('open',open);
+  });
+  // The event-loop row hides itself until it has data to show. Its fold follows it: a header over
+  // nothing is worse than no header.
+  { const box=el('admLoop'), fold=document.querySelector('#view-admin .adm-fold[data-fold="loop"]');
+    if(box&&fold) fold.hidden=!!box.hidden; }
+  const all=el('admFoldAll');
+  if(all) all.textContent=admFolds().some(f=>f.classList.contains('open')&&!f.hidden)?'collapse all':'expand all';
+}
+
+function admFoldWire(){
+  const v=el('view-admin'); if(!v||v._foldWired) return;
+  v._foldWired=1;
+  v.addEventListener('click',(e)=>{
+    const hd=e.target.closest('.adm-foldhd');
+    if(hd){
+      const f=hd.closest('.adm-fold'), key=f&&f.dataset.fold;
+      if(!key) return;
+      const st=admFoldState();
+      if(st[key]) delete st[key]; else st[key]=true;
+      admFoldSave(st); admFoldApply();
+      return;
+    }
+    if(e.target.closest('#admFoldAll')){
+      const open=admFolds().some(f=>f.classList.contains('open')&&!f.hidden);
+      const st={};
+      if(!open) admFolds().forEach(f=>{ if(!f.hidden) st[f.dataset.fold]=true; });
+      admFoldSave(st); admFoldApply();
+    }
   });
 }
