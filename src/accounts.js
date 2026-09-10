@@ -247,6 +247,7 @@ CREATE TABLE IF NOT EXISTS dm_read (
   notifiedMsgId INTEGER NOT NULL DEFAULT 0,   -- highest id already escalated to Telegram
   hiddenUpTo INTEGER NOT NULL DEFAULT 0,      -- closed: off the rail until a message id passes this
   clearedUpTo INTEGER NOT NULL DEFAULT 0,     -- history cleared: this viewer never sees ids at or under
+  boardNotify INTEGER NOT NULL DEFAULT 0,     -- boards only: 1 = full Telegram digests (default is mentions/watched only)
   PRIMARY KEY (thread, uid)
 ) STRICT, WITHOUT ROWID;
 
@@ -285,7 +286,8 @@ CREATE TABLE IF NOT EXISTS dm_file (
   const ADDED_COLUMNS = {
     dm_thread: [["kind", "TEXT NOT NULL DEFAULT 'dm'"], ["pairKey", "TEXT"], ["title", "TEXT"], ["createdBy", "TEXT"]],
     dm_msg: [["sys", "TEXT"], ["fileId", "TEXT"], ["via", "TEXT"], ["pinnedAt", "INTEGER"], ["pinnedBy", "TEXT"], ["replyTo", "INTEGER"]],
-    dm_read: [["hiddenUpTo", "INTEGER NOT NULL DEFAULT 0"], ["clearedUpTo", "INTEGER NOT NULL DEFAULT 0"]],
+    dm_read: [["hiddenUpTo", "INTEGER NOT NULL DEFAULT 0"], ["clearedUpTo", "INTEGER NOT NULL DEFAULT 0"],
+      ["boardNotify", "INTEGER NOT NULL DEFAULT 0"]],
   };
   for (const [table, cols] of Object.entries(ADDED_COLUMNS)) {
     const have = db.prepare("PRAGMA table_info(" + table + ")").all().map((c) => c.name);
@@ -392,6 +394,8 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       ON CONFLICT(thread, uid) DO UPDATE SET notifiedMsgId = MAX(notifiedMsgId, excluded.notifiedMsgId)`),
     readHide: db.prepare(`INSERT INTO dm_read (thread, uid, hiddenUpTo) VALUES (?,?,?)
       ON CONFLICT(thread, uid) DO UPDATE SET hiddenUpTo = excluded.hiddenUpTo`),
+    readBoardNotify: db.prepare(`INSERT INTO dm_read (thread, uid, boardNotify) VALUES (?,?,?)
+      ON CONFLICT(thread, uid) DO UPDATE SET boardNotify = excluded.boardNotify`),
     // Clearing also reads and closes up to the same point: cleared history must not keep counting
     // as unread or keep the row on the rail with a preview of text this viewer chose to forget.
     readClearAll: db.prepare(`INSERT INTO dm_read (thread, uid, clearedUpTo, readMsgId, hiddenUpTo) VALUES (?,?,?,?,?)
@@ -400,8 +404,12 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
 
     // Retention: candidates past their window, oldest first, capped per sweep so one tick never
     // stalls on a huge backlog. Pinned rows are exempt by the WHERE, not by caller discipline.
+    // Two exemptions: pins (a board's standing post) and PRICED CALLS (ref + refPx) — the calls
+    // record reads live messages, and a track record that self-destructs in a week is not a track
+    // record. Everything else ages out.
     retainSweep: db.prepare(`SELECT m.id, m.fileId FROM dm_msg m JOIN dm_thread t ON t.id = m.thread
-      WHERE m.pinnedAt IS NULL AND m.ts < CASE WHEN t.kind = 'dm' THEN ? ELSE ? END
+      WHERE m.pinnedAt IS NULL AND (m.ref IS NULL OR m.refPx IS NULL)
+        AND m.ts < CASE WHEN t.kind = 'dm' THEN ? ELSE ? END
       ORDER BY m.id LIMIT 500`),
     retainDrop: db.prepare("DELETE FROM dm_msg WHERE id = ?"),
     reactPurge: db.prepare("DELETE FROM dm_reaction WHERE msg = ?"),
@@ -1055,8 +1063,16 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
         b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return { mime: "image/webp", inline: 1 };
     // .txt by name AND text by bytes — the extension alone is a claim, and claims are not evidence.
     if (/\.txt$/i.test(String(name || "")) && looksLikeText(b)) return { mime: "text/plain; charset=utf-8", inline: 0 };
+    // Voice notes: the three containers the composer's recorder can produce, verified by magic
+    // bytes and capped hard at AUDIO_MAX below — the small cap is what keeps this from becoming
+    // the video lane through the back door.
+    if (startsWith(0x1A, 0x45, 0xDF, 0xA3) && /\.(webm|weba)$/i.test(String(name || ""))) return { mime: "audio/webm", inline: 0, audio: 1 };
+    if (startsWith(0x4F, 0x67, 0x67, 0x53)) return { mime: "audio/ogg", inline: 0, audio: 1 };
+    if (b.length > 11 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70
+        && b[8] === 0x4D && b[9] === 0x34 && b[10] === 0x41) return { mime: "audio/mp4", inline: 0, audio: 1 };
     return null;   // refused
   }
+  const AUDIO_MAX = 3 * 1024 * 1024;   // ~3 minutes of opus — a voice note, not a podcast
   // Filtered by code point, like cleanBody, and for the same reason. Path separators go too:
   // the stored filename is only ever a LABEL — the bytes live under a random id — but a name
   // that can contain a slash is one refactor away from being joined to a path.
@@ -1075,7 +1091,8 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (!buf || !buf.length) return { ok: false, error: "that file is empty" };
     if (buf.length > FILE_MAX) return { ok: false, error: "that file is too large (8 MB maximum)" };
     const sniff = safeMime(buf, name);
-    if (!sniff) return { ok: false, error: "only images (png, jpeg, gif, webp) and .txt files can be shared here" };
+    if (!sniff) return { ok: false, error: "only images (png, jpeg, gif, webp), .txt files and voice notes can be shared here" };
+    if (sniff.audio && buf.length > AUDIO_MAX) return { ok: false, error: "voice notes cap at 3 MB — keep it under ~3 minutes" };
     const id = crypto.randomBytes(16).toString("hex");
     try {
       fs.mkdirSync(fileDir, { recursive: true });
@@ -1238,7 +1255,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       members: mem.map((m) => ({ uid: m.uid, display: (users.get(m.uid) || {}).display || "—", owner: !!m.owner })),
       owner: !!(me && me.owner),
       disabled: t.kind === "dm" ? !!(users.get(peerOf(t, uid)) || {}).disabledAt : false,
-      lastAt: t.lastAt, muted: !!rd.muted,
+      lastAt: t.lastAt, muted: !!rd.muted, boardNotify: !!rd.boardNotify,
       // What the OTHER side has read, so "did my call land" is answerable. The data was already
       // being stored for unread counts; showing it costs a lookup.
       seen: mem.filter((x) => x.uid !== uid).map((x) => ({
@@ -1351,6 +1368,14 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (!t || !isMember(t.id, uid)) return { ok: false, error: "no such conversation" };
     S.readMute.run(t.id, uid, on ? 1 : 0);
     return { ok: true, thread: t.id, muted: !!on };
+  }
+  // Boards default QUIET on Telegram — mentions and watched tickers only. This is the opt-in to
+  // full digests, per member per board: a busy topic should not page the whole desk by default.
+  function setBoardNotify(uid, threadId, on) {
+    const t = S.thrById.get(+threadId);
+    if (!t || t.kind !== "board" || !isMember(t.id, uid)) return { ok: false, error: "no such topic" };
+    S.readBoardNotify.run(t.id, uid, on ? 1 : 0);
+    return { ok: true, thread: t.id, boardNotify: !!on };
   }
 
   // ---- attachment lifecycle ----------------------------------------------------------------------
@@ -1538,7 +1563,10 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
         // asking not to be told when somebody watches your name or calls it directly.
         const mre = mentionRe(u.handle);
         const hot = fresh.filter((m) => (m.ref && watches(uid, m.ref)) || mre.test(m.body || ""));
-        const rows = hot.length ? hot : (rd.muted ? [] : fresh.filter((m) => m.ts <= cut));
+        // Boards digest only for members who opted in; mentions and watched tickers reach
+        // everyone regardless — that is what makes the quiet default safe.
+        const digestOk = t.kind === "board" ? (!rd.muted && rd.boardNotify === 1) : !rd.muted;
+        const rows = hot.length ? hot : (digestOk ? fresh.filter((m) => m.ts <= cut) : []);
         if (!rows.length) continue;
         out.push({ uid, thread: t.id, kind: t.kind,
           from: t.kind === "group" ? threadName(t, uid)
@@ -1591,7 +1619,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     otpRequest, otpVerify,
     // messages
     setMarkSource, threadFor, threadPeers, isMember, memberUids, send, edit, drop,
-    threads, history, sync, search, markRead, setMuted,
+    threads, history, sync, search, markRead, setMuted, setBoardNotify,
     closeThread, reopenThread, clearHistory,
     createGroup, addMembers, removeMember, leaveGroup, renameGroup, deleteGroup,
     createBoard, joinBoard, listBoards, setTweetSource,

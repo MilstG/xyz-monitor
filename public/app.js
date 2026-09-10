@@ -14309,6 +14309,42 @@ function dmUpdatePip(){
   // The chat dock's red count rides the same number.
   const dp=el('dm-dockpip');
   if(dp){ dp.hidden=!n; if(n) dp.textContent=n>99?'99+':String(n); }
+  dmFavicon(n);
+}
+// The browser-tab ICON carries the count too — pinned tabs truncate the title, and the favicon is
+// all that survives. The site icon is drawn under a red badge; if the SVG taints the canvas the
+// badge draws on a plain dark tile instead, and any failure leaves the original icon alone.
+let _favLink=null,_favImg=null,_favLast=null;
+function dmFavicon(n){
+  try{
+    if(_favLast===n) return; _favLast=n;
+    if(!_favLink){ _favLink=document.querySelector('link[rel="icon"]');
+      if(!_favLink){ _favLink=document.createElement('link'); _favLink.rel='icon'; document.head.appendChild(_favLink); } }
+    if(!n){ _favLink.href='/icon.svg'; return; }
+    const draw=()=>{
+      try{
+        const c=document.createElement('canvas'); c.width=c.height=64;
+        const x=c.getContext('2d');
+        try{ if(_favImg&&_favImg.complete&&_favImg.naturalWidth) x.drawImage(_favImg,0,0,64,64); }
+        catch(_){ }
+        let url;
+        try{ url=c.toDataURL('image/png'); }
+        catch(_){ // tainted: redraw badge-only on a clean canvas
+          const c2=document.createElement('canvas'); c2.width=c2.height=64; const y=c2.getContext('2d');
+          y.fillStyle='#151A21'; y.beginPath(); y.roundRect?y.roundRect(0,0,64,64,14):y.rect(0,0,64,64); y.fill();
+          badge(y); url=c2.toDataURL('image/png'); _favLink.href=url; return;
+        }
+        badge(x); _favLink.href=c.toDataURL('image/png');
+      }catch(_){ }
+    };
+    const badge=(x)=>{
+      x.fillStyle='#E5604D'; x.beginPath(); x.arc(45,19,18,0,7); x.fill();
+      x.fillStyle='#fff'; x.font='bold 26px system-ui,sans-serif'; x.textAlign='center'; x.textBaseline='middle';
+      x.fillText(n>9?'9+':String(n),45,21);
+    };
+    if(!_favImg){ _favImg=new Image(); _favImg.onload=draw; _favImg.src='/icon.svg'; setTimeout(draw,400); }
+    else draw();
+  }catch(_){ }
 }
 
 function dmThread(id){ return dmState.threads.find(t=>t.id===id)||null; }
@@ -14575,6 +14611,82 @@ async function dmToggleMute(){
   const res=await dmPost({thread:t.id,mute:!t.muted});
   if(res.ok){ t.muted=!t.muted; dmUpdatePip(); dmRender(); }
 }
+async function dmToggleBoardNotify(){
+  const t=dmThread(dmState.sel); if(!t) return;
+  const res=await dmPost({thread:t.id,boardNotify:!t.boardNotify});
+  if(res.ok){ t.boardNotify=!t.boardNotify; dmRender(); }
+}
+
+// ---- @mention autocomplete ---------------------------------------------------------------------
+// A trailing "@prefix" at the caret pops the member list; Enter/Tab or a click completes it.
+// Mentions already pierce mutes and jump the Telegram queue — this makes them typo-proof.
+function dmMentionPop(ta){
+  const box=el('dm-mpop'); if(!box) return;
+  const pos=ta.selectionStart==null?ta.value.length:ta.selectionStart;
+  const m=/(^|\s)@([A-Za-z0-9._-]{0,24})$/.exec(ta.value.slice(0,pos));
+  if(!m){ box.hidden=true; return; }
+  const q=m[2].toLowerCase();
+  const opts=(dmState.members||[]).filter(u=>
+    String(u.handle||'').toLowerCase().startsWith(q)||String(u.display||'').toLowerCase().startsWith(q)).slice(0,6);
+  if(!opts.length){ box.hidden=true; return; }
+  box.innerHTML=opts.map(u=>'<div class="dm-mopt" data-dmmention="'+esc(u.handle)+'">'
+    +'<b style="color:'+dmNameColor(u.uid)+'">'+esc(u.display)+'</b> <span class="acc-mu">@'+esc(u.handle)+'</span></div>').join('');
+  box.hidden=false;
+}
+function dmMentionPick(handle){
+  const ta=el('dm-input'), box=el('dm-mpop'); if(box) box.hidden=true;
+  if(!ta) return;
+  const pos=ta.selectionStart==null?ta.value.length:ta.selectionStart;
+  const upto=ta.value.slice(0,pos);
+  const m=/(^|\s)@([A-Za-z0-9._-]{0,24})$/.exec(upto);
+  if(!m) return;
+  const start=upto.length-m[2].length;
+  ta.value=ta.value.slice(0,start)+handle+' '+ta.value.slice(pos);
+  const caret=start+String(handle).length+1;
+  ta.focus(); try{ ta.setSelectionRange(caret,caret); }catch(_){}
+  dmDraftSave(dmState.sel,ta.value);
+}
+
+// ---- voice notes -------------------------------------------------------------------------------
+// One button: press to record, press to stop; the note lands as the pending attachment, sent like
+// any file. The server verifies the container by magic bytes and caps audio at 3 MB.
+let _dmRec=null,_dmRecT0=0,_dmRecTimer=null;
+async function dmMicToggle(){
+  if(_dmRec){ try{ _dmRec.stop(); }catch(_){} return; }
+  if(!navigator.mediaDevices||!window.MediaRecorder){ pushToast('Voice notes need microphone support in this browser'); return; }
+  let stream;
+  try{ stream=await navigator.mediaDevices.getUserMedia({audio:true}); }
+  catch(_){ pushToast('Microphone permission denied — allow it in the browser to record'); return; }
+  const mime=MediaRecorder.isTypeSupported&&MediaRecorder.isTypeSupported('audio/webm;codecs=opus')?'audio/webm;codecs=opus'
+    :(MediaRecorder.isTypeSupported&&MediaRecorder.isTypeSupported('audio/mp4')?'audio/mp4':'');
+  let rec;
+  try{ rec=new MediaRecorder(stream, mime?{mimeType:mime}:undefined); }
+  catch(_){ stream.getTracks().forEach(tr=>tr.stop()); pushToast('Recording is not supported here'); return; }
+  const chunks=[];
+  rec.ondataavailable=(e)=>{ if(e.data&&e.data.size) chunks.push(e.data); };
+  rec.onstop=()=>{
+    stream.getTracks().forEach(tr=>tr.stop());
+    clearInterval(_dmRecTimer); _dmRecTimer=null; _dmRec=null;
+    dmMicPaint();
+    const type=rec.mimeType||mime||'audio/webm';
+    const blob=new Blob(chunks,{type});
+    if(blob.size<200) return;   // a tap, not a take
+    const ext=/mp4/.test(type)?'m4a':(/ogg/.test(type)?'ogg':'webm');
+    const name='voice-'+new Date().toISOString().slice(11,19).replace(/:/g,'')+'.'+ext;
+    try{ dmState.pendingFile=new File([blob],name,{type}); }
+    catch(_){ dmState.pendingFile=blob; dmState.pendingFile.name=name; }
+    dmState.err=''; dmRender();
+  };
+  _dmRec=rec; _dmRecT0=Date.now();
+  rec.start();
+  dmMicPaint();
+  _dmRecTimer=setInterval(dmMicPaint,1000);
+}
+function dmMicPaint(){
+  const btn=el('dm-mic'); if(!btn) return;
+  if(_dmRec){ btn.classList.add('rec'); btn.textContent='■'+Math.floor((Date.now()-_dmRecT0)/1000); btn.title='Stop recording'; }
+  else { btn.classList.remove('rec'); btn.textContent='🎙'; btn.title='Record a voice note (3 MB max)'; }
+}
 // Close: off YOUR rail, history intact — the row comes back when either side writes again.
 async function dmCloseThread(){
   const t=dmThread(dmState.sel); if(!t) return;
@@ -14727,6 +14839,8 @@ function fmtBytes(n){
 function dmFile(m){
   if(!m.file) return '';
   const url='/api/dm/file/'+encodeURIComponent(m.file.id);
+  if(/^audio\//.test(m.file.mime||''))
+    return '<span class="dm-aud">🎙 <audio controls preload="none" src="'+esc(url)+'"></audio></span>';
   if(m.file.inline)
     return '<a class="dm-img" href="'+esc(url)+'" target="_blank" rel="noopener noreferrer">'
       +'<img src="'+esc(url)+'" alt="'+esc(m.file.name)+'" loading="lazy"></a>';
@@ -14749,7 +14863,8 @@ function dmTweet(m){
     +'<span class="dm-x-who">'+esc(t.author||t.handle||'—')+'</span>'
     +'<span class="dm-x-at">'+esc((t.handle?'@'+t.handle:'')+(t.when?(t.handle?' · ':'')+t.when:''))+'</span></span>'
     +(t.text?'<span class="dm-x-t">'+cash(esc(t.text)).replace(/\n/g,'<br>')+'</span>':'')
-    +'<span class="dm-x-f">'+(t.media?'<span class="dm-x-media">🖼 media attached</span>':'')
+    +(t.img?'<img class="dm-x-img" src="'+esc(t.img)+'" alt="" loading="lazy">':'')
+    +'<span class="dm-x-f">'+((t.media&&!t.img)?'<span class="dm-x-media">🖼 media attached</span>':'')
     +'<span class="dm-x-open">open on X ↗</span></span></a>';
 }
 
@@ -15114,8 +15229,11 @@ function dmRender(){
       +'<span class="dm-hdact">'
       +(grp?'<button type="button" class="btn dm-mutebtn" id="dm-managebtn">'+(dmState.manage?'close':'members')+'</button>':'')
       +'<a class="btn dm-mutebtn" href="/api/dm/export/'+t.id+'" title="Download this conversation as JSON \u2014 messages, stamps and members">\u2913</a>'
-      +'<button type="button" class="btn dm-mutebtn" id="dm-mute" title="Muted conversations never escalate to Telegram'+(t.muted?'':' \u2014 except tickers you watch, which always come through')+'">'
-      +(t.muted?'unmute':'mute')+'</button>'
+      +(t.kind==='board'
+        ?'<button type="button" class="btn dm-mutebtn" id="dm-bnotify" title="Boards are quiet on Telegram by default: only @mentions and tickers you watch reach your phone. Toggle to get every message nudged like a group.">'
+          +(t.boardNotify?'\ud83d\udd14 everything':'\ud83d\udd14 mentions only')+'</button>'
+        :'<button type="button" class="btn dm-mutebtn" id="dm-mute" title="Muted conversations never escalate to Telegram'+(t.muted?'':' \u2014 except tickers you watch and your @handle, which always come through')+'">'
+          +(t.muted?'unmute':'mute')+'</button>')
       +'<button type="button" class="btn dm-mutebtn" id="dm-clearhist" title="Clear this conversation\u2019s history for YOU \u2014 the other side keeps theirs, and the operator record is untouched. Cannot be undone.">clear</button>'
       +'<button type="button" class="btn dm-mutebtn" id="dm-close" title="Close this conversation \u2014 it leaves your list; the history stays and it comes back the moment either of you writes again.">close</button>'
       +'</span></div>'
@@ -15128,8 +15246,10 @@ function dmRender(){
     ? '<div class="dm-pending">📎 '+esc(dmState.pendingFile.name)+' <button type="button" class="dm-tool" id="dm-unattach">remove</button></div>'
     : '';
   const composer='<div class="dm-cmp">'
-    +'<label class="dm-clip'+(canWrite&&t?'':' off')+'" title="Attach an image or a .txt note (8 MB maximum) — nothing else is accepted">📎'
+    +'<label class="dm-clip'+(canWrite&&t?'':' off')+'" title="Attach an image or a .txt note (8 MB maximum) — or just paste a screenshot into the box">📎'
     +'<input type="file" id="dm-file" accept=".png,.jpg,.jpeg,.gif,.webp,.txt,image/png,image/jpeg,image/gif,image/webp,text/plain"'+(canWrite&&t?'':' disabled')+'></label>'
+    +'<button type="button" class="dm-clip dm-mic'+(canWrite&&t?'':' off')+'" id="dm-mic" title="Record a voice note (3 MB max)"'+(canWrite&&t?'':' disabled')+'>🎙</button>'
+    +'<div class="dm-mpop" id="dm-mpop" hidden></div>'
     +'<textarea id="dm-input" rows="1" maxlength="'+dmState.maxLen+'" '
     +(canWrite?'':'disabled ')+'placeholder="'
     +(canWrite?'message '+esc((t&&t.name)||(pendingPeer&&pendingPeer.display)||'')+'…  (type $TICKER to attach the mark)':'pick a conversation first')
@@ -15160,7 +15280,7 @@ function dmRender(){
   // Retention is policy, so it is said where people write, not discovered when history is gone.
   const disclosure='<div class="dm-disclose">'
     +(dmState.operatorReadsAll?'The operator of this terminal can read every message here. ':'')
-    +'Messages are kept 30 days — 7 in groups and topics — except pinned ones, which stay.</div>';
+    +'Messages are kept 30 days — 7 in groups and topics — except pinned messages and price-stamped calls, which stay.</div>';
   // Who is here RIGHT NOW, at the top of the rail — before this, presence hid as a small dot per
   // conversation and you only learned somebody was around after opening theirs. Clicking a chip
   // starts (or jumps to) a conversation with that person.
@@ -15189,12 +15309,36 @@ function dmRender(){
     ta.addEventListener('input',()=>{
       ta.style.height='auto'; ta.style.height=Math.min(ta.scrollHeight,160)+'px';
       dmDraftSave(dmState.sel,ta.value);
+      dmMentionPop(ta);
       dmTypingPing(); });
     ta.addEventListener('keydown',(e)=>{
+      // The @mention popup captures Enter/Tab while it is showing — completion, not send.
+      const pop=el('dm-mpop');
+      if(pop&&!pop.hidden){
+        if(e.key==='Enter'||e.key==='Tab'){ e.preventDefault();
+          const first=pop.querySelector('[data-dmmention]');
+          if(first) dmMentionPick(first.dataset.dmmention); return; }
+        if(e.key==='Escape'){ pop.hidden=true; return; }
+      }
       // Enter sends, Shift+Enter is a newline. A chat box that needs a mouse to send is a form.
       if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); dmSend(); }
       if(e.key==='Escape'&&dmState.editing){ dmState.editing=null; ta.value=''; dmRender(); }
       else if(e.key==='Escape'&&dmState.replying){ dmState.replying=null; dmRender(); }
+    });
+    // A pasted screenshot is the desk's most common attachment — straight from the clipboard to
+    // the pending chip, no save-to-disk detour.
+    ta.addEventListener('paste',(e)=>{
+      const items=(e.clipboardData&&e.clipboardData.items)||[];
+      for(const it of items){
+        if(it.kind==='file'&&/^image\//.test(it.type)){
+          const f=it.getAsFile(); if(!f) continue;
+          e.preventDefault();
+          const ext=(f.type.split('/')[1]||'png').replace(/[^a-z0-9]/gi,'');
+          try{ dmState.pendingFile=new File([f],'paste-'+new Date().toISOString().slice(11,19).replace(/:/g,'')+'.'+ext,{type:f.type}); }
+          catch(_){ dmState.pendingFile=f; }
+          dmState.err=''; dmRender(); return;
+        }
+      }
     });
   }
   const q=el('dm-q');
@@ -15296,6 +15440,10 @@ function dmWire(){
     if(e.target.closest('#dm-newbtn')){ dmState.picking=!dmState.picking; dmRender(); return; }
     if(e.target.closest('#dm-send')){ dmSend(); return; }
     if(e.target.closest('#dm-mute')){ dmToggleMute(); return; }
+    if(e.target.closest('#dm-bnotify')){ dmToggleBoardNotify(); return; }
+    if(e.target.closest('#dm-mic')){ dmMicToggle(); return; }
+    const mn=e.target.closest('[data-dmmention]');
+    if(mn){ dmMentionPick(mn.dataset.dmmention); return; }
     if(e.target.closest('#dm-close')){ dmCloseThread(); return; }
     if(e.target.closest('#dm-clearhist')){ dmClearHistory(); return; }
     if(e.target.closest('#dm-canceledit')){ dmState.editing=null; dmRender(); return; }

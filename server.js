@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.10-57";
+const VERSION = "2026.09.10-58";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -569,6 +569,27 @@ async function main() {
         if (r.ok) j = await r.json();
       } finally { clearTimeout(to); }
       const pub = j ? tweetFromOembed(j, id) : null;
+      // Thumbnail, best-effort: the syndication endpoint is unauthenticated but undocumented, so
+      // a failure here costs only the picture — the card still ships. Only a pbs.twimg.com https
+      // URL is accepted; anything else in the answer is not an image we will point a client at.
+      if (pub && pub.media) {
+        try {
+          const tok = ((Number(id) / 1e15) * Math.PI).toString(36).replace(/(0+|\.)/g, "");
+          const c2 = new AbortController();
+          const t2 = setTimeout(() => c2.abort(), 6000);
+          try {
+            const r2 = await fetch("https://cdn.syndication.twimg.com/tweet-result?id=" + id + "&lang=en&token=" + tok,
+              { signal: c2.signal, headers: { accept: "application/json" } });
+            if (r2.ok) {
+              const j2 = await r2.json();
+              const ph = (j2 && j2.photos && j2.photos[0] && j2.photos[0].url)
+                || (j2 && j2.mediaDetails && j2.mediaDetails[0] && j2.mediaDetails[0].media_url_https) || "";
+              if (/^https:\/\/pbs\.twimg\.com\//.test(String(ph)))
+                pub.img = String(ph) + (String(ph).includes("?") ? "" : "?name=small");
+            }
+          } finally { clearTimeout(t2); }
+        } catch (_) { /* no picture, still a card */ }
+      }
       if (tweetCache.size > TWEET_CACHE_MAX) tweetCache.clear();
       tweetCache.set(id, pub ? { ok: true, at: Date.now(), pub } : { ok: false, at: Date.now() });
     } catch (_) { tweetCache.set(id, { ok: false, at: Date.now() }); }
@@ -1131,7 +1152,9 @@ async function main() {
     if (!me) return reply.code(401).header("cache-control", "no-store").send({ ok: false, error: "sign in first" });
     const r = ACCOUNTS.readFile(me.uid, (req.params || {}).id);
     if (!r.ok) return reply.code(404).header("cache-control", "no-store").send(r);
-    const dispo = r.file.inline ? "inline" : "attachment";
+    // Audio must be inline or <audio> playback is blocked (Firefox honors attachment on media);
+    // the sandboxed CSP below still applies if somebody browses to it directly.
+    const dispo = (r.file.inline || /^audio\//.test(r.file.mime)) ? "inline" : "attachment";
     // The filename is quoted and RFC 5987-encoded; a name is a label, never a header injection.
     const safe = encodeURIComponent(r.file.name).replace(/['()]/g, escape);
     return reply
@@ -1217,6 +1240,7 @@ async function main() {
     else if (b.react) r = ACCOUNTS.react(me.uid, b.id, String(b.emoji || ""));
     else if (b.read != null || b.markRead) r = ACCOUNTS.markRead(me.uid, b.thread, b.read);
     else if (b.mute != null) r = ACCOUNTS.setMuted(me.uid, b.thread, !!b.mute);
+    else if (b.boardNotify != null) r = ACCOUNTS.setBoardNotify(me.uid, b.thread, !!b.boardNotify);
     else if (b.drop && b.id != null) r = ACCOUNTS.drop(me.uid, b.id);
     else if (b.id != null) r = ACCOUNTS.edit(me.uid, b.id, b.body);
     else r = ACCOUNTS.send(me.uid, String(b.to || ""), b.body, coinForSymbol,
