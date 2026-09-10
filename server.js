@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.10-51";
+const VERSION = "2026.09.10-52";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1147,7 +1147,7 @@ async function main() {
     else if (b.drop && b.id != null) r = ACCOUNTS.drop(me.uid, b.id);
     else if (b.id != null) r = ACCOUNTS.edit(me.uid, b.id, b.body);
     else r = ACCOUNTS.send(me.uid, String(b.to || ""), b.body, coinForSymbol,
-      { thread: b.thread || null, fileId: b.fileId || null });
+      { thread: b.thread || null, fileId: b.fileId || null, replyTo: b.replyTo || null });
     if (!r.ok) return reply.code(r.retry ? 429 : 400).send(r);
     // Wake everybody in the conversation. The frame carries a sequence number, never the message —
     // the client reacts by running the same sync pull it would have run on its own.

@@ -14267,7 +14267,8 @@ const dmState = { me: null, threads: [], members: [], online: new Set(),
   picking: false, editing: null, pendingPeer: null, reactions: [], maxLen: 4000, maxFile: 8388608,
   typing: new Map(), q: '', results: null, searching: false, manage: false, pendingFile: null,
   watching: [], admin: false, operatorReadsAll: false, calls: null, mode: 'chat', watchAdd: false,
-  boards: [], meTg: false, adoptables: null };
+  boards: [], meTg: false, adoptables: null,
+  replying: null, unreadMark: null, scrollToNew: false };
 
 function dmSignedIn(){ return !!(window.__ME && window.__ME.uid); }
 function dmUnreadTotal(){ return dmState.threads.reduce((a,t)=>a+(t.muted?0:(t.unread||0)),0); }
@@ -14361,7 +14362,10 @@ async function dmSync(){
       // pip alone was easy to miss under a ribbon menu. Muted conversations stay quiet here too.
       if(prevCursor&&state.view!=='dm'){
         const muted=new Set(dmState.threads.filter(t=>t.muted).map(t=>t.id));
-        const fresh=(d.messages||[]).filter(m=>!m.mine&&!m.sys&&!m.deleted&&m.id>prevCursor&&!muted.has(m.thread));
+        // A muted thread stays quiet — unless the message calls YOUR handle, which pierces the
+        // mute here exactly as it does on the Telegram escalation.
+        const fresh=(d.messages||[]).filter(m=>!m.mine&&!m.sys&&!m.deleted&&m.id>prevCursor
+          &&(!muted.has(m.thread)||dmMentionsMe(m.body)));
         if(fresh.length){
           const f=fresh[fresh.length-1];
           pushToast('💬 '+f.sender+': '+String(f.body||'attachment').slice(0,80)
@@ -14410,8 +14414,13 @@ function dmTypingLine(threadId){
 async function dmOpenThread(id){
   // Whatever is in the box belongs to the thread being left, not the one being opened.
   if(dmState.sel&&dmState.sel!==id){ const ta=el('dm-input'); if(ta) dmDraftSave(dmState.sel,ta.value); }
-  dmState.sel=id; dmState.editing=null; dmState.picking=false; dmState.manage=false;
+  dmState.sel=id; dmState.editing=null; dmState.replying=null; dmState.picking=false; dmState.manage=false;
   dmState.results=null; dmState.pendingPeer=null; dmState.pendingFile=null; dmState.mode='chat';
+  // Where "new" starts is decided NOW, before markRead moves the watermark: the divider draws at
+  // the read position this open found, and stays put while you read past it.
+  { const th0=dmThread(id);
+    dmState.unreadMark=(th0&&th0.unread>0)?{thread:id,after:+th0.myRead||0}:null;
+    dmState.scrollToNew=!!dmState.unreadMark; }
   dmRender();
   { const ta=el('dm-input'); if(ta){ ta.value=dmDraftGet(id); } }
   try{
@@ -14464,14 +14473,14 @@ async function dmSend(){
   }
 
   const body=dmState.editing?{id:dmState.editing,body:text}
-    :t?{thread:t.id,body:text,fileId:fileId}
+    :t?{thread:t.id,body:text,fileId:fileId,replyTo:dmState.replying||null}
     :{to:peer,body:text};
   const res=await dmPost(body);
   dmState.sending=false;
   if(res.ok){
     // Nothing is kept in the box on success; on failure the text stays exactly where it was,
     // because a dropped connection must never eat something somebody typed.
-    ta.value=''; dmState.editing=null; dmState.pendingFile=null; dmState.pendingPeer=null;
+    ta.value=''; dmState.editing=null; dmState.replying=null; dmState.pendingFile=null; dmState.pendingPeer=null;
     dmDraftSave(dmState.sel,'');
     _dmClearOnNextRender=true;
     if(res.d.message) dmMerge([res.d.message]);
@@ -14715,6 +14724,7 @@ function dmMessageHtml(m,t,p){
     +'<span class="dm-rxadd"><button type="button" class="dm-tool" data-dmrxopen="'+m.id+'" title="React">+</button>'
       +'<span class="dm-rxmenu">'+dmState.reactions.map(e=>
         '<button type="button" class="dm-rxopt" data-dmrx="'+m.id+'" data-emoji="'+esc(e)+'">'+esc(e)+'</button>').join('')+'</span></span>'
+    +'<button type="button" class="dm-tool" data-dmreply="'+m.id+'" title="Quote this message in your reply">reply</button>'
     +'<button type="button" class="dm-tool" data-dmpin="'+m.id+'" data-on="'+(m.pinned?'0':'1')+'" title="'+(m.pinned?'Unpin':'Pin this to the top of the conversation')+'">'+(m.pinned?'unpin':'pin')+'</button>'
     +((m.ref&&m.refPx!=null&&dmState.admin)?'<button type="button" class="dm-tool" data-dmnote="'+m.id+'" title="Write this into the notes book, keeping the price and time it was called at">\u2192 note</button>':'')
     +(own?'<button type="button" class="dm-tool" data-dmedit="'+m.id+'" title="Edit \u2014 the price stamp stays at what it was sent at">edit</button>'
@@ -14724,12 +14734,30 @@ function dmMessageHtml(m,t,p){
   // grouped messages, so anything that lived only there would vanish with it.
   const marks=m.deleted?'':((m.via==='telegram'?'<span class="dm-mk" title="sent from Telegram">tg</span>':'')
     +(m.edited?'<span class="dm-mk">edited</span>':''));
+  // The quote a reply carries: one line of what it answers, clickable back to the original.
+  const quote=(!m.deleted&&m.reply)
+    ? '<div class="dm-quote" data-dmq="'+m.replyTo+'" title="jump to the quoted message"><b>'+esc(m.reply.sender||'\u2014')+'</b> '
+      +esc(m.reply.deleted?'message deleted':((m.reply.ref?'$'+dmTkName(m.reply.ref)+' \u00b7 ':'')+(m.reply.body||'attachment'))).replace(/\n/g,' ')+'</div>'
+    : '';
   const body=m.deleted
     ? '<div class="dm-b dm-del">message deleted</div>'
-    : '<div class="dm-b" title="'+esc(who+' \u00b7 '+dmWhen(m.ts))+'">'
-      +(m.body?esc(m.body).replace(/\n/g,'<br>'):'')+marks+dmFile(m)+dmStamp(m)+'</div>';
-  return '<div class="dm-msg'+(own?' out':'')+(head?' hd':'')+'">'+meta
+    : '<div class="dm-b" title="'+esc(who+' \u00b7 '+dmWhen(m.ts))+'">'+quote
+      +(m.body?dmMentionHtml(esc(m.body)).replace(/\n/g,'<br>'):'')+marks+dmFile(m)+dmStamp(m)+'</div>';
+  return '<div class="dm-msg'+(own?' out':'')+(head?' hd':'')+'" data-mid="'+m.id+'">'+meta
     +body+act+(m.deleted?'':dmReactions(m))+'</div>';
+}
+// @handle rendered as a mention chip, YOURS in the loud style \u2014 the visual half of the escalation
+// rule that lets your own handle pierce a muted thread. Runs over already-escaped HTML; the handle
+// alphabet contains nothing esc() rewrites.
+function dmMentionHtml(html){
+  const me=dmState.me&&dmState.me.handle?String(dmState.me.handle).toLowerCase():'';
+  return String(html).replace(/(^|[\s>])@([A-Za-z0-9._-]{2,24})/g,(a,pre,h)=>
+    pre+'<span class="dm-mention'+(me&&h.toLowerCase()===me?' me':'')+'">@'+h+'</span>');
+}
+function dmMentionsMe(body){
+  const me=dmState.me&&dmState.me.handle; if(!me) return false;
+  const h=String(me).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+  return new RegExp('(^|[^A-Za-z0-9._-])@'+h+'(?![A-Za-z0-9._-])','i').test(String(body||''));
 }
 function dmSysLine(m,t){
   const who=m.mine?'you':(m.sender||'someone');
@@ -14939,16 +14967,31 @@ function dmRender(){
       ?('seen by '+esc(seenBy.join(', ')))
       :(t.kind!=='dm'?'sent':'sent \u00b7 not read yet'))+'</div>'):'';
     const pinned=(t.pins?arr.filter(x=>x.pinned):[]);
-    const pinStrip=pinned.length?('<div class="dm-pinstrip">'+pinned.slice(0,3).map(x=>
+    // On a topic board the FIRST pinned message is the standing post — the thesis the topic was
+    // opened to argue — rendered in full at the top rather than as a one-line strip row.
+    const thesis=(t.kind==='board'&&pinned.length)?pinned[0]:null;
+    const thesisHtml=thesis?('<div class="dm-thesis">'
+      +'<div class="dm-thesis-h">§ standing post — '+esc(thesis.mine?'you':(thesis.sender||'—'))+' · '+dmWhen(thesis.ts)
+      +'<button type="button" class="dm-tool" data-dmpin="'+thesis.id+'" data-on="0" style="margin-left:auto">unpin</button></div>'
+      +'<div class="dm-thesis-b">'+dmMentionHtml(esc(thesis.body||'')).replace(/\n/g,'<br>')+'</div>'
+      +dmStamp(thesis)+'</div>'):'';
+    const stripPins=thesis?pinned.slice(1):pinned;
+    const pinStrip=stripPins.length?('<div class="dm-pinstrip">'+stripPins.slice(0,3).map(x=>
       '<div class="dm-pinrow" data-dmjump="'+x.id+'"><span class="dm-pinicon">\u2691</span>'
       +'<span class="dm-pintext">'+esc((x.ref?'$'+x.ref+' \u00b7 ':'')+(x.body||'attachment')).slice(0,120)+'</span>'
       +'<button type="button" class="dm-tool" data-dmpin="'+x.id+'" data-on="0">unpin</button></div>').join('')+'</div>'):'';
     // Day dividers carry the date once, so per-message headers can be bare clock times; each
     // message also sees its predecessor, which is what chat-style grouping keys on.
     const parts=[];
+    // The "new" line draws where this open found the read watermark, once, before the first
+    // incoming message past it — and stays put while the reader catches up.
+    const um=(dmState.unreadMark&&dmState.unreadMark.thread===t.id)?dmState.unreadMark.after:null;
+    let newMarked=false;
     for(let i=0;i<arr.length;i++){
       const m=arr[i], p=arr[i-1];
       if(!p||!dmSameDay(p.ts,m.ts)) parts.push('<div class="dm-day"><span>'+esc(dmDayLabel(m.ts))+'</span></div>');
+      if(um!=null&&!newMarked&&m.id>um&&!m.mine&&!m.sys){
+        parts.push('<div class="dm-day dm-newmark"><span>new</span></div>'); newMarked=true; }
       parts.push(dmMessageHtml(m,t,p));
     }
     const log=arr.length?parts.join('')+receipt:'<div class="dm-empty">No messages yet.</div>';
@@ -14967,7 +15010,7 @@ function dmRender(){
       +'<a class="btn dm-mutebtn" href="/api/dm/export/'+t.id+'" title="Download this conversation as JSON \u2014 messages, stamps and members">\u2913</a>'
       +'<button type="button" class="btn dm-mutebtn" id="dm-mute" title="Muted conversations never escalate to Telegram'+(t.muted?'':' \u2014 except tickers you watch, which always come through')+'">'
       +(t.muted?'unmute':'mute')+'</button></span></div>'
-      +dmManageHtml(info)+pinStrip
+      +dmManageHtml(info)+thesisHtml+pinStrip
       +'<div class="dm-log" id="dm-log">'+log+'</div>'+dmTypingLine(t.id);
   }
 
@@ -14987,6 +15030,10 @@ function dmRender(){
     +attach
     +(dmState.editing?'<div class="dm-editing">Editing — the original timestamp and price stamp stand. '
       +'<button type="button" class="dm-tool" id="dm-canceledit">cancel</button></div>':'')
+    +(dmState.replying?(function(){ const rm=dmMsgs(dmState.sel).find(x=>x.id===dmState.replying);
+      return '<div class="dm-editing">Replying to <b>'+esc(rm?(rm.mine?'you':(rm.sender||'—')):'…')+'</b>'
+        +(rm?' — '+esc(String(rm.body||'attachment')).replace(/\n/g,' ').slice(0,60):'')
+        +' <button type="button" class="dm-tool" id="dm-cancelreply">cancel</button></div>'; })():'')
     +(dmState.err?'<div class="dm-err">'+esc(dmState.err)+'</div>':'');
 
   const watchChips=(dmState.watching||[]).map(c=>
@@ -15036,6 +15083,7 @@ function dmRender(){
       // Enter sends, Shift+Enter is a newline. A chat box that needs a mouse to send is a form.
       if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); dmSend(); }
       if(e.key==='Escape'&&dmState.editing){ dmState.editing=null; ta.value=''; dmRender(); }
+      else if(e.key==='Escape'&&dmState.replying){ dmState.replying=null; dmRender(); }
     });
   }
   const q=el('dm-q');
@@ -15048,7 +15096,17 @@ function dmRender(){
   const f=el('dm-file');
   if(f) f.addEventListener('change',()=>{ if(f.files&&f.files[0]){ dmState.pendingFile=f.files[0]; dmState.err=''; dmRender(); } });
   dmRestore(keep);
-  if(!dmState.results) dmScrollBottom();
+  if(!dmState.results){
+    // A thread opened with unread lands ON the "new" line, once; everything else keeps the
+    // stay-at-the-bottom behavior a chat expects.
+    if(dmState.scrollToNew){
+      // The flag survives until the mark actually renders — the open paints once before the
+      // history fetch lands, and consuming it on that first empty paint would scroll past "new".
+      const nm=document.querySelector('.dm-newmark');
+      if(nm){ dmState.scrollToNew=false; nm.scrollIntoView({block:'center'}); }
+      else dmScrollBottom();
+    } else dmScrollBottom();
+  }
 }
 
 // One delegated listener for the whole tab — the panel is re-rendered wholesale on every change,
@@ -15056,6 +15114,15 @@ function dmRender(){
 function dmWire(){
   const host=el('dm-body'); if(!host||host._dmWired) return;
   host._dmWired=true;
+  // Double-tap (dblclick on desktop, double-tap on phones) toggles the first quick reaction —
+  // the hover action bar has no hover to ride on a touch screen.
+  host.addEventListener('dblclick',(e)=>{
+    const msg=e.target.closest('.dm-msg[data-mid]');
+    if(!msg||e.target.closest('a,button,textarea,input')) return;
+    if(msg.querySelector('.dm-del')) return;
+    const emo=(dmState.reactions&&dmState.reactions[0])||null;
+    if(emo) dmReact(+msg.dataset.mid,emo);
+  });
   host.addEventListener('click',(e)=>{
     const pinBtn=e.target.closest('[data-dmpin]');
     if(pinBtn){ dmPin(+pinBtn.dataset.dmpin, pinBtn.dataset.on==='1'); return; }
@@ -15070,6 +15137,14 @@ function dmWire(){
     if(tk){ const c=tk.dataset.coin;
       if(state.rows.has(c)) openDetail(c);
       else pushToast('That market is not on the board right now');
+      return; }
+    const rp=e.target.closest('[data-dmreply]');
+    if(rp){ dmState.replying=+rp.dataset.dmreply; dmState.editing=null; dmRender();
+      const ta=el('dm-input'); if(ta) ta.focus(); return; }
+    if(e.target.closest('#dm-cancelreply')){ dmState.replying=null; dmRender(); return; }
+    const q=e.target.closest('[data-dmq]');
+    if(q){ const n=document.querySelector('.dm-msg[data-mid="'+q.dataset.dmq+'"]');
+      if(n){ n.scrollIntoView({block:'center'}); n.classList.add('dm-flash'); setTimeout(()=>n.classList.remove('dm-flash'),1200); }
       return; }
     const ad=e.target.closest('[data-dmadopt]');
     if(ad){ dmAdopt(ad.dataset.dmadopt); return; }

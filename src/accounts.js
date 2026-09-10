@@ -210,7 +210,8 @@ CREATE TABLE IF NOT EXISTS dm_msg (
   fileId TEXT,                     -- attachment, when the message carried one
   via TEXT,                        -- 'telegram' when it came in over the bridge, else NULL
   pinnedAt INTEGER,                -- a desk channel wants the current levels at the top
-  pinnedBy TEXT
+  pinnedBy TEXT,
+  replyTo INTEGER                  -- quoted message id, same thread — threading without threads
 ) STRICT;
 
 -- Tickers a member wants to hear about even when they are not looking. A message carrying one of
@@ -281,7 +282,7 @@ CREATE TABLE IF NOT EXISTS dm_file (
   // what produced "table dm_msg has no column named sys" the first time round.
   const ADDED_COLUMNS = {
     dm_thread: [["kind", "TEXT NOT NULL DEFAULT 'dm'"], ["pairKey", "TEXT"], ["title", "TEXT"], ["createdBy", "TEXT"]],
-    dm_msg: [["sys", "TEXT"], ["fileId", "TEXT"], ["via", "TEXT"], ["pinnedAt", "INTEGER"], ["pinnedBy", "TEXT"]],
+    dm_msg: [["sys", "TEXT"], ["fileId", "TEXT"], ["via", "TEXT"], ["pinnedAt", "INTEGER"], ["pinnedBy", "TEXT"], ["replyTo", "INTEGER"]],
   };
   for (const [table, cols] of Object.entries(ADDED_COLUMNS)) {
     const have = db.prepare("PRAGMA table_info(" + table + ")").all().map((c) => c.name);
@@ -361,7 +362,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     memAll: db.prepare("SELECT * FROM dm_member WHERE thread = ?"),
     memLeave: db.prepare("UPDATE dm_member SET leftAt = ? WHERE thread = ? AND uid = ? AND leftAt IS NULL"),
 
-    msgIns: db.prepare("INSERT INTO dm_msg (thread, sender, ts, body, ref, refPx, sys, fileId, via) VALUES (?,?,?,?,?,?,?,?,?)"),
+    msgIns: db.prepare("INSERT INTO dm_msg (thread, sender, ts, body, ref, refPx, sys, fileId, via, replyTo) VALUES (?,?,?,?,?,?,?,?,?,?)"),
     msgById: db.prepare("SELECT * FROM dm_msg WHERE id = ?"),
     msgEdit: db.prepare("UPDATE dm_msg SET body = ?, ref = ?, editedAt = ? WHERE id = ? AND sender = ? AND deletedAt IS NULL"),
     msgDrop: db.prepare("UPDATE dm_msg SET deletedAt = ?, body = '', fileId = NULL WHERE id = ? AND sender = ?"),
@@ -884,7 +885,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   // way for the membership story to drift from the message history.
   function sysMessage(threadId, actor, kind, detail) {
     const now = Date.now();
-    const id = Number(S.msgIns.run(+threadId, actor || "", now, String(detail || ""), null, null, kind, null, null).lastInsertRowid);
+    const id = Number(S.msgIns.run(+threadId, actor || "", now, String(detail || ""), null, null, kind, null, null, null).lastInsertRowid);
     S.thrTouch.run(id, now, +threadId);
     return id;
   }
@@ -1038,8 +1039,19 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   };
 
   // ---- the wire shape ---------------------------------------------------------------------------
+  // A reply carries a one-level preview of what it quotes, resolved at read: the quote renders
+  // without a second fetch, and a quoted message later deleted honestly says so instead of
+  // resurrecting its text.
+  function replyPreview(id) {
+    const q = S.msgById.get(+id);
+    if (!q) return null;
+    return { id: q.id, sender: q.sender ? ((users.get(q.sender) || {}).display || "—") : "",
+      body: q.deletedAt ? "" : String(q.body || (q.fileId ? "sent a file" : "")).slice(0, 120),
+      ref: q.deletedAt ? null : (q.ref || null), deleted: !!q.deletedAt };
+  }
   function wire(m, uid) {
     return { id: m.id, thread: m.thread, mine: m.sender === uid,
+      replyTo: m.replyTo || null, reply: m.replyTo ? replyPreview(m.replyTo) : null,
       senderUid: m.sender || null,
       sender: m.sender ? ((users.get(m.sender) || {}).display || "—") : "",
       ts: m.ts, body: m.deletedAt ? "" : m.body,
@@ -1082,8 +1094,15 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       const coin = coinResolve ? coinResolve(sym) : sym;
       if (coin) { ref = coin; const px = markFor(coin); refPx = Number.isFinite(px) && px > 0 ? px : null; }
     }
+    // A quote binds only inside its own conversation: a replyTo naming another thread's message is
+    // dropped, not erred — the message still says what it says without the quote.
+    let replyTo = null;
+    if (o.replyTo != null) {
+      const rm = S.msgById.get(+o.replyTo);
+      if (rm && rm.thread === t.id && !rm.sys && !rm.deletedAt) replyTo = rm.id;
+    }
     const now = Date.now();
-    const id = Number(S.msgIns.run(t.id, fromUid, now, text, ref, refPx, null, file ? file.id : null, o.via || null).lastInsertRowid);
+    const id = Number(S.msgIns.run(t.id, fromUid, now, text, ref, refPx, null, file ? file.id : null, o.via || null, replyTo).lastInsertRowid);
     S.thrTouch.run(id, now, t.id);
     S.readUp.run(t.id, fromUid, id);            // your own message is read by definition
     return { ok: true, id, thread: t.id, message: wire(S.msgById.get(id), fromUid) };
@@ -1139,6 +1158,9 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
         readMsgId: (S.readGet.get(t.id, x.uid) || { readMsgId: 0 }).readMsgId })),
       pins: S.pinsOf.all(t.id).length,
       unread: S.msgUnread.get(t.id, rd.readMsgId, uid).n,
+      // The viewer's own read watermark, so the client can draw the "new messages" line exactly
+      // where they left off rather than guessing from the unread count.
+      myRead: rd.readMsgId || 0,
       preview: String(preview).slice(0, 90),
     };
   }
@@ -1370,6 +1392,12 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   //
   // isOnline(uid) is supplied by the server from its live SSE connection map — a member with the
   // terminal open is by definition not missing anything.
+  // "@handle" in a body, as a word: preceded by start or a non-handle character, and not running
+  // into more handle characters — so @lena matches for lena but @lena2 does not.
+  function mentionRe(handle) {
+    const h = String(handle || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp("(^|[^A-Za-z0-9._-])@" + h + "(?![A-Za-z0-9._-])", "i");
+  }
   function pendingEscalations(delayMs, isOnline) {
     const now = Date.now(), cut = now - (delayMs == null ? 5 * 60000 : delayMs);
     const out = [];
@@ -1382,10 +1410,11 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
         const floor = Math.max(rd.readMsgId || 0, rd.notifiedMsgId || 0);
         const fresh = S.msgSince.all(t.id, floor, 50)
           .filter((m) => m.sender !== uid && !m.deletedAt && !m.sys);
-        // A ticker you asked to hear about jumps the queue: it goes out immediately rather than
-        // waiting out the delay, and it pierces a muted thread. Muting a busy group should not be
-        // the same as asking not to be told when somebody mentions the name you are watching.
-        const hot = fresh.filter((m) => m.ref && watches(uid, m.ref));
+        // Two things jump the queue — out immediately, and through a muted thread: a ticker you
+        // asked to hear about, and YOUR OWN handle. Muting a busy group should not be the same as
+        // asking not to be told when somebody watches your name or calls it directly.
+        const mre = mentionRe(u.handle);
+        const hot = fresh.filter((m) => (m.ref && watches(uid, m.ref)) || mre.test(m.body || ""));
         const rows = hot.length ? hot : (rd.muted ? [] : fresh.filter((m) => m.ts <= cut));
         if (!rows.length) continue;
         out.push({ uid, thread: t.id, kind: t.kind,

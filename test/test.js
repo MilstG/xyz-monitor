@@ -13336,7 +13336,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract â€
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.10-51"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.10-52"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -23469,6 +23469,51 @@ test("a watched ticker jumps the queue and pierces mute", () => {
   assert.equal(hot[0].hot, true, "and gets through the mute");
   assert.ok(A.pendingEscalations(0, (u) => u === l.uid).every((e) => e.uid !== l.uid),
     "but somebody with the terminal open is still not interrupted");
+});
+
+test("replies quote one level, inside their own conversation only", () => {
+  const A = freshAccounts();
+  const { g, l } = seedTwo(A);
+  const T = A.threadFor(g.uid, l.uid, true).id;
+  const orig = A.send(g.uid, null, "entry at 113.90, stop under 110", null, { thread: T });
+
+  const rep = A.send(l.uid, null, "took it", null, { thread: T, replyTo: orig.id });
+  assert.equal(rep.message.replyTo, orig.id, "the reply names what it answers");
+  assert.equal(rep.message.reply.sender, "gustavo", "the quote carries who said it");
+  assert.ok(rep.message.reply.body.startsWith("entry at 113.90"), "and what they said");
+
+  // A replyTo pointing outside the conversation is dropped, never an error and never a leak.
+  const code = A.mintInvite(g.uid, null, 7, "join").invite.code;
+  const m = A.redeem(code, "marco", "another-long-password").user;
+  const T2 = A.threadFor(g.uid, m.uid, true).id;
+  const secret = A.send(g.uid, null, "private to marco", null, { thread: T2 });
+  const cross = A.send(l.uid, null, "quoting across", null, { thread: T, replyTo: secret.id });
+  assert.equal(cross.message.replyTo, null, "a cross-thread quote does not bind");
+
+  // A quoted message deleted later says so at read instead of resurrecting its text.
+  A.drop(g.uid, orig.id);
+  const read = A.history(l.uid, T).messages.find((x) => x.id === rep.id);
+  assert.equal(read.reply.deleted, true, "the preview is honest about the deletion");
+  assert.equal(read.reply.body, "", "and carries none of the deleted text");
+});
+
+test("an @mention does not wait out the delay and pierces a mute, like a watched ticker", () => {
+  const A = freshAccounts();
+  const { g, l } = seedTwo(A);
+  const T = A.threadFor(g.uid, l.uid, true).id;
+  const nobody = () => false;
+
+  A.setMuted(l.uid, T, true);
+  A.send(g.uid, null, "just chatter, ping @lenathings", null, { thread: T });
+  assert.ok(A.pendingEscalations(0, nobody).every((e) => e.uid !== l.uid),
+    "@lena running into a longer handle is not a mention, and a muted thread stays silent");
+
+  A.send(g.uid, null, "@lena what do you make of this", null, { thread: T });
+  const hot = A.pendingEscalations(60000, nobody).filter((e) => e.uid === l.uid);
+  assert.equal(hot.length, 1, "your own handle does not wait out the delay");
+  assert.equal(hot[0].hot, true, "and gets through the mute");
+  assert.ok(A.pendingEscalations(60000, nobody).every((e) => e.uid !== g.uid),
+    "the mention is lena's, not everyone's");
 });
 
 test("read receipts, pins and export", () => {
