@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.10-52";
+const VERSION = "2026.09.10-53";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1137,10 +1137,14 @@ async function main() {
     else if (b.board) r = ACCOUNTS.createBoard(me.uid, b.title);
     else if (b.joinBoard != null) r = ACCOUNTS.joinBoard(me.uid, b.joinBoard);
     else if (b.group) r = ACCOUNTS.createGroup(me.uid, b.title, b.members);
-    else if (b.addMembers) r = ACCOUNTS.addMembers(me.uid, b.thread, b.members);
-    else if (b.removeMember) r = ACCOUNTS.removeMember(me.uid, b.thread, String(b.uid || ""));
+    else if (b.addMembers) r = ACCOUNTS.addMembers(me.uid, b.thread, b.members, isAdmin(req));
+    else if (b.removeMember) r = ACCOUNTS.removeMember(me.uid, b.thread, String(b.uid || ""), isAdmin(req));
     else if (b.leave) r = ACCOUNTS.leaveGroup(me.uid, b.thread);
-    else if (b.rename) r = ACCOUNTS.renameGroup(me.uid, b.thread, b.title);
+    else if (b.rename) r = ACCOUNTS.renameGroup(me.uid, b.thread, b.title, isAdmin(req));
+    // Close and clear are per-viewer state: no dmPoke — nobody else's screen changed.
+    else if (b.close != null) r = ACCOUNTS.closeThread(me.uid, b.close);
+    else if (b.reopen != null) r = ACCOUNTS.reopenThread(me.uid, b.reopen);
+    else if (b.clearHistory != null) r = ACCOUNTS.clearHistory(me.uid, b.clearHistory);
     else if (b.react) r = ACCOUNTS.react(me.uid, b.id, String(b.emoji || ""));
     else if (b.read != null || b.markRead) r = ACCOUNTS.markRead(me.uid, b.thread, b.read);
     else if (b.mute != null) r = ACCOUNTS.setMuted(me.uid, b.thread, !!b.mute);

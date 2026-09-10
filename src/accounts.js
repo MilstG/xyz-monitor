@@ -245,6 +245,8 @@ CREATE TABLE IF NOT EXISTS dm_read (
   readMsgId INTEGER NOT NULL DEFAULT 0,
   muted INTEGER NOT NULL DEFAULT 0,
   notifiedMsgId INTEGER NOT NULL DEFAULT 0,   -- highest id already escalated to Telegram
+  hiddenUpTo INTEGER NOT NULL DEFAULT 0,      -- closed: off the rail until a message id passes this
+  clearedUpTo INTEGER NOT NULL DEFAULT 0,     -- history cleared: this viewer never sees ids at or under
   PRIMARY KEY (thread, uid)
 ) STRICT, WITHOUT ROWID;
 
@@ -283,6 +285,7 @@ CREATE TABLE IF NOT EXISTS dm_file (
   const ADDED_COLUMNS = {
     dm_thread: [["kind", "TEXT NOT NULL DEFAULT 'dm'"], ["pairKey", "TEXT"], ["title", "TEXT"], ["createdBy", "TEXT"]],
     dm_msg: [["sys", "TEXT"], ["fileId", "TEXT"], ["via", "TEXT"], ["pinnedAt", "INTEGER"], ["pinnedBy", "TEXT"], ["replyTo", "INTEGER"]],
+    dm_read: [["hiddenUpTo", "INTEGER NOT NULL DEFAULT 0"], ["clearedUpTo", "INTEGER NOT NULL DEFAULT 0"]],
   };
   for (const [table, cols] of Object.entries(ADDED_COLUMNS)) {
     const have = db.prepare("PRAGMA table_info(" + table + ")").all().map((c) => c.name);
@@ -366,7 +369,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     msgById: db.prepare("SELECT * FROM dm_msg WHERE id = ?"),
     msgEdit: db.prepare("UPDATE dm_msg SET body = ?, ref = ?, editedAt = ? WHERE id = ? AND sender = ? AND deletedAt IS NULL"),
     msgDrop: db.prepare("UPDATE dm_msg SET deletedAt = ?, body = '', fileId = NULL WHERE id = ? AND sender = ?"),
-    msgPage: db.prepare("SELECT * FROM dm_msg WHERE thread = ? AND id < ? ORDER BY id DESC LIMIT ?"),
+    msgPage: db.prepare("SELECT * FROM dm_msg WHERE thread = ? AND id < ? AND id > ? ORDER BY id DESC LIMIT ?"),
     msgSince: db.prepare("SELECT * FROM dm_msg WHERE thread = ? AND id > ? ORDER BY id LIMIT ?"),
     msgLast: db.prepare("SELECT * FROM dm_msg WHERE thread = ? ORDER BY id DESC LIMIT 1"),
     msgUnread: db.prepare("SELECT COUNT(*) AS n FROM dm_msg WHERE thread = ? AND id > ? AND sender <> ? AND deletedAt IS NULL AND sys IS NULL"),
@@ -375,7 +378,9 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     // Search is scoped by a JOIN on membership, never by a thread id the caller supplied: the
     // filter IS the authorization, so there is no way to phrase a query that reaches outside it.
     msgSearch: db.prepare(`SELECT s.* FROM dm_msg s JOIN dm_member m ON m.thread = s.thread
+      LEFT JOIN dm_read rd ON rd.thread = s.thread AND rd.uid = m.uid
       WHERE m.uid = ? AND m.leftAt IS NULL AND s.deletedAt IS NULL AND s.sys IS NULL
+        AND s.id > COALESCE(rd.clearedUpTo, 0)
         AND s.body LIKE ? ESCAPE '\\' ORDER BY s.id DESC LIMIT ?`),
 
     readGet: db.prepare("SELECT * FROM dm_read WHERE thread = ? AND uid = ?"),
@@ -385,6 +390,13 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       ON CONFLICT(thread, uid) DO UPDATE SET muted = excluded.muted`),
     readNotified: db.prepare(`INSERT INTO dm_read (thread, uid, notifiedMsgId) VALUES (?,?,?)
       ON CONFLICT(thread, uid) DO UPDATE SET notifiedMsgId = MAX(notifiedMsgId, excluded.notifiedMsgId)`),
+    readHide: db.prepare(`INSERT INTO dm_read (thread, uid, hiddenUpTo) VALUES (?,?,?)
+      ON CONFLICT(thread, uid) DO UPDATE SET hiddenUpTo = excluded.hiddenUpTo`),
+    // Clearing also reads and closes up to the same point: cleared history must not keep counting
+    // as unread or keep the row on the rail with a preview of text this viewer chose to forget.
+    readClearAll: db.prepare(`INSERT INTO dm_read (thread, uid, clearedUpTo, readMsgId, hiddenUpTo) VALUES (?,?,?,?,?)
+      ON CONFLICT(thread, uid) DO UPDATE SET clearedUpTo = MAX(clearedUpTo, excluded.clearedUpTo),
+        readMsgId = MAX(readMsgId, excluded.readMsgId), hiddenUpTo = excluded.hiddenUpTo`),
 
     reactAdd: db.prepare("INSERT OR IGNORE INTO dm_reaction (msg, uid, emoji, at) VALUES (?,?,?,?)"),
     reactDrop: db.prepare("DELETE FROM dm_reaction WHERE msg = ? AND uid = ? AND emoji = ?"),
@@ -890,17 +902,20 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     return id;
   }
 
-  function groupGuard(threadId, uid, needOwner) {
+  // `asAdmin` lets the terminal's operator manage any group THEY ARE IN without being its owner —
+  // membership is still required, so this is moderation of rooms they can already read as members,
+  // not a management path into conversations they are outside of.
+  function groupGuard(threadId, uid, needOwner, asAdmin) {
     const t = S.thrById.get(+threadId);
     if (!t) return { ok: false, error: "no such conversation" };
     if (t.kind !== "group" && t.kind !== "board") return { ok: false, error: "that is a direct message, not a group" };
     const m = S.memGet.get(+threadId, uid);
     if (!m || m.leftAt) return { ok: false, error: "no such conversation" };
-    if (needOwner && !m.owner) return { ok: false, error: "only the person who made this group can do that" };
+    if (needOwner && !m.owner && !asAdmin) return { ok: false, error: "only the person who made this group can do that" };
     return { ok: true, thread: t, member: m };
   }
-  function addMembers(uid, threadId, uids) {
-    const g = groupGuard(threadId, uid, true);
+  function addMembers(uid, threadId, uids, asAdmin) {
+    const g = groupGuard(threadId, uid, true, asAdmin);
     if (!g.ok) return g;
     const now = Date.now(), added = [];
     for (const u of (Array.isArray(uids) ? uids : [])) {
@@ -915,8 +930,8 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     sysMessage(threadId, uid, "added", added.join(", "));
     return { ok: true, thread: +threadId, added };
   }
-  function removeMember(uid, threadId, target) {
-    const g = groupGuard(threadId, uid, true);
+  function removeMember(uid, threadId, target, asAdmin) {
+    const g = groupGuard(threadId, uid, true, asAdmin);
     if (!g.ok) return g;
     if (target === uid) return { ok: false, error: "leave the group instead" };
     if (!isMember(threadId, target)) return { ok: false, error: "they are not in this group" };
@@ -936,8 +951,8 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       db.prepare("UPDATE dm_member SET owner = 1 WHERE thread = ? AND uid = ?").run(+threadId, left[0].uid);
     return { ok: true, thread: +threadId };
   }
-  function renameGroup(uid, threadId, title) {
-    const g = groupGuard(threadId, uid, true);
+  function renameGroup(uid, threadId, title, asAdmin) {
+    const g = groupGuard(threadId, uid, true, asAdmin);
     if (!g.ok) return g;
     const name = String(title == null ? "" : title).replace(/\s+/g, " ").trim().slice(0, GROUP_TITLE_MAX);
     if (!name) return { ok: false, error: "give the group a name" };
@@ -1138,7 +1153,8 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const last = S.msgLast.get(t.id);
     const mem = S.memOf.all(t.id);
     const me = S.memGet.get(t.id, uid);
-    const preview = last
+    // A preview of text this viewer cleared would un-forget it in the rail.
+    const preview = (last && last.id > (rd.clearedUpTo || 0))
       ? (last.sys ? sysLine(last) : last.deletedAt ? "message deleted"
         : ((last.ref ? "$" + last.ref + " · " : "") + (last.body || (last.fileId ? "sent a file" : ""))))
       : "";
@@ -1157,7 +1173,9 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
         uid: x.uid, handle: (users.get(x.uid) || {}).display || "—",
         readMsgId: (S.readGet.get(t.id, x.uid) || { readMsgId: 0 }).readMsgId })),
       pins: S.pinsOf.all(t.id).length,
-      unread: S.msgUnread.get(t.id, rd.readMsgId, uid).n,
+      unread: S.msgUnread.get(t.id, Math.max(rd.readMsgId || 0, rd.clearedUpTo || 0), uid).n,
+      // Closed for this viewer: off the rail until a newer message id passes the watermark.
+      hidden: (rd.hiddenUpTo || 0) > 0 && (rd.hiddenUpTo || 0) >= (t.lastMsgId || 0),
       // The viewer's own read watermark, so the client can draw the "new messages" line exactly
       // where they left off rather than guessing from the unread count.
       myRead: rd.readMsgId || 0,
@@ -1174,14 +1192,15 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (m.sys === "renamed") return who + " renamed this to “" + m.body + "”";
     return "";
   };
-  function threads(uid) { return S.thrMine.all(uid).map((t) => threadInfo(t, uid)); }
+  function threads(uid) { return S.thrMine.all(uid).map((t) => threadInfo(t, uid)).filter((x) => !x.hidden); }
 
   function history(uid, threadId, before, limit) {
     const t = S.thrById.get(+threadId);
     if (!t || !isMember(t.id, uid)) return { ok: false, error: "no such conversation" };
     const b = Number.isFinite(+before) && +before > 0 ? +before : Number.MAX_SAFE_INTEGER;
     const n = Math.min(Math.max(+limit || 50, 1), 200);
-    const rows = S.msgPage.all(t.id, b, n).reverse().map((m) => wire(m, uid));
+    const cf = (S.readGet.get(t.id, uid) || {}).clearedUpTo || 0;
+    const rows = S.msgPage.all(t.id, b, cf, n).reverse().map((m) => wire(m, uid));
     return { ok: true, thread: t.id, info: threadInfo(t, uid), messages: rows,
       more: rows.length === n, cursor: S.msgMaxId.get().m };
   }
@@ -1193,7 +1212,8 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const n = Math.min(Math.max(+limit || 200, 1), 500);
     const out = [];
     for (const t of S.thrMine.all(uid)) {
-      for (const m of S.msgSince.all(t.id, s, n)) out.push(wire(m, uid));
+      const cf = (S.readGet.get(t.id, uid) || {}).clearedUpTo || 0;
+      for (const m of S.msgSince.all(t.id, Math.max(s, cf), n)) out.push(wire(m, uid));
     }
     out.sort((a, b) => a.id - b.id);
     return { ok: true, cursor: S.msgMaxId.get().m, messages: out.slice(0, n), threads: threads(uid) };
@@ -1212,6 +1232,31 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       const t = S.thrById.get(m.thread);
       return Object.assign(wire(m, uid), { threadName: t ? threadName(t, uid) : "—", kind: t ? t.kind : "dm" });
     }) };
+  }
+
+  // ---- close & clear ----------------------------------------------------------------------------
+  // Both are PER-VIEWER. Closing takes the row off YOUR rail until a newer message id passes the
+  // watermark — talk to the same person later and the whole backscroll is right there. Clearing
+  // forgets the backscroll for YOU alone: the other side keeps their record, and the operator
+  // read-through still sees everything, which is this deployment's stated posture.
+  function closeThread(uid, threadId) {
+    const t = S.thrById.get(+threadId);
+    if (!t || !isMember(t.id, uid)) return { ok: false, error: "no such conversation" };
+    S.readHide.run(t.id, uid, t.lastMsgId || 0);
+    return { ok: true, closed: t.id };
+  }
+  function reopenThread(uid, threadId) {
+    const t = S.thrById.get(+threadId);
+    if (!t || !isMember(t.id, uid)) return { ok: false, error: "no such conversation" };
+    S.readHide.run(t.id, uid, 0);
+    return { ok: true, reopened: t.id };
+  }
+  function clearHistory(uid, threadId) {
+    const t = S.thrById.get(+threadId);
+    if (!t || !isMember(t.id, uid)) return { ok: false, error: "no such conversation" };
+    const last = t.lastMsgId || 0;
+    S.readClearAll.run(t.id, uid, last, last, last);
+    return { ok: true, cleared: t.id };
   }
 
   function markRead(uid, threadId, upTo) {
@@ -1319,7 +1364,10 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   function exportThread(uid, threadId) {
     const t = S.thrById.get(+threadId);
     if (!t || !isMember(t.id, uid)) return { ok: false, error: "no such conversation" };
-    const rows = db.prepare("SELECT * FROM dm_msg WHERE thread = ? ORDER BY id").all(t.id);
+    // An export honors the caller's own clear: history they chose to forget is not theirs to
+    // re-download. The operator read-through keeps the full record, as disclosed.
+    const cf = (S.readGet.get(t.id, uid) || {}).clearedUpTo || 0;
+    const rows = db.prepare("SELECT * FROM dm_msg WHERE thread = ? AND id > ? ORDER BY id").all(t.id, cf);
     return { ok: true, thread: t.id, kind: t.kind, name: threadName(t, uid),
       exportedAt: Date.now(),
       members: S.memAll.all(t.id).map((m) => ({ handle: (users.get(m.uid) || {}).display || m.uid,
@@ -1355,7 +1403,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (!t) return { ok: false, error: "no such conversation" };
     const b = Number.isFinite(+before) && +before > 0 ? +before : Number.MAX_SAFE_INTEGER;
     const n = Math.min(Math.max(+limit || 100, 1), 300);
-    const rows = S.msgPage.all(t.id, b, n).reverse();
+    const rows = S.msgPage.all(t.id, b, 0, n).reverse();   // read-through: no per-viewer clear floor
     adminAudit(adminUid, "read-thread", t.id, "" + rows.length + " message(s)");
     return { ok: true, thread: t.id, kind: t.kind,
       name: t.kind === "group" ? (t.title || "untitled group")
@@ -1469,6 +1517,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     // messages
     setMarkSource, threadFor, threadPeers, isMember, memberUids, send, edit, drop,
     threads, history, sync, search, markRead, setMuted,
+    closeThread, reopenThread, clearHistory,
     createGroup, addMembers, removeMember, leaveGroup, renameGroup,
     createBoard, joinBoard, listBoards,
     react, REACTIONS, putFile, readFile, removeFile, sweepFiles, bridgeReply,

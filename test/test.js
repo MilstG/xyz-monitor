@@ -13336,7 +13336,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract â€
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.10-52"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.10-53"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -23514,6 +23514,50 @@ test("an @mention does not wait out the delay and pierces a mute, like a watched
   assert.equal(hot[0].hot, true, "and gets through the mute");
   assert.ok(A.pendingEscalations(60000, nobody).every((e) => e.uid !== g.uid),
     "the mention is lena's, not everyone's");
+});
+
+test("close hides a conversation for you until somebody writes; clear forgets it for you alone", () => {
+  const A = freshAccounts();
+  const { g, l } = seedTwo(A);
+  const T = A.threadFor(g.uid, l.uid, true).id;
+  A.send(g.uid, null, "first", null, { thread: T });
+  A.send(l.uid, null, "second", null, { thread: T });
+
+  assert.ok(A.closeThread(l.uid, T).ok, "lena closes it");
+  assert.ok(A.threads(l.uid).every((t) => t.id !== T), "off HER rail");
+  assert.ok(A.threads(g.uid).some((t) => t.id === T), "still on gustavo's â€” closing is per-viewer");
+
+  A.send(g.uid, null, "you there?", null, { thread: T });
+  const back = A.threads(l.uid).find((t) => t.id === T);
+  assert.ok(back, "a new message brings it back");
+  assert.equal(A.history(l.uid, T).messages.filter((m) => !m.sys).length, 3, "with the whole backscroll intact");
+
+  assert.ok(A.clearHistory(l.uid, T).ok, "lena clears the history");
+  assert.equal(A.history(l.uid, T).messages.length, 0, "her view starts empty");
+  assert.ok(A.threads(l.uid).every((t) => t.id !== T), "and the row leaves her rail");
+  assert.ok(A.history(g.uid, T).messages.filter((m) => !m.sys).length >= 3, "gustavo's record is untouched");
+  assert.ok(A.search(l.uid, "first").results.every((m) => m.thread !== T), "cleared history stops matching her search");
+  assert.ok(A.search(g.uid, "first").results.some((m) => m.thread === T), "but still matches his");
+
+  const again = A.send(g.uid, null, "fresh start", null, { thread: T });
+  assert.ok(again.ok, "talking again just works");
+  const hist = A.history(l.uid, T).messages;
+  assert.equal(hist.length, 1, "she sees only what came after the clear");
+  assert.equal(hist[0].body, "fresh start");
+  assert.equal(A.exportThread(l.uid, T).messages.length, 1, "her export honors the clear too");
+});
+
+test("the terminal operator can manage a group they are in without owning it", () => {
+  const A = freshAccounts();
+  const { g, l } = seedTwo(A);
+  const code = A.mintInvite(g.uid, null, 7, "join").invite.code;
+  const m = A.redeem(code, "marco", "another-long-password").user;
+  // lena (not an admin) creates the group; gustavo (admin flag, first account) is a member.
+  const grp = A.createGroup(l.uid, "desk", [g.uid]);
+  assert.ok(!A.addMembers(g.uid, grp.thread, [m.uid]).ok, "a plain member cannot add");
+  assert.ok(A.addMembers(g.uid, grp.thread, [m.uid], true).ok, "the operator can");
+  assert.ok(A.removeMember(g.uid, grp.thread, m.uid, true).ok, "and remove");
+  assert.ok(!A.addMembers(m.uid, grp.thread, [m.uid], true).ok, "but only from inside: a non-member stays refused even asAdmin");
 });
 
 test("read receipts, pins and export", () => {

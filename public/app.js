@@ -14292,6 +14292,9 @@ function dmUpdatePip(){
       pip.textContent=n>99?'99+':String(n); }
     else if(pip) pip.remove();
   }
+  // The chat dock's red count rides the same number.
+  const dp=el('dm-dockpip');
+  if(dp){ dp.hidden=!n; if(n) dp.textContent=n>99?'99+':String(n); }
 }
 
 function dmThread(id){ return dmState.threads.find(t=>t.id===id)||null; }
@@ -14372,6 +14375,11 @@ async function dmSync(){
             +(fresh.length>1?'  (+'+(fresh.length-1)+' more)':'')+' — open Messages');
         }
       }
+      // THE "sent · not read yet forever" fix: a reader sitting IN the open conversation never
+      // marked arrivals read — the receipt only moved when they re-opened the thread, so senders
+      // concluded delivery itself was broken. Reading is being here with the tab visible.
+      if(state.view==='dm'&&dmState.sel&&!document.hidden
+        &&(d.messages||[]).some(m=>m.thread===dmState.sel&&!m.mine)) dmMarkRead(dmState.sel);
       if(state.view==='dm') dmRender();
     }
   }catch(_){ /* the next frame or the next open retries; a failed sync is never fatal */ }
@@ -14547,6 +14555,20 @@ async function dmToggleMute(){
   const t=dmThread(dmState.sel); if(!t) return;
   const res=await dmPost({thread:t.id,mute:!t.muted});
   if(res.ok){ t.muted=!t.muted; dmUpdatePip(); dmRender(); }
+}
+// Close: off YOUR rail, history intact — the row comes back when either side writes again.
+async function dmCloseThread(){
+  const t=dmThread(dmState.sel); if(!t) return;
+  const res=await dmPost({close:t.id});
+  if(res.ok){ dmState.sel=null; await dmLoad(); dmRender(); }
+}
+// Clear: forget the backscroll for YOU — the local cache goes with it, or the render would keep
+// showing history the server no longer serves this account.
+async function dmClearHistory(){
+  const t=dmThread(dmState.sel); if(!t) return;
+  if(!confirm('Clear this conversation’s history for you? The other side keeps theirs, and the operator record is untouched. This cannot be undone.')) return;
+  const res=await dmPost({clearHistory:t.id});
+  if(res.ok){ dmState.msgs.delete(t.id); dmState.sel=null; await dmLoad(); dmRender(); }
 }
 async function dmDrop(id){
   if(!confirm('Delete this message? The other side sees that it was deleted.')) return;
@@ -14850,15 +14872,18 @@ function dmPickerHtml(){
 }
 
 function dmManageHtml(info){
-  if(!dmState.manage||!info||info.kind!=='group') return '';
+  if(!dmState.manage||!info||(info.kind!=='group'&&info.kind!=='board')) return '';
   const notIn=dmState.members.filter(m=>!info.members.some(x=>x.uid===m.uid));
+  // The group's owner manages it; the terminal's operator can too — moderation of rooms they are
+  // already in, mirrored server-side, so this is visibility of a power, not the power itself.
+  const canMan=info.owner||dmState.admin;
   return '<div class="dm-manage">'
     +'<div class="dm-sh">Members · '+info.members.length+'</div>'
     +info.members.map(m=>'<div class="dm-mrow"><span class="grow">'+esc(m.display)
       +(m.owner?' <span class="mk-chip">owner</span>':'')+'</span>'
-      +(info.owner&&!m.owner?'<button type="button" class="dm-tool" data-dmrm="'+esc(m.uid)+'">remove</button>':'')
+      +(canMan&&!m.owner?'<button type="button" class="dm-tool" data-dmrm="'+esc(m.uid)+'">remove</button>':'')
       +'</div>').join('')
-    +(info.owner?'<div class="dm-sh" style="margin-top:10px">Add</div>'
+    +(canMan?'<div class="dm-sh" style="margin-top:10px">Add</div>'
       +(notIn.length?notIn.map(m=>'<div class="dm-mrow"><span class="grow">'+esc(m.display)+'</span>'
         +'<button type="button" class="dm-tool" data-dmadd="'+esc(m.uid)+'">add</button></div>').join('')
         :'<div class="dm-empty">Everyone is already in.</div>')
@@ -15009,7 +15034,10 @@ function dmRender(){
       +(grp?'<button type="button" class="btn dm-mutebtn" id="dm-managebtn">'+(dmState.manage?'close':'members')+'</button>':'')
       +'<a class="btn dm-mutebtn" href="/api/dm/export/'+t.id+'" title="Download this conversation as JSON \u2014 messages, stamps and members">\u2913</a>'
       +'<button type="button" class="btn dm-mutebtn" id="dm-mute" title="Muted conversations never escalate to Telegram'+(t.muted?'':' \u2014 except tickers you watch, which always come through')+'">'
-      +(t.muted?'unmute':'mute')+'</button></span></div>'
+      +(t.muted?'unmute':'mute')+'</button>'
+      +'<button type="button" class="btn dm-mutebtn" id="dm-clearhist" title="Clear this conversation\u2019s history for YOU \u2014 the other side keeps theirs, and the operator record is untouched. Cannot be undone.">clear</button>'
+      +'<button type="button" class="btn dm-mutebtn" id="dm-close" title="Close this conversation \u2014 it leaves your list; the history stays and it comes back the moment either of you writes again.">close</button>'
+      +'</span></div>'
       +dmManageHtml(info)+thesisHtml+pinStrip
       +'<div class="dm-log" id="dm-log">'+log+'</div>'+dmTypingLine(t.id);
   }
@@ -15180,6 +15208,8 @@ function dmWire(){
     if(e.target.closest('#dm-newbtn')){ dmState.picking=!dmState.picking; dmRender(); return; }
     if(e.target.closest('#dm-send')){ dmSend(); return; }
     if(e.target.closest('#dm-mute')){ dmToggleMute(); return; }
+    if(e.target.closest('#dm-close')){ dmCloseThread(); return; }
+    if(e.target.closest('#dm-clearhist')){ dmClearHistory(); return; }
     if(e.target.closest('#dm-canceledit')){ dmState.editing=null; dmRender(); return; }
     const ed=e.target.closest('[data-dmedit]'); if(ed){ dmEdit(+ed.dataset.dmedit); return; }
     const dl=e.target.closest('[data-dmdel]'); if(dl){ dmDrop(+dl.dataset.dmdel); return; }
@@ -15225,6 +15255,7 @@ async function openDM(){
 // signed-in member who never opens the tab still needs their Telegram escalation cancelled by the
 // simple fact of being here.
 if(dmSignedIn()){
+  dmDockInit();
   dmLoad().then(()=>{
     // Unread waiting at open gets said out loud once — the pip alone was easy to miss.
     const n=dmUnreadTotal();
@@ -15233,6 +15264,46 @@ if(dmSignedIn()){
   });
 }
 else { const b=el('tab-dm'); if(b) b.hidden=true; }
+
+// ---- the chat dock -----------------------------------------------------------------------------
+// The Ask console's twin, bottom-left: conversations reachable from ANY tab, one click. The dock
+// lists the rail (unread first-class, red count on the button) and jumping into one lands on the
+// Messages tab with that conversation open.
+function dmDockRows(){
+  const rows=dmState.threads.slice(0,8).map(t=>
+    '<div class="dm-th" data-dockth="'+t.id+'"><div class="dm-thn">'
+    +(t.kind==='dm'?'<span class="'+(dmState.online.has(t.peer)?'dm-on':'dm-off')+'">●</span> ':'<span class="dm-grp">#</span> ')
+    +esc(t.name)
+    +((t.unread&&!t.muted)?'<span class="dm-badge">'+(t.unread>99?'99+':t.unread)+'</span>':'')+'</div>'
+    +'<div class="dm-thp">'+esc(t.preview||'no messages yet')+'</div></div>');
+  return rows.join('')||'<div class="dm-empty">No conversations yet.</div>';
+}
+function dmDockToggle(){
+  const p=el('dm-dockpanel'); if(!p) return;
+  if(p.hidden){
+    p.innerHTML='<div class="dm-sh" style="padding:10px 14px 7px">Messages</div>'+dmDockRows()
+      +'<div class="dm-dockfoot" id="dm-dockopen">open messages ↗</div>';
+    p.hidden=false;
+  } else p.hidden=true;
+}
+function dmDockInit(){
+  if(el('dm-dock')) return;
+  const b=document.createElement('button');
+  b.type='button'; b.id='dm-dock'; b.className='term-fab';
+  b.title='Messages — your conversations, from any tab';
+  b.innerHTML='<span class="tf-ic">💬</span><span class="tf-t">Chat</span><span class="dm-dockpip" id="dm-dockpip" hidden></span>';
+  document.body.appendChild(b);
+  const p=document.createElement('div');
+  p.id='dm-dockpanel'; p.hidden=true;
+  document.body.appendChild(p);
+  b.addEventListener('click',(e)=>{ e.stopPropagation(); dmDockToggle(); });
+  p.addEventListener('click',(e)=>{
+    const row=e.target.closest('[data-dockth]');
+    if(row){ p.hidden=true; showView('dm'); dmOpenThread(+row.dataset.dockth); return; }
+    if(e.target.closest('#dm-dockopen')){ p.hidden=true; showView('dm'); }
+  });
+  document.addEventListener('click',(e)=>{ if(!p.hidden&&(!e.target.closest||!e.target.closest('#dm-dock,#dm-dockpanel'))) p.hidden=true; });
+}
 
 // ===== admin panel: access (members + invites) =================================================
 // The only box in the admin panel that decides WHO gets in. Everything else there decides what
