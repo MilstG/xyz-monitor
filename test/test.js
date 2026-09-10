@@ -13336,7 +13336,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.10-54"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.10-55"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -23198,13 +23198,20 @@ test("attachments: the type comes from OUR sniff, and svg never renders inline",
   const good = A.putFile(g.uid, T, "chart.png", png);
   assert.ok(good.ok && good.file.mime === "image/png" && good.file.inline === 1, "a real png renders inline");
 
-  // The two that matter. An SVG is a document with a <script> element in it, and a claimed
-  // extension is not evidence of anything — both must land as an octet-stream download.
+  // The allowlist IS the policy now: images and .txt only, everything else refused at upload —
+  // an SVG (a document with a <script> element in it), a lying extension, a zip, a video: no
+  // second-class download lane, just a no.
   const svg = A.putFile(g.uid, T, "logo.svg", Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'));
-  assert.equal(svg.file.mime, "application/octet-stream", "svg is never given an image type");
-  assert.equal(svg.file.inline, 0, "and never renders inline");
+  assert.ok(!svg.ok, "svg is refused outright");
   const liar = A.putFile(g.uid, T, "totally.png", Buffer.from("<html><script>alert(1)</script></html>"));
-  assert.equal(liar.file.inline, 0, "a lying extension buys nothing — the bytes decide");
+  assert.ok(!liar.ok, "a lying extension buys nothing — the bytes decide");
+  assert.ok(!A.putFile(g.uid, T, "clip.zip", Buffer.from([0x50, 0x4B, 0x03, 0x04, 1, 2, 3])).ok, "archives are refused");
+  assert.ok(!A.putFile(g.uid, T, "doc.pdf", Buffer.from("%PDF-1.4 whatever")).ok, "PDFs are refused too");
+  const note = A.putFile(g.uid, T, "levels.TXT", Buffer.from("HOOD 113.90 entry\nstop 109\n"));
+  assert.ok(note.ok && note.file.mime.startsWith("text/plain") && note.file.inline === 0,
+    "a real .txt is accepted, typed text/plain, and downloads rather than rendering");
+  assert.ok(!A.putFile(g.uid, T, "fake.txt", Buffer.from([0x00, 0x01, 0x02, 65, 66])).ok,
+    "binary bytes named .txt are refused — the extension is a claim, not evidence");
 
   assert.ok(A.putFile(g.uid, T, "../../etc/passwd", png).file.name.indexOf("/") < 0,
     "a filename is a label, and cannot contain a path separator");
@@ -23558,6 +23565,29 @@ test("the terminal operator can manage a group they are in without owning it", (
   assert.ok(A.addMembers(g.uid, grp.thread, [m.uid], true).ok, "the operator can");
   assert.ok(A.removeMember(g.uid, grp.thread, m.uid, true).ok, "and remove");
   assert.ok(!A.addMembers(m.uid, grp.thread, [m.uid], true).ok, "but only from inside: a non-member stays refused even asAdmin");
+});
+
+test("retention: 30 days for a 1-to-1, 7 for groups and topics, pins exempt", () => {
+  const { A, g, l, m } = seedDesk();
+  const DM = A.threadFor(g.uid, l.uid, true).id;
+  const GR = A.createGroup(g.uid, "desk", [l.uid, m.uid]).thread;
+  const dmsg = A.send(g.uid, null, "dm line", null, { thread: DM });
+  const gmsg = A.send(g.uid, null, "group line", null, { thread: GR });
+  const keep = A.send(g.uid, null, "the standing levels", null, { thread: GR });
+  A.pin(g.uid, keep.id, true);
+
+  const now = Date.now();
+  assert.equal(A.sweepRetention(now), 0, "nothing in-window is touched");
+
+  const n8 = A.sweepRetention(now + 8 * 86400e3);
+  assert.ok(n8 >= 1, "at day 8 the group backlog goes");
+  assert.ok(A.history(g.uid, GR).messages.every((x) => x.id !== gmsg.id), "the group line is gone — row deleted, not hidden");
+  assert.ok(A.history(g.uid, GR).messages.some((x) => x.id === keep.id), "the pinned message stays");
+  assert.ok(A.history(g.uid, DM).messages.some((x) => x.id === dmsg.id), "the 1-to-1 line is still inside its 30 days");
+
+  A.sweepRetention(now + 31 * 86400e3);
+  assert.ok(A.history(g.uid, DM).messages.every((x) => x.id !== dmsg.id), "at day 31 the 1-to-1 line goes too");
+  assert.ok(A.history(g.uid, GR).messages.some((x) => x.id === keep.id), "the pin still stays");
 });
 
 test("read receipts, pins and export", () => {

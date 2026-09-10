@@ -398,6 +398,14 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       ON CONFLICT(thread, uid) DO UPDATE SET clearedUpTo = MAX(clearedUpTo, excluded.clearedUpTo),
         readMsgId = MAX(readMsgId, excluded.readMsgId), hiddenUpTo = excluded.hiddenUpTo`),
 
+    // Retention: candidates past their window, oldest first, capped per sweep so one tick never
+    // stalls on a huge backlog. Pinned rows are exempt by the WHERE, not by caller discipline.
+    retainSweep: db.prepare(`SELECT m.id, m.fileId FROM dm_msg m JOIN dm_thread t ON t.id = m.thread
+      WHERE m.pinnedAt IS NULL AND m.ts < CASE WHEN t.kind = 'dm' THEN ? ELSE ? END
+      ORDER BY m.id LIMIT 500`),
+    retainDrop: db.prepare("DELETE FROM dm_msg WHERE id = ?"),
+    reactPurge: db.prepare("DELETE FROM dm_reaction WHERE msg = ?"),
+
     reactAdd: db.prepare("INSERT OR IGNORE INTO dm_reaction (msg, uid, emoji, at) VALUES (?,?,?,?)"),
     reactDrop: db.prepare("DELETE FROM dm_reaction WHERE msg = ? AND uid = ? AND emoji = ?"),
     reactOf: db.prepare("SELECT * FROM dm_reaction WHERE msg = ?"),
@@ -990,11 +998,24 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   }
 
   // ---- attachments ------------------------------------------------------------------------------
-  // The uploader's claimed content type is never trusted. We sniff the first bytes ourselves and
-  // render INLINE only for the four raster formats that cannot carry script. Everything else —
-  // including SVG, which is a document with a <script> element in it — is served as a download.
+  // The uploader's claimed content type is never trusted, and the ALLOWLIST is now the policy: a
+  // desk chat shares screenshots and plain-text notes, so only the four raster formats we can
+  // verify by magic bytes (rendered inline — none can carry script) and .txt that actually
+  // validates as text are accepted. Everything else — video, archives, PDFs, SVG above all, which
+  // is a document with a <script> element in it — is REFUSED at upload rather than quarantined as
+  // a download: a file type nobody here should be sharing does not get a second-class lane.
   const FILE_MAX = 8 * 1024 * 1024;
   const fileDir = path.join(dataDir, "dm-files");
+  // Text is bytes that read as text: NUL or any control byte other than tab/LF/CR fails it, over
+  // the WHOLE file — a zip renamed .txt fails on its first few bytes, a binary tail on its last.
+  function looksLikeText(buf) {
+    for (let i = 0; i < buf.length; i++) {
+      const c = buf[i];
+      if (c === 9 || c === 10 || c === 13) continue;
+      if (c < 32 || c === 127) return false;
+    }
+    return true;
+  }
   function safeMime(buf, name) {
     const b = buf;
     const startsWith = (...bytes) => bytes.every((v, i) => b[i] === v);
@@ -1003,10 +1024,9 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (startsWith(0x47, 0x49, 0x46, 0x38)) return { mime: "image/gif", inline: 1 };
     if (startsWith(0x52, 0x49, 0x46, 0x46) && b.length > 11 &&
         b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return { mime: "image/webp", inline: 1 };
-    if (startsWith(0x25, 0x50, 0x44, 0x46)) return { mime: "application/pdf", inline: 0 };
-    // Unknown bytes: octet-stream and a forced download. Naming it by extension would hand an
-    // attacker the content type, which is the whole hole this closes.
-    return { mime: "application/octet-stream", inline: 0 };
+    // .txt by name AND text by bytes — the extension alone is a claim, and claims are not evidence.
+    if (/\.txt$/i.test(String(name || "")) && looksLikeText(b)) return { mime: "text/plain; charset=utf-8", inline: 0 };
+    return null;   // refused
   }
   // Filtered by code point, like cleanBody, and for the same reason. Path separators go too:
   // the stored filename is only ever a LABEL — the bytes live under a random id — but a name
@@ -1026,6 +1046,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (!buf || !buf.length) return { ok: false, error: "that file is empty" };
     if (buf.length > FILE_MAX) return { ok: false, error: "that file is too large (8 MB maximum)" };
     const sniff = safeMime(buf, name);
+    if (!sniff) return { ok: false, error: "only images (png, jpeg, gif, webp) and .txt files can be shared here" };
     const id = crypto.randomBytes(16).toString("hex");
     try {
       fs.mkdirSync(fileDir, { recursive: true });
@@ -1036,6 +1057,27 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     S.fileIns.run(id, +threadId, uid, fileNameClean(name), sniff.mime, buf.length, sniff.inline, Date.now());
     return { ok: true, file: S.fileById.get(id) };
   }
+  // ---- retention --------------------------------------------------------------------------------
+  // Messages age out: 30 days in a 1-to-1, 7 in groups and topics — rows and attachment bytes,
+  // actually deleted, not hidden. PINNED messages are exempt, or every board's standing post would
+  // self-destruct in a week; unpinning re-enters a message into its window. Note the calls record
+  // reads live messages, so a stamped call only counts while its message is retained.
+  const RETAIN_DM_MS = 30 * 86400e3, RETAIN_GROUP_MS = 7 * 86400e3;
+  function sweepRetention(nowOpt) {
+    const now = Number.isFinite(+nowOpt) ? +nowOpt : Date.now();
+    const rows = S.retainSweep.all(now - RETAIN_DM_MS, now - RETAIN_GROUP_MS);
+    if (!rows.length) return 0;
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const r of rows) { S.reactPurge.run(r.id); S.retainDrop.run(r.id); }
+      db.exec("COMMIT");
+    } catch (e) { try { db.exec("ROLLBACK"); } catch (_) {} return 0; }
+    // File bytes go after the rows are committed gone — a crash mid-sweep leaves an orphaned file
+    // for the abandoned-upload sweeper, never a message pointing at deleted bytes.
+    for (const r of rows) if (r.fileId) removeFile(r.fileId);
+    return rows.length;
+  }
+
   // Reading a file is a membership check, never a "knows the id" check: an id in a URL is not a
   // capability, and a forwarded link must not become an access grant.
   function readFile(uid, fileId) {
@@ -1520,7 +1562,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     closeThread, reopenThread, clearHistory,
     createGroup, addMembers, removeMember, leaveGroup, renameGroup,
     createBoard, joinBoard, listBoards,
-    react, REACTIONS, putFile, readFile, removeFile, sweepFiles, bridgeReply,
+    react, REACTIONS, putFile, readFile, removeFile, sweepFiles, sweepRetention, bridgeReply,
     watchList, setWatch, pin, pinsOf, calls, exportThread,
     adminThreads, adminHistory, adminSearch, adminAuditLog,
     pendingEscalations, markEscalated,
