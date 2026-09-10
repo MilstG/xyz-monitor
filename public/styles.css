@@ -2284,6 +2284,7 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
   font-size:12.5px;line-height:1.5;color:var(--text)}
 .dm-x-cash{font-family:var(--mono);color:var(--accent);font-weight:500}
 .dm-x-f{display:flex;margin-top:5px;font-family:var(--mono);font-size:9.5px;color:var(--faint)}
+.dm-x-media{color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:1px 6px}
 .dm-x-open{margin-left:auto;color:var(--muted)}
 .dm-x:hover .dm-x-open{color:var(--accent)}
 .dm-x.dead{cursor:default;border-style:dashed}

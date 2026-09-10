@@ -13336,7 +13336,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract â€
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.10-56"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.10-57"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -23566,13 +23566,16 @@ test("tweet links: the id is spotted, the oEmbed answer parses, and the card rid
   assert.equal(tweetLinkId("x.com/a/status/123"), null, "no scheme, no match â€” the body is not re-guessed");
 
   const j = { author_name: "zerohedge", author_url: "https://twitter.com/zerohedge",
-    html: '<blockquote class="twitter-tweet"><p lang="en" dir="ltr">$HOOD up 8% &amp; squeezing<br>after S&amp;P inclusion &lt;wild&gt;</p>&mdash; zerohedge (@zerohedge) <a href="https://twitter.com/zerohedge/status/1">September 10, 2025</a></blockquote>' };
+    html: '<blockquote class="twitter-tweet"><p lang="en" dir="ltr">$HOOD up 8% &amp; squeezing<br>after S&amp;P inclusion &lt;wild&gt; <a href="https://t.co/x">pic.twitter.com/aB3cD</a></p>&mdash; zerohedge (@zerohedge) <a href="https://twitter.com/zerohedge/status/1">September 10, 2025</a></blockquote>' };
   const t = tweetFromOembed(j, "1");
   assert.equal(t.author, "zerohedge");
   assert.equal(t.handle, "zerohedge");
-  assert.equal(t.text, "$HOOD up 8% & squeezing\nafter S&P inclusion <wild>", "entities decoded once, <br> becomes a newline, raw angle brackets survive as text");
+  assert.equal(t.text, "$HOOD up 8% & squeezing\nafter S&P inclusion <wild>", "entities decoded once, <br> becomes a newline, raw angle brackets survive as text, the pic link is stripped");
+  assert.equal(t.media, true, "the pic link becomes a media flag instead of a URL stub");
   assert.equal(t.when, "September 10, 2025");
   assert.equal(t.url, "https://x.com/zerohedge/status/1");
+  assert.equal(tweetFromOembed({ author_name: "a", author_url: "", html: "<p>plain words</p>" }, "2").media, false,
+    "no pic link, no media flag");
   assert.equal(tweetFromOembed({}, "1"), null, "an empty answer is null, not a blank card");
 
   // The wire attachment: injected source, exactly like the price mark.
