@@ -2202,6 +2202,10 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
    just its bubble, and everything actionable rides a hover bar. */
 .dm-log{flex:1;min-height:0;padding:10px 12px 6px;display:flex;flex-direction:column;
   align-items:flex-start;gap:1px;overflow-y:auto}
+/* Conversations anchor to the BOTTOM, next to the composer — a short thread must not float at
+   the top of a tall pane. margin-top:auto on the first real row (not justify-content:flex-end,
+   which breaks scrolling in overflowed flex columns) collapses to 0 once history fills the pane. */
+.dm-log>.dm-day:first-child,.dm-log>.dm-msg:first-child{margin-top:auto}
 .dm-msg{max-width:78%;min-width:0;position:relative}
 .dm-msg.hd{margin-top:8px}
 .dm-msg.out{align-self:flex-end}
