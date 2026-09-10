@@ -175,7 +175,7 @@ CREATE TABLE IF NOT EXISTS otp (
 
 CREATE TABLE IF NOT EXISTS dm_thread (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind TEXT NOT NULL DEFAULT 'dm',        -- 'dm' | 'group'
+  kind TEXT NOT NULL DEFAULT 'dm',        -- 'dm' | 'group' | 'board' (an open topic anyone may join)
   pairKey TEXT,                           -- 'uidA|uidB' for a dm, NULL for a group
   title TEXT,                             -- groups only
   createdBy TEXT,
@@ -345,7 +345,9 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     thrById: db.prepare("SELECT * FROM dm_thread WHERE id = ?"),
     thrInsDm: db.prepare("INSERT INTO dm_thread (kind, pairKey, createdAt) VALUES ('dm',?,?)"),
     thrInsGroup: db.prepare("INSERT INTO dm_thread (kind, title, createdBy, createdAt) VALUES ('group',?,?,?)"),
-    thrRename: db.prepare("UPDATE dm_thread SET title = ? WHERE id = ? AND kind = 'group'"),
+    thrInsBoard: db.prepare("INSERT INTO dm_thread (kind, title, createdBy, createdAt) VALUES ('board',?,?,?)"),
+    thrRename: db.prepare("UPDATE dm_thread SET title = ? WHERE id = ? AND kind IN ('group','board')"),
+    thrBoards: db.prepare("SELECT * FROM dm_thread WHERE kind = 'board' ORDER BY lastAt DESC, createdAt DESC LIMIT 100"),
     thrTouch: db.prepare("UPDATE dm_thread SET lastMsgId = ?, lastAt = ? WHERE id = ?"),
     thrMine: db.prepare(`SELECT t.* FROM dm_thread t JOIN dm_member m ON m.thread = t.id
       WHERE m.uid = ? AND m.leftAt IS NULL ORDER BY t.lastAt DESC`),
@@ -800,9 +802,10 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   function threadPeers(id) { return memberUids(id); }
   const peerOf = (t, uid) => memberUids(t.id).find((u) => u !== uid) || "";
 
-  // A thread's name depends on who is looking: a pair is "the other person", a group is its title.
+  // A thread's name depends on who is looking: a pair is "the other person", a group or a board
+  // is its title.
   function threadName(t, uid) {
-    if (t.kind === "group") return t.title || "untitled group";
+    if (t.kind === "group" || t.kind === "board") return t.title || "untitled";
     const p = users.get(peerOf(t, uid));
     return p ? p.display : "—";
   }
@@ -828,6 +831,54 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     return { ok: true, thread: id };
   }
 
+  // ---- topic boards ----------------------------------------------------------------------------
+  // A board is a group whose door is open: same thread row, same membership table, same messages —
+  // the ONE difference is that any member of the terminal may join it themselves, so it behaves
+  // like a standing channel for a topic ("$HOOD thesis", "macro week") rather than an invite list.
+  // Reads and writes still go through membership: joining is what grants them, exactly as a group,
+  // so no authorization path had to learn a new case.
+  function createBoard(uid, title) {
+    if (!users.get(uid)) return { ok: false, error: "not signed in" };
+    const name = String(title == null ? "" : title).replace(/\s+/g, " ").trim().slice(0, GROUP_TITLE_MAX);
+    if (!name) return { ok: false, error: "give the topic a name" };
+    const now = Date.now();
+    let id;
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      id = Number(S.thrInsBoard.run(name, uid, now).lastInsertRowid);
+      S.memAdd.run(id, uid, now, 1);
+      db.exec("COMMIT");
+    } catch (e) { try { db.exec("ROLLBACK"); } catch (_) {} return { ok: false, error: "could not create the topic" }; }
+    sysMessage(id, uid, "created", name);
+    return { ok: true, thread: id };
+  }
+  function joinBoard(uid, threadId) {
+    const who = users.get(uid);
+    if (!who || who.disabledAt) return { ok: false, error: "not signed in" };
+    const t = S.thrById.get(+threadId);
+    if (!t || t.kind !== "board") return { ok: false, error: "no such topic" };
+    if (isMember(t.id, uid)) return { ok: true, thread: t.id, already: true };
+    if (memberUids(t.id).length >= GROUP_MAX_MEMBERS) return { ok: false, error: "this topic is full" };
+    S.memAdd.run(t.id, uid, Date.now(), 0);
+    seedRead(t.id, uid);
+    sysMessage(t.id, uid, "joined", who.display);
+    return { ok: true, thread: t.id };
+  }
+  // Every board, joined or not: the whole point of a board is being discoverable. Previews are not
+  // a leak — a board is desk-public by construction, which is what separates it from a group.
+  function listBoards(uid) {
+    return S.thrBoards.all().map((t) => {
+      const last = S.msgLast.get(t.id);
+      const joined = isMember(t.id, uid);
+      const rd = joined ? (S.readGet.get(t.id, uid) || { readMsgId: 0 }) : null;
+      return { id: t.id, title: t.title || "untitled", members: memberUids(t.id).length,
+        joined, lastAt: t.lastAt,
+        unread: joined ? S.msgUnread.get(t.id, rd.readMsgId, uid).n : 0,
+        preview: last ? String(last.sys ? sysLine(last) : last.deletedAt ? "message deleted"
+          : (last.body || "attachment")).slice(0, 90) : "no posts yet" };
+    });
+  }
+
   // System lines are ordinary rows with `sys` set. They ride the same cursor as everything else, so
   // "gustavo added lena" arrives through the same sync a message does — no second channel, and no
   // way for the membership story to drift from the message history.
@@ -841,7 +892,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   function groupGuard(threadId, uid, needOwner) {
     const t = S.thrById.get(+threadId);
     if (!t) return { ok: false, error: "no such conversation" };
-    if (t.kind !== "group") return { ok: false, error: "that is a direct message, not a group" };
+    if (t.kind !== "group" && t.kind !== "board") return { ok: false, error: "that is a direct message, not a group" };
     const m = S.memGet.get(+threadId, uid);
     if (!m || m.leftAt) return { ok: false, error: "no such conversation" };
     if (needOwner && !m.owner) return { ok: false, error: "only the person who made this group can do that" };
@@ -1097,6 +1148,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (m.sys === "added") return who + " added " + m.body;
     if (m.sys === "removed") return who + " removed " + m.body;
     if (m.sys === "left") return m.body + " left";
+    if (m.sys === "joined") return m.body + " joined";
     if (m.sys === "renamed") return who + " renamed this to “" + m.body + "”";
     return "";
   };
@@ -1389,6 +1441,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     setMarkSource, threadFor, threadPeers, isMember, memberUids, send, edit, drop,
     threads, history, sync, search, markRead, setMuted,
     createGroup, addMembers, removeMember, leaveGroup, renameGroup,
+    createBoard, joinBoard, listBoards,
     react, REACTIONS, putFile, readFile, removeFile, sweepFiles, bridgeReply,
     watchList, setWatch, pin, pinsOf, calls, exportThread,
     adminThreads, adminHistory, adminSearch, adminAuditLog,

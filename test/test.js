@@ -23021,6 +23021,36 @@ test("messages: the client escapes every rendered body, handle and preview", () 
   assert.ok(/const keep=dmCapture\(\)/.test(dm) && /dmRestore\(keep\)/.test(dm), "every render captures before and restores after");
 });
 
+test("topic boards: open threads anyone can discover, join and post in", () => {
+  const A = freshAccounts({ "xyz:HOOD": 113.2 });
+  const { g, l } = seedTwo(A);
+
+  const b = A.createBoard(g.uid, "  HOOD   thesis  ");
+  assert.ok(b.ok, "the operator opens a topic");
+  assert.ok(!A.createBoard(g.uid, "   ").ok, "a topic needs a name");
+
+  // Discoverable before joining — that is what separates a board from a group…
+  const seen = A.listBoards(l.uid).find((x) => x.id === b.thread);
+  assert.ok(seen && seen.title === "HOOD thesis" && seen.joined === false, "everyone sees the board, whitespace collapsed");
+  // …but reading and writing still ride membership, exactly like a group: joining GRANTS them, so
+  // no authorization path learned a new case.
+  assert.ok(!A.history(l.uid, b.thread).ok, "no read before joining");
+  assert.ok(!A.send(l.uid, "", "hi there", null, { thread: b.thread }).ok, "no write before joining");
+
+  assert.ok(A.joinBoard(l.uid, b.thread).ok, "anyone may join themselves");
+  assert.ok(A.joinBoard(l.uid, b.thread).already, "joining twice is a no-op, not an error");
+  const s = A.send(l.uid, "", "I think $HOOD runs", (x) => "xyz:" + x, { thread: b.thread });
+  assert.ok(s.ok && s.message.refPx === 113.2, "a post stamps its mark like any message");
+  const h = A.history(l.uid, b.thread);
+  assert.ok(h.ok && h.messages.some((m) => m.sys === "joined"), "the join is on the record as a system line");
+  assert.equal(A.listBoards(l.uid).find((x) => x.id === b.thread).members, 2, "the member count moves");
+  assert.ok(A.renameGroup(g.uid, b.thread, "HOOD thesis v2").ok, "the creator can rename a board like a group");
+
+  // A DM can never be joined through this door.
+  const dm = A.threadFor(g.uid, l.uid, true);
+  assert.ok(!A.joinBoard(g.uid, dm.id).ok, "joinBoard refuses anything that is not a board");
+});
+
 test("server: the invite door strips the code from the URL before anything renders", () => {
   const fs = require("fs"), path = require("path");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");

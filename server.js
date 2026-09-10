@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.03-50";
+const VERSION = "2026.09.10-51";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1027,6 +1027,7 @@ async function main() {
     // The directory is simply the member list: at this size a request-to-connect flow is ceremony.
     return { ok: true, me: ACCOUNTS.pub(me), threads: ACCOUNTS.threads(me.uid),
       members: ACCOUNTS.listUsers().filter((u) => u.uid !== me.uid && !u.disabled),
+      boards: ACCOUNTS.listBoards(me.uid),
       online: [...dmOnline()], maxLen: ACCOUNT_DM_MAX,
       reactions: ACCOUNTS.REACTIONS, maxFile: ACCOUNT_DM_FILE_MAX,
       watching: ACCOUNTS.watchList(me.uid), admin: isAdmin(req),
@@ -1127,6 +1128,8 @@ async function main() {
     if (b.watch != null) r = ACCOUNTS.setWatch(me.uid, b.watch, b.on !== false);
     else if (b.pin != null) r = ACCOUNTS.pin(me.uid, b.pin, b.on !== false);
     else if (b.toNote && b.id != null) r = promoteToNote(me, req, b.id);
+    else if (b.board) r = ACCOUNTS.createBoard(me.uid, b.title);
+    else if (b.joinBoard != null) r = ACCOUNTS.joinBoard(me.uid, b.joinBoard);
     else if (b.group) r = ACCOUNTS.createGroup(me.uid, b.title, b.members);
     else if (b.addMembers) r = ACCOUNTS.addMembers(me.uid, b.thread, b.members);
     else if (b.removeMember) r = ACCOUNTS.removeMember(me.uid, b.thread, String(b.uid || ""));

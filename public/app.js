@@ -14266,16 +14266,21 @@ const dmState = { me: null, threads: [], members: [], online: new Set(),
   sel: null, msgs: new Map(), info: new Map(), cursor: 0, loaded: false, err: '', sending: false,
   picking: false, editing: null, pendingPeer: null, reactions: [], maxLen: 4000, maxFile: 8388608,
   typing: new Map(), q: '', results: null, searching: false, manage: false, pendingFile: null,
-  watching: [], admin: false, operatorReadsAll: false, calls: null, mode: 'chat', watchAdd: false };
+  watching: [], admin: false, operatorReadsAll: false, calls: null, mode: 'chat', watchAdd: false,
+  boards: [] };
 
 function dmSignedIn(){ return !!(window.__ME && window.__ME.uid); }
 function dmUnreadTotal(){ return dmState.threads.reduce((a,t)=>a+(t.muted?0:(t.unread||0)),0); }
 
 // The tab pip. Painted from the thread list rather than a separate counter so it can never
-// disagree with what the rail shows.
+// disagree with what the rail shows. The browser-tab title carries the same count, so unread
+// messages are visible from ANY tab of the app — and from another window entirely.
+let _dmBaseTitle='';
 function dmUpdatePip(){
-  const b=el('tab-dm'); if(!b) return;
   const n=dmUnreadTotal();
+  if(!_dmBaseTitle) _dmBaseTitle=document.title;
+  try{ document.title=(n?'('+(n>99?'99+':n)+') ':'')+_dmBaseTitle; }catch(_){}
+  const b=el('tab-dm'); if(!b) return;
   b.innerHTML='Messages'+(n?'<span class="tabpip">'+(n>99?'99+':n)+'</span>':'');
 }
 
@@ -14302,6 +14307,7 @@ async function dmLoad(){
     dmState.online=new Set(d.online||[]); dmState.maxLen=d.maxLen||4000;
     dmState.maxFile=d.maxFile||8388608; dmState.reactions=d.reactions||[];
     dmState.watching=d.watching||[]; dmState.admin=!!d.admin; dmState.operatorReadsAll=!!d.operatorReadsAll;
+    dmState.boards=d.boards||[];
     dmState.loaded=true; dmState.err='';
   }catch(e){ dmState.err=e.message||String(e); }
   dmUpdatePip();
@@ -14314,17 +14320,46 @@ async function dmSync(){
   if(!dmSignedIn()||_dmSyncing) return;
   _dmSyncing=true;
   try{
-    const d=await fetchJSON('/api/dm/sync?since='+encodeURIComponent(dmState.cursor||0));
+    const prevCursor=dmState.cursor||0;
+    const d=await fetchJSON('/api/dm/sync?since='+encodeURIComponent(prevCursor));
     if(d&&d.ok){
       dmMerge(d.messages);
       if(d.threads) dmState.threads=d.threads;
       if(d.cursor>dmState.cursor) dmState.cursor=d.cursor;
       dmUpdatePip();
+      // A message landing while you are anywhere BUT the Messages tab surfaces as a toast — the
+      // pip alone was easy to miss under a ribbon menu. Muted conversations stay quiet here too.
+      if(prevCursor&&state.view!=='dm'){
+        const muted=new Set(dmState.threads.filter(t=>t.muted).map(t=>t.id));
+        const fresh=(d.messages||[]).filter(m=>!m.mine&&!m.sys&&!m.deleted&&m.id>prevCursor&&!muted.has(m.thread));
+        if(fresh.length){
+          const f=fresh[fresh.length-1];
+          pushToast('💬 '+f.sender+': '+String(f.body||'attachment').slice(0,80)
+            +(fresh.length>1?'  (+'+(fresh.length-1)+' more)':'')+' — open Messages');
+        }
+      }
       if(state.view==='dm') dmRender();
     }
   }catch(_){ /* the next frame or the next open retries; a failed sync is never fatal */ }
   finally{ _dmSyncing=false; }
 }
+
+// The price stamp's "since sent" is computed live at READ on the server, but a fetched message
+// sat frozen in dmState forever — a stamp showed +0.0% no matter how far the market moved. While
+// a conversation is on screen, re-pull its page every 45s: dmMerge replaces rows by id, so every
+// visible stamp (and the calls view) re-marks against the current price.
+setInterval(async ()=>{
+  if(!dmSignedIn()||state.view!=='dm') return;
+  try{
+    await dmLoad();   // presence, thread list and the pip stay fresh while the tab sits open
+    if(dmState.mode==='calls'){ const d=await fetchJSON('/api/dm/calls'); if(d&&d.ok) dmState.calls=d; }
+    else if(dmState.sel&&!dmState.results){
+      const d=await fetchJSON('/api/dm/'+encodeURIComponent(dmState.sel));
+      if(d&&d.ok){ dmMerge(d.messages); if(d.info) dmState.info.set(dmState.sel,d.info); }
+    }
+    dmRender();
+  }catch(_){ }
+},45000);
 
 // Ephemeral, and treated as such: a typing hint that arrives is shown for its own lifetime and
 // never stored, never merged into a thread, never survives a reload.
@@ -14562,6 +14597,18 @@ function dmWhen(ts){
                      +d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false});
   }catch(_){ return ''; }
 }
+// Bare clock time — the day is carried by the divider above the run, so repeating it per message
+// would be noise. dmWhen stays for the rail and search results, which have no divider context.
+function dmTime(ts){ try{ return new Date(ts).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}); }catch(_){ return ''; } }
+function dmSameDay(a,b){ try{ return new Date(a).toDateString()===new Date(b).toDateString(); }catch(_){ return true; } }
+function dmDayLabel(ts){
+  try{
+    const d=new Date(ts), now=new Date();
+    if(d.toDateString()===now.toDateString()) return 'today';
+    if(d.toDateString()===new Date(now.getTime()-864e5).toDateString()) return 'yesterday';
+    return d.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
+  }catch(_){ return ''; }
+}
 // The price stamp. refPx is what the market showed when the message was sent and never changes;
 // px is read live at render. The move between them is the entire reason this feature exists, so
 // it is computed here and nowhere else.
@@ -14574,7 +14621,7 @@ function dmStamp(m){
   const cls=chg==null?'':(chg>0?'pos':(chg<0?'neg':'sec'));
   const right=chg==null?'<span class="dm-tk-d sec" title="this market is no longer listed">—</span>'
     :'<span class="dm-tk-d '+cls+'">'+(chg>0?'+':'')+(chg*100).toFixed(1)+'%</span>';
-  const sub=has?('sent at '+fmtPx(at)+(live?'':' · no longer listed')):'no mark at send';
+  const sub=has?('sent at '+fmtPx(at)+(live?' · now '+fmtPx(now):' · no longer listed')):'no mark at send';
   return '<div class="dm-tk"><div><div class="dm-tk-s">'+esc(m.ref)+'</div>'
     +'<div class="dm-tk-m">'+esc(sub)+'</div></div>'+right+'</div>';
 }
@@ -14608,32 +14655,44 @@ function dmReactions(m){
   if(r) for(const e of Object.keys(r))
     chips.push('<button type="button" class="dm-rx'+(r[e].mine?' mine':'')+'" data-dmrx="'+m.id+'" data-emoji="'+esc(e)+'"'
       +' title="'+esc(r[e].who.join(', '))+'">'+esc(e)+' '+r[e].n+'</button>');
-  const picker='<span class="dm-rxadd"><button type="button" class="dm-rx dm-rxbtn" data-dmrxopen="'+m.id+'" title="React">+</button>'
-    +'<span class="dm-rxmenu">'+dmState.reactions.map(e=>
-      '<button type="button" class="dm-rxopt" data-dmrx="'+m.id+'" data-emoji="'+esc(e)+'">'+esc(e)+'</button>').join('')+'</span></span>';
-  return '<div class="dm-rxrow">'+chips.join('')+picker+'</div>';
+  // Chips only, and only when somebody has actually reacted — an always-present picker row
+  // reserved a blank line under every message, which is where most of the old layout's air came
+  // from. The picker lives in the hover action bar now.
+  return chips.length?'<div class="dm-rxrow">'+chips.join('')+'</div>':'';
 }
 
-function dmMessageHtml(m,t){
+// One message. `p` is the message rendered above it: a run from the same sender inside five
+// minutes groups chat-app style — the name/time header paints once at the head of the run and
+// the bubbles underneath sit tight. A grouped bubble keeps its exact time in a hover tooltip.
+function dmMessageHtml(m,t,p){
   if(m.sys) return '<div class="dm-sys">'+esc(dmSysLine(m,t))+'</div>';
   const own=m.mine;
-  const who=own?'you':(m.sender||'—');
-  const meta=esc(who)+' · '+dmWhen(m.ts)
-    +(m.via==='telegram'?' · <span class="sec" title="sent from Telegram">via telegram</span>':'')
-    +(m.edited&&!m.deleted?' · <span class="sec">edited</span>':'');
+  const who=own?'you':(m.sender||'\u2014');
+  const head=!p||p.sys||p.mine!==m.mine||p.sender!==m.sender||(m.ts-p.ts)>5*60e3||!dmSameDay(p.ts,m.ts);
+  const meta=head?'<div class="dm-meta">'+esc(who)+' \u00b7 '+dmTime(m.ts)+'</div>':'';
   // Pinning is any member's; editing and deleting are the author's; promoting a call to a note is
-  // the operator's, because the notes book itself is operator-only.
-  const tools='<span class="dm-tools">'
-    +(m.deleted?'':'<button type="button" class="dm-tool" data-dmpin="'+m.id+'" data-on="'+(m.pinned?'0':'1')+'" title="'+(m.pinned?'Unpin':'Pin this to the top of the conversation')+'">'+(m.pinned?'unpin':'pin')+'</button>')
-    +((m.ref&&m.refPx!=null&&dmState.admin&&!m.deleted)?'<button type="button" class="dm-tool" data-dmnote="'+m.id+'" title="Write this into the notes book, keeping the price and time it was called at">\u2192 note</button>':'')
-    +((own&&!m.deleted)?'<button type="button" class="dm-tool" data-dmedit="'+m.id+'" title="Edit — the price stamp stays at what it was sent at">edit</button>'
-      +'<button type="button" class="dm-tool" data-dmdel="'+m.id+'" title="Delete — this removes the attachment too">delete</button>':'')
+  // the operator's, because the notes book itself is operator-only. All of it — the reaction
+  // picker included — lives in a hover action bar over the bubble, so a message at rest is
+  // just its bubble.
+  const act=m.deleted?'':'<span class="dm-act">'
+    +'<span class="dm-rxadd"><button type="button" class="dm-tool" data-dmrxopen="'+m.id+'" title="React">+</button>'
+      +'<span class="dm-rxmenu">'+dmState.reactions.map(e=>
+        '<button type="button" class="dm-rxopt" data-dmrx="'+m.id+'" data-emoji="'+esc(e)+'">'+esc(e)+'</button>').join('')+'</span></span>'
+    +'<button type="button" class="dm-tool" data-dmpin="'+m.id+'" data-on="'+(m.pinned?'0':'1')+'" title="'+(m.pinned?'Unpin':'Pin this to the top of the conversation')+'">'+(m.pinned?'unpin':'pin')+'</button>'
+    +((m.ref&&m.refPx!=null&&dmState.admin)?'<button type="button" class="dm-tool" data-dmnote="'+m.id+'" title="Write this into the notes book, keeping the price and time it was called at">\u2192 note</button>':'')
+    +(own?'<button type="button" class="dm-tool" data-dmedit="'+m.id+'" title="Edit \u2014 the price stamp stays at what it was sent at">edit</button>'
+      +'<button type="button" class="dm-tool" data-dmdel="'+m.id+'" title="Delete \u2014 this removes the attachment too">delete</button>':'')
     +'</span>';
+  // Edited / via-telegram ride inside the bubble as a faint suffix: the header line is gone on
+  // grouped messages, so anything that lived only there would vanish with it.
+  const marks=m.deleted?'':((m.via==='telegram'?'<span class="dm-mk" title="sent from Telegram">tg</span>':'')
+    +(m.edited?'<span class="dm-mk">edited</span>':''));
   const body=m.deleted
     ? '<div class="dm-b dm-del">message deleted</div>'
-    : '<div class="dm-b">'+(m.body?esc(m.body).replace(/\n/g,'<br>'):'')+dmFile(m)+dmStamp(m)+'</div>';
-  return '<div class="dm-msg'+(own?' out':'')+'"><div class="dm-meta">'+meta+tools+'</div>'
-    +body+(m.deleted?'':dmReactions(m))+'</div>';
+    : '<div class="dm-b" title="'+esc(who+' \u00b7 '+dmWhen(m.ts))+'">'
+      +(m.body?esc(m.body).replace(/\n/g,'<br>'):'')+marks+dmFile(m)+dmStamp(m)+'</div>';
+  return '<div class="dm-msg'+(own?' out':'')+(head?' hd':'')+'">'+meta
+    +body+act+(m.deleted?'':dmReactions(m))+'</div>';
 }
 function dmSysLine(m,t){
   const who=m.mine?'you':(m.sender||'someone');
@@ -14641,13 +14700,16 @@ function dmSysLine(m,t){
   if(m.sys==='added') return who+' added '+m.body;
   if(m.sys==='removed') return who+' removed '+m.body;
   if(m.sys==='left') return m.body+' left';
+  if(m.sys==='joined') return m.body+' joined';
   if(m.sys==='renamed') return who+' renamed this to “'+m.body+'”';
   return '';
 }
 
 function dmRailHtml(){
-  if(!dmState.threads.length) return '<div class="dm-empty">No conversations yet.</div>';
-  return dmState.threads.map(t=>{
+  // Boards live in their own "Topics" section below — the conversations rail is people.
+  const list=dmState.threads.filter(t=>t.kind!=='board');
+  if(!list.length) return '<div class="dm-empty">No conversations yet.</div>';
+  return list.map(t=>{
     const grp=t.kind==='group';
     const dot=grp?'<span class="dm-grp">#</span>'
       :'<span class="'+(dmState.online.has(t.peer)?'dm-on':'dm-off')+'">●</span>';
@@ -14657,6 +14719,38 @@ function dmRailHtml(){
       +(t.unread?'<span class="dm-badge">'+(t.unread>99?'99+':t.unread)+'</span>':'')+'</div>'
       +'<div class="dm-thp">'+esc(t.preview||'no messages yet')+'</div></div>';
   }).join('');
+}
+
+// Standing topics — open threads anyone on the desk can discover and join, for discussing one
+// idea in one place instead of scattering it across DMs.
+function dmTopicsHtml(){
+  const rows=(dmState.boards||[]).map(b=>{
+    const th=dmThread(b.id);
+    const unread=b.joined?((th&&th.muted)?0:(th?th.unread:b.unread)||0):0;
+    return '<div class="dm-th'+(b.id===dmState.sel?' sel':'')+'" data-dmboard="'+b.id+'" data-joined="'+(b.joined?'1':'0')+'">'
+      +'<div class="dm-thn"><span class="dm-grp">#</span> '+esc(b.title)
+      +(unread?'<span class="dm-badge">'+(unread>99?'99+':unread)+'</span>':'')
+      +(b.joined?'':'<span class="dm-join">join</span>')+'</div>'
+      +'<div class="dm-thp">'+(+b.members||0)+' member'+(b.members===1?'':'s')+' · '+esc(b.preview||'')+'</div></div>';
+  }).join('');
+  return '<div class="dm-sh" style="margin-top:12px;display:flex;align-items:center">Topics'
+    +'<button type="button" class="dm-tool" id="dm-topicbtn" style="margin-left:auto" title="Open a standing topic anyone on the desk can join — an idea, a ticker thesis, a theme">+ new</button></div>'
+    +(rows||'<div class="dm-empty" style="padding:4px 14px 8px">No topics yet — open one.</div>');
+}
+async function dmOpenBoard(id,joined){
+  if(!joined){
+    const r=await dmPost({joinBoard:id});
+    if(!r.ok){ dmState.err=(r.d&&r.d.error)||'could not join that topic'; dmRender(); return; }
+    await dmLoad();
+  }
+  dmOpenThread(id);
+}
+async function dmNewTopic(){
+  const name=(prompt('Name the topic — an idea, a ticker, a theme. Anyone on the desk can see and join it.')||'').trim();
+  if(!name) return;
+  const r=await dmPost({board:true,title:name});
+  if(r.ok&&r.d.thread){ await dmLoad(); dmOpenThread(r.d.thread); }
+  else { dmState.err=(r.d&&r.d.error)||'could not create the topic'; dmRender(); }
 }
 
 function dmPickerHtml(){
@@ -14749,7 +14843,8 @@ function dmCallsHtml(){
       +'<span class="dm-callt">'+esc(c.ref)+'</span>'
       +'<span class="dm-callb">'+esc(c.body).slice(0,120)+'</span>'
       +'<span class="acc-mu">'+esc(c.sender)+' \u00b7 '+esc(c.threadName)+' \u00b7 '+dmWhen(c.ts)+'</span>'
-      +'<span class="dm-callpx">'+(c.refPx!=null?fmtPx(c.refPx):'\u2014')+'</span>'
+      +'<span class="dm-callpx" title="the mark when it was sent">'+(c.refPx!=null?fmtPx(c.refPx):'\u2014')+'</span>'
+      +'<span class="dm-callpx dm-callnow" title="the current mark">'+(c.px!=null?fmtPx(c.px):'\u2014')+'</span>'
       +'<span class="dm-callmv '+cls+'">'+mv+'</span></div>';
   }).join('');
   return '<div class="dm-log" id="dm-log"><div class="dm-callsums">'+sum+'</div>'+rows+'</div>';
@@ -14770,7 +14865,7 @@ function dmRender(){
   let main;
   if(dmState.mode==='calls'){
     main='<div class="dm-hd"><b>Calls</b>'
-      +'<span class="sec">every price-stamped message, and the move since</span>'
+      +'<span class="sec">every price-stamped message — sent price, current price, and the move</span>'
       +'<button type="button" class="btn dm-mutebtn" id="dm-backchat">back</button></div>'+dmCallsHtml();
   }else if(dmState.results){
     main='<div class="dm-hd"><b>Search</b><span class="sec">'+esc(dmState.q)+'</span>'
@@ -14790,15 +14885,24 @@ function dmRender(){
     const seenBy=(t.seen||[]).filter(x=>lastMine&&x.readMsgId>=lastMine.id).map(x=>x.handle);
     const receipt=lastMine?('<div class="dm-seen">'+(seenBy.length
       ?('seen by '+esc(seenBy.join(', ')))
-      :(t.kind==='group'?'sent':'sent \u00b7 not read yet'))+'</div>'):'';
+      :(t.kind!=='dm'?'sent':'sent \u00b7 not read yet'))+'</div>'):'';
     const pinned=(t.pins?arr.filter(x=>x.pinned):[]);
     const pinStrip=pinned.length?('<div class="dm-pinstrip">'+pinned.slice(0,3).map(x=>
       '<div class="dm-pinrow" data-dmjump="'+x.id+'"><span class="dm-pinicon">\u2691</span>'
       +'<span class="dm-pintext">'+esc((x.ref?'$'+x.ref+' \u00b7 ':'')+(x.body||'attachment')).slice(0,120)+'</span>'
       +'<button type="button" class="dm-tool" data-dmpin="'+x.id+'" data-on="0">unpin</button></div>').join('')+'</div>'):'';
-    const log=arr.length?arr.map(m=>dmMessageHtml(m,t)).join('')+receipt:'<div class="dm-empty">No messages yet.</div>';
-    const grp=t.kind==='group';
+    // Day dividers carry the date once, so per-message headers can be bare clock times; each
+    // message also sees its predecessor, which is what chat-style grouping keys on.
+    const parts=[];
+    for(let i=0;i<arr.length;i++){
+      const m=arr[i], p=arr[i-1];
+      if(!p||!dmSameDay(p.ts,m.ts)) parts.push('<div class="dm-day"><span>'+esc(dmDayLabel(m.ts))+'</span></div>');
+      parts.push(dmMessageHtml(m,t,p));
+    }
+    const log=arr.length?parts.join('')+receipt:'<div class="dm-empty">No messages yet.</div>';
+    const grp=t.kind==='group'||t.kind==='board';
     main='<div class="dm-hd">'+(grp?'<span class="dm-grp">#</span> ':'')+'<b>'+esc(t.name)+'</b>'
+      +(t.kind==='board'?'<span class="mk-chip" title="a standing topic — anyone on the desk can join it">topic</span>':'')
       +(grp?'<span class="mk-chip">'+(info?info.members.length:t.members?t.members.length:0)+' members</span>'
         :'<span class="mk-chip '+(dmState.online.has(t.peer)?'dm-chip-on':'')+'">'
           +(dmState.online.has(t.peer)?'online':'away')+'</span>')
@@ -14843,13 +14947,24 @@ function dmRender(){
   // otherwise, and on this deployment it is not.
   const disclosure=dmState.operatorReadsAll
     ? '<div class="dm-disclose">The operator of this terminal can read every message here.</div>' : '';
+  // Who is here RIGHT NOW, at the top of the rail — before this, presence hid as a small dot per
+  // conversation and you only learned somebody was around after opening theirs. Clicking a chip
+  // starts (or jumps to) a conversation with that person.
+  const onNames=(dmState.members||[]).filter(m=>dmState.online.has(m.uid));
+  const onlineStrip='<div class="dm-onrow">'
+    +(onNames.length
+      ? onNames.map(m=>'<span class="dm-onchip" data-dmnew="'+esc(m.uid)+'" title="message '+esc(m.display)+'"><i></i>'+esc(m.display)+'</span>').join('')
+      : '<span class="dm-onnone">nobody else online</span>')
+    +'</div>';
   host.innerHTML='<div class="dm-wrap">'
     +'<div class="dm-side">'
       +'<div class="dm-search"><input id="dm-q" placeholder="search messages…" value="'+esc(dmState.q)+'"></div>'
+      +'<div class="dm-sh">Online — '+onNames.length+'</div>'+onlineStrip
       +'<div class="dm-sh">Conversations'
         +'<button type="button" class="dm-tool dm-callsbtn" id="dm-callsbtn" title="Every price-stamped call, and how each has done since">calls \u2197</button></div>'
       +dmRailHtml()
       +'<div class="dm-new" id="dm-newbtn">'+(dmState.picking?'× close':'+ new message')+'</div>'+dmPickerHtml()
+      +dmTopicsHtml()
       +watchBox+'</div>'
     +'<div class="dm-main">'+main+composer+disclosure+'</div></div>';
 
@@ -14894,6 +15009,9 @@ function dmWire(){
     if(e.target.closest('#dm-waddbtn')){ dmState.watchAdd=true; dmRender(); return; }
     if(e.target.closest('#dm-callsbtn')){ dmOpenCalls(); return; }
     if(e.target.closest('#dm-backchat')){ dmState.mode='chat'; dmRender(); return; }
+    const bd=e.target.closest('[data-dmboard]');
+    if(bd){ dmOpenBoard(+bd.dataset.dmboard, bd.dataset.joined==='1'); return; }
+    if(e.target.closest('#dm-topicbtn')){ dmNewTopic(); return; }
     const jt=e.target.closest('[data-dmjump-thread]');
     if(jt){ dmState.mode='chat'; dmOpenThread(+jt.dataset.dmjumpThread); return; }
     const jump=e.target.closest('[data-dmjump]');
