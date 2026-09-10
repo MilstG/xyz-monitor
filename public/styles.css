@@ -2229,6 +2229,7 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .dm-meta{font-family:var(--mono);font-size:9.5px;color:var(--faint);margin:0 3px 3px;
   display:flex;align-items:center;gap:8px}
 .dm-msg.out .dm-meta{justify-content:flex-end}
+.dm-who{font-weight:700;font-size:10px;letter-spacing:.2px}
 /* hover action bar: react, pin, note, edit, delete — floats over the bubble's top edge */
 .dm-act{display:none;position:absolute;top:-11px;right:4px;z-index:6;align-items:center;gap:7px;
   background:var(--panel);border:1px solid var(--border);border-radius:7px;padding:2px 8px;
