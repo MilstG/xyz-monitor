@@ -13336,7 +13336,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.10-57"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.10-58"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -23213,6 +23213,17 @@ test("attachments: the type comes from OUR sniff, and svg never renders inline",
   assert.ok(!A.putFile(g.uid, T, "fake.txt", Buffer.from([0x00, 0x01, 0x02, 65, 66])).ok,
     "binary bytes named .txt are refused — the extension is a claim, not evidence");
 
+  // Voice notes: the recorder's containers by magic bytes, hard-capped small — the cap is what
+  // keeps audio from becoming the video lane through the back door.
+  const ogg = Buffer.concat([Buffer.from("OggS"), Buffer.alloc(64)]);
+  const voice = A.putFile(g.uid, T, "voice-1201.ogg", ogg);
+  assert.ok(voice.ok && voice.file.mime === "audio/ogg", "an ogg voice note is accepted and typed audio");
+  const webm = Buffer.concat([Buffer.from([0x1A, 0x45, 0xDF, 0xA3]), Buffer.alloc(64)]);
+  assert.equal(A.putFile(g.uid, T, "voice.webm", webm).file.mime, "audio/webm", "webm by magic bytes AND extension");
+  assert.ok(!A.putFile(g.uid, T, "clip.mov", webm).ok, "EBML bytes without the audio extension stay refused — a renamed video buys nothing");
+  assert.ok(!A.putFile(g.uid, T, "long.ogg", Buffer.concat([Buffer.from("OggS"), Buffer.alloc(4 * 1024 * 1024)])).ok,
+    "audio past 3 MB is refused");
+
   assert.ok(A.putFile(g.uid, T, "../../etc/passwd", png).file.name.indexOf("/") < 0,
     "a filename is a label, and cannot contain a path separator");
   assert.ok(!A.putFile(g.uid, T, "x", Buffer.alloc(0)).ok, "an empty file is refused");
@@ -23620,14 +23631,17 @@ test("the terminal operator can manage a group they are in without owning it", (
   assert.ok(!A.addMembers(m.uid, grp.thread, [m.uid], true).ok, "but only from inside: a non-member stays refused even asAdmin");
 });
 
-test("retention: 30 days for a 1-to-1, 7 for groups and topics, pins exempt", () => {
-  const { A, g, l, m } = seedDesk();
+test("retention: 30 days for a 1-to-1, 7 for groups and topics, pins and priced calls exempt", () => {
+  const marks = { "xyz:HOOD": 113.2 };
+  const { A, g, l, m } = seedDesk(marks);
   const DM = A.threadFor(g.uid, l.uid, true).id;
   const GR = A.createGroup(g.uid, "desk", [l.uid, m.uid]).thread;
   const dmsg = A.send(g.uid, null, "dm line", null, { thread: DM });
   const gmsg = A.send(g.uid, null, "group line", null, { thread: GR });
   const keep = A.send(g.uid, null, "the standing levels", null, { thread: GR });
   A.pin(g.uid, keep.id, true);
+  const call = A.send(g.uid, null, "long $HOOD here", (x) => marks["xyz:" + x] ? "xyz:" + x : null, { thread: GR });
+  assert.ok(call.message.refPx === 113.2, "the call is priced");
 
   const now = Date.now();
   assert.equal(A.sweepRetention(now), 0, "nothing in-window is touched");
@@ -23641,6 +23655,32 @@ test("retention: 30 days for a 1-to-1, 7 for groups and topics, pins exempt", ()
   A.sweepRetention(now + 31 * 86400e3);
   assert.ok(A.history(g.uid, DM).messages.every((x) => x.id !== dmsg.id), "at day 31 the 1-to-1 line goes too");
   assert.ok(A.history(g.uid, GR).messages.some((x) => x.id === keep.id), "the pin still stays");
+  assert.ok(A.history(g.uid, GR).messages.some((x) => x.id === call.id),
+    "and so does the priced call — a track record that self-destructs is not a track record");
+  assert.ok(A.calls(g.uid, {}).calls.some((c) => c.id === call.id), "the calls record still counts it");
+});
+
+test("boards are quiet on Telegram by default — digests are the opt-in, mentions always land", () => {
+  const A = freshAccounts();
+  const { g, l } = seedTwo(A);
+  const B = A.createBoard(g.uid, "macro week").thread;
+  A.joinBoard(l.uid, B);
+  const nobody = () => false;
+
+  A.send(g.uid, null, "ordinary board chatter", null, { thread: B });
+  assert.ok(A.pendingEscalations(0, nobody).every((e) => e.uid !== l.uid),
+    "a board digest does not page a member who never opted in");
+
+  A.send(g.uid, null, "@lena what say you", null, { thread: B });
+  assert.ok(A.pendingEscalations(60000, nobody).some((e) => e.uid === l.uid && e.hot),
+    "but her own handle still reaches her, immediately");
+  A.pendingEscalations(0, nobody).forEach((e) => A.markEscalated(e.uid, e.thread, e.upTo));
+
+  assert.ok(!A.setBoardNotify(l.uid, A.threadFor(g.uid, l.uid, true).id, true).ok, "the toggle is board-only");
+  assert.ok(A.setBoardNotify(l.uid, B, true).ok, "she opts in");
+  A.send(g.uid, null, "more chatter", null, { thread: B });
+  assert.ok(A.pendingEscalations(0, nobody).some((e) => e.uid === l.uid),
+    "and now the digest reaches her like a group's would");
 });
 
 test("read receipts, pins and export", () => {
