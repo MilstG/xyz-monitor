@@ -14968,7 +14968,21 @@ function dmRender(){
   const keep=dmCapture();
   if(!dmSignedIn()){
     host.innerHTML='<div class="msg">Messages need an account. '
-      +'<a href="/login">Sign in</a> — or ask the operator for an invite link.</div>';
+      +'<a href="/login">Sign in</a> — or ask the operator for an invite link.'
+      +'<div style="margin-top:10px"><button type="button" class="btn" id="dm-reqinvite">Request an invite</button>'
+      +'<span class="sec" id="dm-reqnote" style="margin-left:8px"></span></div></div>';
+    const rb=el('dm-reqinvite');
+    if(rb) rb.addEventListener('click',async ()=>{
+      const who=(prompt('Who should the operator invite? A name they will recognize:')||'').trim();
+      if(!who) return;
+      rb.disabled=true;
+      const note=el('dm-reqnote');
+      try{
+        const r=await fetch('/api/dm/request-invite',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:who})});
+        const d=await r.json().catch(()=>({}));
+        if(note) note.textContent=(r.ok&&d&&d.ok)?'Request sent — the operator has been pinged.':'Could not send — ask the operator directly.';
+      }catch(_){ if(note) note.textContent='Could not send — ask the operator directly.'; }
+    });
     return;
   }
   const t=dmThread(dmState.sel);
@@ -15055,8 +15069,8 @@ function dmRender(){
     ? '<div class="dm-pending">📎 '+esc(dmState.pendingFile.name)+' <button type="button" class="dm-tool" id="dm-unattach">remove</button></div>'
     : '';
   const composer='<div class="dm-cmp">'
-    +'<label class="dm-clip'+(canWrite&&t?'':' off')+'" title="Attach a file (8 MB maximum)">📎'
-    +'<input type="file" id="dm-file"'+(canWrite&&t?'':' disabled')+'></label>'
+    +'<label class="dm-clip'+(canWrite&&t?'':' off')+'" title="Attach an image or a .txt note (8 MB maximum) — nothing else is accepted">📎'
+    +'<input type="file" id="dm-file" accept=".png,.jpg,.jpeg,.gif,.webp,.txt,image/png,image/jpeg,image/gif,image/webp,text/plain"'+(canWrite&&t?'':' disabled')+'></label>'
     +'<textarea id="dm-input" rows="1" maxlength="'+dmState.maxLen+'" '
     +(canWrite?'':'disabled ')+'placeholder="'
     +(canWrite?'message '+esc((t&&t.name)||(pendingPeer&&pendingPeer.display)||'')+'…  (type $TICKER to attach the mark)':'pick a conversation first')
@@ -15084,8 +15098,10 @@ function dmRender(){
     +'</div>';
   // Said plainly, where people write. They will assume a direct message is private unless told
   // otherwise, and on this deployment it is not.
-  const disclosure=dmState.operatorReadsAll
-    ? '<div class="dm-disclose">The operator of this terminal can read every message here.</div>' : '';
+  // Retention is policy, so it is said where people write, not discovered when history is gone.
+  const disclosure='<div class="dm-disclose">'
+    +(dmState.operatorReadsAll?'The operator of this terminal can read every message here. ':'')
+    +'Messages are kept 30 days — 7 in groups and topics — except pinned ones, which stay.</div>';
   // Who is here RIGHT NOW, at the top of the rail — before this, presence hid as a small dot per
   // conversation and you only learned somebody was around after opening theirs. Clicking a chip
   // starts (or jumps to) a conversation with that person.

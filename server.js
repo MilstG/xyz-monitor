@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.10-54";
+const VERSION = "2026.09.10-55";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1021,6 +1021,24 @@ async function main() {
     return out;
   }
 
+  // A visitor with no account can raise a hand: one ops ping to the operator per IP-hour, nothing
+  // stored, nothing echoed back — the operator mints the invite (or doesn't) like any other.
+  const inviteAsk = new Map();   // ip -> last ask
+  fastify.post("/api/dm/request-invite", { bodyLimit: 2 * 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    if (meOf(req)) return { ok: true, already: true };
+    const ip = String(req.headers["x-forwarded-for"] || req.ip).split(",")[0].trim();
+    if (Date.now() - (inviteAsk.get(ip) || 0) < 3600e3) return { ok: true, sent: true };   // idempotent to the asker — no spam lever
+    if (inviteAsk.size > 2000) inviteAsk.clear();
+    inviteAsk.set(ip, Date.now());
+    // The name rides into a Telegram HTML message: markup-significant characters go, at the door.
+    const who = String((req.body || {}).name || "").replace(/[<>&\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60);
+    if (poller.pushOpsNow) poller.pushOpsNow("invite request",
+      "Somebody at the terminal asked for a Messages invite" + (who ? ": “" + who + "”" : "") + ". Mint one in the admin panel.");
+    log("invite requested from the messages tab" + (who ? " (" + who + ")" : ""));
+    return { ok: true, sent: true };
+  });
+
   fastify.get("/api/dm", (req, reply) => {
     reply.header("cache-control", "no-store");
     const me = dmMe(req, reply); if (!me) return;
@@ -1206,6 +1224,12 @@ async function main() {
       const n = ACCOUNTS.sweepFiles();
       if (n) log("dm: swept " + n + " abandoned upload(s)");
     } catch (e) { log("dm file sweep failed (isolated): " + (e && e.message)); }
+    // Retention: 30d for a 1-to-1, 7d for groups and topics, pinned messages exempt. Runs on the
+    // same cadence — a message a few minutes past its window is not a policy violation.
+    try {
+      const r = ACCOUNTS.sweepRetention();
+      if (r) log("dm: retention removed " + r + " message(s) past their window");
+    } catch (e) { log("dm retention sweep failed (isolated): " + (e && e.message)); }
   }, 30 * 60 * 1000).unref();
 
   // ---- the Telegram reply bridge -----------------------------------------------------------------
