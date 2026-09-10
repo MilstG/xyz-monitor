@@ -14727,6 +14727,12 @@ function dmReactions(m){
   return chips.length?'<div class="dm-rxrow">'+chips.join('')+'</div>':'';
 }
 
+// Deterministic per-person color for group and topic rooms: the uid hashes to a palette picked to
+// stay legible on the dark ground, so a member keeps their color across every conversation and
+// every device — nothing is stored, nothing can drift.
+const DM_NAME_COLORS=['#E3A53C','#5CC8FF','#46B97E','#E5604D','#C792EA','#F2C14E','#6ED3CF','#F28FAD','#9CCC65','#7E9CD8'];
+function dmNameColor(key){ let h=0; const s=String(key||''); for(let i=0;i<s.length;i++) h=(h*31+s.charCodeAt(i))>>>0; return DM_NAME_COLORS[h%DM_NAME_COLORS.length]; }
+
 // One message. `p` is the message rendered above it: a run from the same sender inside five
 // minutes groups chat-app style — the name/time header paints once at the head of the run and
 // the bubbles underneath sit tight. A grouped bubble keeps its exact time in a hover tooltip.
@@ -14737,7 +14743,9 @@ function dmMessageHtml(m,t,p){
   const head=!p||p.sys||p.mine!==m.mine||p.sender!==m.sender||(m.ts-p.ts)>5*60e3||!dmSameDay(p.ts,m.ts);
   // Own messages carry only the time: they sit right-aligned in their own color, so "you" was
   // saying what the layout already says.
-  const meta=head?'<div class="dm-meta">'+(own?'':esc(who)+' \u00b7 ')+dmTime(m.ts)+'</div>':'';
+  const meta=head?'<div class="dm-meta">'+(own?'':(t&&t.kind!=='dm'
+    ?'<b class="dm-who" style="color:'+dmNameColor(m.senderUid||m.sender)+'">'+esc(who)+'</b> \u00b7 '
+    :esc(who)+' \u00b7 '))+dmTime(m.ts)+'</div>':'';
   // Pinning is any member's; editing and deleting are the author's; promoting a call to a note is
   // the operator's, because the notes book itself is operator-only. All of it — the reaction
   // picker included — lives in a hover action bar over the bubble, so a message at rest is
@@ -14758,7 +14766,7 @@ function dmMessageHtml(m,t,p){
     +(m.edited?'<span class="dm-mk">edited</span>':''));
   // The quote a reply carries: one line of what it answers, clickable back to the original.
   const quote=(!m.deleted&&m.reply)
-    ? '<div class="dm-quote" data-dmq="'+m.replyTo+'" title="jump to the quoted message"><b>'+esc(m.reply.sender||'\u2014')+'</b> '
+    ? '<div class="dm-quote" data-dmq="'+m.replyTo+'" title="jump to the quoted message"><b style="color:'+dmNameColor(m.reply.sender)+'">'+esc(m.reply.sender||'\u2014')+'</b> '
       +esc(m.reply.deleted?'message deleted':((m.reply.ref?'$'+dmTkName(m.reply.ref)+' \u00b7 ':'')+(m.reply.body||'attachment'))).replace(/\n/g,' ')+'</div>'
     : '';
   const body=m.deleted
