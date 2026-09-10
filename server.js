@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.10-55";
+const VERSION = "2026.09.10-56";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -544,6 +544,46 @@ async function main() {
   // A symbol the server does not know stays plain text rather than being stamped with nothing.
   const coinForSymbol = (sym) => { refreshMarks(); return coinBySym.get(String(sym || "").toUpperCase()) || null; };
   ACCOUNTS.setMarkSource(markForCoin);
+
+  // ---- tweet preview cards ---------------------------------------------------------------------
+  // A message carrying an x.com/twitter.com status link gets a preview card: author, handle, text,
+  // one click out. X's public oEmbed endpoint answers without any API key; ONE fetch per tweet id,
+  // cached, fetched in the background — the message ships immediately and the thread is poked with
+  // a refresh hint when the card lands. X's embed HTML is never stored and never rendered (it can
+  // carry script): only the parsed fields travel, and the client escapes them like any body text.
+  const { tweetLinkId, tweetFromOembed } = require("./src/compute");
+  const tweetCache = new Map();           // tweet id -> { ok, at, pub? }
+  const tweetInflight = new Set();
+  const TWEET_RETRY_MS = 10 * 60e3, TWEET_CACHE_MAX = 500;
+  async function tweetFetch(id, thread) {
+    if (tweetInflight.has(id)) return;
+    tweetInflight.add(id);
+    try {
+      const ctl = new AbortController();
+      const to = setTimeout(() => ctl.abort(), 6000);
+      let j = null;
+      try {
+        const r = await fetch("https://publish.twitter.com/oembed?omit_script=1&dnt=1&url="
+          + encodeURIComponent("https://twitter.com/i/status/" + id),
+          { signal: ctl.signal, headers: { accept: "application/json" } });
+        if (r.ok) j = await r.json();
+      } finally { clearTimeout(to); }
+      const pub = j ? tweetFromOembed(j, id) : null;
+      if (tweetCache.size > TWEET_CACHE_MAX) tweetCache.clear();
+      tweetCache.set(id, pub ? { ok: true, at: Date.now(), pub } : { ok: false, at: Date.now() });
+    } catch (_) { tweetCache.set(id, { ok: false, at: Date.now() }); }
+    finally { tweetInflight.delete(id); }
+    if (thread) dmPoke(thread, { refresh: Number(thread) });
+  }
+  ACCOUNTS.setTweetSource((body, thread) => {
+    const id = tweetLinkId(body);
+    if (!id) return null;
+    const e = tweetCache.get(id);
+    if (e && e.ok) return e.pub;
+    if (e && Date.now() - e.at < TWEET_RETRY_MS) return { ok: false };
+    tweetFetch(id, thread);              // background; the poke re-renders the thread when it lands
+    return e ? { ok: false } : null;     // a stale failure keeps the honest stub while retrying
+  });
 
   // The alert-ownership handle. A signed-in member IS their uid — which is precisely why redeem()
   // reuses an existing xyzown handle as the uid: every recipient and rule keyed by that string
@@ -1159,6 +1199,17 @@ async function main() {
     else if (b.removeMember) r = ACCOUNTS.removeMember(me.uid, b.thread, String(b.uid || ""), isAdmin(req));
     else if (b.leave) r = ACCOUNTS.leaveGroup(me.uid, b.thread);
     else if (b.rename) r = ACCOUNTS.renameGroup(me.uid, b.thread, b.title, isAdmin(req));
+    else if (b.deleteGroup != null) {
+      r = ACCOUNTS.deleteGroup(me.uid, b.deleteGroup, isAdmin(req));
+      if (r.ok) {
+        log("group deleted by " + me.handle + (r.title ? ": " + r.title.slice(0, 40) : ""));
+        // The thread is gone, so dmPoke (which resolves members) has nobody to resolve — wake the
+        // collected members directly with a `gone` hint so their rails drop it now, not at the
+        // next full load.
+        const frame = "data: " + JSON.stringify({ dm: { seq: ACCOUNTS.stats().messages, gone: r.deleted } }) + "\n\n";
+        for (const uid of r.peers || []) { const set = sseByUid.get(uid); if (set) for (const e2 of set) sseWrite(e2, frame); }
+      }
+    }
     // Close and clear are per-viewer state: no dmPoke — nobody else's screen changed.
     else if (b.close != null) r = ACCOUNTS.closeThread(me.uid, b.close);
     else if (b.reopen != null) r = ACCOUNTS.reopenThread(me.uid, b.reopen);

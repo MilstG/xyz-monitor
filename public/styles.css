@@ -2270,6 +2270,25 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
   border-radius:6px;padding:8px 10px;margin-top:8px}
 .dm-tk[data-coin]{cursor:pointer}
 .dm-tk[data-coin]:hover{border-color:var(--accent)}
+/* the tweet card — same visual grammar as the price stamp: dark inset, accent on hover */
+.dm-x{display:block;background:var(--bg);border:1px solid var(--border);border-radius:6px;
+  padding:8px 11px 7px;margin-top:7px;max-width:420px;text-decoration:none;color:inherit;cursor:pointer}
+.dm-x:hover{border-color:var(--accent)}
+.dm-x-h{display:flex;align-items:center;gap:7px;margin-bottom:4px;min-width:0}
+.dm-x-logo{font-family:var(--disp);font-weight:700;font-size:12px;color:var(--text);flex:none;
+  border:1px solid var(--border);border-radius:4px;width:19px;height:19px;
+  display:flex;align-items:center;justify-content:center;background:var(--panel2)}
+.dm-x-who{font-size:12.5px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dm-x-at{font-family:var(--mono);font-size:10px;color:var(--faint);white-space:nowrap;flex:none}
+.dm-x-t{display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;
+  font-size:12.5px;line-height:1.5;color:var(--text)}
+.dm-x-cash{font-family:var(--mono);color:var(--accent);font-weight:500}
+.dm-x-f{display:flex;margin-top:5px;font-family:var(--mono);font-size:9.5px;color:var(--faint)}
+.dm-x-open{margin-left:auto;color:var(--muted)}
+.dm-x:hover .dm-x-open{color:var(--accent)}
+.dm-x.dead{cursor:default;border-style:dashed}
+.dm-x.dead:hover{border-color:var(--border)}
+.dm-x-deadt{font-family:var(--mono);font-size:10px;color:var(--faint);font-style:italic;line-height:1.5}
 .dm-tk-s{font-family:var(--mono);font-size:12.5px;font-weight:700;color:var(--text)}
 .dm-tk-m{font-family:var(--mono);font-size:9.5px;color:var(--muted);line-height:1.4}
 .dm-tk-d{font-family:var(--mono);font-size:12.5px;font-weight:700;margin-left:auto;white-space:nowrap}

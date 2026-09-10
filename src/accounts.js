@@ -783,6 +783,10 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   // the price the sender was looking at.
   let markFor = options.markFor || (() => null);
   function setMarkSource(fn) { if (typeof fn === "function") markFor = fn; }
+  // tweetFor(body, thread) -> preview|{ok:false}|null is injected the same way: the server owns
+  // the oEmbed cache and the network; this module only asks "does this body have a card yet".
+  let tweetFor = options.tweetFor || (() => null);
+  function setTweetSource(fn) { if (typeof fn === "function") tweetFor = fn; }
 
   // ---- threads: one shape for a pair, one for a group ------------------------------------------
   const pairKeyOf = (x, y) => (x < y ? x + "|" + y : y + "|" + x);
@@ -947,6 +951,31 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     sysMessage(threadId, uid, "removed", (users.get(target) || {}).display || "someone");
     return { ok: true, thread: +threadId };
   }
+  // Deleting a group or topic is FOR EVERYONE and forever — rows, reactions, attachment bytes,
+  // membership, the thread row itself. Owner or operator, and distinct from "close" on purpose:
+  // close is a per-viewer tidy-up that keeps everything; this is the shredder, behind its own
+  // button and its own confirm. The member list is collected first so the caller can wake the
+  // people whose rail just changed; the act lands in the admin audit log.
+  function deleteGroup(uid, threadId, asAdmin) {
+    const g = groupGuard(threadId, uid, true, asAdmin);
+    if (!g.ok) return g;
+    const t = g.thread;
+    const peers = memberUids(t.id);
+    const files = db.prepare("SELECT fileId FROM dm_msg WHERE thread = ? AND fileId IS NOT NULL").all(t.id).map((r) => r.fileId);
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.prepare("DELETE FROM dm_reaction WHERE msg IN (SELECT id FROM dm_msg WHERE thread = ?)").run(t.id);
+      db.prepare("DELETE FROM dm_msg WHERE thread = ?").run(t.id);
+      db.prepare("DELETE FROM dm_member WHERE thread = ?").run(t.id);
+      db.prepare("DELETE FROM dm_read WHERE thread = ?").run(t.id);
+      db.prepare("DELETE FROM dm_thread WHERE id = ?").run(t.id);
+      db.exec("COMMIT");
+    } catch (e) { try { db.exec("ROLLBACK"); } catch (_) {} return { ok: false, error: "could not delete it" }; }
+    for (const f of files) removeFile(f);
+    adminAudit(uid, "delete-group", +threadId, (t.title || "") + " (" + peers.length + " member(s))");
+    return { ok: true, deleted: +threadId, peers, title: t.title || "" };
+  }
+
   function leaveGroup(uid, threadId) {
     const g = groupGuard(threadId, uid, false);
     if (!g.ok) return g;
@@ -1109,6 +1138,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   function wire(m, uid) {
     return { id: m.id, thread: m.thread, mine: m.sender === uid,
       replyTo: m.replyTo || null, reply: m.replyTo ? replyPreview(m.replyTo) : null,
+      tweet: (m.deletedAt || m.sys) ? null : tweetFor(m.body, m.thread),
       senderUid: m.sender || null,
       sender: m.sender ? ((users.get(m.sender) || {}).display || "—") : "",
       ts: m.ts, body: m.deletedAt ? "" : m.body,
@@ -1234,7 +1264,10 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (m.sys === "renamed") return who + " renamed this to “" + m.body + "”";
     return "";
   };
-  function threads(uid) { return S.thrMine.all(uid).map((t) => threadInfo(t, uid)).filter((x) => !x.hidden); }
+  // Hidden (closed) threads STAY in the list, flagged — the client folds them into a "closed"
+  // section with a reopen, because a closed group has no other road back: nobody can re-open it
+  // from a picker the way a 1-to-1 reappears when you message the person again.
+  function threads(uid) { return S.thrMine.all(uid).map((t) => threadInfo(t, uid)); }
 
   function history(uid, threadId, before, limit) {
     const t = S.thrById.get(+threadId);
@@ -1560,8 +1593,8 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     setMarkSource, threadFor, threadPeers, isMember, memberUids, send, edit, drop,
     threads, history, sync, search, markRead, setMuted,
     closeThread, reopenThread, clearHistory,
-    createGroup, addMembers, removeMember, leaveGroup, renameGroup,
-    createBoard, joinBoard, listBoards,
+    createGroup, addMembers, removeMember, leaveGroup, renameGroup, deleteGroup,
+    createBoard, joinBoard, listBoards, setTweetSource,
     react, REACTIONS, putFile, readFile, removeFile, sweepFiles, sweepRetention, bridgeReply,
     watchList, setWatch, pin, pinsOf, calls, exportThread,
     adminThreads, adminHistory, adminSearch, adminAuditLog,

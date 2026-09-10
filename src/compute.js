@@ -3993,6 +3993,40 @@ function clusterDays(entries) {
   return d.size;
 }
 // Declared with const, so they cannot ride the hoisted function list in the main exports object.
+// ---- tweet links (Messages preview cards) ------------------------------------------------------
+// Pure halves of the unfurl: spotting a status link in a message body, and parsing X's oEmbed
+// answer into the four fields the card renders. Network and cache live in server.js; nothing here
+// touches either, which is what makes both halves testable.
+const TWEET_URL_RE = /https?:\/\/(?:www\.|mobile\.)?(?:x\.com|twitter\.com)\/(?:i\/web\/status\/|[A-Za-z0-9_]{1,15}\/status(?:es)?\/)(\d{5,25})/;
+function tweetLinkId(text) {
+  const m = TWEET_URL_RE.exec(String(text || ""));
+  return m ? m[1] : null;
+}
+// oEmbed html is a blockquote: <p>TEXT</p>&mdash; Author (@handle) <a ...>DATE</a>. The text is
+// extracted and de-HTML'd here ONCE, server-side; the client still escapes it at render like any
+// user-authored string, so a hostile oEmbed answer buys markup exactly nowhere.
+function tweetFromOembed(j, id) {
+  if (!j || typeof j !== "object") return null;
+  const html = String(j.html || "");
+  const deHtml = (s) => String(s)
+    .replace(/<br\s*\/?>/gi, "\n").replace(/<[^>]+>/g, "")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'").replace(/&mdash;/g, "—").replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&");   // last, or &amp;lt; would double-decode
+  const pm = /<p[^>]*>([\s\S]*?)<\/p>/.exec(html);
+  const text = pm ? deHtml(pm[1]).trim() : "";
+  const hm = /twitter\.com\/([A-Za-z0-9_]{1,15})/.exec(String(j.author_url || ""));
+  const handle = hm ? hm[1] : "";
+  const wm = /<a href="https?:\/\/twitter\.com[^"]*">([^<]+)<\/a>\s*<\/blockquote>/.exec(html);
+  const author = String(j.author_name || handle || "").slice(0, 60);
+  if (!text && !author) return null;
+  return { ok: true, id: String(id || ""), author, handle,
+    text: text.slice(0, 400), when: wm ? deHtml(wm[1]).slice(0, 30) : "",
+    url: "https://x.com/" + (handle || "i") + "/status/" + String(id || "") };
+}
+module.exports.tweetLinkId = tweetLinkId;
+module.exports.tweetFromOembed = tweetFromOembed;
+
 module.exports.GEO_MIN_SD = GEO_MIN_SD;
 module.exports.GEO_MAX_SD = GEO_MAX_SD;
 module.exports.GEO_MAX_LN = GEO_MAX_LN;
