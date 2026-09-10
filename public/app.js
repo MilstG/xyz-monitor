@@ -9763,6 +9763,11 @@ function startEvents(){ if(typeof EventSource==='undefined'||_sseSrc) return;
     // pip has to be right before you look at it, not after you switch to the tab.
     if(d&&d.dm){
       if(d.dm.typing) dmTypingFrame(d.dm.typing);
+      // A tweet card landed for a message already on screen: re-pull the open page so it paints.
+      if(d.dm.refresh&&state.view==='dm'&&dmState.sel===d.dm.refresh) dmRefreshOpen();
+      // A group was deleted for everyone: drop it locally without waiting for the next full load.
+      if(d.dm.gone){ dmState.msgs.delete(+d.dm.gone); if(dmState.sel===+d.dm.gone) dmState.sel=null;
+        dmLoad().then(()=>{ if(state.view==='dm') dmRender(); }); }
       if(typeof d.dm.seq==='number'&&d.dm.seq>dmState.cursor) dmSync();
     } };
 }
@@ -14268,10 +14273,19 @@ const dmState = { me: null, threads: [], members: [], online: new Set(),
   typing: new Map(), q: '', results: null, searching: false, manage: false, pendingFile: null,
   watching: [], admin: false, operatorReadsAll: false, calls: null, mode: 'chat', watchAdd: false,
   boards: [], meTg: false, adoptables: null,
-  replying: null, unreadMark: null, scrollToNew: false };
+  replying: null, unreadMark: null, scrollToNew: false, showClosed: false };
 
 function dmSignedIn(){ return !!(window.__ME && window.__ME.uid); }
-function dmUnreadTotal(){ return dmState.threads.reduce((a,t)=>a+(t.muted?0:(t.unread||0)),0); }
+function dmUnreadTotal(){ return dmState.threads.reduce((a,t)=>a+((t.muted||t.hidden)?0:(t.unread||0)),0); }
+// Re-pull the open conversation's page — used by the 45s tick's cousin cases: a tweet card
+// landing, a jumped-to message needing fresh context.
+async function dmRefreshOpen(){
+  if(!dmState.sel) return;
+  try{
+    const d=await fetchJSON('/api/dm/'+encodeURIComponent(dmState.sel));
+    if(d&&d.ok){ dmMerge(d.messages); if(d.info) dmState.info.set(dmState.sel,d.info); if(state.view==='dm') dmRender(); }
+  }catch(_){ }
+}
 
 // The tab pip. Painted from the thread list rather than a separate counter so it can never
 // disagree with what the rail shows. The browser-tab title carries the same count, so unread
@@ -14544,7 +14558,12 @@ function dmTypingPing(){
 
 async function dmStartWith(uid){
   const existing=dmState.threads.find(t=>t.peer===uid);
-  if(existing){ dmState.picking=false; dmOpenThread(existing.id); return; }
+  if(existing){
+    dmState.picking=false;
+    // Picking a person whose conversation you closed reopens it — history and all.
+    if(existing.hidden){ await dmPost({reopen:existing.id}); await dmLoad(); }
+    dmOpenThread(existing.id); return;
+  }
   // No thread until there is a message: an empty conversation in the rail is a row that says
   // nothing happened. The composer targets the member directly and the thread appears on send.
   dmState.picking=false; dmState.sel=null; dmState.pendingPeer=uid; dmState.results=null; dmRender();
@@ -14715,6 +14734,24 @@ function dmFile(m){
     +'<span class="dm-att-i">↓</span><span class="dm-att-n">'+esc(m.file.name)+'</span>'
     +'<span class="dm-att-s">'+esc(fmtBytes(m.file.size))+'</span></a>';
 }
+// The tweet card. Server-parsed fields only, escaped here like any user-authored text — X's embed
+// HTML never reaches this client. $CASHTAGS inside the tweet pick up the terminal's accent, tying
+// the card to the board's own vocabulary. tweet === null means no link (or still fetching: the
+// card paints on the refresh poke); {ok:false} is a real failure and gets the honest stub.
+function dmTweet(m){
+  const t=m.tweet;
+  if(!t) return '';
+  if(!t.ok) return '<span class="dm-x dead"><span class="dm-x-h"><span class="dm-x-logo">𝕏</span>'
+    +'<span class="dm-x-deadt">preview unavailable — deleted, protected, or X didn’t answer. The link still works.</span></span></span>';
+  const cash=(html)=>html.replace(/(^|[\s>])\$([A-Za-z]{1,6})(?![A-Za-z])/g,(a,p,s)=>p+'<span class="dm-x-cash">$'+s+'</span>');
+  return '<a class="dm-x" href="'+esc(t.url)+'" target="_blank" rel="noopener noreferrer">'
+    +'<span class="dm-x-h"><span class="dm-x-logo">𝕏</span>'
+    +'<span class="dm-x-who">'+esc(t.author||t.handle||'—')+'</span>'
+    +'<span class="dm-x-at">'+esc((t.handle?'@'+t.handle:'')+(t.when?(t.handle?' · ':'')+t.when:''))+'</span></span>'
+    +(t.text?'<span class="dm-x-t">'+cash(esc(t.text)).replace(/\n/g,'<br>')+'</span>':'')
+    +'<span class="dm-x-f"><span class="dm-x-open">open on X ↗</span></span></a>';
+}
+
 function dmReactions(m){
   const r=m.reactions;
   const chips=[];
@@ -14772,7 +14809,7 @@ function dmMessageHtml(m,t,p){
   const body=m.deleted
     ? '<div class="dm-b dm-del">message deleted</div>'
     : '<div class="dm-b" title="'+esc(who+' \u00b7 '+dmWhen(m.ts))+'">'+quote
-      +(m.body?dmMentionHtml(esc(m.body)).replace(/\n/g,'<br>'):'')+marks+dmFile(m)+dmStamp(m)+'</div>';
+      +(m.body?dmMentionHtml(esc(m.body)).replace(/\n/g,'<br>'):'')+marks+dmFile(m)+dmStamp(m)+dmTweet(m)+'</div>';
   return '<div class="dm-msg'+(own?' out':'')+(head?' hd':'')+'" data-mid="'+m.id+'">'+meta
     +body+act+(m.deleted?'':dmReactions(m))+'</div>';
 }
@@ -14801,10 +14838,20 @@ function dmSysLine(m,t){
 }
 
 function dmRailHtml(){
-  // Boards live in their own "Topics" section below — the conversations rail is people.
-  const list=dmState.threads.filter(t=>t.kind!=='board');
-  if(!list.length) return '<div class="dm-empty">No conversations yet.</div>';
-  return list.map(t=>{
+  // Boards live in their own "Topics" section below — the conversations rail is people. Closed
+  // conversations fold into their own row: closing never deletes anything, so there must always
+  // be a road back that doesn't depend on somebody writing first.
+  const all=dmState.threads.filter(t=>t.kind!=='board');
+  const list=all.filter(t=>!t.hidden), closed=all.filter(t=>t.hidden);
+  const closedSec=closed.length
+    ? '<div class="dm-sh" id="dm-closedhd" style="margin-top:10px;cursor:pointer">'
+      +(dmState.showClosed?'▾':'▸')+' Closed — '+closed.length+'</div>'
+      +(dmState.showClosed?closed.map(t=>'<div class="dm-th" data-dmreopen="'+t.id+'">'
+        +'<div class="dm-thn">'+(t.kind==='group'?'<span class="dm-grp">#</span> ':'')+esc(t.name)
+        +'<span class="dm-join">reopen</span></div></div>').join(''):'')
+    : '';
+  if(!list.length&&!closed.length) return '<div class="dm-empty">No conversations yet.</div>';
+  return (list.length?'':'<div class="dm-empty">Nothing open.</div>')+list.map(t=>{
     const grp=t.kind==='group';
     const dot=grp?'<span class="dm-grp">#</span>'
       :'<span class="'+(dmState.online.has(t.peer)?'dm-on':'dm-off')+'">●</span>';
@@ -14813,7 +14860,7 @@ function dmRailHtml(){
       +(t.muted?' <span class="dm-mute" title="muted — no Telegram escalation">⊘</span>':'')
       +(t.unread?'<span class="dm-badge">'+(t.unread>99?'99+':t.unread)+'</span>':'')+'</div>'
       +'<div class="dm-thp">'+esc(t.preview||'no messages yet')+'</div></div>';
-  }).join('');
+  }).join('')+closedSec;
 }
 
 // Standing topics — open threads anyone on the desk can discover and join, for discussing one
@@ -14898,8 +14945,19 @@ function dmManageHtml(info){
       +'<div class="dm-sh" style="margin-top:10px">Rename</div>'
       +'<div class="dm-mrow"><input id="dm-rename" value="'+esc(info.title||'')+'" maxlength="48">'
       +'<button type="button" class="dm-tool" id="dm-dorename">save</button></div>':'')
-    +'<div class="dm-mrow" style="margin-top:10px"><button type="button" class="dm-tool dm-leave" id="dm-leave">leave this group</button></div>'
+    +'<div class="dm-mrow" style="margin-top:10px"><button type="button" class="dm-tool dm-leave" id="dm-leave">leave this group</button>'
+    +(canMan?'<button type="button" class="dm-tool dm-leave" id="dm-delgroup" style="margin-left:auto" title="Deletes the whole conversation for EVERYONE — messages, files, membership. Close (in the header) just tidies your own list.">delete for everyone</button>':'')
+    +'</div>'
     +'</div>';
+}
+// The shredder, as distinct from "close": everything, for everyone, forever. The double-take is
+// deliberate — the confirm names the group and says who loses what.
+async function dmDeleteGroup(){
+  const t=dmThread(dmState.sel); if(!t) return;
+  if(!confirm('Delete “'+t.name+'” for EVERYONE? All messages and files in it are removed for every member, permanently. “Close” in the header just hides it from your own list — this does not.')) return;
+  const res=await dmPost({deleteGroup:t.id});
+  if(res.ok){ dmState.msgs.delete(t.id); dmState.sel=null; dmState.manage=false; await dmLoad(); dmRender(); }
+  else { dmState.err=(res.d&&res.d.error)||'could not delete it'; dmRender(); }
 }
 
 function dmResultsHtml(){
@@ -15200,6 +15258,11 @@ function dmWire(){
       return; }
     const ad=e.target.closest('[data-dmadopt]');
     if(ad){ dmAdopt(ad.dataset.dmadopt); return; }
+    if(e.target.closest('#dm-closedhd')){ dmState.showClosed=!dmState.showClosed; dmRender(); return; }
+    const ro=e.target.closest('[data-dmreopen]');
+    if(ro){ const id=+ro.dataset.dmreopen;
+      dmPost({reopen:id}).then(()=>dmLoad()).then(()=>dmOpenThread(id)); return; }
+    if(e.target.closest('#dm-delgroup')){ dmDeleteGroup(); return; }
     const bd=e.target.closest('[data-dmboard]');
     if(bd){ dmOpenBoard(+bd.dataset.dmboard, bd.dataset.joined==='1'); return; }
     if(e.target.closest('#dm-topicbtn')){ dmNewTopic(); return; }
@@ -15294,7 +15357,7 @@ else { const b=el('tab-dm'); if(b) b.hidden=true; }
 // lists the rail (unread first-class, red count on the button) and jumping into one lands on the
 // Messages tab with that conversation open.
 function dmDockRows(){
-  const rows=dmState.threads.slice(0,8).map(t=>
+  const rows=dmState.threads.filter(t=>!t.hidden).slice(0,8).map(t=>
     '<div class="dm-th" data-dockth="'+t.id+'"><div class="dm-thn">'
     +(t.kind==='dm'?'<span class="'+(dmState.online.has(t.peer)?'dm-on':'dm-off')+'">●</span> ':'<span class="dm-grp">#</span> ')
     +esc(t.name)

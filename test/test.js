@@ -13336,7 +13336,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.10-55"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.10-56"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -23531,17 +23531,20 @@ test("close hides a conversation for you until somebody writes; clear forgets it
   A.send(l.uid, null, "second", null, { thread: T });
 
   assert.ok(A.closeThread(l.uid, T).ok, "lena closes it");
-  assert.ok(A.threads(l.uid).every((t) => t.id !== T), "off HER rail");
-  assert.ok(A.threads(g.uid).some((t) => t.id === T), "still on gustavo's — closing is per-viewer");
+  assert.equal(A.threads(l.uid).find((t) => t.id === T).hidden, true, "flagged closed on HER rail — listed, so it can always be reopened, never deleted");
+  assert.equal(A.threads(g.uid).find((t) => t.id === T).hidden, false, "open as ever on gustavo's — closing is per-viewer");
+  assert.ok(A.reopenThread(l.uid, T).ok && A.threads(l.uid).find((t) => t.id === T).hidden === false,
+    "and she can reopen it herself, without waiting for a message");
+  A.closeThread(l.uid, T);
 
   A.send(g.uid, null, "you there?", null, { thread: T });
   const back = A.threads(l.uid).find((t) => t.id === T);
-  assert.ok(back, "a new message brings it back");
+  assert.ok(back && !back.hidden, "a new message brings it back");
   assert.equal(A.history(l.uid, T).messages.filter((m) => !m.sys).length, 3, "with the whole backscroll intact");
 
   assert.ok(A.clearHistory(l.uid, T).ok, "lena clears the history");
   assert.equal(A.history(l.uid, T).messages.length, 0, "her view starts empty");
-  assert.ok(A.threads(l.uid).every((t) => t.id !== T), "and the row leaves her rail");
+  assert.equal(A.threads(l.uid).find((t) => t.id === T).hidden, true, "and the row folds closed on her rail");
   assert.ok(A.history(g.uid, T).messages.filter((m) => !m.sys).length >= 3, "gustavo's record is untouched");
   assert.ok(A.search(l.uid, "first").results.every((m) => m.thread !== T), "cleared history stops matching her search");
   assert.ok(A.search(g.uid, "first").results.some((m) => m.thread === T), "but still matches his");
@@ -23552,6 +23555,53 @@ test("close hides a conversation for you until somebody writes; clear forgets it
   assert.equal(hist.length, 1, "she sees only what came after the clear");
   assert.equal(hist[0].body, "fresh start");
   assert.equal(A.exportThread(l.uid, T).messages.length, 1, "her export honors the clear too");
+});
+
+test("tweet links: the id is spotted, the oEmbed answer parses, and the card rides the wire", () => {
+  const { tweetLinkId, tweetFromOembed } = require("../src/compute");
+  assert.equal(tweetLinkId("look https://x.com/zerohedge/status/1833629471000000000 wild"), "1833629471000000000");
+  assert.equal(tweetLinkId("https://twitter.com/a_b/statuses/12345678"), "12345678", "old-form twitter.com works");
+  assert.equal(tweetLinkId("https://mobile.twitter.com/i/web/status/987654321"), "987654321");
+  assert.equal(tweetLinkId("https://x.com/zerohedge"), null, "a profile link is not a tweet");
+  assert.equal(tweetLinkId("x.com/a/status/123"), null, "no scheme, no match — the body is not re-guessed");
+
+  const j = { author_name: "zerohedge", author_url: "https://twitter.com/zerohedge",
+    html: '<blockquote class="twitter-tweet"><p lang="en" dir="ltr">$HOOD up 8% &amp; squeezing<br>after S&amp;P inclusion &lt;wild&gt;</p>&mdash; zerohedge (@zerohedge) <a href="https://twitter.com/zerohedge/status/1">September 10, 2025</a></blockquote>' };
+  const t = tweetFromOembed(j, "1");
+  assert.equal(t.author, "zerohedge");
+  assert.equal(t.handle, "zerohedge");
+  assert.equal(t.text, "$HOOD up 8% & squeezing\nafter S&P inclusion <wild>", "entities decoded once, <br> becomes a newline, raw angle brackets survive as text");
+  assert.equal(t.when, "September 10, 2025");
+  assert.equal(t.url, "https://x.com/zerohedge/status/1");
+  assert.equal(tweetFromOembed({}, "1"), null, "an empty answer is null, not a blank card");
+
+  // The wire attachment: injected source, exactly like the price mark.
+  const A = freshAccounts();
+  const { g, l } = seedTwo(A);
+  const T = A.threadFor(g.uid, l.uid, true).id;
+  A.setTweetSource((body) => tweetLinkId(body) ? { ok: true, author: "zh", handle: "zh", text: "hi", when: "", url: "https://x.com/zh/status/9" } : null);
+  const withLink = A.send(g.uid, null, "see https://x.com/zh/status/900001", null, { thread: T });
+  assert.equal(withLink.message.tweet.author, "zh", "a message with a status link carries the card");
+  const plain = A.send(g.uid, null, "no links here", null, { thread: T });
+  assert.equal(plain.message.tweet, null, "a plain message carries none");
+});
+
+test("deleting a group removes it for everyone; close never does", () => {
+  const { A, g, l, m } = seedDesk();
+  const T = A.createGroup(g.uid, "shreddable", [l.uid, m.uid]).thread;
+  A.send(l.uid, null, "this will vanish", null, { thread: T });
+
+  assert.ok(!A.deleteGroup(l.uid, T).ok, "a plain member cannot delete it");
+  const dm = A.threadFor(g.uid, l.uid, true).id;
+  assert.ok(!A.deleteGroup(g.uid, dm).ok, "a 1-to-1 cannot be deleted — clear covers the personal case");
+
+  const r = A.deleteGroup(g.uid, T);
+  assert.ok(r.ok, "the owner can");
+  assert.deepEqual(r.peers.sort(), [g.uid, l.uid, m.uid].sort(), "and gets the member list to wake");
+  assert.ok(A.threads(l.uid).every((t) => t.id !== T), "gone from every rail — not flagged, GONE");
+  assert.ok(!A.history(l.uid, T).ok, "the history is not readable by anyone");
+  assert.ok(A.search(l.uid, "vanish").results.every((x) => x.thread !== T), "and not searchable");
+  assert.ok(A.adminAuditLog(10).some((e) => e.action === "delete-group"), "the shredding itself is on the record");
 });
 
 test("the terminal operator can manage a group they are in without owning it", () => {
