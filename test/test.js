@@ -10057,6 +10057,30 @@ test("push: fully dormant without TG_BOT_TOKEN — no state, no calls, no surpri
   assert.equal(p.pushTest(null, "own-a", false).ok, false, "test fire is honest about being unavailable");
 });
 
+test("push: adopting a linked chat needs the code sent to that chat, and only moves ownership then", () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  const { p } = pushHarness();
+  const mint = p.pushMintCode("old-browser-handle", false);
+  assert.ok(p.pushBindNow(mint.code, 777000111, "Taladro").ok, "a chat linked under a pre-account browser handle");
+
+  assert.equal(p.pushAdoptRequest(777000111, "").ok, false, "no owner, no request");
+  assert.equal(p.pushAdoptRequest(999, "uid-lena").ok, false, "an unknown chat cannot be asked about");
+  const r = p.pushAdoptRequest(777000111, "uid-lena");
+  assert.ok(r.ok && /^\d{6}$/.test(r.code), "a request mints a 6-digit code for THAT chat");
+
+  assert.equal(p.pushAdoptVerify(777000111, "uid-lena", "000000").ok, r.code === "000000", "a wrong guess is refused");
+  assert.equal(p.pushAdoptVerify(777000111, "uid-other", r.code).ok, false, "the code is bound to the requester — another account cannot redeem it");
+  assert.equal(p.pushOwnerOf("777000111"), "old-browser-handle", "ownership has not moved yet");
+
+  const r2 = p.pushAdoptRequest(777000111, "uid-lena");   // re-request replaces; the old code above may be burned by the guesses
+  const v = p.pushAdoptVerify(777000111, "uid-lena", r2.code);
+  assert.ok(v.ok, "the right code, from the right account, transfers");
+  assert.equal(p.pushOwnerOf("777000111"), "uid-lena", "the chat now belongs to the account");
+  assert.equal(p.pushRecipientsFor("uid-lena").length, 1, "and escalation targets find it");
+  assert.equal(p.pushAdoptVerify(777000111, "uid-lena", r2.code).ok, false, "a code works once");
+  assert.equal(p.pushAdoptRequest(777000111, "uid-lena").error, "already-yours", "an owned chat is not re-claimable by its owner");
+});
+
 test("push: link codes are single-use, expiring, and a new recipient starts CAUGHT UP", () => {
   process.env.TG_BOT_TOKEN = "test-token";
   const { p } = pushHarness();
@@ -13312,7 +13336,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.03-50"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.10-51"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -23019,6 +23043,36 @@ test("messages: the client escapes every rendered body, handle and preview", () 
   // person is mid-way through writing — which is exactly what happened before this existed.
   assert.ok(/function dmCapture\(\)/.test(dm) && /function dmRestore\(/.test(dm), "the composer is captured and restored across renders");
   assert.ok(/const keep=dmCapture\(\)/.test(dm) && /dmRestore\(keep\)/.test(dm), "every render captures before and restores after");
+});
+
+test("topic boards: open threads anyone can discover, join and post in", () => {
+  const A = freshAccounts({ "xyz:HOOD": 113.2 });
+  const { g, l } = seedTwo(A);
+
+  const b = A.createBoard(g.uid, "  HOOD   thesis  ");
+  assert.ok(b.ok, "the operator opens a topic");
+  assert.ok(!A.createBoard(g.uid, "   ").ok, "a topic needs a name");
+
+  // Discoverable before joining — that is what separates a board from a group…
+  const seen = A.listBoards(l.uid).find((x) => x.id === b.thread);
+  assert.ok(seen && seen.title === "HOOD thesis" && seen.joined === false, "everyone sees the board, whitespace collapsed");
+  // …but reading and writing still ride membership, exactly like a group: joining GRANTS them, so
+  // no authorization path learned a new case.
+  assert.ok(!A.history(l.uid, b.thread).ok, "no read before joining");
+  assert.ok(!A.send(l.uid, "", "hi there", null, { thread: b.thread }).ok, "no write before joining");
+
+  assert.ok(A.joinBoard(l.uid, b.thread).ok, "anyone may join themselves");
+  assert.ok(A.joinBoard(l.uid, b.thread).already, "joining twice is a no-op, not an error");
+  const s = A.send(l.uid, "", "I think $HOOD runs", (x) => "xyz:" + x, { thread: b.thread });
+  assert.ok(s.ok && s.message.refPx === 113.2, "a post stamps its mark like any message");
+  const h = A.history(l.uid, b.thread);
+  assert.ok(h.ok && h.messages.some((m) => m.sys === "joined"), "the join is on the record as a system line");
+  assert.equal(A.listBoards(l.uid).find((x) => x.id === b.thread).members, 2, "the member count moves");
+  assert.ok(A.renameGroup(g.uid, b.thread, "HOOD thesis v2").ok, "the creator can rename a board like a group");
+
+  // A DM can never be joined through this door.
+  const dm = A.threadFor(g.uid, l.uid, true);
+  assert.ok(!A.joinBoard(g.uid, dm.id).ok, "joinBoard refuses anything that is not a board");
 });
 
 test("server: the invite door strips the code from the URL before anything renders", () => {

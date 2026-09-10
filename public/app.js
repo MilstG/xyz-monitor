@@ -14266,17 +14266,31 @@ const dmState = { me: null, threads: [], members: [], online: new Set(),
   sel: null, msgs: new Map(), info: new Map(), cursor: 0, loaded: false, err: '', sending: false,
   picking: false, editing: null, pendingPeer: null, reactions: [], maxLen: 4000, maxFile: 8388608,
   typing: new Map(), q: '', results: null, searching: false, manage: false, pendingFile: null,
-  watching: [], admin: false, operatorReadsAll: false, calls: null, mode: 'chat', watchAdd: false };
+  watching: [], admin: false, operatorReadsAll: false, calls: null, mode: 'chat', watchAdd: false,
+  boards: [], meTg: false, adoptables: null };
 
 function dmSignedIn(){ return !!(window.__ME && window.__ME.uid); }
 function dmUnreadTotal(){ return dmState.threads.reduce((a,t)=>a+(t.muted?0:(t.unread||0)),0); }
 
 // The tab pip. Painted from the thread list rather than a separate counter so it can never
-// disagree with what the rail shows.
+// disagree with what the rail shows. The browser-tab title carries the same count, so unread
+// messages are visible from ANY tab of the app — and from another window entirely.
+let _dmBaseTitle='';
 function dmUpdatePip(){
-  const b=el('tab-dm'); if(!b) return;
   const n=dmUnreadTotal();
+  if(!_dmBaseTitle) _dmBaseTitle=document.title;
+  try{ document.title=(n?'('+(n>99?'99+':n)+') ':'')+_dmBaseTitle; }catch(_){}
+  const b=el('tab-dm'); if(!b) return;
   b.innerHTML='Messages'+(n?'<span class="tabpip">'+(n>99?'99+':n)+'</span>':'');
+  // If the admin moved Messages into a ribbon menu, the pip on the tab is invisible until the
+  // menu opens — mirror it onto the menu's own button so unread is visible from the main screen.
+  const wrap=b.closest('.tabgrp'), gb=wrap?wrap.querySelector('.grp'):null;
+  if(gb){
+    let pip=gb.querySelector('.tabpip');
+    if(n){ if(!pip){ pip=document.createElement('span'); pip.className='tabpip'; gb.insertBefore(pip, gb.querySelector('.caret')); }
+      pip.textContent=n>99?'99+':String(n); }
+    else if(pip) pip.remove();
+  }
 }
 
 function dmThread(id){ return dmState.threads.find(t=>t.id===id)||null; }
@@ -14302,9 +14316,31 @@ async function dmLoad(){
     dmState.online=new Set(d.online||[]); dmState.maxLen=d.maxLen||4000;
     dmState.maxFile=d.maxFile||8388608; dmState.reactions=d.reactions||[];
     dmState.watching=d.watching||[]; dmState.admin=!!d.admin; dmState.operatorReadsAll=!!d.operatorReadsAll;
+    dmState.boards=d.boards||[]; dmState.meTg=!!d.meTg;
+    // With no Telegram linked, ask whether the bot already messages a chat no account owns —
+    // that is this member's own phone from before accounts, offered for a code-verified claim.
+    if(!dmState.meTg&&dmState.adoptables===null){
+      try{ const a=await fetchJSON('/api/alerts/adoptable'); dmState.adoptables=(a&&a.ok)?(a.candidates||[]):[]; }
+      catch(_){ dmState.adoptables=[]; }
+    }
     dmState.loaded=true; dmState.err='';
   }catch(e){ dmState.err=e.message||String(e); }
   dmUpdatePip();
+}
+
+// Code-verified claim of an already-linked chat: request sends a 6-digit code TO that Telegram,
+// typing it back here is the proof of control that moves ownership to this account.
+async function dmAdopt(chat){
+  const r=await fetch('/api/alerts/adopt',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chat})});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok||!d.ok){ pushToast('Could not send a code — '+((d&&d.error)||('HTTP '+r.status))); return; }
+  const code=(prompt('A 6-digit code was sent to “'+(d.name||'that chat')+'” on Telegram.\nEnter it here to link that chat to your account:')||'').trim();
+  if(!code) return;
+  const v=await fetch('/api/alerts/adopt',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chat,code})});
+  const dv=await v.json().catch(()=>({}));
+  if(v.ok&&dv.ok){ pushToast('Telegram linked — messages that arrive while you are away now nudge your phone');
+    dmState.adoptables=null; await dmLoad(); dmRender(); }
+  else pushToast((dv&&dv.error)||'That code did not match');
 }
 
 // The pull the SSE frame triggers. Runs whatever tab is showing — the unread pip has to be right
@@ -14314,17 +14350,46 @@ async function dmSync(){
   if(!dmSignedIn()||_dmSyncing) return;
   _dmSyncing=true;
   try{
-    const d=await fetchJSON('/api/dm/sync?since='+encodeURIComponent(dmState.cursor||0));
+    const prevCursor=dmState.cursor||0;
+    const d=await fetchJSON('/api/dm/sync?since='+encodeURIComponent(prevCursor));
     if(d&&d.ok){
       dmMerge(d.messages);
       if(d.threads) dmState.threads=d.threads;
       if(d.cursor>dmState.cursor) dmState.cursor=d.cursor;
       dmUpdatePip();
+      // A message landing while you are anywhere BUT the Messages tab surfaces as a toast — the
+      // pip alone was easy to miss under a ribbon menu. Muted conversations stay quiet here too.
+      if(prevCursor&&state.view!=='dm'){
+        const muted=new Set(dmState.threads.filter(t=>t.muted).map(t=>t.id));
+        const fresh=(d.messages||[]).filter(m=>!m.mine&&!m.sys&&!m.deleted&&m.id>prevCursor&&!muted.has(m.thread));
+        if(fresh.length){
+          const f=fresh[fresh.length-1];
+          pushToast('💬 '+f.sender+': '+String(f.body||'attachment').slice(0,80)
+            +(fresh.length>1?'  (+'+(fresh.length-1)+' more)':'')+' — open Messages');
+        }
+      }
       if(state.view==='dm') dmRender();
     }
   }catch(_){ /* the next frame or the next open retries; a failed sync is never fatal */ }
   finally{ _dmSyncing=false; }
 }
+
+// The price stamp's "since sent" is computed live at READ on the server, but a fetched message
+// sat frozen in dmState forever — a stamp showed +0.0% no matter how far the market moved. While
+// a conversation is on screen, re-pull its page every 45s: dmMerge replaces rows by id, so every
+// visible stamp (and the calls view) re-marks against the current price.
+setInterval(async ()=>{
+  if(!dmSignedIn()||state.view!=='dm') return;
+  try{
+    await dmLoad();   // presence, thread list and the pip stay fresh while the tab sits open
+    if(dmState.mode==='calls'){ const d=await fetchJSON('/api/dm/calls'); if(d&&d.ok) dmState.calls=d; }
+    else if(dmState.sel&&!dmState.results){
+      const d=await fetchJSON('/api/dm/'+encodeURIComponent(dmState.sel));
+      if(d&&d.ok){ dmMerge(d.messages); if(d.info) dmState.info.set(dmState.sel,d.info); }
+    }
+    dmRender();
+  }catch(_){ }
+},45000);
 
 // Ephemeral, and treated as such: a typing hint that arrives is shown for its own lifetime and
 // never stored, never merged into a thread, never survives a reload.
@@ -14562,9 +14627,24 @@ function dmWhen(ts){
                      +d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false});
   }catch(_){ return ''; }
 }
+// Bare clock time — the day is carried by the divider above the run, so repeating it per message
+// would be noise. dmWhen stays for the rail and search results, which have no divider context.
+function dmTime(ts){ try{ return new Date(ts).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}); }catch(_){ return ''; } }
+function dmSameDay(a,b){ try{ return new Date(a).toDateString()===new Date(b).toDateString(); }catch(_){ return true; } }
+function dmDayLabel(ts){
+  try{
+    const d=new Date(ts), now=new Date();
+    if(d.toDateString()===now.toDateString()) return 'today';
+    if(d.toDateString()===new Date(now.getTime()-864e5).toDateString()) return 'yesterday';
+    return d.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
+  }catch(_){ return ''; }
+}
 // The price stamp. refPx is what the market showed when the message was sent and never changes;
 // px is read live at render. The move between them is the entire reason this feature exists, so
 // it is computed here and nowhere else.
+// Display name for a stamped market: the "xyz:" universe prefix is routing, not information —
+// the card already said $HOOD in the body, repeating it as xyz:HOOD reads as a different thing.
+function dmTkName(ref){ return String(ref||'').replace(/^xyz:/,''); }
 function dmStamp(m){
   if(!m.ref) return '';
   const at=m.refPx, now=m.px;
@@ -14574,8 +14654,10 @@ function dmStamp(m){
   const cls=chg==null?'':(chg>0?'pos':(chg<0?'neg':'sec'));
   const right=chg==null?'<span class="dm-tk-d sec" title="this market is no longer listed">—</span>'
     :'<span class="dm-tk-d '+cls+'">'+(chg>0?'+':'')+(chg*100).toFixed(1)+'%</span>';
-  const sub=has?('sent at '+fmtPx(at)+(live?'':' · no longer listed')):'no mark at send';
-  return '<div class="dm-tk"><div><div class="dm-tk-s">'+esc(m.ref)+'</div>'
+  const sub=has?('sent at '+fmtPx(at)+(live?' · now '+fmtPx(now):' · no longer listed')):'no mark at send';
+  // The card is a door, not just a label: clicking it opens the market drawer for the name —
+  // same in-place drawer the earnings rows and news badges use, so no tab switch.
+  return '<div class="dm-tk" data-coin="'+esc(m.ref)+'" title="open the '+esc(dmTkName(m.ref))+' drawer"><div><div class="dm-tk-s">'+esc(dmTkName(m.ref))+'</div>'
     +'<div class="dm-tk-m">'+esc(sub)+'</div></div>'+right+'</div>';
 }
 function fmtPx(v){
@@ -14608,32 +14690,46 @@ function dmReactions(m){
   if(r) for(const e of Object.keys(r))
     chips.push('<button type="button" class="dm-rx'+(r[e].mine?' mine':'')+'" data-dmrx="'+m.id+'" data-emoji="'+esc(e)+'"'
       +' title="'+esc(r[e].who.join(', '))+'">'+esc(e)+' '+r[e].n+'</button>');
-  const picker='<span class="dm-rxadd"><button type="button" class="dm-rx dm-rxbtn" data-dmrxopen="'+m.id+'" title="React">+</button>'
-    +'<span class="dm-rxmenu">'+dmState.reactions.map(e=>
-      '<button type="button" class="dm-rxopt" data-dmrx="'+m.id+'" data-emoji="'+esc(e)+'">'+esc(e)+'</button>').join('')+'</span></span>';
-  return '<div class="dm-rxrow">'+chips.join('')+picker+'</div>';
+  // Chips only, and only when somebody has actually reacted — an always-present picker row
+  // reserved a blank line under every message, which is where most of the old layout's air came
+  // from. The picker lives in the hover action bar now.
+  return chips.length?'<div class="dm-rxrow">'+chips.join('')+'</div>':'';
 }
 
-function dmMessageHtml(m,t){
+// One message. `p` is the message rendered above it: a run from the same sender inside five
+// minutes groups chat-app style — the name/time header paints once at the head of the run and
+// the bubbles underneath sit tight. A grouped bubble keeps its exact time in a hover tooltip.
+function dmMessageHtml(m,t,p){
   if(m.sys) return '<div class="dm-sys">'+esc(dmSysLine(m,t))+'</div>';
   const own=m.mine;
-  const who=own?'you':(m.sender||'—');
-  const meta=esc(who)+' · '+dmWhen(m.ts)
-    +(m.via==='telegram'?' · <span class="sec" title="sent from Telegram">via telegram</span>':'')
-    +(m.edited&&!m.deleted?' · <span class="sec">edited</span>':'');
+  const who=own?'you':(m.sender||'\u2014');
+  const head=!p||p.sys||p.mine!==m.mine||p.sender!==m.sender||(m.ts-p.ts)>5*60e3||!dmSameDay(p.ts,m.ts);
+  // Own messages carry only the time: they sit right-aligned in their own color, so "you" was
+  // saying what the layout already says.
+  const meta=head?'<div class="dm-meta">'+(own?'':esc(who)+' \u00b7 ')+dmTime(m.ts)+'</div>':'';
   // Pinning is any member's; editing and deleting are the author's; promoting a call to a note is
-  // the operator's, because the notes book itself is operator-only.
-  const tools='<span class="dm-tools">'
-    +(m.deleted?'':'<button type="button" class="dm-tool" data-dmpin="'+m.id+'" data-on="'+(m.pinned?'0':'1')+'" title="'+(m.pinned?'Unpin':'Pin this to the top of the conversation')+'">'+(m.pinned?'unpin':'pin')+'</button>')
-    +((m.ref&&m.refPx!=null&&dmState.admin&&!m.deleted)?'<button type="button" class="dm-tool" data-dmnote="'+m.id+'" title="Write this into the notes book, keeping the price and time it was called at">\u2192 note</button>':'')
-    +((own&&!m.deleted)?'<button type="button" class="dm-tool" data-dmedit="'+m.id+'" title="Edit — the price stamp stays at what it was sent at">edit</button>'
-      +'<button type="button" class="dm-tool" data-dmdel="'+m.id+'" title="Delete — this removes the attachment too">delete</button>':'')
+  // the operator's, because the notes book itself is operator-only. All of it — the reaction
+  // picker included — lives in a hover action bar over the bubble, so a message at rest is
+  // just its bubble.
+  const act=m.deleted?'':'<span class="dm-act">'
+    +'<span class="dm-rxadd"><button type="button" class="dm-tool" data-dmrxopen="'+m.id+'" title="React">+</button>'
+      +'<span class="dm-rxmenu">'+dmState.reactions.map(e=>
+        '<button type="button" class="dm-rxopt" data-dmrx="'+m.id+'" data-emoji="'+esc(e)+'">'+esc(e)+'</button>').join('')+'</span></span>'
+    +'<button type="button" class="dm-tool" data-dmpin="'+m.id+'" data-on="'+(m.pinned?'0':'1')+'" title="'+(m.pinned?'Unpin':'Pin this to the top of the conversation')+'">'+(m.pinned?'unpin':'pin')+'</button>'
+    +((m.ref&&m.refPx!=null&&dmState.admin)?'<button type="button" class="dm-tool" data-dmnote="'+m.id+'" title="Write this into the notes book, keeping the price and time it was called at">\u2192 note</button>':'')
+    +(own?'<button type="button" class="dm-tool" data-dmedit="'+m.id+'" title="Edit \u2014 the price stamp stays at what it was sent at">edit</button>'
+      +'<button type="button" class="dm-tool" data-dmdel="'+m.id+'" title="Delete \u2014 this removes the attachment too">delete</button>':'')
     +'</span>';
+  // Edited / via-telegram ride inside the bubble as a faint suffix: the header line is gone on
+  // grouped messages, so anything that lived only there would vanish with it.
+  const marks=m.deleted?'':((m.via==='telegram'?'<span class="dm-mk" title="sent from Telegram">tg</span>':'')
+    +(m.edited?'<span class="dm-mk">edited</span>':''));
   const body=m.deleted
     ? '<div class="dm-b dm-del">message deleted</div>'
-    : '<div class="dm-b">'+(m.body?esc(m.body).replace(/\n/g,'<br>'):'')+dmFile(m)+dmStamp(m)+'</div>';
-  return '<div class="dm-msg'+(own?' out':'')+'"><div class="dm-meta">'+meta+tools+'</div>'
-    +body+(m.deleted?'':dmReactions(m))+'</div>';
+    : '<div class="dm-b" title="'+esc(who+' \u00b7 '+dmWhen(m.ts))+'">'
+      +(m.body?esc(m.body).replace(/\n/g,'<br>'):'')+marks+dmFile(m)+dmStamp(m)+'</div>';
+  return '<div class="dm-msg'+(own?' out':'')+(head?' hd':'')+'">'+meta
+    +body+act+(m.deleted?'':dmReactions(m))+'</div>';
 }
 function dmSysLine(m,t){
   const who=m.mine?'you':(m.sender||'someone');
@@ -14641,13 +14737,16 @@ function dmSysLine(m,t){
   if(m.sys==='added') return who+' added '+m.body;
   if(m.sys==='removed') return who+' removed '+m.body;
   if(m.sys==='left') return m.body+' left';
+  if(m.sys==='joined') return m.body+' joined';
   if(m.sys==='renamed') return who+' renamed this to “'+m.body+'”';
   return '';
 }
 
 function dmRailHtml(){
-  if(!dmState.threads.length) return '<div class="dm-empty">No conversations yet.</div>';
-  return dmState.threads.map(t=>{
+  // Boards live in their own "Topics" section below — the conversations rail is people.
+  const list=dmState.threads.filter(t=>t.kind!=='board');
+  if(!list.length) return '<div class="dm-empty">No conversations yet.</div>';
+  return list.map(t=>{
     const grp=t.kind==='group';
     const dot=grp?'<span class="dm-grp">#</span>'
       :'<span class="'+(dmState.online.has(t.peer)?'dm-on':'dm-off')+'">●</span>';
@@ -14657,6 +14756,53 @@ function dmRailHtml(){
       +(t.unread?'<span class="dm-badge">'+(t.unread>99?'99+':t.unread)+'</span>':'')+'</div>'
       +'<div class="dm-thp">'+esc(t.preview||'no messages yet')+'</div></div>';
   }).join('');
+}
+
+// Standing topics — open threads anyone on the desk can discover and join, for discussing one
+// idea in one place instead of scattering it across DMs.
+function dmTopicsHtml(){
+  const rows=(dmState.boards||[]).map(b=>{
+    const th=dmThread(b.id);
+    const unread=b.joined?((th&&th.muted)?0:(th?th.unread:b.unread)||0):0;
+    return '<div class="dm-th'+(b.id===dmState.sel?' sel':'')+'" data-dmboard="'+b.id+'" data-joined="'+(b.joined?'1':'0')+'">'
+      +'<div class="dm-thn"><span class="dm-grp">#</span> '+esc(b.title)
+      +(unread?'<span class="dm-badge">'+(unread>99?'99+':unread)+'</span>':'')
+      +(b.joined?'':'<span class="dm-join">join</span>')+'</div>'
+      +'<div class="dm-thp">'+(+b.members||0)+' member'+(b.members===1?'':'s')+' · '+esc(b.preview||'')+'</div></div>';
+  }).join('');
+  return '<div class="dm-sh" style="margin-top:12px;display:flex;align-items:center">Topics'
+    +'<button type="button" class="dm-tool" id="dm-topicbtn" style="margin-left:auto" title="Open a standing topic anyone on the desk can join — an idea, a ticker thesis, a theme">+ new</button></div>'
+    +(rows||'<div class="dm-empty" style="padding:4px 14px 8px">No topics yet — open one.</div>');
+}
+async function dmOpenBoard(id,joined){
+  if(!joined){
+    const r=await dmPost({joinBoard:id});
+    if(!r.ok){ dmState.err=(r.d&&r.d.error)||'could not join that topic'; dmRender(); return; }
+    await dmLoad();
+  }
+  dmOpenThread(id);
+}
+async function dmNewTopic(){
+  const name=(prompt('Name the topic — an idea, a ticker, a theme. Anyone on the desk can see and join it.')||'').trim();
+  if(!name) return;
+  const r=await dmPost({board:true,title:name});
+  if(r.ok&&r.d.thread){ await dmLoad(); dmOpenThread(r.d.thread); }
+  else { dmState.err=(r.d&&r.d.error)||'could not create the topic'; dmRender(); }
+}
+
+// The away-delivery story, said where messages are written: with no Telegram linked to THIS
+// account, nothing nudges this member's phone. If the bot already messages a chat no account owns
+// (linked before accounts existed), it is offered for a code-verified claim.
+function dmTgHintHtml(){
+  if(!dmState.loaded||dmState.meTg) return '';
+  return '<div class="dm-tglink"><div class="dm-sh" style="padding:0 0 6px">Telegram nudges</div>'
+    +'<div class="dm-tgtxt">No Telegram linked — messages that arrive while you are away cannot reach your phone.</div>'
+    +((dmState.adoptables&&dmState.adoptables.length)
+      ?'<div class="dm-tgtxt">The bot already messages:</div>'
+        +dmState.adoptables.map(c=>'<div class="dm-tgrow"><span class="grow">'+esc(c.name)+' <span class="acc-mu">'+esc(c.mask)+'</span></span>'
+          +'<button type="button" class="dm-tool" data-dmadopt="'+esc(c.chat)+'" title="A 6-digit code goes to that Telegram; typing it back links the chat to your account.">this is me</button></div>').join('')
+      :'<div class="dm-tgtxt">Link one from the alerts panel: mint a code there and send the bot /start CODE.</div>')
+    +'</div>';
 }
 
 function dmPickerHtml(){
@@ -14746,10 +14892,11 @@ function dmCallsHtml(){
     const cls=c.chg==null?'sec':(c.chg>0?'pos':'neg');
     const mv=c.chg==null?'\u2014':((c.chg>0?'+':'')+(c.chg*100).toFixed(1)+'%');
     return '<div class="dm-callrow" data-dmjump-thread="'+c.thread+'" data-mid="'+c.id+'">'
-      +'<span class="dm-callt">'+esc(c.ref)+'</span>'
+      +'<span class="dm-callt" data-coin="'+esc(c.ref)+'" title="open the '+esc(dmTkName(c.ref))+' drawer — the rest of the row jumps to the conversation">'+esc(dmTkName(c.ref))+'</span>'
       +'<span class="dm-callb">'+esc(c.body).slice(0,120)+'</span>'
       +'<span class="acc-mu">'+esc(c.sender)+' \u00b7 '+esc(c.threadName)+' \u00b7 '+dmWhen(c.ts)+'</span>'
-      +'<span class="dm-callpx">'+(c.refPx!=null?fmtPx(c.refPx):'\u2014')+'</span>'
+      +'<span class="dm-callpx" title="the mark when it was sent">'+(c.refPx!=null?fmtPx(c.refPx):'\u2014')+'</span>'
+      +'<span class="dm-callpx dm-callnow" title="the current mark">'+(c.px!=null?fmtPx(c.px):'\u2014')+'</span>'
       +'<span class="dm-callmv '+cls+'">'+mv+'</span></div>';
   }).join('');
   return '<div class="dm-log" id="dm-log"><div class="dm-callsums">'+sum+'</div>'+rows+'</div>';
@@ -14770,7 +14917,7 @@ function dmRender(){
   let main;
   if(dmState.mode==='calls'){
     main='<div class="dm-hd"><b>Calls</b>'
-      +'<span class="sec">every price-stamped message, and the move since</span>'
+      +'<span class="sec">every price-stamped message — sent price, current price, and the move</span>'
       +'<button type="button" class="btn dm-mutebtn" id="dm-backchat">back</button></div>'+dmCallsHtml();
   }else if(dmState.results){
     main='<div class="dm-hd"><b>Search</b><span class="sec">'+esc(dmState.q)+'</span>'
@@ -14790,23 +14937,36 @@ function dmRender(){
     const seenBy=(t.seen||[]).filter(x=>lastMine&&x.readMsgId>=lastMine.id).map(x=>x.handle);
     const receipt=lastMine?('<div class="dm-seen">'+(seenBy.length
       ?('seen by '+esc(seenBy.join(', ')))
-      :(t.kind==='group'?'sent':'sent \u00b7 not read yet'))+'</div>'):'';
+      :(t.kind!=='dm'?'sent':'sent \u00b7 not read yet'))+'</div>'):'';
     const pinned=(t.pins?arr.filter(x=>x.pinned):[]);
     const pinStrip=pinned.length?('<div class="dm-pinstrip">'+pinned.slice(0,3).map(x=>
       '<div class="dm-pinrow" data-dmjump="'+x.id+'"><span class="dm-pinicon">\u2691</span>'
       +'<span class="dm-pintext">'+esc((x.ref?'$'+x.ref+' \u00b7 ':'')+(x.body||'attachment')).slice(0,120)+'</span>'
       +'<button type="button" class="dm-tool" data-dmpin="'+x.id+'" data-on="0">unpin</button></div>').join('')+'</div>'):'';
-    const log=arr.length?arr.map(m=>dmMessageHtml(m,t)).join('')+receipt:'<div class="dm-empty">No messages yet.</div>';
-    const grp=t.kind==='group';
+    // Day dividers carry the date once, so per-message headers can be bare clock times; each
+    // message also sees its predecessor, which is what chat-style grouping keys on.
+    const parts=[];
+    for(let i=0;i<arr.length;i++){
+      const m=arr[i], p=arr[i-1];
+      if(!p||!dmSameDay(p.ts,m.ts)) parts.push('<div class="dm-day"><span>'+esc(dmDayLabel(m.ts))+'</span></div>');
+      parts.push(dmMessageHtml(m,t,p));
+    }
+    const log=arr.length?parts.join('')+receipt:'<div class="dm-empty">No messages yet.</div>';
+    const grp=t.kind==='group'||t.kind==='board';
     main='<div class="dm-hd">'+(grp?'<span class="dm-grp">#</span> ':'')+'<b>'+esc(t.name)+'</b>'
       +(grp?'<span class="mk-chip">'+(info?info.members.length:t.members?t.members.length:0)+' members</span>'
-        :'<span class="mk-chip '+(dmState.online.has(t.peer)?'dm-chip-on':'')+'">'
-          +(dmState.online.has(t.peer)?'online':'away')+'</span>')
+        :(function(){ const on=dmState.online.has(t.peer), pm=dmState.members.find(m=>m.uid===t.peer);
+          // "away" answers the question this tab keeps raising: will they even know I wrote?
+          return '<span class="mk-chip '+(on?'dm-chip-on':'')+'" title="'+(on?'connected right now'
+            :(pm&&pm.tg?'away \u2014 unread messages nudge their Telegram after 5 minutes'
+              :'away \u2014 no Telegram linked: they will only see this when they next open the terminal'))+'">'
+            +(on?'online':'away'+(pm&&!pm.tg?' \u00b7 no telegram':''))+'</span>'; })())
       +(t.disabled?'<span class="sec">account disabled</span>':'')
+      +'<span class="dm-hdact">'
       +(grp?'<button type="button" class="btn dm-mutebtn" id="dm-managebtn">'+(dmState.manage?'close':'members')+'</button>':'')
-      +'<a class="btn dm-mutebtn" href="/api/dm/export/'+t.id+'" title="Download this conversation as JSON \u2014 messages, stamps and members">export</a>'
+      +'<a class="btn dm-mutebtn" href="/api/dm/export/'+t.id+'" title="Download this conversation as JSON \u2014 messages, stamps and members">\u2913</a>'
       +'<button type="button" class="btn dm-mutebtn" id="dm-mute" title="Muted conversations never escalate to Telegram'+(t.muted?'':' \u2014 except tickers you watch, which always come through')+'">'
-      +(t.muted?'unmute':'mute')+'</button></div>'
+      +(t.muted?'unmute':'mute')+'</button></span></div>'
       +dmManageHtml(info)+pinStrip
       +'<div class="dm-log" id="dm-log">'+log+'</div>'+dmTypingLine(t.id);
   }
@@ -14843,13 +15003,25 @@ function dmRender(){
   // otherwise, and on this deployment it is not.
   const disclosure=dmState.operatorReadsAll
     ? '<div class="dm-disclose">The operator of this terminal can read every message here.</div>' : '';
+  // Who is here RIGHT NOW, at the top of the rail — before this, presence hid as a small dot per
+  // conversation and you only learned somebody was around after opening theirs. Clicking a chip
+  // starts (or jumps to) a conversation with that person.
+  const onNames=(dmState.members||[]).filter(m=>dmState.online.has(m.uid));
+  const onlineStrip='<div class="dm-onrow">'
+    +(onNames.length
+      ? onNames.map(m=>'<span class="dm-onchip" data-dmnew="'+esc(m.uid)+'" title="message '+esc(m.display)+'"><i></i>'+esc(m.display)+'</span>').join('')
+      : '<span class="dm-onnone">nobody else online</span>')
+    +'</div>';
   host.innerHTML='<div class="dm-wrap">'
     +'<div class="dm-side">'
       +'<div class="dm-search"><input id="dm-q" placeholder="search messages…" value="'+esc(dmState.q)+'"></div>'
+      +'<div class="dm-sh">Online</div>'+onlineStrip
       +'<div class="dm-sh">Conversations'
         +'<button type="button" class="dm-tool dm-callsbtn" id="dm-callsbtn" title="Every price-stamped call, and how each has done since">calls \u2197</button></div>'
       +dmRailHtml()
       +'<div class="dm-new" id="dm-newbtn">'+(dmState.picking?'× close':'+ new message')+'</div>'+dmPickerHtml()
+      +dmTopicsHtml()
+      +dmTgHintHtml()
       +watchBox+'</div>'
     +'<div class="dm-main">'+main+composer+disclosure+'</div></div>';
 
@@ -14894,6 +15066,16 @@ function dmWire(){
     if(e.target.closest('#dm-waddbtn')){ dmState.watchAdd=true; dmRender(); return; }
     if(e.target.closest('#dm-callsbtn')){ dmOpenCalls(); return; }
     if(e.target.closest('#dm-backchat')){ dmState.mode='chat'; dmRender(); return; }
+    const tk=e.target.closest('.dm-tk[data-coin],.dm-callt[data-coin]');
+    if(tk){ const c=tk.dataset.coin;
+      if(state.rows.has(c)) openDetail(c);
+      else pushToast('That market is not on the board right now');
+      return; }
+    const ad=e.target.closest('[data-dmadopt]');
+    if(ad){ dmAdopt(ad.dataset.dmadopt); return; }
+    const bd=e.target.closest('[data-dmboard]');
+    if(bd){ dmOpenBoard(+bd.dataset.dmboard, bd.dataset.joined==='1'); return; }
+    if(e.target.closest('#dm-topicbtn')){ dmNewTopic(); return; }
     const jt=e.target.closest('[data-dmjump-thread]');
     if(jt){ dmState.mode='chat'; dmOpenThread(+jt.dataset.dmjumpThread); return; }
     const jump=e.target.closest('[data-dmjump]');
@@ -14967,7 +15149,14 @@ async function openDM(){
 // Messages boot with the app, not with the tab: the pip must be accurate on the first paint, and a
 // signed-in member who never opens the tab still needs their Telegram escalation cancelled by the
 // simple fact of being here.
-if(dmSignedIn()){ dmLoad().then(dmSync); }
+if(dmSignedIn()){
+  dmLoad().then(()=>{
+    // Unread waiting at open gets said out loud once — the pip alone was easy to miss.
+    const n=dmUnreadTotal();
+    if(n) pushToast('💬 '+n+' unread message'+(n===1?'':'s')+' — open Messages');
+    return dmSync();
+  });
+}
 else { const b=el('tab-dm'); if(b) b.hidden=true; }
 
 // ===== admin panel: access (members + invites) =================================================
