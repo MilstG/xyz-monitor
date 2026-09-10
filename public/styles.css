@@ -2189,13 +2189,21 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
   border:1px solid var(--border);border-radius:4px;padding:1px 6px}
 .dm-hd .dm-chip-on{color:var(--up);border-color:rgba(70,185,126,.5)}
 .dm-mutebtn{margin-left:auto;font-size:11px;padding:3px 9px}
+/* the header's action cluster: one right-aligned group instead of buttons scattered across it */
+.dm-hdact{margin-left:auto;display:inline-flex;gap:6px;align-items:center}
+.dm-hdact .dm-mutebtn{margin-left:0}
+/* the Telegram-nudge hint + adopt offer in the rail */
+.dm-tglink{border-top:1px solid var(--border);margin-top:10px;padding:11px 13px 12px}
+.dm-tgtxt{font-family:var(--mono);font-size:10px;color:var(--faint);line-height:1.5;padding-bottom:6px}
+.dm-tgrow{display:flex;align-items:center;gap:8px;font-size:12px;padding:2px 0}
+.dm-tgrow .grow{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* Tight, chat-app rhythm: 2px inside a sender's run, air only between runs (.hd) and around day
    dividers. The old always-on reaction row and per-message header are gone — a message at rest is
    just its bubble, and everything actionable rides a hover bar. */
-.dm-log{flex:1;min-height:0;padding:12px 14px 8px;display:flex;flex-direction:column;
-  align-items:flex-start;gap:2px;overflow-y:auto}
+.dm-log{flex:1;min-height:0;padding:10px 12px 6px;display:flex;flex-direction:column;
+  align-items:flex-start;gap:1px;overflow-y:auto}
 .dm-msg{max-width:78%;min-width:0;position:relative}
-.dm-msg.hd{margin-top:11px}
+.dm-msg.hd{margin-top:8px}
 .dm-msg.out{align-self:flex-end}
 .dm-day{align-self:center;margin:12px 0 4px;font-family:var(--mono);font-size:9.5px;color:var(--faint);
   text-transform:uppercase;letter-spacing:.8px}
@@ -2213,7 +2221,7 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
   cursor:pointer;padding:0;text-decoration:underline}
 .dm-tool:hover{color:var(--accent)}
 .dm-act .dm-tool{text-decoration:none}
-.dm-b{background:var(--panel2);border:1px solid var(--border);border-radius:14px;padding:6px 11px;
+.dm-b{background:var(--panel2);border:1px solid var(--border);border-radius:13px;padding:5px 10px;
   font-size:13px;line-height:1.45;word-wrap:break-word;overflow-wrap:anywhere}
 .dm-msg:not(.out) .dm-b{border-bottom-left-radius:5px}
 .dm-msg.out .dm-b{background:rgba(227,165,60,.07);border-color:rgba(227,165,60,.32);

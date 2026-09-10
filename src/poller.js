@@ -11389,6 +11389,58 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     log(`push: linked recipient ${name || key} (${pushMask(key)})`);
     return { ok: true, chat: key };
   }
+  // ---- adopting an already-linked chat ---------------------------------------------------------
+  // A member signs in on a terminal whose bot already messages their Telegram (linked before
+  // accounts existed, or from another browser's cookie). Ownership transfers ONLY on proof of
+  // control: a 6-digit code is sent TO that chat and typed back — the same claim /start makes.
+  // Candidate filtering (which rows may even be offered) is the CALLER's job: this module does not
+  // know what an account is.
+  const adoptCodes = new Map();            // chat -> { code, owner, t, sends, tries }
+  const ADOPT_TTL = 10 * 60 * 1000, ADOPT_MAX_SENDS = 3, ADOPT_MAX_TRIES = 5;
+  function pushAdoptRequest(chat, owner) {
+    const key = String(chat);
+    const r = pushRecipients.get(key);
+    if (!r) return { ok: false, error: "unknown" };
+    if (!owner) return { ok: false, error: "no-owner" };
+    if ((r.owner || "") === owner) return { ok: false, error: "already-yours" };
+    const now = Date.now();
+    const prev = adoptCodes.get(key);
+    let sends = 1;
+    if (prev && now - prev.t < ADOPT_TTL) {
+      if (prev.sends >= ADOPT_MAX_SENDS) return { ok: false, error: "throttled" };
+      sends = prev.sends + 1;
+    }
+    // Digits, uniform: it is typed off a phone screen, and randomInt avoids the modulo bias.
+    const code = String(require("crypto").randomInt(0, 1000000)).padStart(6, "0");
+    adoptCodes.set(key, { code, owner, t: now, sends, tries: 0 });
+    return { ok: true, code, name: r.name, ttlMin: Math.round(ADOPT_TTL / 60000) };
+  }
+  function pushAdoptVerify(chat, owner, given) {
+    const key = String(chat);
+    const bad = { ok: false, error: "that code is wrong or has expired" };
+    const e = adoptCodes.get(key);
+    if (!e || e.owner !== owner) return bad;
+    if (Date.now() - e.t > ADOPT_TTL) { adoptCodes.delete(key); return bad; }
+    e.tries++;
+    if (e.tries > ADOPT_MAX_TRIES) { adoptCodes.delete(key); return bad; }
+    const a = Buffer.from(String(given || "").replace(/\s/g, "")), b = Buffer.from(e.code);
+    let match = false;
+    try { match = a.length === b.length && require("crypto").timingSafeEqual(a, b); } catch (_) {}
+    if (!match) return bad;
+    adoptCodes.delete(key);
+    const r = pushRecipients.get(key);
+    if (!r) return { ok: false, error: "unknown" };
+    r.owner = owner;
+    persistPush();
+    log(`push: ${pushMask(key)} adopted by its member (code-verified)`);
+    return { ok: true, chat: key, name: r.name };
+  }
+  // The raw roster for the adopt flow — caller filters to rows no live account owns.
+  function pushAdoptRoster() {
+    return [...pushRecipients.values()].map((r) => ({
+      chat: r.chat, name: r.name, mask: pushMask(r.chat), owner: r.owner || "" }));
+  }
+
   function pushUnlink(chat, owner, isAdmin) {
     const key = String(chat);
     if (!pushRecipients.has(key)) return { ok: false, error: "unknown" };
@@ -14119,6 +14171,9 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     // why an account reuses its xyzown handle as its id.
     pushRecipientsFor: (owner) => [...pushRecipients.values()]
       .filter((r) => r.owner === owner && !r.muted).map((r) => r.chat),
+    // Adopt flow: offer chats the bot already serves to the signed-in member they belong to,
+    // transfer only on a code typed back from inside that chat.
+    pushAdoptRequest, pushAdoptVerify, pushAdoptRoster,
     pushTickNow: pushStreamTick,               // harness: consume the stream on demand
     pushDrainNow: pushDrain,                   // harness: drain the outbox against an injected transport
     pushUpdatesNow: pushUpdatesTick,           // harness: process a getUpdates payload without waiting out the poll

@@ -1025,9 +1025,15 @@ async function main() {
     reply.header("cache-control", "no-store");
     const me = dmMe(req, reply); if (!me) return;
     // The directory is simply the member list: at this size a request-to-connect flow is ceremony.
+    // `tg` per member and `meTg` for the caller: whether an unmuted Telegram is linked to that
+    // ACCOUNT. It is what decides if an away member gets nudged about unread messages — surfaced
+    // so "did my message reach anyone" stops being unanswerable from the tab.
+    const tgLinked = (uid) => !!(poller.pushRecipientsFor && poller.pushRecipientsFor(uid).length);
     return { ok: true, me: ACCOUNTS.pub(me), threads: ACCOUNTS.threads(me.uid),
-      members: ACCOUNTS.listUsers().filter((u) => u.uid !== me.uid && !u.disabled),
+      members: ACCOUNTS.listUsers().filter((u) => u.uid !== me.uid && !u.disabled)
+        .map((u) => Object.assign({ tg: tgLinked(u.uid) }, u)),
       boards: ACCOUNTS.listBoards(me.uid),
+      meTg: tgLinked(me.uid),
       online: [...dmOnline()], maxLen: ACCOUNT_DM_MAX,
       reactions: ACCOUNTS.REACTIONS, maxFile: ACCOUNT_DM_FILE_MAX,
       watching: ACCOUNTS.watchList(me.uid), admin: isAdmin(req),
@@ -1449,6 +1455,46 @@ async function main() {
   fastify.post("/api/alerts/unlink", { bodyLimit: 4 * 1024 }, (req, reply) => {
     const r = poller.pushUnlink(String((req.body && req.body.chat) || ""), ownerFor(req, reply), isAdmin(req));
     return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : 400)).send(r);
+  });
+  // ---- adopting an already-linked Telegram -------------------------------------------------------
+  // A member signs in on a terminal whose bot already messages their phone — linked before accounts
+  // existed, or from a browser cookie that is not this account. Offered are ONLY chats no live
+  // account owns (a teammate's properly-linked chat is never on the list), and ownership moves only
+  // after a code sent TO that chat is typed back: control of the Telegram account is the proof,
+  // exactly the claim /start makes.
+  const adoptCandidates = (me) => (poller.pushAdoptRoster ? poller.pushAdoptRoster() : [])
+    .filter((r) => r.owner !== me.uid && !(r.owner && ACCOUNTS.getUser(r.owner)))
+    .map((r) => ({ chat: r.chat, name: r.name, mask: r.mask }));
+  fastify.get("/api/alerts/adoptable", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = meOf(req);
+    if (!me) return reply.code(401).send({ ok: false, error: "sign in first" });
+    return { ok: true, candidates: adoptCandidates(me) };
+  });
+  fastify.post("/api/alerts/adopt", { bodyLimit: 4 * 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = meOf(req);
+    if (!me) return reply.code(401).send({ ok: false, error: "sign in first" });
+    const b = req.body || {};
+    const chat = String(b.chat || "");
+    // The offer list is the authorization for a REQUEST: a chat owned by a live account cannot
+    // even be asked about, so the code message never lands in a properly-linked teammate's chat.
+    if (!adoptCandidates(me).some((c) => c.chat === chat))
+      return reply.code(400).send({ ok: false, error: "that chat cannot be claimed" });
+    if (b.code != null) {
+      const r = poller.pushAdoptVerify(chat, me.uid, String(b.code || ""));
+      if (r.ok) log(`push: ${me.handle} adopted a linked Telegram (code-verified)`);
+      return reply.code(r.ok ? 200 : 400).send(r);
+    }
+    const r = poller.pushAdoptRequest(chat, me.uid);
+    if (!r.ok) return reply.code(r.error === "throttled" ? 429 : 400).send({ ok: false, error:
+      r.error === "throttled" ? "too many codes sent to that chat — try again in a bit" : "that chat cannot be claimed" });
+    poller.pushEnqueueNow(chat, "<b>Link this chat to " + tgEsc(me.display) + "?</b>\n"
+      + "Someone signed in as <b>" + tgEsc(me.display) + "</b> on the terminal says this Telegram is theirs.\n"
+      + "Their code is <b>" + r.code + "</b> — good for " + r.ttlMin + " minutes.\n"
+      + "<i>If this isn't you, ignore this message and tell the operator.</i>", true);
+    log("push: adopt code sent (chat masked) for " + me.handle);
+    return { ok: true, sent: true, name: r.name };
   });
   // Per-recipient quiet hours and digest time. Separate from the class selection because they are
   // scheduling, not subscription — the same event can be wanted and still not wanted at 3am.
@@ -2140,9 +2186,12 @@ async function main() {
           dmReplyTarget.set(String(chat), { thread: p.thread, at: Date.now() });
         }
       }
-      // Marked either way. With no Telegram linked there is nothing to send, and leaving it
-      // unmarked would re-scan the same backlog every tick forever.
-      ACCOUNTS.markEscalated(p.uid, p.thread, p.upTo);
+      // Marked ONLY when something was actually sent. The old "mark either way" burned the
+      // notification permanently for members with no Telegram linked — link one a day later and
+      // the backlog would never nudge. Left unmarked, the rows come back each tick (a map lookup
+      // and a skip, bounded by a desk's thread count) and go out as ONE digest the moment a chat
+      // is linked or adopted.
+      if (targets.length) ACCOUNTS.markEscalated(p.uid, p.thread, p.upTo);
     }
   }, 60 * 1000).unref();
   // Telegram sends with parse_mode HTML, so a message body is untrusted markup on that wire exactly

@@ -14267,7 +14267,7 @@ const dmState = { me: null, threads: [], members: [], online: new Set(),
   picking: false, editing: null, pendingPeer: null, reactions: [], maxLen: 4000, maxFile: 8388608,
   typing: new Map(), q: '', results: null, searching: false, manage: false, pendingFile: null,
   watching: [], admin: false, operatorReadsAll: false, calls: null, mode: 'chat', watchAdd: false,
-  boards: [] };
+  boards: [], meTg: false, adoptables: null };
 
 function dmSignedIn(){ return !!(window.__ME && window.__ME.uid); }
 function dmUnreadTotal(){ return dmState.threads.reduce((a,t)=>a+(t.muted?0:(t.unread||0)),0); }
@@ -14282,6 +14282,15 @@ function dmUpdatePip(){
   try{ document.title=(n?'('+(n>99?'99+':n)+') ':'')+_dmBaseTitle; }catch(_){}
   const b=el('tab-dm'); if(!b) return;
   b.innerHTML='Messages'+(n?'<span class="tabpip">'+(n>99?'99+':n)+'</span>':'');
+  // If the admin moved Messages into a ribbon menu, the pip on the tab is invisible until the
+  // menu opens — mirror it onto the menu's own button so unread is visible from the main screen.
+  const wrap=b.closest('.tabgrp'), gb=wrap?wrap.querySelector('.grp'):null;
+  if(gb){
+    let pip=gb.querySelector('.tabpip');
+    if(n){ if(!pip){ pip=document.createElement('span'); pip.className='tabpip'; gb.insertBefore(pip, gb.querySelector('.caret')); }
+      pip.textContent=n>99?'99+':String(n); }
+    else if(pip) pip.remove();
+  }
 }
 
 function dmThread(id){ return dmState.threads.find(t=>t.id===id)||null; }
@@ -14307,10 +14316,31 @@ async function dmLoad(){
     dmState.online=new Set(d.online||[]); dmState.maxLen=d.maxLen||4000;
     dmState.maxFile=d.maxFile||8388608; dmState.reactions=d.reactions||[];
     dmState.watching=d.watching||[]; dmState.admin=!!d.admin; dmState.operatorReadsAll=!!d.operatorReadsAll;
-    dmState.boards=d.boards||[];
+    dmState.boards=d.boards||[]; dmState.meTg=!!d.meTg;
+    // With no Telegram linked, ask whether the bot already messages a chat no account owns —
+    // that is this member's own phone from before accounts, offered for a code-verified claim.
+    if(!dmState.meTg&&dmState.adoptables===null){
+      try{ const a=await fetchJSON('/api/alerts/adoptable'); dmState.adoptables=(a&&a.ok)?(a.candidates||[]):[]; }
+      catch(_){ dmState.adoptables=[]; }
+    }
     dmState.loaded=true; dmState.err='';
   }catch(e){ dmState.err=e.message||String(e); }
   dmUpdatePip();
+}
+
+// Code-verified claim of an already-linked chat: request sends a 6-digit code TO that Telegram,
+// typing it back here is the proof of control that moves ownership to this account.
+async function dmAdopt(chat){
+  const r=await fetch('/api/alerts/adopt',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chat})});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok||!d.ok){ pushToast('Could not send a code — '+((d&&d.error)||('HTTP '+r.status))); return; }
+  const code=(prompt('A 6-digit code was sent to “'+(d.name||'that chat')+'” on Telegram.\nEnter it here to link that chat to your account:')||'').trim();
+  if(!code) return;
+  const v=await fetch('/api/alerts/adopt',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chat,code})});
+  const dv=await v.json().catch(()=>({}));
+  if(v.ok&&dv.ok){ pushToast('Telegram linked — messages that arrive while you are away now nudge your phone');
+    dmState.adoptables=null; await dmLoad(); dmRender(); }
+  else pushToast((dv&&dv.error)||'That code did not match');
 }
 
 // The pull the SSE frame triggers. Runs whatever tab is showing — the unread pip has to be right
@@ -14612,6 +14642,9 @@ function dmDayLabel(ts){
 // The price stamp. refPx is what the market showed when the message was sent and never changes;
 // px is read live at render. The move between them is the entire reason this feature exists, so
 // it is computed here and nowhere else.
+// Display name for a stamped market: the "xyz:" universe prefix is routing, not information —
+// the card already said $HOOD in the body, repeating it as xyz:HOOD reads as a different thing.
+function dmTkName(ref){ return String(ref||'').replace(/^xyz:/,''); }
 function dmStamp(m){
   if(!m.ref) return '';
   const at=m.refPx, now=m.px;
@@ -14624,7 +14657,7 @@ function dmStamp(m){
   const sub=has?('sent at '+fmtPx(at)+(live?' · now '+fmtPx(now):' · no longer listed')):'no mark at send';
   // The card is a door, not just a label: clicking it opens the market drawer for the name —
   // same in-place drawer the earnings rows and news badges use, so no tab switch.
-  return '<div class="dm-tk" data-coin="'+esc(m.ref)+'" title="open the '+esc(m.ref)+' drawer"><div><div class="dm-tk-s">'+esc(m.ref)+'</div>'
+  return '<div class="dm-tk" data-coin="'+esc(m.ref)+'" title="open the '+esc(dmTkName(m.ref))+' drawer"><div><div class="dm-tk-s">'+esc(dmTkName(m.ref))+'</div>'
     +'<div class="dm-tk-m">'+esc(sub)+'</div></div>'+right+'</div>';
 }
 function fmtPx(v){
@@ -14671,7 +14704,9 @@ function dmMessageHtml(m,t,p){
   const own=m.mine;
   const who=own?'you':(m.sender||'\u2014');
   const head=!p||p.sys||p.mine!==m.mine||p.sender!==m.sender||(m.ts-p.ts)>5*60e3||!dmSameDay(p.ts,m.ts);
-  const meta=head?'<div class="dm-meta">'+esc(who)+' \u00b7 '+dmTime(m.ts)+'</div>':'';
+  // Own messages carry only the time: they sit right-aligned in their own color, so "you" was
+  // saying what the layout already says.
+  const meta=head?'<div class="dm-meta">'+(own?'':esc(who)+' \u00b7 ')+dmTime(m.ts)+'</div>':'';
   // Pinning is any member's; editing and deleting are the author's; promoting a call to a note is
   // the operator's, because the notes book itself is operator-only. All of it — the reaction
   // picker included — lives in a hover action bar over the bubble, so a message at rest is
@@ -14753,6 +14788,21 @@ async function dmNewTopic(){
   const r=await dmPost({board:true,title:name});
   if(r.ok&&r.d.thread){ await dmLoad(); dmOpenThread(r.d.thread); }
   else { dmState.err=(r.d&&r.d.error)||'could not create the topic'; dmRender(); }
+}
+
+// The away-delivery story, said where messages are written: with no Telegram linked to THIS
+// account, nothing nudges this member's phone. If the bot already messages a chat no account owns
+// (linked before accounts existed), it is offered for a code-verified claim.
+function dmTgHintHtml(){
+  if(!dmState.loaded||dmState.meTg) return '';
+  return '<div class="dm-tglink"><div class="dm-sh" style="padding:0 0 6px">Telegram nudges</div>'
+    +'<div class="dm-tgtxt">No Telegram linked — messages that arrive while you are away cannot reach your phone.</div>'
+    +((dmState.adoptables&&dmState.adoptables.length)
+      ?'<div class="dm-tgtxt">The bot already messages:</div>'
+        +dmState.adoptables.map(c=>'<div class="dm-tgrow"><span class="grow">'+esc(c.name)+' <span class="acc-mu">'+esc(c.mask)+'</span></span>'
+          +'<button type="button" class="dm-tool" data-dmadopt="'+esc(c.chat)+'" title="A 6-digit code goes to that Telegram; typing it back links the chat to your account.">this is me</button></div>').join('')
+      :'<div class="dm-tgtxt">Link one from the alerts panel: mint a code there and send the bot /start CODE.</div>')
+    +'</div>';
 }
 
 function dmPickerHtml(){
@@ -14842,7 +14892,7 @@ function dmCallsHtml(){
     const cls=c.chg==null?'sec':(c.chg>0?'pos':'neg');
     const mv=c.chg==null?'\u2014':((c.chg>0?'+':'')+(c.chg*100).toFixed(1)+'%');
     return '<div class="dm-callrow" data-dmjump-thread="'+c.thread+'" data-mid="'+c.id+'">'
-      +'<span class="dm-callt" data-coin="'+esc(c.ref)+'" title="open the '+esc(c.ref)+' drawer — the rest of the row jumps to the conversation">'+esc(c.ref)+'</span>'
+      +'<span class="dm-callt" data-coin="'+esc(c.ref)+'" title="open the '+esc(dmTkName(c.ref))+' drawer — the rest of the row jumps to the conversation">'+esc(dmTkName(c.ref))+'</span>'
       +'<span class="dm-callb">'+esc(c.body).slice(0,120)+'</span>'
       +'<span class="acc-mu">'+esc(c.sender)+' \u00b7 '+esc(c.threadName)+' \u00b7 '+dmWhen(c.ts)+'</span>'
       +'<span class="dm-callpx" title="the mark when it was sent">'+(c.refPx!=null?fmtPx(c.refPx):'\u2014')+'</span>'
@@ -14904,15 +14954,19 @@ function dmRender(){
     const log=arr.length?parts.join('')+receipt:'<div class="dm-empty">No messages yet.</div>';
     const grp=t.kind==='group'||t.kind==='board';
     main='<div class="dm-hd">'+(grp?'<span class="dm-grp">#</span> ':'')+'<b>'+esc(t.name)+'</b>'
-      +(t.kind==='board'?'<span class="mk-chip" title="a standing topic — anyone on the desk can join it">topic</span>':'')
       +(grp?'<span class="mk-chip">'+(info?info.members.length:t.members?t.members.length:0)+' members</span>'
-        :'<span class="mk-chip '+(dmState.online.has(t.peer)?'dm-chip-on':'')+'">'
-          +(dmState.online.has(t.peer)?'online':'away')+'</span>')
+        :(function(){ const on=dmState.online.has(t.peer), pm=dmState.members.find(m=>m.uid===t.peer);
+          // "away" answers the question this tab keeps raising: will they even know I wrote?
+          return '<span class="mk-chip '+(on?'dm-chip-on':'')+'" title="'+(on?'connected right now'
+            :(pm&&pm.tg?'away \u2014 unread messages nudge their Telegram after 5 minutes'
+              :'away \u2014 no Telegram linked: they will only see this when they next open the terminal'))+'">'
+            +(on?'online':'away'+(pm&&!pm.tg?' \u00b7 no telegram':''))+'</span>'; })())
       +(t.disabled?'<span class="sec">account disabled</span>':'')
+      +'<span class="dm-hdact">'
       +(grp?'<button type="button" class="btn dm-mutebtn" id="dm-managebtn">'+(dmState.manage?'close':'members')+'</button>':'')
-      +'<a class="btn dm-mutebtn" href="/api/dm/export/'+t.id+'" title="Download this conversation as JSON \u2014 messages, stamps and members">export</a>'
+      +'<a class="btn dm-mutebtn" href="/api/dm/export/'+t.id+'" title="Download this conversation as JSON \u2014 messages, stamps and members">\u2913</a>'
       +'<button type="button" class="btn dm-mutebtn" id="dm-mute" title="Muted conversations never escalate to Telegram'+(t.muted?'':' \u2014 except tickers you watch, which always come through')+'">'
-      +(t.muted?'unmute':'mute')+'</button></div>'
+      +(t.muted?'unmute':'mute')+'</button></span></div>'
       +dmManageHtml(info)+pinStrip
       +'<div class="dm-log" id="dm-log">'+log+'</div>'+dmTypingLine(t.id);
   }
@@ -14961,12 +15015,13 @@ function dmRender(){
   host.innerHTML='<div class="dm-wrap">'
     +'<div class="dm-side">'
       +'<div class="dm-search"><input id="dm-q" placeholder="search messages…" value="'+esc(dmState.q)+'"></div>'
-      +'<div class="dm-sh">Online — '+onNames.length+'</div>'+onlineStrip
+      +'<div class="dm-sh">Online</div>'+onlineStrip
       +'<div class="dm-sh">Conversations'
         +'<button type="button" class="dm-tool dm-callsbtn" id="dm-callsbtn" title="Every price-stamped call, and how each has done since">calls \u2197</button></div>'
       +dmRailHtml()
       +'<div class="dm-new" id="dm-newbtn">'+(dmState.picking?'× close':'+ new message')+'</div>'+dmPickerHtml()
       +dmTopicsHtml()
+      +dmTgHintHtml()
       +watchBox+'</div>'
     +'<div class="dm-main">'+main+composer+disclosure+'</div></div>';
 
@@ -15016,6 +15071,8 @@ function dmWire(){
       if(state.rows.has(c)) openDetail(c);
       else pushToast('That market is not on the board right now');
       return; }
+    const ad=e.target.closest('[data-dmadopt]');
+    if(ad){ dmAdopt(ad.dataset.dmadopt); return; }
     const bd=e.target.closest('[data-dmboard]');
     if(bd){ dmOpenBoard(+bd.dataset.dmboard, bd.dataset.joined==='1'); return; }
     if(e.target.closest('#dm-topicbtn')){ dmNewTopic(); return; }
@@ -15092,7 +15149,14 @@ async function openDM(){
 // Messages boot with the app, not with the tab: the pip must be accurate on the first paint, and a
 // signed-in member who never opens the tab still needs their Telegram escalation cancelled by the
 // simple fact of being here.
-if(dmSignedIn()){ dmLoad().then(dmSync); }
+if(dmSignedIn()){
+  dmLoad().then(()=>{
+    // Unread waiting at open gets said out loud once — the pip alone was easy to miss.
+    const n=dmUnreadTotal();
+    if(n) pushToast('💬 '+n+' unread message'+(n===1?'':'s')+' — open Messages');
+    return dmSync();
+  });
+}
 else { const b=el('tab-dm'); if(b) b.hidden=true; }
 
 // ===== admin panel: access (members + invites) =================================================
