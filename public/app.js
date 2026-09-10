@@ -14622,7 +14622,9 @@ function dmStamp(m){
   const right=chg==null?'<span class="dm-tk-d sec" title="this market is no longer listed">—</span>'
     :'<span class="dm-tk-d '+cls+'">'+(chg>0?'+':'')+(chg*100).toFixed(1)+'%</span>';
   const sub=has?('sent at '+fmtPx(at)+(live?' · now '+fmtPx(now):' · no longer listed')):'no mark at send';
-  return '<div class="dm-tk"><div><div class="dm-tk-s">'+esc(m.ref)+'</div>'
+  // The card is a door, not just a label: clicking it opens the market drawer for the name —
+  // same in-place drawer the earnings rows and news badges use, so no tab switch.
+  return '<div class="dm-tk" data-coin="'+esc(m.ref)+'" title="open the '+esc(m.ref)+' drawer"><div><div class="dm-tk-s">'+esc(m.ref)+'</div>'
     +'<div class="dm-tk-m">'+esc(sub)+'</div></div>'+right+'</div>';
 }
 function fmtPx(v){
@@ -14840,7 +14842,7 @@ function dmCallsHtml(){
     const cls=c.chg==null?'sec':(c.chg>0?'pos':'neg');
     const mv=c.chg==null?'\u2014':((c.chg>0?'+':'')+(c.chg*100).toFixed(1)+'%');
     return '<div class="dm-callrow" data-dmjump-thread="'+c.thread+'" data-mid="'+c.id+'">'
-      +'<span class="dm-callt">'+esc(c.ref)+'</span>'
+      +'<span class="dm-callt" data-coin="'+esc(c.ref)+'" title="open the '+esc(c.ref)+' drawer — the rest of the row jumps to the conversation">'+esc(c.ref)+'</span>'
       +'<span class="dm-callb">'+esc(c.body).slice(0,120)+'</span>'
       +'<span class="acc-mu">'+esc(c.sender)+' \u00b7 '+esc(c.threadName)+' \u00b7 '+dmWhen(c.ts)+'</span>'
       +'<span class="dm-callpx" title="the mark when it was sent">'+(c.refPx!=null?fmtPx(c.refPx):'\u2014')+'</span>'
@@ -15009,6 +15011,11 @@ function dmWire(){
     if(e.target.closest('#dm-waddbtn')){ dmState.watchAdd=true; dmRender(); return; }
     if(e.target.closest('#dm-callsbtn')){ dmOpenCalls(); return; }
     if(e.target.closest('#dm-backchat')){ dmState.mode='chat'; dmRender(); return; }
+    const tk=e.target.closest('.dm-tk[data-coin],.dm-callt[data-coin]');
+    if(tk){ const c=tk.dataset.coin;
+      if(state.rows.has(c)) openDetail(c);
+      else pushToast('That market is not on the board right now');
+      return; }
     const bd=e.target.closest('[data-dmboard]');
     if(bd){ dmOpenBoard(+bd.dataset.dmboard, bd.dataset.joined==='1'); return; }
     if(e.target.closest('#dm-topicbtn')){ dmNewTopic(); return; }
