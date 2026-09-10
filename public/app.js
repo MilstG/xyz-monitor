@@ -14749,7 +14749,8 @@ function dmTweet(m){
     +'<span class="dm-x-who">'+esc(t.author||t.handle||'—')+'</span>'
     +'<span class="dm-x-at">'+esc((t.handle?'@'+t.handle:'')+(t.when?(t.handle?' · ':'')+t.when:''))+'</span></span>'
     +(t.text?'<span class="dm-x-t">'+cash(esc(t.text)).replace(/\n/g,'<br>')+'</span>':'')
-    +'<span class="dm-x-f"><span class="dm-x-open">open on X ↗</span></span></a>';
+    +'<span class="dm-x-f">'+(t.media?'<span class="dm-x-media">🖼 media attached</span>':'')
+    +'<span class="dm-x-open">open on X ↗</span></span></a>';
 }
 
 function dmReactions(m){

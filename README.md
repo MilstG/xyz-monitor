@@ -179,6 +179,26 @@ instant, and the per-IP rate limit stops being a per-user problem.
   open/closed state survives a re-render without a single renderer knowing the folds exist. Open
   folds are remembered per browser — collapsed is the state a fresh browser gets, not one to
   re-clear every visit. A test fails if a future box is added to the panel without a fold.
+- **Messages v4** (builds 2026.09.10-51…-57) — the tab became a chat app. Chat-style grouping (one
+  name/time header per run, day dividers, hover action bar, bottom-anchored log), per-member
+  colors in groups, live read receipts (arrivals mark read while the conversation is open and
+  visible — before this, "sent · not read yet" stuck forever and read as failed delivery), and a
+  bottom-left **chat dock** with a red unread count on every tab. **Replies** quote one line and
+  click back to the original; a cross-thread `replyTo` never binds. **@mentions** behave like
+  watched tickers: immediate Telegram escalation, through a mute. **Topic boards** are groups
+  whose door is open — anyone may join themselves, so reads and writes still ride the membership
+  check — with the first pin rendered in full as the topic's standing post. **Tweet cards**: an
+  x.com status link unfurls via X's public oEmbed (no key, cached per id, fetched in the
+  background with an SSE refresh poke); only parsed fields are stored — X's embed HTML can carry
+  script and never reaches a client. **Close / clear / delete** are three different verbs: close
+  is per-viewer and reversible from a folded "Closed" rail section; clear forgets the backscroll
+  for you alone (history, sync, search and export all honor it); delete — owner or operator, on
+  groups only — shreds the thread for everyone and lands in the audit log. **Attachments** are an
+  allowlist now: the four sniffed raster formats plus `.txt` that validates as text, everything
+  else refused at upload. **Retention**: 30d in a 1-to-1, 7d in groups/topics, pinned messages
+  exempt, rows and bytes actually deleted. Members with no Telegram can adopt a chat the bot
+  already serves — a 6-digit code sent to that chat is the proof — and signed-out visitors get a
+  rate-limited "request an invite" that pings the operator's ops channel.
 - **Saved layouts** — named views of the markets table (column order + visibility, sort,
   analysis window, vol/OI filters, ★-only), saved and switched from the Layouts menu. Stored
   per browser in localStorage; the active layout shows a • when the live view has unsaved changes.

@@ -4014,13 +4014,17 @@ function tweetFromOembed(j, id) {
     .replace(/&#39;/g, "'").replace(/&mdash;/g, "—").replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&");   // last, or &amp;lt; would double-decode
   const pm = /<p[^>]*>([\s\S]*?)<\/p>/.exec(html);
-  const text = pm ? deHtml(pm[1]).trim() : "";
+  let text = pm ? deHtml(pm[1]).trim() : "";
+  // Attached media shows up in oEmbed only as a trailing pic.twitter.com link in the text — turn
+  // it into a flag and strip the link, so the card says "media" instead of printing a URL stub.
+  const media = /pic\.twitter\.com\//.test(text);
+  text = text.replace(/\s*(?:https?:\/\/)?pic\.twitter\.com\/\S+/g, "").trim();
   const hm = /twitter\.com\/([A-Za-z0-9_]{1,15})/.exec(String(j.author_url || ""));
   const handle = hm ? hm[1] : "";
   const wm = /<a href="https?:\/\/twitter\.com[^"]*">([^<]+)<\/a>\s*<\/blockquote>/.exec(html);
   const author = String(j.author_name || handle || "").slice(0, 60);
   if (!text && !author) return null;
-  return { ok: true, id: String(id || ""), author, handle,
+  return { ok: true, id: String(id || ""), author, handle, media,
     text: text.slice(0, 400), when: wm ? deHtml(wm[1]).slice(0, 30) : "",
     url: "https://x.com/" + (handle || "i") + "/status/" + String(id || "") };
 }
