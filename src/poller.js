@@ -2,7 +2,7 @@
 // Owns all Hyperliquid I/O. Polls the universe, backfills candle history, samples OI,
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket, createCoinalyze } = require("./hyperliquid");
-const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly } = require("./compute");
+const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly, closedDailyCloses } = require("./compute");
 const { claimGeometryOk, clusterDays, evMeta, capPerUniverse, detectCascExhaust, latestCascade, tradeableNow } = require("./compute");
 const { sectorAuditDecide, mergeSectorAudit, sectorAuditDue } = require("./compute");
 const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFeatures, featureCounts, featureSettable, featureScopeVis, coinScope, scopeFilterSignals, scopeFilterActionable, scopeEventVisible, epLatSplit } = require("./compute");
@@ -2721,7 +2721,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     for (const r of activeMarkets().concat(crypto ? mainMarkets() : [])) {
       if (r.delisted || r.px == null) continue;
       if (++yN % BUILD_YIELD_EVERY === 0) await buildYield();
-      const closes = deepDaily.get(r.coin) || dc.daily[r.coin] || null, dayFunding = dc.funding[r.coin] || null;   // -28: detectors read full depth; the wire's cap is the wire's business
+      // CLOSED bars only: the raw daily spine ends with today's forming UTC bar, and the studies and
+      // detectors below read the last element as a close — so "close-confirmed" setups fired at 00:10
+      // UTC and every study's forward returns drifted on each rebuild (the -20 shadows already trim
+      // theirs at `ccl`). One trim here covers studiesFor, compressionNow and every detector in this loop.
+      const closes = closedDailyCloses(deepDaily.get(r.coin) || dc.daily[r.coin] || null), dayFunding = dc.funding[r.coin] || null;   // -28: detectors read full depth; the wire's cap is the wire's business
       const st = studiesFor(r, closes, dayFunding);
       const ac = acOf(r);
       if (st.bigmove && st.bigmove.raw) { feed(ac, "bigmove", "d1", st.bigmove.raw.d1); }

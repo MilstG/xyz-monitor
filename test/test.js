@@ -658,11 +658,14 @@ test("gap study F-gap: the forward session uses the TRUE close, honoring early-c
   const spine = [];
   const start = Date.UTC(2025, 5, 20, 12, 0), end = Date.UTC(2025, 6, 3, 22, 0);
   const open = Date.UTC(2025, 6, 3, 13, 30), trueClose = Date.UTC(2025, 6, 3, 17, 0), phantom = Date.UTC(2025, 6, 3, 20, 0);
+  // A row's t is the bar's OPEN; its close is the print at t+1h (the -67 priceAsOf semantics), so
+  // the regimes are keyed on the bar's close time.
   for (let t = start; t <= end; t += HH) {
+    const ct = t + HH;
     let c = 100 + 0.3 * Math.sin(t / (7 * HH));   // gentle sub-threshold wiggle
-    if (t >= open && t < trueClose) c = 110;
-    else if (t >= trueClose && t < phantom) c = 130;
-    else if (t >= phantom) c = 101;
+    if (ct > open && ct < trueClose) c = 110;
+    else if (ct >= trueClose && ct < phantom) c = 130;
+    else if (ct >= phantom) c = 101;
     spine.push([t, c, c, c, c]);
   }
   // Gap windows: 11 tiny filler gaps (sub-threshold, to build the sd sample) on prior days, plus
@@ -4801,7 +4804,7 @@ test("client + server integrity: the Report tab ships end to end (markers, style
   // shadows at 216) for eight builds while the 370d retention sat unread. The loop must read the
   // deep map, and the deep map must be written before the wire slice.
   assert.ok(pol.includes("deepDaily.set(r.coin, dr);"), "full crypto tuples stashed for the signal loop");
-  assert.ok(pol.includes("const closes = deepDaily.get(r.coin) || dc.daily[r.coin] || null"), "the signal loop prefers full depth");
+  assert.ok(pol.includes("const closes = closedDailyCloses(deepDaily.get(r.coin) || dc.daily[r.coin] || null)"), "the signal loop prefers full depth (closed bars only, -67)");
 });
 
 test("ai report: OpenAI provider — Chat Completions shape, Bearer auth, Terra→Sol fallback on refusal", async () => {
@@ -7126,7 +7129,7 @@ test("levels study -10: manifest — engine, control and exports are pinned", ()
   // DEFAULT closure: detectLevels with pass-through opts, and the walk feeding it the prefix only.
   assert.ok(/const detect = typeof o\.detect === "function" \? o\.detect\s*\n\s*: \(pb, px2, sd2\) => detectLevels\(pb, px2, sd2, dOpts\);/.test(cmp),
     "levelOutcomes' default detector must be the shipping detectLevels with pass-through opts (one code path)");
-  assert.ok(/const lv = detect\(b\.slice\(0, i \+ 1\), px, sd30\);/.test(cmp),
+  assert.ok(/const lv = detect\(b\.slice\(0, i \+ 1\), px, sdHere\);/.test(cmp),
     "the walk hands the detector the PREFIX only — injected or default alike");
   assert.ok(cmp.includes("// The null for a SET of levels is the mean of each level's own touch probability"),
     "the Jensen note must survive — it explains why grouped cells average per-event controls");
@@ -9682,8 +9685,9 @@ test("BTC-excess leg + tape-day clustering: the two disclosures a correlated uni
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: true });
   const HOUR = 3600e3, now = Date.now();
   // BTC rose 10% over the window; ALT rose 15%. The raw leg says +15%, the excess leg +5%.
-  const spine = (from, to) => { const h = []; for (let i = 30; i >= 0; i--) {
-    const c = from + (to - from) * ((30 - i) / 30); h.push([now - i * HOUR, c, c, c, c, 1e5]); } return h; };
+  // 32 bars: the claim opens at now-30h and priceAsOf reads the bar that had CLOSED by then (-67).
+  const spine = (from, to) => { const h = []; for (let i = 31; i >= 0; i--) {
+    const c = from + (to - from) * ((31 - i) / 31); h.push([now - i * HOUR, c, c, c, c, 1e5]); } return h; };
   p.seedRowNow("BTC", { px: 110, ticker: "BTC", uni: "main", hourlyRaw: spine(100, 110), hourlyTs: now });
   p.seedRowNow("ALT", { px: 115, ticker: "ALT", uni: "main", hourlyRaw: spine(100, 115), hourlyTs: now });
   const e = p.openLedgerNow("ALT", "breakout", { score: 9, reading: "", play: { side: "long", stop: 94, target: 130 } }, 1, { sd0: 5 });
@@ -24250,4 +24254,71 @@ test("audit -67: the OI log streams in at boot and loadAll serves the preloaded 
   // A file that ends cleanly keeps its last row.
   fs.writeFileSync(path.join(dir, "oi.log"), rows.join("\n") + "\n");
   assert.equal(await openStore(dir).preloadOI(), 501);
+});
+
+// priceAsOf returned the close of the bar that STARTS at or before the anchor — the print an hour
+// after it. A 16:00 ET cash close read the 17:00 print and every "held close→open" hold contained
+// the open auction. It now reads the last bar that had closed by the anchor.
+test("audit -67: priceAsOf reads the last bar that closed by the anchor, never a later print", () => {
+  const C = require("../src/compute");
+  const t0 = Date.UTC(2026, 0, 5, 12, 0);
+  const rows = []; for (let i = 0; i < 12; i++) rows.push([t0 + i * HOUR, 0, 0, 0, 100 + i, 1]);   // bar i closes at t0+(i+1)h with 100+i
+  assert.equal(C.priceAsOf(rows, t0 + 5 * HOUR, 3 * HOUR), 104, "on the hour: the bar that ends exactly then");
+  assert.equal(C.priceAsOf(rows, t0 + 5 * HOUR + 30 * 60e3, 3 * HOUR), 104, "half past: still the last CLOSED bar, not the one in progress");
+  assert.equal(C.priceAsOf(rows, t0 + 30 * 60e3, 3 * HOUR), null, "nothing has closed yet");
+  assert.equal(C.priceAsOf(rows, t0 + 12 * HOUR + 4 * HOUR, 3 * HOUR), null, "beyond tol after the last close");
+  assert.equal(C.priceAsOf(rows, t0 + 12 * HOUR + 2 * HOUR, 3 * HOUR), 111, "within tol after the last close");
+});
+
+test("audit -67: the forming daily bar is dropped before detectors and studies read a 'close'", () => {
+  const C = require("../src/compute");
+  const now = Date.now(), day0 = Math.floor(now / DAY) * DAY;
+  const closes = []; for (let i = 80; i >= 0; i--) closes.push([day0 - i * DAY, 100]);
+  assert.equal(C.closedDailyCloses(closes, now).length, 80, "today's bar is forming");
+  assert.equal(C.closedDailyCloses(closes, day0 + DAY).length, 81, "once its day has ended it is a close");
+  assert.equal(C.closedDailyCloses([], now).length, 0);
+  // A base breakout that only exists on today's forming bar must not fire.
+  const b = closes.slice(0, -1).map((k, i) => [k[0], 100 + 0.1 * Math.sin(i)]);
+  b.push([day0, 120]);   // today: "broke out" — but the day is not over
+  const px = 121, sd30 = 1;
+  assert.ok(C.detectBaseBreak(b, px, sd30, null) != null, "raw: the forming bar reads as a breakout close");
+  assert.equal(C.detectBaseBreak(C.closedDailyCloses(b, now), px, sd30, null), null, "trimmed: nothing has closed above the base yet");
+  // earnReactionsFor: today's reaction candle is not a reaction yet.
+  const daily = []; for (let i = 30; i >= 0; i--) daily.push({ t: day0 - i * DAY, c: 100 });
+  daily[daily.length - 1].c = 130;
+  const d = (t) => new Date(t).toISOString().slice(0, 10);
+  const st = C.earnReactionsFor([{ d: d(day0), s: "BMO" }, { d: d(day0 - 10 * DAY), s: "BMO" }], daily, now);
+  assert.equal(st && st.n, 1, "only the settled print counts (" + (st && st.n) + ")");
+});
+
+// levelOutcomes and emaCrossOutcomes normalised a 370-bar walk with TODAY's σ: a name whose σ
+// doubled had its old pivots clustered at today's tolerance and its old outcomes scored at half
+// their true R. σ is now trailing per prefix (excluding the event bar's own return), today's value
+// only where the prefix is too short.
+test("audit -67: level and EMA outcome studies score history in the σ the tape had at the time", () => {
+  const C = require("../src/compute");
+  const t0 = Date.UTC(2025, 0, 1), bars = [];
+  // 200 quiet bars (±1% oscillation) then 200 loud ones (±4%), deterministic, crossing the line often.
+  for (let i = 0; i < 400; i++) { const amp = i < 200 ? 1 : 4; const c = 100 * (1 + (amp / 100) * Math.sin(i * 0.9)); bars.push({ t: t0 + i * DAY, c, h: c * 1.003, l: c * 0.997, v: 1 }); }
+  const sdToday = 4;
+  const trail = C.emaCrossOutcomes(bars, sdToday, { N: 20, horizon: 5, rearm: 3, bufSd: 0.25 });
+  const fixed = C.emaCrossOutcomes(bars, sdToday, { N: 20, horizon: 5, rearm: 3, bufSd: 0.25, trailingSd: false });
+  const early = (r) => r.events.filter((e) => e.vr === "raw" && e.t < t0 + 190 * DAY);
+  const late = (r) => r.events.filter((e) => e.vr === "raw" && e.t > t0 + 260 * DAY);
+  assert.ok(early(trail).length > 10 && late(trail).length > 10, "events on both halves");
+  const meanAbs = (evs) => evs.reduce((a, e) => a + Math.abs(e.fwd), 0) / evs.length;
+  // The property: in R, a regime's own moves read the same size whether it was the quiet or the
+  // loud one — under today's σ the quiet era shrinks to a fraction of the loud one.
+  const ratioTrail = meanAbs(early(trail)) / meanAbs(late(trail)), ratioFixed = meanAbs(early(fixed)) / meanAbs(late(fixed));
+  assert.ok(ratioTrail > 0.7 && ratioTrail < 1.4, "trailing σ: quiet-era and loud-era |R| are comparable (" + ratioTrail.toFixed(2) + ")");
+  assert.ok(ratioFixed < 0.5, "today's σ: the quiet era is scored at a fraction of its true R (" + ratioFixed.toFixed(2) + ")");
+  const lv = C.levelOutcomes(bars, sdToday, { stride: 5, horizon: 10, minBars: 60 });
+  const lvF = C.levelOutcomes(bars, sdToday, { stride: 5, horizon: 10, minBars: 60, trailingSd: false });
+  const dEarly = (r) => r.events.filter((e) => e.t < t0 + 190 * DAY).map((e) => e.distSd);
+  assert.ok(dEarly(lv).length && dEarly(lvF).length);
+  const med = (a) => { const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
+  assert.ok(med(dEarly(lv)) > 1.5 * med(dEarly(lvF)), "a quiet-era level sits further away in quiet-era σ");
+  // Pinned convention: the σ window ends BEFORE the event bar (no one-bar look-ahead).
+  const cmp = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "compute.js"), "utf8");
+  assert.equal((cmp.match(/sdAt\(rets, i\); return v != null && v > 0 \? v : sd(30|Tf); \}/g) || []).length, 2);
 });
