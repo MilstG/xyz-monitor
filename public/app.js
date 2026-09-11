@@ -2799,7 +2799,8 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
     <div class="dsec">Top hedges — inverse (90d)</div>${neg.length?neg.map(x=>li(x[0],x[1])).join(''):'<div class="sec" style="font-size:12px">no negative correlations</div>'}`;
   el('drawer').classList.add('show'); el('drawerbg').classList.add('show'); el('drawer').setAttribute('aria-hidden','false');
   el('dclose').onclick=closeDetail;
-  el('dstar').onclick=()=>{ toggleWatch(coin); openDetail(coin); };
+  el('dstar').onclick=()=>{ toggleWatch(coin);   // renders the table; the drawer (and a half-typed note) stays put
+    const on=state.watch.has(coin), st=el('dstar'); if(st){ st.textContent=on?'\u2605':'\u2606'; st.classList.toggle('on',on); } };
   wireDrawerNotes(coin);
   if(!state.notes) loadNotes().then(()=>{ if(state.detail===coin) renderDrawerNotes(coin); });
   setHash('t='+encodeURIComponent(coin));
@@ -3823,10 +3824,13 @@ function renderAdmFloors(){
     const at=ev=>{ const r=sv.getBoundingClientRect(); if(!r.width) return;
       const f=Math.max(0,Math.min(1,((ev.touches?ev.touches[0].clientX:ev.clientX)-r.left)/r.width));
       commit(sv.dataset.flk,Math.pow(10,LO+f*(HI-LO))); };
-    sv.addEventListener('mousedown',e=>{ e.preventDefault(); sv._d=1; at(e); });
-    sv.addEventListener('mousemove',e=>{ if(sv._d) at(e); });
-    sv.addEventListener('mouseup',()=>{ sv._d=0; });
-    sv.addEventListener('mouseleave',()=>{ sv._d=0; });
+    // commit() re-renders the box, which replaces this SVG mid-drag — so the drag only tracks the
+    // pointer and commits ONCE on release (a click is mousedown+mouseup at the same spot).
+    sv.addEventListener('mousedown',e=>{ e.preventDefault(); sv._d=1; sv._last=e; });
+    sv.addEventListener('mousemove',e=>{ if(sv._d) sv._last=e; });
+    const release=()=>{ if(sv._d&&sv._last){ const e=sv._last; sv._d=0; sv._last=null; at(e); } sv._d=0; };
+    sv.addEventListener('mouseup',release);
+    sv.addEventListener('mouseleave',release);
   });
   const sb=el('admFlSave'); if(sb) sb.addEventListener('click',saveAdmFloors);
   const rb=el('admFlReset'); if(rb) rb.addEventListener('click',()=>{ _admFlV=hard.vol; _admFlO=hard.oi;
@@ -6915,10 +6919,14 @@ async function loadTriggers(){
       if(!A.seenSeq){ A.seenSeq=d.seq||0; saveAlerts(); }
       updateBell(); if(!el('alertpop').hidden) buildAlertsPanel(); return; }
     for(const ev of d.events){
-      const k=ev.kind||'setup';
-      if(k==='ops'){ fireOps(ev); continue; }
-      if(k==='ledger'){ fireLedger(ev); continue; }
-      if(A.trig.on && trigEligibleClient(ev,A.trig)) fireTrigger(ev);
+      // Per event: one malformed row used to throw out of the loop, skip trigSeqSet, and replay
+      // the whole window (repeat toasts) on every alertVer bump.
+      try{
+        const k=ev.kind||'setup';
+        if(k==='ops'){ fireOps(ev); continue; }
+        if(k==='ledger'){ fireLedger(ev); continue; }
+        if(A.trig.on && trigEligibleClient(ev,A.trig)) fireTrigger(ev);
+      }catch(_){ /* this event is broken, the batch is not */ }
     }
     if(d.seq!=null) trigSeqSet(d.seq);
   }catch(_){ /* cursor unadvanced — the next poll retries the same window, nothing is lost */ }
@@ -6942,7 +6950,7 @@ function pushTrigToast(ev){
   const late=ev.late==null?'—':((ev.late>=0?'+':'')+ev.late.toFixed(2)+'R');
   const lateCls=ev.late==null?'sec':(ev.late<=0?'pos':(ev.late>0.5?'warn':'sec'));
   t.innerHTML=`<div class="tt-h"><span class="tt-lbl">NEW TRIGGER</span><span class="ax" data-x="1" title="dismiss">✕</span></div>`
-    +`<div class="tt-n"><b class="${sideCls}">${esc(ev.t)}</b> <span class="${sideCls}">${esc(ev.side.toUpperCase())}</span> <span class="sec">${esc(ev.label)}</span></div>`
+    +`<div class="tt-n"><b class="${sideCls}">${esc(ev.t)}</b> <span class="${sideCls}">${esc(String(ev.side||'').toUpperCase())}</span> <span class="sec">${esc(ev.label)}</span></div>`
     +`<div class="tt-g">fired ${fmtPrice(ev.fired)} · void ${fmtPrice(ev.void)} · target ${fmtPrice(ev.target)}</div>`
     +`<div class="tt-g">R:R ${ev.rr&&ev.rr.gross!=null?(+ev.rr.gross).toFixed(2):'—'} at fire · EV ${ev.evR!=null?((ev.evR>=0?'+':'')+(+ev.evR).toFixed(2)+'R'):'no record'} · late <span class="${lateCls}">${late}</span></div>`
     +(ev.earn?`<div class="tt-w">⚠ earnings ${ev.earn.days}d out — inside the ${ev.horizonD}d horizon</div>`:'')
@@ -7332,7 +7340,7 @@ function actDetail(r){
   g.push(['taking it now',`${fmtPrice(r.entry)} \u2014 ${r.late==null?'lateness unavailable':(r.late<0?`${actLate(-r.late)}R of the claim's risk already spent against you`:`${actLate(r.late)}R of the move already made`)}`]);
   g.push(['fired',`${actAgo(Date.now()-r.t0)} ago \u00b7 ${r.bars==null?'\u2014':r.bars} ${r.tf} bar(s) in trigger`]);
   g.push(['lateness',r.late==null?'unavailable':`${actLate(r.late)}R ${r.late<0?'\u2014 price moved AGAINST the claim: better entry price, but that much less room to the void than the record\u2019s fires had':'of the claim\u2019s move already made before entry'}`]);
-  let h=`<div class="act-det"><div class="ad-h"><b class="${r.side==='long'?'pos':'neg'}">${esc(r.t)} ${esc(r.side.toUpperCase())}</b> \u00b7 ${esc(r.label)} on the ${esc(r.tf)} rung \u00b7 ${r.horizonD}d horizon`
+  let h=`<div class="act-det"><div class="ad-h"><b class="${r.side==='long'?'pos':'neg'}">${esc(r.t)} ${esc(String(r.side||'').toUpperCase())}</b> \u00b7 ${esc(r.label)} on the ${esc(r.tf)} rung \u00b7 ${r.horizonD}d horizon`
     +(r.prime===true?' <span class="ad-badge" title="This setup was prime at fire time by the signals engine\u2019s heuristic: hit \u2265 60%, positive average, clean structure, no earnings. Shown, not enforced \u2014 a lower-hit setup at high R:R is still worth taking.">prime at fire</span>':'')
     +(r.also&&r.also.length?` \u00b7 <span class="sec">corroborated by ${esc(r.also.map(a=>a.label).join(', '))}</span>`:'')+`</div><div class="ad-g">`;
   for(const [k,v] of g) h+=`<div class="ad-k">${k}</div><div class="ad-v">${v}</div>`;
@@ -8857,7 +8865,7 @@ function renderNews(){
 }
 function bindNews(box){
   const nf=box.querySelector('#nfilter');
-  if(nf){ nf.oninput=()=>{ newsFilter=nf.value; renderNews(); const el2=document.getElementById('nfilter'); if(el2){ el2.focus(); el2.setSelectionRange(el2.value.length,el2.value.length); } }; }
+  if(nf){ let nfT=null; nf.oninput=()=>{ newsFilter=nf.value; clearTimeout(nfT); nfT=setTimeout(()=>{ renderNews(); const el2=document.getElementById('nfilter'); if(el2){ el2.focus(); el2.setSelectionRange(el2.value.length,el2.value.length); } },120); }; }
   box.querySelectorAll('[data-nm]').forEach(b=>b.onclick=()=>{ newsMode=b.dataset.nm; renderNews(); });
   box.querySelectorAll('[data-nv]').forEach(b=>b.onclick=()=>{ newsView=b.dataset.nv; renderNews(); });
   { const g=box.querySelector('#ntg-gear'); if(g) g.onclick=()=>{ newsTgOpen=!newsTgOpen; if(newsTgOpen) loadTgChannels(); renderNews(); }; }
@@ -9774,11 +9782,18 @@ function warmCount(){
 // proxy can wedge a stream half-open without erroring); any stream error snaps the cadence back
 // instantly and EventSource handles its own reconnect. No EventSource support = the poll exactly
 // as it always was.
-let _sseOk=false, _sseSrc=null;
+let _sseOk=false, _sseSrc=null, _sseBackoff=2000, _sseRetryT=null;
 function startEvents(){ if(typeof EventSource==='undefined'||_sseSrc) return;
   try{ _sseSrc=new EventSource('/api/events'); }catch(_){ return; }
-  _sseSrc.onopen=()=>{ _sseOk=true; startCycle(); };
-  _sseSrc.onerror=()=>{ if(_sseOk){ _sseOk=false; startCycle(); } };   // reconnects itself; we just restore the fast poll
+  _sseSrc.onopen=()=>{ _sseOk=true; _sseBackoff=2000; startCycle(); };
+  _sseSrc.onerror=()=>{
+    if(_sseOk){ _sseOk=false; startCycle(); }   // a transient drop: the browser reconnects itself; we just restore the fast poll
+    // A non-retryable answer (a 5xx mid-redeploy, a 401 after the session expired, a proxy 502)
+    // leaves the source CLOSED for good and the browser never retries — and dmSync only ever ran
+    // off this stream, so the unread pip and read receipts went dark for the rest of the session.
+    if(_sseSrc&&_sseSrc.readyState===2){ try{ _sseSrc.close(); }catch(_){} _sseSrc=null;
+      clearTimeout(_sseRetryT); _sseRetryT=setTimeout(startEvents,_sseBackoff); _sseBackoff=Math.min(_sseBackoff*2,60000); }
+  };
   _sseSrc.onmessage=(ev)=>{ let d; try{ d=JSON.parse(ev.data); }catch(_){ return; }
     // A pushed dataTs we already hold is a no-op (the initial sync frame, typically). A new one —
     // including the new `v` a redeploy pushes via the reconnect's first frame — pulls immediately;
@@ -9831,7 +9846,12 @@ el('watchOnly').classList.toggle('on', state.watchOnly);
 { const nb=el('noteOnly'); if(nb) nb.classList.toggle('on', state.noteOnly); }
 updateLayoutBtn();
 el('refresh').addEventListener('click', forceRefresh);
-el('filter').addEventListener('input', e=>{ state.filter=e.target.value; render(); savePrefs(); });
+// Foregrounding the tab: reopen a dead stream and pull messages once, whatever tab is showing.
+document.addEventListener('visibilitychange',()=>{ if(document.hidden) return;
+  if(!_sseSrc) startEvents();
+  if(typeof dmSync==='function'&&dmState&&dmState.me){ try{ dmSync(); }catch(_){} } });
+// Search-as-you-type re-rendered the whole table synchronously per keystroke; one frame is plenty.
+el('filter').addEventListener('input', e=>{ state.filter=e.target.value; scheduleRender(); savePrefs(); });
 el('body').addEventListener('click', e=>{ const star=e.target.closest('.star');
   if(star){ e.stopPropagation(); toggleWatch(star.dataset.star); return; }
   const pit=e.target.closest('.pit[data-pit]');
@@ -9871,7 +9891,7 @@ document.addEventListener('click',e=>{ const pop=el('alertpop');
 function applyNumFilters(){
   for(const id of ['volMin','volMax','oiMin','oiMax']){ const inp=el(id), v=parseAmount(inp.value);
     if(Number.isNaN(v)) inp.classList.add('bad'); else { inp.classList.remove('bad'); state.filters[id]=v; } }
-  updateFilterChip(); render(); savePrefs();
+  updateFilterChip(); scheduleRender(); savePrefs();
 }
 ['volMin','volMax','oiMin','oiMax'].forEach(id=>el(id).addEventListener('input', applyNumFilters));
 applyNumFilters();
@@ -12635,6 +12655,7 @@ async function focChartOpen(ticker){
   if(!day||!p) return;
   focChartEnsureDom();
   FOCCH.p=p; FOCCH.day=day; FOCCH.base=null; FOCCH.agg=null; FOCCH.hover=null; FOCCH.tf=15;
+  const mySeq=(FOCCH.seq=(FOCCH.seq||0)+1);   // a slower earlier fetch must not paint over a newer name's chart
   const m=el('focmodal'); m.hidden=false;
   m.querySelectorAll('[data-foctf]').forEach(x=>x.classList.toggle('on',x.dataset.foctf==='15'));
   el('focch-t').textContent=ticker;
@@ -12645,6 +12666,7 @@ async function focChartOpen(ticker){
     // max=2000 keeps the archive route from coarsening (72h of 5m is 864 bars) — the client's
     // open-anchored aggregation needs true 5m, not server-side absolute-time buckets.
     const res=await fetchJSON('/api/candles?coin='+encodeURIComponent(p.coin)+'&res=5m&from='+from+'&to='+to+'&max=2000');
+    if(mySeq!==FOCCH.seq) return;   // superseded while in flight
     FOCCH.base=Array.isArray(res.candles)?res.candles:[];
     if(res.enabled===false){ el('focch-sub').textContent='5m archive disabled on this deploy — no chart source'; return; }
     FOCCH.baseFrom=from; FOCCH.baseTo=to;
@@ -14884,8 +14906,9 @@ async function dmRunSearch(){
   try{
     const scoped=dmState.searchScope==='thread'&&dmState.sel?'&thread='+encodeURIComponent(dmState.sel):'';
     const d=await fetchJSON('/api/dm/search?q='+encodeURIComponent(q)+scoped);
+    if(q!==dmState.q.trim()) return;   // the box moved on: "nv" must not land under the "nvda" header
     dmState.results=(d&&d.ok)?d.results:[];
-  }catch(_){ dmState.results=[]; }
+  }catch(_){ if(q!==dmState.q.trim()) return; dmState.results=[]; }
   dmState.searching=false; dmRender();
 }
 

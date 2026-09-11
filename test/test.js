@@ -17055,7 +17055,7 @@ test("sse push 2026.07.29-07: client — poll survives stretched, snaps back on 
   assert.ok(app.includes("typeof EventSource==='undefined'||_sseSrc"), "no-EventSource browsers keep the poll untouched; double-start guarded");
   assert.ok(app.includes("function _cycleMs(){ return _sseOk?Math.max(state.refreshMs,120000):state.refreshMs; }"),
     "healthy stream stretches the poll to a 120s fallback — never kills it (half-open streams are real)");
-  assert.ok(app.includes("_sseSrc.onerror=()=>{ if(_sseOk){ _sseOk=false; startCycle(); } }"), "stream error snaps cadence back instantly");
+  assert.ok(/_sseSrc\.onerror=\(\)=>\{\s*\n\s*if\(_sseOk\)\{ _sseOk=false; startCycle\(\); \}/.test(app), "stream error snaps cadence back instantly");
   assert.ok(app.includes("if(d&&d.dataTs&&d.dataTs!==state.dataTs){ loadSnapshot();"),
     "a pushed version triggers the EXISTING loadSnapshot — the stream changes when we pull, never what");
   assert.ok(app.includes("startEvents();   // push channel first"), "stream armed at boot");
@@ -24471,4 +24471,29 @@ test("audit -67: learned aliases must look like names; the ask universe is pinne
   assert.ok(/if \(res\.status === 429 && a < 2\)/.test(pol), "and a 429 is retried after Retry-After");
   assert.ok(/await chainBuild\("aireadClaim", async \(\) => openLedger\(rr, "airead"/.test(pol), "the analyst claim opens inside the build chain");
   assert.ok(/PUSH_CODE_ALPHABET\[require\("crypto"\)\.randomInt\(PUSH_CODE_ALPHABET\.length\)\]/.test(pol), "link codes come from the CSPRNG");
+});
+
+test("audit -67 client: the SSE stream is recreated after a terminal close, foregrounding re-syncs, and typing no longer re-renders per keystroke", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const sse = app.slice(app.indexOf("function startEvents()"), app.indexOf("function startEvents()") + 1600);
+  assert.ok(/if\(_sseSrc&&_sseSrc\.readyState===2\)\{ try\{ _sseSrc\.close\(\); \}catch\(_\)\{\} _sseSrc=null;/.test(sse), "a CLOSED source is dropped so startEvents can run again");
+  assert.ok(/_sseRetryT=setTimeout\(startEvents,_sseBackoff\); _sseBackoff=Math\.min\(_sseBackoff\*2,60000\)/.test(sse), "and re-opened with backoff");
+  assert.ok(/_sseSrc\.onopen=\(\)=>\{ _sseOk=true; _sseBackoff=2000;/.test(sse), "backoff resets on a good open");
+  assert.ok(/document\.addEventListener\('visibilitychange',\(\)=>\{ if\(document\.hidden\) return;\s*\n\s*if\(!_sseSrc\) startEvents\(\);\s*\n\s*if\(typeof dmSync==='function'&&dmState&&dmState\.me\)/.test(app), "foregrounding reopens the stream and pulls messages once");
+  assert.ok(/el\('filter'\)\.addEventListener\('input', e=>\{ state\.filter=e\.target\.value; scheduleRender\(\); savePrefs\(\); \}\);/.test(app), "the markets filter renders once per frame");
+  assert.ok(/updateFilterChip\(\); scheduleRender\(\); savePrefs\(\);\n\}\n\['volMin'/.test(app), "so do the numeric filters");
+  assert.ok(/nfT=setTimeout\(\(\)=>\{ renderNews\(\);[\s\S]{0,200}\},120\); \}; \}/.test(app), "the news filter debounces");
+});
+
+test("audit -67 client: stale responses cannot paint over newer state; one bad trigger event cannot replay the batch; starring keeps the drawer", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(/const mySeq=\(FOCCH\.seq=\(FOCCH\.seq\|\|0\)\+1\);/.test(app) && /if\(mySeq!==FOCCH\.seq\) return;   \/\/ superseded while in flight/.test(app), "focus chart fetches are sequenced like the trend modal's");
+  assert.ok(/if\(q!==dmState\.q\.trim\(\)\) return;   \/\/ the box moved on/.test(app), "a DM search answer for an older query is dropped");
+  const lt = app.slice(app.indexOf("for(const ev of d.events){"), app.indexOf("for(const ev of d.events){") + 700);
+  assert.ok(/try\{\s*\n\s*const k=ev\.kind\|\|'setup';/.test(lt) && /\}catch\(_\)\{ \/\* this event is broken, the batch is not \*\/ \}/.test(lt), "each event is isolated so trigSeqSet always runs");
+  assert.ok(/esc\(String\(ev\.side\|\|''\)\.toUpperCase\(\)\)/.test(app) && /esc\(String\(r\.side\|\|''\)\.toUpperCase\(\)\)/.test(app), "a missing side renders empty instead of throwing");
+  assert.ok(/el\('dstar'\)\.onclick=\(\)=>\{ toggleWatch\(coin\);/.test(app) && !/toggleWatch\(coin\); openDetail\(coin\);/.test(app), "starring no longer rebuilds the drawer (and the note being typed in it)");
+  assert.ok(/const release=\(\)=>\{ if\(sv\._d&&sv\._last\)\{ const e=sv\._last; sv\._d=0; sv\._last=null; at\(e\); \} sv\._d=0; \};/.test(app), "floor histogram drags commit once on release");
 });
