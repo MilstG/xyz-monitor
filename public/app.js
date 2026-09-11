@@ -13518,7 +13518,9 @@ function renderWhlFund(f,full){
 // ---- terminal: the whale family ---------------------------------------------------------------
 function termWhaleList(){
   const think=termThinking();
-  fetchJSON('/api/whale').then(d=>{ think.remove(); WHL.data=d;
+  // RETURNED, not fired: a chat capture (dmRunCmd) awaits the verb, and a promise dropped on the
+  // floor here meant the answer arrived after the sink was gone — into the hidden panel.
+  return fetchJSON('/api/whale').then(d=>{ think.remove(); WHL.data=d;
     if(!d.watch.length) return termOut('<span class="sec">no funds watched yet'+(IS_ADMIN?' \u2014 <span class="ex" data-tcmd="whale add ">whale add &lt;name or CIK&gt;</span>':' \u2014 the operator curates the list')+'</span>');
     const lines=d.watch.map(w=>`  <span role="button" tabindex="0" class="tp-deep" data-tcmd="whale ${tesc(w.key)}">${tpad(tesc(w.key),12)}</span> ${tpad(tesc(w.name.slice(0,22)),24)} ${tpad(w.q?tesc(w.q):'\u2014',8)} ${tpad(w.total!=null?whlMoney(w.total):'\u2014',9,true)} ${tpad(w.dPct!=null?((w.dPct>0?'+':'')+w.dPct.toFixed(1)+'%'):'\u2014',8,true)}${w.unseen?' <span class="amber">\u25cf unseen</span>':''}${w.amended&&!w.unseen?' <span class="sec">HR/A</span>':''}`).join('\n');
     const win=d.window&&d.window.cur?`${d.window.cur.q} window ${d.window.state} \u00b7 due ${new Date(d.window.cur.deadline).toLocaleDateString('en-US',{month:'short',day:'numeric'})}`:'';
@@ -13527,7 +13529,7 @@ function termWhaleList(){
 }
 function termWhaleFund(key,full){
   const think=termThinking();
-  fetchJSON('/api/whale?fund='+encodeURIComponent(key)+(full?'&full=1':'')).then(f=>{ think.remove();
+  return fetchJSON('/api/whale?fund='+encodeURIComponent(key)+(full?'&full=1':'')).then(f=>{ think.remove();
     if(!f.ok) return termErr(tesc(f.error||'unavailable'));
     const dl=f.hasPrev?`\n<span class="tp-k">${tpad('QoQ',14)}</span> <span class="pos">${f.lanes.opened.length} new</span> \u00b7 <span class="pos">${f.lanes.added.length} added</span> \u00b7 <span class="neg">${f.lanes.trimmed.length} trimmed</span> \u00b7 <span class="sec">${f.lanes.exited.length} exited</span>`:'';
     const rows=f.positions.slice(0,full?f.positions.length:10).map((p,i)=>{
@@ -13539,7 +13541,7 @@ function termWhaleFund(key,full){
 }
 function termWhaleSeason(q){
   const think=termThinking();
-  fetchJSON('/api/whale?season='+encodeURIComponent(q||'')).then(s=>{ think.remove();
+  return fetchJSON('/api/whale?season='+encodeURIComponent(q||'')).then(s=>{ think.remove();
     if(!s.ok) return termErr(tesc(s.error||'no season'));
     const a=s.agg;
     const l=(rows,neg)=>rows.slice(0,3).map(r=>`${r.tk?tesc(r.tk):tesc(r.name.slice(0,14))}${r.put?' <span class="'+(r.put==='put'?'neg':'pos')+'">'+tesc(r.put)+'s</span>':''} ${(r.net!=null?(r.net>0?'+':'\u2212')+whlMoney(Math.abs(r.net)).slice(1):whlMoney(r.tot))}${r.n!=null?' ('+r.n+'/'+a.nFunds+')':''}`).join(' \u00b7 ')||'\u2014';
