@@ -127,14 +127,14 @@ const DEFAULT_ORDER=['ticker','sess','px','m5','m15','h1','h4','d1','dopen','hop
 const DEFAULT_HIDDEN=['m5','m15','hopen','h4open','h12open','prem','trend','dvb','dcap','hitr','beta','mom','vol30','dd','swr','ddy','yopen','mopen','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
 const LAYOUT_V=5; // bump to force a one-time reset of saved layouts to the new default (v5: sess home-market chip column after ticker)
 
-const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return localStorage.getItem('xyz-scope')==='crypto'?'crypto':'stocks';}catch(_){return 'stocks';}})(), sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null, benchMain:null, dvbBasket:'MAG7',
+const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return localStorage.getItem('xyz-scope')==='crypto'?'crypto':'stocks';}catch(_){return 'stocks';}})(), sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:30000, benchCoin:null, benchMain:null, dvbBasket:'MAG7',
   // Markets group lens: 'names' = the classic per-market table; 'sectors'/'industries' aggregate
   // it in place. grpSort is the lens's own sort (the names sort must survive a round trip);
   // grpDrill is the transient member filter a group-row click leaves behind — never persisted.
   grp:'names', grpWt:'vol', grpSort:{key:'d1',dir:'desc'}, grpDrill:null,
   actOpen:true,   // action lists under the markets table: OPEN by default (-03), collapse persisted
   filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'30', ctf:'1d', topN:40, selected:null, search:'', topPairs:10, pair:null, showBuiltins:false},
-  colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN), pollMs:60000,
+  colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN), pollMs:30000,
   sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30', grp:'sector' }, dataTs:0, connOk:true, view:'markets', regimeSrv:null,
   backtest:{ signal:'mom', lookback:20, cadence:5, quantile:0.2, cost:5, universe:'all', split:0.6,
     direction:'high', structure:'ls', weighting:'eq', reqSign:false, holdWindow:'cc', vsBasket:'',
@@ -3167,7 +3167,7 @@ function toggleWatch(coin){ if(state.watch.has(coin)) state.watch.delete(coin); 
 // ===== persistence (localStorage; UI prefs only) =====
 let prefsT=null;
 function savePrefs(){ clearTimeout(prefsT); prefsT=setTimeout(()=>{ store.set(PKEY, JSON.stringify({
-  colOrder:state.colOrder, colHidden:[...state.colHidden], layoutV:LAYOUT_V, tf:state.tf, refreshMs:state.pollMs,
+  colOrder:state.colOrder, colHidden:[...state.colHidden], layoutV:LAYOUT_V, tf:state.tf, refreshMs2:state.pollMs,
   sortKey:state.sortKey, sortDir:state.sortDir, filterText:state.filter, watch:[...state.watch], watchOnly:!!state.watchOnly, noteOnly:!!state.noteOnly, dvbBasket:state.dvbBasket||null,
   sectGrp:state.sect.grp, grp:state.grp, grpWt:state.grpWt, actOpen2:state.actOpen?1:0,
   filters:{vMin:el('volMin').value,vMax:el('volMax').value,oMin:el('oiMin').value,oMax:el('oiMax').value} }));
@@ -3183,7 +3183,12 @@ function loadPrefs(){ let p; try{ p=JSON.parse(store.get(PKEY)||'null'); }catch(
     if(Array.isArray(p.colHidden)) state.colHidden=new Set(p.colHidden.filter(k=>COL_BY_KEY[k]));
   }
   if(p.tf&&TF_MAP[p.tf]) state.tf=p.tf;
-  if(typeof p.refreshMs==='number'&&p.refreshMs>0){ state.refreshMs=p.refreshMs; state.pollMs=p.refreshMs; }
+  // refreshMs2: the fallback-poll default moved 60s → 30s. The old key stored the unchosen 60s
+  // default in every browser that ever saved prefs (the actOpen trap again), so a saved 60000
+  // under it cannot be read as a choice — only a NON-default old value migrates. A deliberate 1m
+  // picked from now on persists under the new key and is honored.
+  if(typeof p.refreshMs2==='number'&&p.refreshMs2>0){ state.refreshMs=p.refreshMs2; state.pollMs=p.refreshMs2; }
+  else if(typeof p.refreshMs==='number'&&p.refreshMs>0&&p.refreshMs!==60000){ state.refreshMs=p.refreshMs; state.pollMs=p.refreshMs; }
   if(p.sortKey&&COL_BY_KEY[p.sortKey]){ state.sortKey=p.sortKey; state.sortDir=p.sortDir==='asc'?'asc':'desc'; }
   if(p.grp==='sectors'||p.grp==='industries'||p.grp==='names') state.grp=p.grp;   // the drill filter is deliberately NOT persisted — a reload always lands on the full lens
   state.actOpen = p.actOpen2===undefined ? true : !!p.actOpen2;   // -03: open unless explicitly collapsed. New key on purpose — the -02 key (actOpen) stored the unchosen collapsed DEFAULT in every browser that saved prefs, so honoring it would pin the strip shut for exactly the people who never chose that. The old key is ignored, not migrated.
@@ -9775,8 +9780,20 @@ function _cycleMs(){ return _sseOk?Math.max(state.refreshMs,120000):state.refres
 function startCycle(){ clearInterval(cycleTimer); const ms=_cycleMs(); cycleTimer=setInterval(()=>{ loadSnapshot(); nextCycle=Date.now()+_cycleMs(); }, ms); nextCycle=Date.now()+ms; }
 function setRefresh(ms){ state.refreshMs=ms; state.pollMs=ms; startCycle(); }
 function forceRefresh(){ loadSnapshot(); nextCycle=Date.now()+state.refreshMs; }
-setInterval(()=>{ const left=Math.max(0,nextCycle-Date.now()), m=Math.floor(left/60000), s=Math.floor((left%60000)/1000);
-  el('cd').textContent=m+':'+String(s).padStart(2,'0'); updateFreshness(); },500);
+// The countdown is honest about the push stream: while SSE is healthy the poll is only a
+// stretched 120s fallback, and painting THAT number read as "the app refreshes every 2 minutes"
+// when updates actually land the moment the server's content clock moves (~15s rebuild cadence).
+// So a live stream shows "push live" and the countdown only returns when the poll is really
+// what's driving.
+let _cdMode=null;   // last painted mode, so the 500ms tick doesn't rewrite unchanged DOM/titles
+setInterval(()=>{ const lbl=el('cdlbl'), c=el('cd'), mode=_sseOk?'push':'poll';
+  if(mode!==_cdMode){ _cdMode=mode;
+    if(lbl) lbl.textContent=_sseOk?'push':'next';
+    if(c) c.title=_sseOk?'the server pushes a poke the moment its data changes (~15s build cadence) and this browser pulls immediately — the refresh selector only paces the fallback poll':''; }
+  if(_sseOk){ if(c) c.textContent='live'; }
+  else { const left=Math.max(0,nextCycle-Date.now()), m=Math.floor(left/60000), s=Math.floor((left%60000)/1000);
+    if(c) c.textContent=m+':'+String(s).padStart(2,'0'); }
+  updateFreshness(); },500);
 
 // ===== init =====
 loadPrefs();

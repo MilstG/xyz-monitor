@@ -35,7 +35,7 @@
 <div class="statusline">
   <span class="st-item">benchmark <b id="benchnote">…</b></span>
   <span class="st-sep">·</span>
-  <span class="st-item">next <b id="cd">—:—</b></span>
+  <span class="st-item"><span id="cdlbl">next</span> <b id="cd">—:—</b></span>
   <span class="st-sep">·</span>
   <span class="sync" id="sync"><span class="sdot"></span><span id="sync-t">starting…</span></span>
   <span class="st-sep">·</span>
@@ -121,8 +121,9 @@
     <button type="button" data-tf="7d">7d</button>
     <button type="button" data-tf="30d">30d</button>
   </div>
-  <div class="seg" id="rfseg" role="group" aria-label="Refresh cadence">
+  <div class="seg" id="rfseg" role="group" aria-label="Refresh cadence" title="Fallback-poll cadence — how often this browser re-pulls the cached snapshot when the live push stream is down. While the stream is up (status shows &quot;push live&quot;), updates arrive the moment the server has them and this setting is idle.">
     <span class="seglbl">refresh</span>
+    <button type="button" data-ms="15000">15s</button>
     <button type="button" data-ms="30000">30s</button>
     <button type="button" data-ms="60000">1m</button>
     <button type="button" data-ms="300000">5m</button>
