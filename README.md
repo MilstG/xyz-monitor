@@ -149,6 +149,19 @@ instant, and the per-IP rate limit stops being a per-user problem.
   command-only on purpose (`/r your message`, or `/r @handle your message`): people already send
   stray text to that chat, and turning any of it into a message posted under their name is a
   surprise you cannot take back.
+- **Chat terminal** (build 2026.09.11-69) — the ask terminal's verbs run from any conversation's
+  composer: `/top funding 5`, `/nvda`, `/screen rvol>2`, `/earnings today`, and the result posts
+  into the thread under your name as a monospace block badged **computed**, so a group reads one
+  table instead of six people opening the panel. One code path: the same handlers the `~` panel
+  runs, against the same rows, with the panel's output redirected into the message. `/help` is a
+  private card (only you see it) listing what runs here; `//text` sends a message that really
+  starts with a slash. Two operator switches in Admin › Features: `dm.terminal` (the local grammar,
+  **public** by default — it costs nothing) and `dm.ask` (the AI fallback, **admin-only** by
+  default — it spends the shared budget and the answer lands where everyone reads it). The server
+  enforces both on the post and on the ask, and `dm.ask` only ever narrows `ai.ask`. Verbs that open
+  a view or change state (`comp`, `report`, `basket`, `whale add`, `admin …`) are refused with a
+  pointer to the panel; a command result carries no price stamp (a screen dump that spells `$NVDA`
+  is nobody's call) and can't be edited — delete it and run it again.
 - **The calls record** (`/api/dm/calls`) — every price-stamped message in one place, with the move
   since it was sent and a per-person summary. This is what the stamp was FOR: without somewhere to
   read them together, each call died in the conversation it was made in. Calls carry a

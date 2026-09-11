@@ -162,3 +162,51 @@ test("lows: health hides diagnostics from signed-out callers; operator-only writ
   assert.notEqual(c.statusCode, 200);
   assert.equal((await get("/join/NOT-A-REAL-CODE-1")).statusCode, 410);
 });
+
+test("chat terminal -69: a member may post computed results, AI results are admin-locked by default, and /api/ask honours ctx.via", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  // A fresh member through the real door (bob was disabled upstream).
+  const mint = JSON.parse((await post("/api/access", { op: "mint", days: 1 }, gus)).body);
+  const code = mint.code || (mint.invite && mint.invite.code);
+  const cara = jar(); cara.absorb(await get("/join/" + code, cara));
+  assert.equal(cara.absorb(await post("/join", { handle: "cara", password: "yet-another-long-pw" }, cara)).statusCode, 200);
+  const members = JSON.parse((await get("/api/access", gus)).body).members;
+  const caraUid = members.find((m) => m.handle === "cara").uid, gusUid = members.find((m) => m.handle === "gus").uid;
+  // Open the pair thread with an ordinary message, then post a computed result into it.
+  const first = JSON.parse((await post("/api/dm", { to: gusUid, body: "hi" }, cara)).body);
+  assert.ok(first.ok, JSON.stringify(first));
+  const T = first.thread;
+  const local = await post("/api/dm", { thread: T, body: "TOP FUNDING\n 1 NVDA +41%", cmd: "top funding 5" }, cara);
+  assert.equal(local.statusCode, 200, local.body);
+  const lm = JSON.parse(local.body).message;
+  assert.equal(lm.cmd, "top funding 5"); assert.equal(lm.cmdAi, false); assert.equal(lm.ref, null);
+  // The AI half: a member is refused by default, the switch is named; the operator passes.
+  const aiPost = await post("/api/dm", { thread: T, body: "because …", cmd: "why is nvda up", cmdAi: true }, cara);
+  assert.equal(aiPost.statusCode, 403);
+  assert.deepEqual(JSON.parse(aiPost.body), { ok: false, error: "feature-gated", feature: "dm.ask" });
+  const aiAsk0 = await post("/api/ask", { q: "why is nvda up", ctx: { via: "dm" } }, cara);
+  assert.equal(aiAsk0.statusCode, 403); assert.equal(JSON.parse(aiAsk0.body).feature, "ai.ask", "the route gate stands first");
+  // Open the terminal's own AI to members: the chat switch still stands on its own, and refuses
+  // the SPEND — the question never reaches the model, let alone the thread.
+  assert.equal(JSON.parse((await post("/api/features", { key: "ai.ask", state: "public" }, gus)).body).ok, true);
+  const aiAsk = await post("/api/ask", { q: "why is nvda up", ctx: { via: "dm" } }, cara);
+  assert.equal(aiAsk.statusCode, 403, aiAsk.body);
+  assert.deepEqual(JSON.parse(aiAsk.body), { ok: false, error: "feature-gated", feature: "dm.ask" });
+  assert.equal(JSON.parse((await post("/api/features", { key: "ai.ask", state: "admin" }, gus)).body).ok, true);
+  const gusAi = await post("/api/dm", { thread: T, body: "because …", cmd: "why is nvda up", cmdAi: true }, gus);
+  assert.equal(gusAi.statusCode, 200, gusAi.body);
+  assert.equal(JSON.parse(gusAi.body).message.cmdAi, true);
+  // Flip the switch and the same member passes; flip the grammar off and even a computed post is refused.
+  assert.equal(JSON.parse((await post("/api/features", { key: "dm.ask", state: "public" }, gus)).body).ok, true);
+  assert.equal((await post("/api/dm", { thread: T, body: "because …", cmd: "why is nvda up", cmdAi: true }, cara)).statusCode, 200);
+  assert.equal(JSON.parse((await post("/api/features", { key: "dm.terminal", state: "admin" }, gus)).body).ok, true);
+  const off = await post("/api/dm", { thread: T, body: "x", cmd: "breadth" }, cara);
+  assert.equal(off.statusCode, 403); assert.equal(JSON.parse(off.body).feature, "dm.terminal");
+  assert.equal((await post("/api/dm", { thread: T, body: "plain prose still sends" }, cara)).statusCode, 200, "the gate is on the cmd field, not on the verb");
+  // A command result can't be edited over the wire either.
+  const ed = await post("/api/dm", { id: lm.id, body: "reworded" }, cara);
+  assert.equal(ed.statusCode, 400); assert.match(JSON.parse(ed.body).error, /can't be edited/);
+  assert.equal(JSON.parse((await post("/api/features", { key: "dm.terminal", state: "public" }, gus)).body).ok, true);
+  assert.equal(JSON.parse((await post("/api/features", { key: "dm.ask", state: "admin" }, gus)).body).ok, true);
+  void caraUid;
+});

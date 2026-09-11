@@ -13348,7 +13348,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.11-68"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.11-69"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -24574,4 +24574,88 @@ test("ux -68: typed prose is protected, sessions expire into a banner, the drawe
   assert.ok(/'dm','notes'\]\)/.test(app) && /is not available in /.test(app), "Messages and Notes survive Crypto scope; a hidden view says so");
   assert.ok(/Object\.assign\(HELP,\{\s*\n\s*dm:`/.test(app) && /const HELP_KEYS=/.test(app) && /if\(e\.key==='\?'\)\{ e\.preventDefault\(\); openHelp\(\); return; \}/.test(app), "every tab has help, with a keyboard section, on ?");
   assert.ok(/function cmdkTabs\(\)\{/.test(app) && /window\.addEventListener\('hashchange'/.test(app) && /function dmStampPreview\(text\)\{/.test(app) && /did you mean/.test(app), "palette from the ribbon, live hash routing, stamp preview, terminal suggestions");
+});
+
+test("chat terminal -69: a command result is a message with cmd, no stamp, no edit; the AI half is admin-locked by default", () => {
+  const fs = require("fs"), path = require("path");
+  const C = require("../src/compute");
+  // Two switches in the manifest, both act keys, both routeless (the post rides /api/dm and the
+  // ask rides /api/ask, which are claimed already): the local grammar ships public because it
+  // costs nothing; the AI leg ships admin because it spends budget where a whole thread reads it.
+  const term = C.FEATURES.find((f) => f.key === "dm.terminal"), ask = C.FEATURES.find((f) => f.key === "dm.ask");
+  assert.ok(term && term.kind === "act" && term.def === "public" && term.routes.length === 0, "dm.terminal: act, public, routeless");
+  assert.ok(ask && ask.kind === "act" && ask.def === "admin" && ask.routes.length === 0, "dm.ask: act, ADMIN by default, routeless");
+  assert.equal(C.featureVisible({}, "dm.ask", false), false, "a member may not post AI answers into chat until the operator opens it");
+  assert.equal(C.featureVisible({}, "dm.ask", true), true, "the operator always may");
+  assert.equal(C.featureVisible({}, "dm.terminal", false), true, "the local grammar is open to members out of the box");
+  assert.equal(C.featureVisible({ "dm.terminal": "off" }, "dm.terminal", true), false, "off means nobody, operator included");
+
+  // Storage: the command travels as its own field; the body is the output.
+  const A = freshAccounts({ "xyz:NVDA": 113.9 });
+  const { g, l } = seedTwo(A);
+  const T = A.threadFor(g.uid, l.uid, true).id;
+  const resolve = (sym) => (sym === "NVDA" ? "xyz:NVDA" : null);
+  const plain = A.send(l.uid, null, "long $NVDA here", resolve, { thread: T });
+  assert.equal(plain.message.ref, "xyz:NVDA", "control: an ordinary message with $NVDA is stamped");
+  const out = "TOP FUNDING · stocks\n 1 NVDA   +41%  $NVDA is crowded";
+  const r = A.send(l.uid, null, out, resolve, { thread: T, cmd: "  top   funding 5 ", cmdAi: false, replyTo: plain.id });
+  assert.ok(r.ok, r.error);
+  assert.equal(r.message.cmd, "top funding 5", "the command label is whitespace-collapsed and carried on the wire");
+  assert.equal(r.message.cmdAi, false);
+  assert.equal(r.message.body, out, "the output is the body, verbatim");
+  assert.equal(r.message.ref, null, "NO price stamp on a command result — a screen dump that spells $NVDA is nobody's call");
+  assert.equal(r.message.replyTo, null, "a command result quotes nothing");
+  const ai = A.send(l.uid, null, "NVDA is crowded because …", resolve, { thread: T, cmd: "why is nvda crowded", cmdAi: true });
+  assert.equal(ai.message.cmdAi, true, "the AI badge is stored, not inferred at read");
+  // The Telegram digest line names the command too (checked before anything marks gus's side read).
+  const esc = A.pendingEscalations(0, () => false).find((p) => p.uid === g.uid);
+  assert.ok(esc && esc.lines.some((x) => x.includes("▸ top funding 5")), "the digest says what was asked, not the padded header row: " + JSON.stringify(esc && esc.lines));
+  assert.equal(A.threads(g.uid).find((t) => t.id === T).preview, "▸ why is nvda crowded", "the rail previews a command result as the command, not the table");
+  assert.equal(A.send(l.uid, null, "x", resolve, { thread: T, cmd: "y".repeat(500) }).message.cmd.length, 160, "the label is capped hard; the output takes the body cap");
+  assert.equal(A.send(l.uid, null, "x", resolve, { thread: T, cmd: "   " }).message.cmd, null, "a blank label is no label");
+  const e = A.edit(l.uid, r.id, "reworded");
+  assert.ok(!e.ok && /can't be edited/.test(e.error), "a command result can't be reworded into words nobody computed");
+  assert.ok(A.edit(l.uid, plain.id, "reworded").ok, "control: prose still edits");
+  const h = A.history(g.uid, T).messages;
+  const got = h.find((m) => m.id === r.id);
+  assert.equal(got.cmd, "top funding 5"); assert.equal(got.cmdAi, false); assert.equal(got.ref, null);
+  assert.equal(h.find((m) => m.id === ai.id).cmdAi, true);
+  // Quoting a command result quotes the command, not 120 characters of table.
+  const q = A.send(g.uid, null, "nice", resolve, { thread: T, replyTo: r.id });
+  assert.equal(q.message.reply.body, "▸ top funding 5");
+  // A fresh open of the same volume migrates nothing away: the columns are in ADDED_COLUMNS.
+  const src = fs.readFileSync(path.join(__dirname, "..", "src", "accounts.js"), "utf8");
+  assert.ok(/\["cmd", "TEXT"\], \["cmdAi", "INTEGER"\]/.test(src), "both columns are in the table-driven migration list — a volume from before -69 must open");
+  assert.ok(/S\.msgIns\.run\(\+threadId, actor \|\| "", now, String\(detail \|\| ""\), null, null, null, kind, null, null, null, null, null\)/.test(src), "the system-row insert binds the two new columns too — a positional insert one short binds NULL into the wrong slot next time a column is added");
+  assert.ok(/const sym = cmd \? null : firstTickerRef\(text\);/.test(src), "the no-stamp rule is at the ref site, not a post-hoc null");
+
+  // Server: the gate lives in the handlers because the keys own no route.
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(/if \(b\.cmd != null\) \{[\s\S]{0,600}featureVisible\(flags, "dm\.terminal", adm\)[\s\S]{0,200}featureVisible\(flags, "dm\.ask", adm\)/.test(srv), "POST /api/dm gates cmd on dm.terminal and cmdAi on dm.ask");
+  assert.ok(/error: "feature-gated", feature: closed/.test(srv), "the refusal names the switch, same shape as the route gate");
+  assert.ok(/b\.ctx\.via === "dm" && !featureVisible\(poller\.getFlags\(\), "dm\.ask", isAdmin\(req\)\)/.test(srv), "POST /api/ask applies dm.ask on top of ai.ask for a chat-bound question");
+  assert.ok(/cmd: b\.cmd != null \? String\(b\.cmd\) : null, cmdAi: !!b\.cmdAi/.test(srv), "the fields reach the store");
+
+  // Client: one code path — the panel's handlers with the output redirected, the AI leg latched.
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(/let _termSink=null;\nfunction termEmit\(d\)\{ if\(_termSink\)\{ _termSink\.blocks\.push\(d\); return; \}/.test(app), "termEmit is the one door every terminal block goes through");
+  for (const fn of ["termOut", "termOutTrans", "termOutAI", "termEcho", "termErr"])
+    assert.ok(new RegExp("function " + fn + "\\([^)]*\\)\\{[^\\n]*termEmit\\(d\\);").test(app), fn + " must emit through the sink, not append to the panel directly");
+  assert.ok(/if\(_termSink&&!_termSink\.ai\) return termErr\('AI answers are admin-only in chat/.test(app), "termAsk refuses inside a capture whose sink forbids AI — an unknown lens can't sneak a spend");
+  assert.ok(/if\(_termSink\) ctx\.via='dm';/.test(app), "a chat-bound ask tells the server so dm.ask applies");
+  assert.ok(/const fk=tfield\(fname\); if\(!fk\) return termAsk\(/.test(app), "the unknown-lens escalation is RETURNED so a capture awaits it");
+  assert.ok(/if\(!dmState\.editing&&\/\^\\\/\[\^\\\/\\s\]\/\.test\(text\)\) return dmRunCmd\(text\);/.test(app), "dmSend routes /verb to the runner, never an edit");
+  assert.ok(/if\(!dmState\.editing&&text\.startsWith\('\/\/'\)\) text=text\.slice\(1\);/.test(app), "// sends a literal slash");
+  assert.ok(/function dmHelpCmd\(\)\{/.test(app) && /\/\^\(help\|\\\?\)\$\/i\.test\(line\)\) return dmHelpCmd\(\);/.test(app), "/help is a private card, not a post");
+  assert.ok(/'only you see this'/.test(app) || /only you see this<\/span>/.test(app), "private lines say they are private");
+  for (const v of ["comp", "basket", "report", "admin", "clear", "stocks", "crypto"]) assert.ok(new RegExp("\\b" + v + ":'").test(app.slice(app.indexOf("const DM_CMD_BLOCKED="), app.indexOf("const DM_CMD_BLOCKED=") + 800)), v + " is refused from chat — it opens a view or changes state");
+  assert.ok(/whale:\['add','pick','rm','ingest13f','pull','mute','unmute'\]/.test(app) && /earnings:\['backfill'\]/.test(app), "state-changing subverbs are refused too");
+  assert.ok(/function dmAskAllowed\(\)\{ return IS_ADMIN\|\|featureOn\('dm\.ask'\); \}/.test(app), "the client's AI switch reads the resolved flag");
+  assert.ok(/const sink=\{blocks:\[\],ai:ai,via:'dm'\}; _termSink=sink;/.test(app) && /finally\{ _termSink=null; dmState\.cmdBusy=false;/.test(app), "the sink is released on every path");
+  assert.ok(/cmd:line,cmdAi:!cmd\|\|r\.ai/.test(app), "a planner answer (AI planned, board computed) still posts as AI — the badge follows the spend");
+  assert.ok(/\(m\.cmd\?'':'<button type="button" class="dm-tool" data-dmedit=/.test(app), "no edit button on a command result");
+  assert.ok(/<pre class="dm-cmdout">'\+esc\(m\.body\)\+'<\/pre>/.test(app), "the output renders escaped, in a monospace block");
+  assert.ok(/\/help for commands\)/.test(app), "the composer placeholder points at /help");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  for (const pin of [".dm-b.dm-cmdb{", ".dm-cmdout{", ".dm-local{", ".dm-local.err{", ".dm-localmk{"]) assert.ok(css.includes(pin), "css pin missing: " + pin);
 });

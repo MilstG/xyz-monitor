@@ -9,12 +9,12 @@ const { openStore } = require("./src/store");
 const { createPoller } = require("./src/poller");
 const { openAccounts, PW_MIN: ACCOUNT_PW_MIN, DM_MAX_LEN: ACCOUNT_DM_MAX,
   FILE_MAX: ACCOUNT_DM_FILE_MAX } = require("./src/accounts");
-const { featureGateFor, resolveFeatures } = require("./src/compute");
+const { featureGateFor, resolveFeatures, featureVisible } = require("./src/compute");
 
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.11-68";
+const VERSION = "2026.09.11-69";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1410,8 +1410,23 @@ async function buildServer() {
     else if (b.boardNotify != null) r = ACCOUNTS.setBoardNotify(me.uid, b.thread, !!b.boardNotify);
     else if (b.drop && b.id != null) r = ACCOUNTS.drop(me.uid, b.id);
     else if (b.id != null) r = ACCOUNTS.edit(me.uid, b.id, b.body);
-    else r = ACCOUNTS.send(me.uid, String(b.to || ""), b.body, coinForSymbol,
-      { thread: b.thread || null, fileId: b.fileId || null, replyTo: b.replyTo || null });
+    else {
+      // A terminal command's output posted into the thread (build 2026.09.11-69). The manifest
+      // keys own no route — this verb shares /api/dm with every other send — so the gate is
+      // here, on the fields that make a send a command result: dm.terminal for any `cmd`,
+      // dm.ask on top of it for one the AI answered. Admin-locked by default on the AI half;
+      // the feature panel flips either without a deploy. 403 with the key, same shape the route
+      // gate answers, so the client can say which switch is closed rather than "could not send".
+      if (b.cmd != null) {
+        const adm = isAdmin(req), flags = poller.getFlags();
+        const closed = !featureVisible(flags, "dm.terminal", adm) ? "dm.terminal"
+          : (b.cmdAi && !featureVisible(flags, "dm.ask", adm)) ? "dm.ask" : null;
+        if (closed) return reply.code(403).send({ ok: false, error: "feature-gated", feature: closed });
+      }
+      r = ACCOUNTS.send(me.uid, String(b.to || ""), b.body, coinForSymbol,
+        { thread: b.thread || null, fileId: b.fileId || null, replyTo: b.replyTo || null,
+          cmd: b.cmd != null ? String(b.cmd) : null, cmdAi: !!b.cmdAi });
+    }
     if (!r.ok) return reply.code(r.retry ? 429 : 400).send(r);
     // Wake everybody in the conversation. The frame carries a sequence number, never the message —
     // the client reacts by running the same sync pull it would have run on its own.
@@ -2317,6 +2332,12 @@ async function buildServer() {
   fastify.post("/api/ask", { bodyLimit: 256 * 1024 }, async (req, reply) => {
     reply.header("cache-control", "no-store");
     const b = req.body || {};
+    // Asked from a chat composer (ctx.via = "dm"): the answer is about to be posted where the
+    // whole conversation reads it, so the dm.ask key applies ON TOP of ai.ask (which the route
+    // gate already enforced above). Belt and braces with the /api/dm check: this one refuses the
+    // spend, that one refuses the post; an honest client is stopped here before either costs.
+    if (b.ctx && b.ctx.via === "dm" && !featureVisible(poller.getFlags(), "dm.ask", isAdmin(req)))
+      return reply.code(403).send({ ok: false, error: "feature-gated", feature: "dm.ask" });
     return poller.askBoard(b.q || "", b.ctx || {}, aiWho(req, reply));
   });
   // On-demand external fundamentals for the ask terminal. Both endpoints are pull-through
