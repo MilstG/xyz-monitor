@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.10-58";
+const VERSION = "2026.09.11-59";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1025,9 +1025,10 @@ async function main() {
     else if (op === "disable") r = lastAdmin(uid) ? { ok: false, error: "that is the last operator — promote somebody else first" } : ACCOUNTS.setDisabled(uid, true);
     else if (op === "enable") r = ACCOUNTS.setDisabled(uid, false);
     else if (op === "admin") r = (!b.on && lastAdmin(uid)) ? { ok: false, error: "that is the last operator — promote somebody else first" } : ACCOUNTS.setAdmin(uid, !!b.on);
+    else if (op === "rename") r = ACCOUNTS.renameUser(uid, b.handle);
     else r = { ok: false, error: "unknown operation" };
     if (r.ok && op === "mint") log(`invite minted by ${me ? me.handle : "admin"}${b.label ? " for " + String(b.label).slice(0, 32) : ""}`);
-    if (r.ok && (op === "disable" || op === "admin" || op === "signout")) log(`access: ${op} on ${(ACCOUNTS.getUser(uid) || {}).handle || uid}`);
+    if (r.ok && (op === "disable" || op === "admin" || op === "signout" || op === "rename")) log(`access: ${op} on ${(ACCOUNTS.getUser(uid) || {}).handle || uid}`);
     return reply.code(r.ok ? 200 : 400).send(r);
   });
 

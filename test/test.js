@@ -13336,7 +13336,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.10-58"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.11-59"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -22879,6 +22879,30 @@ test("sessions: the epoch field is the whole revocation story", () => {
   assert.equal(A.sessionUser(before), null, "a password change signs out every other device");
   assert.ok(!A.login("lena", "another-long-password").ok, "the old password is dead");
   assert.ok(A.login("lena", "brand-new-password-9").ok, "the new one works");
+});
+
+test("rename: one row update, every surface follows, nothing else moves", () => {
+  const A = freshAccounts();
+  const { g, l } = seedTwo(A);
+  const T = A.threadFor(g.uid, l.uid, true).id;
+  A.send(l.uid, null, "call me maybe", null, { thread: T });
+  const tok = A.login("lena", "another-long-password").token;
+
+  assert.ok(!A.renameUser(l.uid, "admin").ok, "reserved handles stay reserved");
+  assert.ok(!A.renameUser(l.uid, "gustavo").ok, "a taken handle is refused");
+  assert.ok(!A.renameUser(l.uid, "x").ok, "the handle rules apply — too short is too short");
+  assert.ok(!A.renameUser("nobody", "fine-name").ok, "no such account is an error, not a create");
+
+  const r = A.renameUser(l.uid, "Elena");
+  assert.ok(r.ok && r.user.handle === "elena" && r.user.display === "Elena", "handle lowercases, display keeps the typing");
+  assert.ok(A.renameUser(l.uid, "ELENA").ok, "renaming to your own handle's other casing is not a collision");
+
+  assert.equal(A.sessionUser(tok).uid, l.uid, "her sessions survive — the token carries uid and epoch, not the name");
+  assert.equal(A.history(g.uid, T).messages.find((m) => !m.sys && !m.mine).sender, "ELENA",
+    "old messages attribute to the new name — names resolve at read, never stored");
+  assert.equal(A.threads(g.uid).find((t) => t.id === T).name, "ELENA", "the conversation renames itself for the other side too");
+  assert.ok(!A.login("lena", "another-long-password").ok, "the old handle no longer signs in");
+  assert.ok(A.login("elena", "another-long-password").ok, "the new one does, same password");
 });
 
 test("revocation costs nobody else anything", () => {

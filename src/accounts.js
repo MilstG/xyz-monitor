@@ -331,6 +331,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     userDisable: db.prepare("UPDATE user SET disabledAt = ?, epoch = epoch + 1 WHERE uid = ?"),
     userEnable: db.prepare("UPDATE user SET disabledAt = NULL WHERE uid = ?"),
     userAdmin: db.prepare("UPDATE user SET isAdmin = ? WHERE uid = ?"),
+    userRename: db.prepare("UPDATE user SET handle = ?, display = ? WHERE uid = ?"),
     userSeen: db.prepare("UPDATE user SET lastSeen = ? WHERE uid = ?"),
 
     invByCode: db.prepare("SELECT * FROM invite WHERE code = ?"),
@@ -530,6 +531,25 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (!verifyPw(password, u.pw)) return { ok: false, error: "wrong handle or password" };
     try { S.userSeen.run(Date.now(), u.uid); u.lastSeen = Date.now(); } catch (_) {}
     return { ok: true, user: pub(u), token: tokenFor(u, options.sessionDays || 30) };
+  }
+
+  // The operator renames a member. The uid never changes — messages, calls, rules and alert
+  // recipients all key on it — so a rename is one row update that every surface picks up on its
+  // next read: names resolve live, never denormalized. Sessions survive (the token carries uid and
+  // epoch, not the handle); the member simply signs in under the new name next time. @mentions in
+  // OLD message text keep the old spelling — history says what it said.
+  function renameUser(uid, raw) {
+    const u = users.get(uid);
+    if (!u) return { ok: false, error: "no such account" };
+    const display = String(raw == null ? "" : raw).trim().slice(0, 24);
+    const bad = handleError(display);
+    if (bad) return { ok: false, error: bad };
+    const lc = display.toLowerCase();
+    const taken = getUserByHandle(lc);
+    if (taken && taken.uid !== uid) return { ok: false, error: "that handle is taken — pick another" };
+    S.userRename.run(lc, display, uid);
+    hydrate();
+    return { ok: true, user: pub(users.get(uid)) };
   }
 
   function setPassword(uid, password) {
@@ -1613,7 +1633,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   return {
     // identity
     signSession, sessionUser, tokenFor, countUsers, getUser, getUserByHandle, listUsers, pub,
-    login, setPassword, signOutEverywhere, setDisabled, setAdmin, touch, hydrate,
+    login, setPassword, signOutEverywhere, setDisabled, setAdmin, renameUser, touch, hydrate,
     // invites
     mintInvite, readInvite, revokeInvite, listInvites, redeem, bootstrap, claim, inviteState,
     otpRequest, otpVerify,
