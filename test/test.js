@@ -11643,7 +11643,7 @@ test("the drain picks the first ELIGIBLE item, so a deferred message cannot head
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   assert.ok(/const deliverable = \(q\) => \(!q\.after \|\| q\.after <= now\)/.test(pol)
-    && /const idx = pushQueue\.findIndex\(deliverable\);/.test(pol),
+    && /let idx = pushQueue\.findIndex\(\(q\) => !q\.reply && deliverable\(q\)\);\s*\n\s*if \(idx < 0\) idx = pushQueue\.findIndex\(deliverable\);/.test(pol),
     "a message held until 07:00 sitting at the head would block every urgent one behind it for hours");
   const drain = pol.slice(pol.indexOf("async function pushDrain()"), pol.indexOf("function pushLogAdd"));
   assert.ok(!/pushQueue\.shift\(\)/.test(drain), "every removal in the drain must target the chosen index, not the head");
@@ -24103,4 +24103,47 @@ test("audit -67: an account-issued admin cookie is bound to the account and dies
   // Audit attribution follows the binding rather than collapsing to "legacy-admin".
   assert.ok((srv.match(/adminViewUid\(getCookie\(req, "xyzadm"\)\) \|\| "legacy-admin"/g) || []).length >= 2,
     "access and read-through audit rows name the bound uid");
+});
+
+// Every /help from ANY chat earned a forced reply on the one shared outbox; a stranger who found
+// the bot could keep the 1-per-3s drain busy and evict real alerts. Replies are now budgeted per
+// chat (and globally for strangers), bad /start codes count toward a silence, and the drain sends
+// alerts before replies.
+test("audit -67: bot command replies are throttled per chat, strangers share a budget, alerts go first", async () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  const { p, queue, calls } = pushHarness();
+  const upd = (id, text, chat) => ({ update_id: id, message: { chat: { id: chat }, from: { first_name: "x" }, text } });
+  const reply = (result) => ({ body: { ok: true, result } });
+  let id = 100;
+  // One unlinked chat, ten /help in a row: three replies, not ten.
+  queue.push(reply(Array.from({ length: 10 }, () => upd(id++, "/help", 7001))));
+  await p.pushUpdatesNow();
+  assert.equal(p.pushStateNow().queue, 3, "a stranger earns three replies a minute, then silence");
+  // Ten different strangers: the global stranger budget caps them together.
+  queue.push(reply(Array.from({ length: 10 }, (_, i) => upd(id++, "/help", 8000 + i))));
+  await p.pushUpdatesNow();
+  assert.equal(p.pushStateNow().queue, 5, "strangers share five replies a minute between them");
+  // Bad /start codes: five rejections then the chat is ignored (no reply consumed, no oracle).
+  const { p: p2, queue: q2 } = pushHarness();
+  q2.push(reply(Array.from({ length: 8 }, () => upd(id++, "/start NOPE" + id, 7002))));
+  await p2.pushUpdatesNow();
+  assert.ok(p2.pushStateNow().queue <= 3, "bad-code replies are budgeted like any other (" + p2.pushStateNow().queue + ")");
+  q2.length = 0;
+  q2.push(reply([upd(id++, "/start " + p2.pushMintCode("own-a", true).code, 7002)]));
+  await p2.pushUpdatesNow();
+  assert.equal(p2.getPush("own-a", false).recipients.length, 0, "after five bad codes the chat is ignored for a while, even with a real code");
+  // A linked person's command reply is forced past the ALERT cap (it is not an alert) but an alert
+  // enqueued after it still goes out first.
+  const { p: p3, queue: q3, calls: c3 } = pushHarness();
+  const m = p3.pushMintCode("own-a", true); p3.pushBindNow(m.code, 1, "a");
+  q3.push(reply([upd(id++, "/help", 1)]));
+  await p3.pushUpdatesNow();
+  p3.pushOpsNow("setup", "the alert"); p3.pushTickNow();
+  assert.equal(p3.pushStateNow().queue, 2);
+  await p3.pushDrainNow();
+  const sends = c3.filter((c) => /sendMessage/.test(c.url));
+  assert.ok(sends.length === 1 && /the alert/.test(sends[0].body.text), "the alert is sent before the reply that was queued first");
+  await p3.pushDrainNow();
+  assert.equal(c3.filter((c) => /sendMessage/.test(c.url)).length, 1, "the pacing gap still holds between the two");
+  delete process.env.TG_BOT_TOKEN;
 });

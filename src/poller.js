@@ -11259,6 +11259,19 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   const PUSH_DRAIN_MS = 1000;               // outbox tick; the gap above does the actual pacing
   const PUSH_MAX_TRIES = 5;
   const PUSH_LOG_RING = 40;
+  // Command replies are throttled per chat: every /help from ANY chat used to earn a forced reply
+  // on the one shared outbox, so a stranger who found the bot could keep the 1-per-3s drain busy
+  // and evict real alerts. Linked chats get a small per-minute allowance; unlinked chats also get
+  // an hourly one and share a global per-minute budget so twenty strangers cannot do together what
+  // one cannot alone. Bad /start codes count toward a per-chat silence (they used to be free).
+  const PUSH_CMD_PER_MIN = 3;
+  const PUSH_CMD_UNLINKED_PER_HOUR = 10;
+  const PUSH_CMD_STRANGERS_PER_MIN = 5;
+  const PUSH_START_FAILS = 5;               // bad codes per chat per 10 min before that chat is ignored
+  const PUSH_START_FAIL_WINDOW = 10 * 60 * 1000;
+  const pushCmdSeen = new Map();            // chat -> [ts of replies earned]
+  const pushStartFails = new Map();         // chat -> [ts of rejected /start codes]
+  let pushStrangerSeen = [];                // ts of replies earned by unlinked chats, all of them
   const pushFetch = pushFetchOpt || ((...a) => fetch(...a));
   const PUSH_TOKEN = () => process.env.TG_BOT_TOKEN || "";
   const pushOn = () => !!PUSH_TOKEN();
@@ -11377,7 +11390,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       // Admin-ness is stamped at LINK time from the browser that minted the code. Re-linking is how
       // it changes, which is deliberate: an alert channel whose contents silently change when a
       // cookie expires elsewhere is worse than one you re-authorise on purpose.
-      admin: !!rec.admin || (prev ? !!prev.admin : false),
+      admin: !!rec.admin,
       chat: key, name: name || key, since: prev ? prev.since : Date.now(),
       // A new recipient starts CAUGHT UP, never with the backlog: the ring holds up to 200 events
       // and nobody wants their first message from this bot to be two hundred stale setups.
@@ -11492,11 +11505,15 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       const txt = m.text.trim();
       const start = txt.match(/^\/start(?:@\S+)?\s+(\S+)/i);
       if (start) {
+        const now = Date.now(), key = String(chat);
+        const fails = (pushStartFails.get(key) || []).filter((t) => now - t < PUSH_START_FAIL_WINDOW);
+        if (fails.length >= PUSH_START_FAILS) { pushStartFails.set(key, fails); continue; }   // silent: no oracle, no reply budget
         const res = pushBind(start[1], chat, name);
-        pushEnqueue(String(chat), res.ok
+        if (!res.ok) { fails.push(now); pushStartFails.set(key, fails); } else pushStartFails.delete(key);
+        pushReply(chat, res.ok
           ? "<b>Linked.</b>\nYou'll get alerts here. Send /stop to unlink."
           : (res.error === "expired" ? "That code has expired \u2014 generate a new one in the alerts panel."
-            : "That code isn't valid \u2014 check the alerts panel for a current one."), true);
+            : "That code isn't valid \u2014 check the alerts panel for a current one."));
         continue;
       }
       if (/^\/stop(?:@\S+)?$/i.test(txt)) {
@@ -11505,7 +11522,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         // Telegram account is a stronger claim than any browser handle. /stop must always work —
         // it is the one escape hatch that needs no panel, no cookie and no admin.
         if (had) pushUnlink(chat, null, true);
-        pushEnqueue(String(chat), had ? "<b>Unlinked.</b>\nNo further alerts will be sent here." : "You weren't linked.", true);
+        pushReply(chat, had ? "<b>Unlinked.</b>\nNo further alerts will be sent here." : "You weren't linked.", had);
         continue;
       }
       // Direct-message reply bridge (build 2026.08.31-47). COMMAND-ONLY, deliberately: people
@@ -11515,36 +11532,66 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       const rm = /^\/r(?:@\S+)?(?:\s+([\s\S]+))?$/i.exec(txt);
       if (rm) {
         const body = (rm[1] || "").trim();
-        if (!dmBridge) pushEnqueue(String(chat), "Messages aren't available on this deployment.", true);
-        else if (!body) pushEnqueue(String(chat), "Send <code>/r your message</code>, or <code>/r @handle your message</code>.", true);
+        if (!dmBridge) pushReply(chat, "Messages aren't available on this deployment.");
+        else if (!body) pushReply(chat, "Send <code>/r your message</code>, or <code>/r @handle your message</code>.");
+        else if (!pushRecipients.has(String(chat))) pushReply(chat, "Not linked. Open the alerts panel for a link code, then send /start CODE.");
         else {
           let res;
           try { res = dmBridge(String(chat), body); }
           catch (e) { res = { ok: false, error: "That didn't send \u2014 try again." }; }
-          pushEnqueue(String(chat), res && res.ok ? "\u2713 Sent." : "\u26a0 " + ((res && res.error) || "Could not send."), true);
+          pushReply(chat, res && res.ok ? "\u2713 Sent." : "\u26a0 " + ((res && res.error) || "Could not send."));
         }
         continue;
       }
       if (/^\/(status|help)(?:@\S+)?$/i.test(txt)) {
         const r2 = pushRecipients.get(String(chat));
-        pushEnqueue(String(chat), r2
+        pushReply(chat, r2
           ? "<b>Linked</b> \u00b7 classes: " + (r2.classes && r2.classes.length ? r2.classes.join(", ") : "all")
             + "\n/r &lt;message&gt; replies to your last message notification \u00b7 /r @handle &lt;message&gt; picks the person."
             + "\n/stop to unlink."
-          : "Not linked. Open the alerts panel for a link code, then send /start CODE.", true);
+          : "Not linked. Open the alerts panel for a link code, then send /start CODE.");
       }
     }
+    pushCmdPrune();
     if (pushOffset) persistPush();
+  }
+  // One reply per command, and only when the chat has budget left. `linkedOverride` lets /stop's
+  // confirmation ride the linked allowance even though the chat was just unlinked.
+  function pushReply(chat, text, linkedOverride) {
+    const key = String(chat), now = Date.now();
+    const linked = linkedOverride != null ? !!linkedOverride : pushRecipients.has(key);
+    const seen = (pushCmdSeen.get(key) || []).filter((t) => now - t < 3600e3);
+    if (seen.filter((t) => now - t < 60e3).length >= PUSH_CMD_PER_MIN) { pushCmdSeen.set(key, seen); return false; }
+    if (!linked) {
+      pushStrangerSeen = pushStrangerSeen.filter((t) => now - t < 60e3);
+      if (seen.length >= PUSH_CMD_UNLINKED_PER_HOUR || pushStrangerSeen.length >= PUSH_CMD_STRANGERS_PER_MIN) { pushCmdSeen.set(key, seen); return false; }
+      pushStrangerSeen.push(now);
+    }
+    seen.push(now); pushCmdSeen.set(key, seen);
+    // `force` (skip the hourly ALERT cap) only for a linked person: their command reply is not an
+    // alert. A stranger's reply never forces anything and is marked so the drain sends alerts first.
+    pushEnqueue(key, text, linked, 0, true);
+    return true;
+  }
+  function pushCmdPrune() {
+    const now = Date.now();
+    for (const [k, arr] of pushCmdSeen) { const a = arr.filter((t) => now - t < 3600e3); if (a.length) pushCmdSeen.set(k, a); else pushCmdSeen.delete(k); }
+    for (const [k, arr] of pushStartFails) { const a = arr.filter((t) => now - t < PUSH_START_FAIL_WINDOW); if (a.length) pushStartFails.set(k, a); else pushStartFails.delete(k); }
   }
 
   // ---- outbox ---------------------------------------------------------------------------------
   // Bounded, paced, and never silently lossy: an overflow increments a counter the panel shows and
   // the next delivered message discloses. `force` bypasses the per-recipient hourly cap for replies
   // to a human who just typed a command at the bot — a /stop confirmation is not an alert.
-  function pushEnqueue(chat, text, force, after) {
+  function pushEnqueue(chat, text, force, after, reply) {
     if (!text) return;
-    if (pushQueue.length >= PUSH_QUEUE_MAX) { pushQueue.shift(); pushDropped++; }
-    pushQueue.push({ chat: String(chat), text, tries: 0, at: Date.now(), force: !!force, after: after || 0 });
+    if (pushQueue.length >= PUSH_QUEUE_MAX) {
+      // Overflow evicts a bot reply before it evicts an alert: a dropped "/help" answer costs a
+      // retype, a dropped setup costs the setup.
+      const ri = pushQueue.findIndex((q) => q.reply);
+      if (ri >= 0) pushQueue.splice(ri, 1); else { pushQueue.shift(); pushDropped++; }
+    }
+    pushQueue.push({ chat: String(chat), text, tries: 0, at: Date.now(), force: !!force, after: after || 0, reply: !!reply });
   }
   function pushRecent(chat, now) {
     const r = pushRecipients.get(String(chat));
@@ -11564,7 +11611,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     // their cap parked everyone else's alerts, a minute at a time, until it cleared.
     const deliverable = (q) => (!q.after || q.after <= now)
       && (q.force || pushRecent(q.chat, now) < PUSH_CAP_HOUR);
-    const idx = pushQueue.findIndex(deliverable);
+    // Alerts first, then bot replies: a reply can wait a pacing gap, an alert is the product.
+    let idx = pushQueue.findIndex((q) => !q.reply && deliverable(q));
+    if (idx < 0) idx = pushQueue.findIndex(deliverable);
     if (idx < 0) {
       // Nothing sendable this tick. If something is due but capped, re-check in a minute instead
       // of spinning the drain: the cap HOLDS, it never drops — the message keeps its place and
