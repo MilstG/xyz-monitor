@@ -13348,7 +13348,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.11-72"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.11-73"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -24656,10 +24656,10 @@ test("chat terminal -69: a command result is a message with cmd, no stamp, no ed
   assert.ok(/const shown=line\.replace\(\/\^\(admin\\s\+\(\?:unlock\|reset-reports\)\)/.test(app), "an admin password typed into chat is redacted in the private echo");
   assert.ok(/cmd:line,cmdAi:!cmd\|\|r\.ai/.test(app), "a planner answer (AI planned, board computed) still posts as AI — the badge follows the spend");
   assert.ok(/\(m\.cmd\?'':'<button type="button" class="dm-tool" data-dmedit=/.test(app), "no edit button on a command result");
-  assert.ok(/<pre class="dm-cmdout">'\+esc\(m\.body\)\+'<\/pre>/.test(app), "the output renders escaped, in a monospace block");
+  assert.ok(/<\/div>'\+dmFile\(m\)\+'<pre class="dm-cmdout">'\+esc\(m\.body\)\+'<\/pre>/.test(app), "the output renders escaped, in a monospace block, with the attachment (the ratio chart) ABOVE it — the first cut never called dmFile on a command result, so the chart posted and never drew");
   assert.ok(/\/help for commands\)/.test(app), "the composer placeholder points at /help");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
-  for (const pin of [".dm-b.dm-cmdb{", ".dm-cmdout{", ".dm-local{", ".dm-local.err{", ".dm-localmk{", ".dm-guidebtn{", ".hlp-cmd{", ".hlp-chip.chat{"]) assert.ok(css.includes(pin), "css pin missing: " + pin);
+  for (const pin of [".dm-b.dm-cmdb{", ".dm-cmdout{", ".dm-local{", ".dm-local.err{", ".dm-localmk{", ".dm-guidebtn{", ".hlp-cmd{", ".hlp-chip.chat{", ".dm-msg.cmd:has(.dm-img){", ".dm-cmdb .dm-img img{width:100%}"]) assert.ok(css.includes(pin), "css pin missing: " + pin);
   // -70: the guide. One data source renders the private card AND the modal, a ? beside the
   // composer opens it, and every verb the chat runner blocks is tagged panel-only in the guide.
   assert.ok(/const DM_CMD_GUIDE=\[/.test(app) && /function openDmGuide\(\)\{/.test(app), "the guide exists");

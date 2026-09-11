@@ -2407,6 +2407,10 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 /* the ? beside the composer, and the command guide it opens in the help modal (build 2026.09.11-70) */
 .dm-guidebtn{font-family:var(--mono);font-weight:600;font-size:14px;color:var(--accent)}
 .dm-mopt .amber{color:var(--accent)}
+/* a chart posted by /ratio is the message: full bubble width, and the bubble takes the room a chart needs */
+.dm-msg.cmd:has(.dm-img){max-width:100%;width:min(100%,980px)}
+.dm-cmdb .dm-img{max-width:100%;margin:6px 0 8px}
+.dm-cmdb .dm-img img{width:100%}
 .hlp-cmd{border-collapse:collapse;width:100%;font-size:12.5px;margin:2px 0 4px} .hlp-cmd td{padding:5px 8px 5px 0;vertical-align:top;border-top:1px solid var(--border);line-height:1.45}
 .hlp-cmd td.c{font-family:var(--mono);font-size:12px;color:var(--accent);white-space:pre-wrap;word-break:break-word;width:36%}
 .hlp-cmd td.w{white-space:nowrap;text-align:right;padding-right:0}
