@@ -284,8 +284,10 @@ You need a GitHub account and a Railway account.
 - Cost at this scale is typically just the Railway Hobby base (~\$5/mo).
 - Redeploys keep OI history (it's on the volume) but re-backfill candle history (~1–2 min),
   which is cheap and expected.
-- The refresh selector in the UI controls how often *your browser* re-fetches the cached
-  snapshot (30s–15m). The server updates independently every ~30s regardless.
+- While the live push stream (SSE) is healthy the status line reads **push live** and your
+  browser pulls the moment the server's data changes (~15s snapshot cadence). The refresh
+  selector (15s–15m, default 30s) only paces the fallback poll used when the stream is down.
+  The server updates independently every ~15–30s regardless.
 
 ## Tests
 
