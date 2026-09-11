@@ -13336,7 +13336,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.11-61"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.11-62"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -17049,6 +17049,21 @@ test("sse push 2026.07.29-07: client — poll survives stretched, snaps back on 
   assert.ok(app.includes("startEvents();   // push channel first"), "stream armed at boot");
   // startCycle must derive its interval through _cycleMs so a stretch/snap re-arm actually re-times.
   assert.ok(app.includes("const ms=_cycleMs(); cycleTimer=setInterval("), "cycle interval derives from _cycleMs");
+});
+
+// ===== update notice (build 2026.09.11-62) =====================================================
+// A redeploy announces itself: any snapshot or SSE frame carrying a build other than the one the
+// tab is running raises ONE persistent "please refresh" toast with a real reload action.
+test("update notice -62: a changed server build raises one persistent refresh toast", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(app.includes("if(state.build&&state.build!==s.v) notifyNewBuild(s.v); state.build=s.v;"),
+    "applySnapshot compares the incoming build BEFORE overwriting — and never fires on the first snapshot");
+  assert.ok(app.includes("if(d&&d.v&&state.build&&d.v!==state.build) notifyNewBuild(d.v);"),
+    "the SSE frame's own v is a trigger — dataTs is a restarted counter the notice must not depend on");
+  assert.ok(app.includes("if(_buildToastFor===v) return; _buildToastFor=v;"),
+    "one toast per version — repeated snapshots and a dismissed toast never stack");
+  assert.ok(app.includes("location.reload()"), "the offered action is a real reload, not a message");
 });
 
 // ===== perf phase 3 (build 2026.07.29-08): named ticks, yielding builds, the serialized chain ===
