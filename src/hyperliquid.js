@@ -115,21 +115,25 @@ function createUniverseSocket({ onCtxs, log }) {
     return { enabled: false, healthy: () => false, status: () => ({ enabled: false }), close() {} };
   }
   let ws = null, pingT = null, closed = false;
-  let lastMsg = 0, msgs = 0, reconnects = 0, backoff = 1000, loggedUp = false;
+  // lastMsg: anything from the peer (pongs included) — proves the socket is alive.
+  // lastData: a ctxs event — proves the SUBSCRIPTION is alive. Health and the watchdog read the
+  // second: pongs kept a dead subscription looking healthy, REST dropped to its slow reconcile
+  // cadence, and the board went 150s stale while status said "connected".
+  let lastMsg = 0, lastData = 0, msgs = 0, reconnects = 0, backoff = 1000, loggedUp = false, gotData = false;
 
   function connect() {
     if (closed) return;
     try { ws = new WebSocket(WS_URL); } catch (_) { retry(); return; }
     ws.onopen = () => {
-      backoff = 1000;
-      lastMsg = Date.now();   // arm the watchdog at open, so a socket that never delivers a single message is also caught
+      gotData = false;   // backoff resets on the first DATA event, not here (accept-then-close must not loop at 1s)
+      lastMsg = Date.now(); lastData = lastMsg;   // arm the watchdog at open, so a socket that never delivers a single message is also caught
       try { ws.send(JSON.stringify({ method: "subscribe", subscription: { type: "allDexsAssetCtxs" } })); } catch (_) {}
       clearInterval(pingT);
       pingT = setInterval(() => {
         // Watchdog first: total silence past the threshold means the peer is gone even though
         // the socket claims open — force-close so onclose fires and the backoff reconnect runs.
         // Repeat fires while CLOSING are harmless (close() no-ops / throws into the catch).
-        if (Date.now() - lastMsg > WS_STALE_MS) { try { ws.close(); } catch (_) {} return; }
+        if (Date.now() - lastData > WS_STALE_MS) { try { ws.close(); } catch (_) {} return; }   // no DATA — dead peer or dead subscription, same cure
         try { if (ws && ws.readyState === 1) ws.send('{"method":"ping"}'); } catch (_) {}
       }, 45000);
     };
@@ -138,6 +142,8 @@ function createUniverseSocket({ onCtxs, log }) {
       if (!m || typeof m !== "object") return;
       if (m.channel === "pong" || m.channel === "subscriptionResponse") { lastMsg = Date.now(); return; }
       if (m.channel !== "allDexsAssetCtxs" || !m.data || !Array.isArray(m.data.ctxs)) return;
+      lastData = Date.now();
+      if (!gotData) { gotData = true; backoff = 1000; }
       lastMsg = Date.now(); msgs++;
       if (!loggedUp) { loggedUp = true; log("WebSocket universe feed LIVE (allDexsAssetCtxs) — prices now push in real time; REST drops to a slow reconciliation poll"); }
       try { onCtxs(m.data.ctxs); } catch (_) {}
@@ -148,7 +154,7 @@ function createUniverseSocket({ onCtxs, log }) {
   function retry() {
     if (closed) return;
     reconnects++;
-    setTimeout(connect, backoff);
+    setTimeout(connect, backoff + Math.floor(Math.random() * backoff * 0.4));   // jitter: a fleet reconnecting in lockstep is its own outage
     backoff = Math.min(backoff * 2, 60000);
   }
   connect();
@@ -156,7 +162,7 @@ function createUniverseSocket({ onCtxs, log }) {
   return {
     enabled: true,
     // healthy = we've decoded at least one ctxs event and heard from the server recently
-    healthy: () => msgs > 0 && Date.now() - lastMsg < 90000,
+    healthy: () => msgs > 0 && Date.now() - lastData < 90000,
     status: () => ({
       enabled: true,
       connected: !!(ws && ws.readyState === 1),

@@ -256,7 +256,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   let earnCache = null, earnVer = 0, earnSig = "", lastEarnOk = 0, earnErr = null;   // /api/earnings payload + freshness
   let trendCache = null, trendVer = 0, trendSig = "", trendBuilt = 0, trendByCoin = new Map();   // /api/trend — lazy, memoized, ETag rides content
   const earnMap = new Map();   // ticker -> sorted upcoming [{d, s, eps}] for badge/guard proximity lookups
-  let earnPrints = [], earnHistDone = false, earnStudy = {};   // past prints (persisted, self-accruing) + per-ticker reaction stats
+  let earnPrints = [], earnHistDone = false, earnHistBusy = false, earnStudy = {};   // past prints (persisted, self-accruing) + per-ticker reaction stats
   let earnVoids = new Set();   // operator tombstones (ticker|date): feed-garbage prints, permanently ignored at every ingest point
   const regimeHist = store.loadRegime(Date.now() - REGIME_RETENTION);   // [[ts, corr], ...]
   let curCorr = null, curCorrPct = null, curCorrN = 0, lastRegimeSample = 0;
@@ -758,6 +758,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const c = r.uni === "main"
       ? await fetchCandles(coin, "1d", now - MAIN_DAILY_DAYS * DAY, now, MAIN_DAILY_WEIGHT)
       : await fetchCandles(coin, "1d", now - 370 * DAY, now, 27);
+    // A non-array body (an upstream error page with a 200) must not replace a warm 370d spine:
+    // needDaily would see a truthy value with a fresh stamp and not retry for six hours.
+    if (!Array.isArray(c)) throw new Error("daily candles: non-array reply");
     r.dailyRaw = c; r.dailyTs = Date.now(); r.isNew = false;
     buildDaily();
   }
@@ -4738,6 +4741,23 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
     return m;
   }
+  // A learned alias is write-once and re-gates the whole tape, so a headline crafted to steer the
+  // classifier into returning "the" or "and" for a roster ticker would attribute broad swaths of
+  // the tape to that name. An alias must be a name: no stopwords, a capital or a digit somewhere,
+  // and it must not already match more than a fifth of the current headlines.
+  const ALIAS_STOP = new Set(["the", "and", "for", "with", "from", "that", "this", "inc", "corp", "stock", "stocks", "shares", "market", "markets", "news", "today", "report", "company", "group", "holdings", "said", "says", "will", "after", "before", "over", "under", "into", "than", "more", "less", "new", "big", "top", "best", "buy", "sell", "trade", "price", "rally", "drop", "surge", "fall"]);
+  function aliasOk(n, T) {
+    const low = n.toLowerCase().trim();
+    if (low.length < 3 || ALIAS_STOP.has(low)) return false;
+    if (!/[A-Z0-9]/.test(n)) return false;
+    if (low === String(T).toLowerCase()) return true;
+    const heads = newsItems.map((a) => String(a.h || "").toLowerCase());
+    if (heads.length >= 10) {
+      const hits = heads.filter((h) => h.includes(low)).length;
+      if (hits > heads.length * 0.2) return false;
+    }
+    return true;
+  }
   async function tgTick() {
     if (!tgChannels.length || tgBusy) return;
     tgBusy = true;
@@ -7340,7 +7360,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (!e || !e.t || !Array.isArray(e.names)) continue;
       const T = String(e.t).toUpperCase();
       if (nameLearned[T] || !pend.names.includes(T)) continue;
-      const clean = e.names.filter((n) => typeof n === "string" && n.trim().length >= 3).map((n) => n.trim().slice(0, 60)).slice(0, 4);
+      const clean = e.names.filter((n) => typeof n === "string" && n.trim().length >= 3).map((n) => n.trim().slice(0, 60))
+        .filter((n) => aliasOk(n, T)).slice(0, 4);
       if (clean.length) { nameLearned[T] = clean; applied++; }
     }
     applied += regatePending();
@@ -7359,11 +7380,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // epsActual/revenueActual on the same calendar row after the report) and then graduates into the
   // persisted print history.
   function earnCalFetchers(token, elig) {
+    // One retry on 429 honouring Retry-After: the free tier is 60 calls/min and the chunk walks
+    // below are paced under it, but the news lane shares the key.
     const getCal = async (f, t) => {
-      const res = await fetch(`https://finnhub.io/api/v1/calendar/earnings?from=${f}&to=${t}`,
-        { headers: { accept: "application/json", "X-Finnhub-Token": token }, signal: AbortSignal.timeout(20000) });
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      return parseEarningsCalendar(await res.json(), elig);
+      for (let a = 0; ; a++) {
+        const res = await fetch(`https://finnhub.io/api/v1/calendar/earnings?from=${f}&to=${t}`,
+          { headers: { accept: "application/json", "X-Finnhub-Token": token }, signal: AbortSignal.timeout(20000) });
+        if (res.status === 429 && a < 2) { const ra = parseInt(res.headers.get("retry-after"), 10); await sleep((Number.isFinite(ra) && ra > 0 ? Math.min(60, ra) : 15) * 1000); continue; }
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return parseEarningsCalendar(await res.json(), elig);
+      }
     };
     // The free-tier calendar TRUNCATES long windows, serving the FAR end first — a 19-day
     // earnings-season pull returned only its last 9 days and silently dropped a same-day NFLX
@@ -7396,7 +7422,6 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   //
   // Re-pulling is idempotent by construction: mergeEarnPrints dedupes on ticker+date and upgrades a
   // row in place, so a second walk over the same window changes nothing and a wider one only adds.
-  let earnHistBusy = false;
   async function earnHistBackfill(opts) {
     const o = opts || {};
     if (earnHistBusy) return { ok: false, error: "a history backfill is already running" };
@@ -7447,13 +7472,18 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       // history" across the board). Flag is VERSIONED (histDone2): volumes that completed the
       // truncated v1 backfill re-run it chunked once; the print merge dedupes and upgrades in
       // place, so re-pulling is idempotent. Flagged done only on full chunk success.
-      if (!earnHistDone) {
+      // 52 chunks at 1.2s ≈ 50 calls/min, under the free tier's 60 (the old 300ms pace was ~200/min
+      // and failed the whole walk on the first 429, every six hours, forever). The busy flag is
+      // shared with the operator-forced backfill so the two never reassign earnPrints past each other.
+      if (!earnHistDone && !earnHistBusy) {
+        earnHistBusy = true;
         try {
-          const hist = await getCalChunked(now - 370 * DAY, now - 6 * DAY, 7, 300);
+          const hist = await getCalChunked(now - 370 * DAY, now - 6 * DAY, 7, 1200);
           earnPrints = mergeEarnPrints(earnPrints, hist, now);
           earnHistDone = true;
           log(`Earnings history backfill (chunked): ${hist.length} past print(s) retrieved (feed depth is whatever the free tier serves — study self-accrues from here)`);
         } catch (he) { log("Earnings history backfill failed (will retry): " + (he && he.message)); }
+        finally { earnHistBusy = false; }
       }
       const entries = [], past = [];
       for (const e of parsed) ((earnDayDiff(e.d, now) >= 0) ? entries : past).push(e);
@@ -8089,9 +8119,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     if (crypto) czBoot();
     hydrateDuel();
     if (duel.ic.length) log(`Restored score duel: ${duel.ic.length} IC day(s) — the MOM vs MOM+ record carries across this deploy`);
-    await pollUniverse();
-    seedFundingFromOI();
-    buildSnapshot(); buildDaily();
+    // The boot poll and first builds are isolated the same way the analytics builds below are: a
+    // throw here used to reject start() before any interval was armed — a zombie process with a
+    // green healthcheck. sampleOI/buildSnapshot were bare; the fetch inside pollUniverse was not.
+    try { await pollUniverse(); } catch (e) { log("boot universe poll failed: " + (e && e.message)); }
+    try { seedFundingFromOI(); } catch (e) { log("boot funding seed failed: " + (e && e.message)); }
+    try { buildSnapshot(); } catch (e) { log("boot snapshot build failed: " + (e && e.message)); }
+    try { buildDaily(); } catch (e) { log("boot daily build failed: " + (e && e.message)); }
     // Isolate each universe's boot build: a throw here used to abort the rest of start() — including
     // the analytics rebuild interval registered further down — so one bad build left BOTH tabs stuck
     // on "warming up the spines" forever with no retry. Now a failure is logged and the interval still
@@ -8246,6 +8280,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     let hi = Number.isFinite(+to) ? +to : now;
     let lo = Number.isFinite(+from) ? +from : hi - 30 * DAY;
     if (lo > hi) { const t = lo; lo = hi; hi = t; }
+    // Bounded by retention and snapped to the bar grid: from=0 used to scan the whole 370d @ 5m
+    // archive on the request path, and every distinct millisecond minted a fresh cache entry.
+    hi = Math.min(hi, now + HOUR);
+    lo = Math.max(lo, hi - 370 * DAY);
+    lo = Math.floor(lo / 300000) * 300000; hi = Math.ceil(hi / 300000) * 300000;
     // BASE SPLICE (build 2026.08.18-04). Where the 1m opening-hour archive covers a span, it is
     // AUTHORITATIVE and the overlapping 5m rows are dropped rather than merged — the two archives
     // hold the same trades, so folding both in would double every volume in the window and put a
@@ -9750,11 +9789,13 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
               const rets = []; for (let i = 1; i < cls.length; i++) rets.push((cls[i] / cls[i - 1] - 1) * 100);
               sd0 = retStd(rets.slice(-30), 15);
             } catch (_) {}
-            openLedger(rr, "airead", { score: 0, reading: "" }, bias === "long" ? 1 : -1,
+            // Inside the serialised build chain: this runs after an awaited model call, i.e. at an
+            // arbitrary point relative to a yielding buildSignals that mutates ledgerOpen.
+            await chainBuild("aireadClaim", async () => openLedger(rr, "airead", { score: 0, reading: "" }, bias === "long" ? 1 : -1,
               { sd0: sd0 != null ? +sd0.toFixed(3) : undefined, psd: bias, pn: 1,
                 stp: +(+vdv).toPrecision(6),
                 mv: tg ? +(Math.abs(tg.value / mk - 1) * 100).toFixed(2) : undefined,
-                rm: used }, 0);
+                rm: used }, 0));
           }
         }
       } catch (e) { log("airead claim open failed (isolated, report unaffected): " + (e && e.message)); }
@@ -10025,9 +10066,28 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     askHits.push(now);
     // Enrich each row with the canonical company name from sectors.js (server-owned, so the
     // analyst maps ticker->company reliably instead of guessing). Unseeded names stay ticker-only.
+    // The client's compact rows are ACCEPTED only for names on the live board, only for the keys
+    // the terminal ships, only as finite numbers — and the mark is the server's, not theirs.
+    // Before this the 256 KB body went verbatim into the prompt: any member could inflate every
+    // call to tens of thousands of tokens against the shared pool, or feed the analyst fabricated
+    // "live" numbers it is instructed to treat as the board's.
+    const ASK_KEYS = new Set(["t", "px", "d1", "f", "fp", "sqz", "mom", "vs", "oi", "vol", "doi", "beta", "dd", "sector", "h1", "h4", "d7", "d30", "gap", "pr", "rv", "adr", "v30", "rs", "hitr", "ddy", "yo", "mo", "m20", "m50", "m100", "m200", "vw"]);
+    const live = new Map();
+    for (const r of rows.values()) if (!r.delisted && r.ticker) live.set(String(r.ticker).toUpperCase(), r);
     const markets = Array.isArray(ctx.universe) ? ctx.universe.slice(0, 160).map((m) => {
-      const nm = companyName(m && m.t); return nm ? Object.assign({ name: nm }, m) : m;
-    }) : [];
+      if (!m || typeof m !== "object") return null;
+      const t = String(m.t || "").toUpperCase().slice(0, 24), lr = live.get(t) || null;
+      if (live.size && !lr) return null;   // a board exists and this name is not on it
+      const o = { t };
+      for (const k of Object.keys(m)) {
+        if (!ASK_KEYS.has(k) || k === "t") continue;
+        const v = m[k];
+        if (k === "sector") { if (typeof v === "string") o.sector = v.slice(0, 40); continue; }
+        if (typeof v === "number" && Number.isFinite(v) && Math.abs(v) < 1e15) o[k] = v;
+      }
+      if (lr && lr.px > 0) o.px = +(+lr.px).toPrecision(9);   // the mark every read anchors on is the server's
+      const nm = companyName(t); return nm ? Object.assign({ name: nm }, o) : o;
+    }).filter(Boolean) : [];
     const tickerSet = new Set(markets.map((m) => String(m && m.t || "").toUpperCase()).filter(Boolean));
     // Terminal calls run at medium effort — fast enough for a console, deep enough to plan or
     // reason correctly. The token budgets look oversized for one-line outputs because OpenAI
@@ -11412,7 +11472,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const now = Date.now();
     for (const [c, v] of pushCodes) if (now - v.t > PUSH_LINK_TTL) pushCodes.delete(c);
     let code = "";
-    for (let i = 0; i < 6; i++) code += PUSH_CODE_ALPHABET[Math.floor(Math.random() * PUSH_CODE_ALPHABET.length)];
+    for (let i = 0; i < 6; i++) code += PUSH_CODE_ALPHABET[require("crypto").randomInt(PUSH_CODE_ALPHABET.length)];   // binds a chat AND stamps admin: never Math.random
     pushCodes.set(code, { t: now, owner: owner || "", admin: !!isAdmin });
     return { ok: true, code, expiresAt: now + PUSH_LINK_TTL };
   }
@@ -12177,8 +12237,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // the generation path, comparing against the stance the previous cached report published.
   function aiFlipCheck(coin, prevRep, nextRep) {
     try {
-      const a = prevRep && prevRep.report && prevRep.report.action;
-      const b = nextRep && nextRep.report && nextRep.report.action;
+      // Stored reports carry computed.action (aiAssemble); `.report.action` never existed, so this
+      // class could never fire — and the test fixture had been written to the same wrong shape.
+      const a = prevRep && prevRep.computed && prevRep.computed.action;
+      const b = nextRep && nextRep.computed && nextRep.computed.action;
       if (!a || !b || !a.stance || !b.stance) return null;
       if (a.stance === b.stance) return null;
       const r = rows.get(coin);
@@ -14453,6 +14515,8 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       trendBuilt = Number.MAX_SAFE_INTEGER / 2;
     },
     pollUniverseNow: pollUniverse,     // harness: one universe poll through the injected metaFetch
+    lastPollAt: () => lastPoll,        // /api/health: the stale flag reads this
+    aliasOkNow: aliasOk,               // harness: the learned-alias guard
     orderNow: () => order.slice(),     // harness: the live roster
     seedRowNow: (coin, fields) => {   // harness: seed a synthetic market so builds are testable without network; main-universe seeds join the main roster exactly as the refresh would place them
       const r = Object.assign(getRow(coin), fields);

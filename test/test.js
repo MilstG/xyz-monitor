@@ -355,7 +355,7 @@ test("ask-the-board 2C: analyst may use identity/business knowledge, scoped to t
     assert.ok(pol.includes(pin), `analyst identity/numbers rule missing: ${pin}`);
   // And the canonical name must actually be threaded onto each analyst row server-side, so the
   // model maps ticker->company from the payload rather than guessing.
-  assert.ok(pol.includes("const nm = companyName(m && m.t)") && pol.includes('require("./sectors")'),
+  assert.ok(pol.includes("const nm = companyName(t); return nm ? Object.assign({ name: nm }, o) : o;") && pol.includes('require("./sectors")'),
     "company-name injection not wired into askBoard markets");
   assert.ok(/companyName/.test(pol), "companyName must be imported/used in poller");
 });
@@ -10962,7 +10962,7 @@ test("earnings alerts are scoped to open announced claims, once per report date"
 test("analyst flip fires only on an actual stance change", () => {
   const p = ctxHarness();
   p.seedRowNow("AAA", { ticker: "AAA", px: 10, uni: "xyz" });
-  const rep = (stance) => ({ report: { action: { stance, note: "because" } } });
+  const rep = (stance) => ({ computed: { action: { stance, note: "because" } } });   // the shape aiAssemble actually stores (-67)
   const ai = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "ai");
 
   assert.equal(p.aiFlipCheckNow("AAA", null, rep("wait")), null, "a first report is not a flip — there is nothing to have changed from");
@@ -10971,7 +10971,7 @@ test("analyst flip fires only on an actual stance change", () => {
   assert.equal(ai().length, 1, "the report changing its mind is the part worth interrupting for");
   assert.equal(ai()[0].from, "wait");
   assert.equal(ai()[0].to, "enter_on_pullback");
-  assert.equal(p.aiFlipCheckNow("AAA", rep("wait"), { report: {} }), null, "a malformed report is not a flip");
+  assert.equal(p.aiFlipCheckNow("AAA", rep("wait"), { computed: {} }), null, "a malformed report is not a flip");
   assert.equal(p.aiFlipCheckNow("AAA", rep("wait"), null), null);
 });
 
@@ -12658,7 +12658,7 @@ test("ws watchdog: a mute socket that never closes is force-closed into the reco
   const fs = require("fs"), path = require("path");
   const hl = fs.readFileSync(path.join(__dirname, "..", "src", "hyperliquid.js"), "utf8");
   assert.ok(hl.includes("const WS_STALE_MS = 120000"), "staleness threshold pinned at 120s — two missed ping cycles of total silence");
-  assert.ok(/if \(Date\.now\(\) - lastMsg > WS_STALE_MS\) \{ try \{ ws\.close\(\); \} catch \(_\) \{\} return; \}/.test(hl),
+  assert.ok(/if \(Date\.now\(\) - lastData > WS_STALE_MS\) \{ try \{ ws\.close\(\); \} catch \(_\) \{\} return; \}/.test(hl),
     "the ping tick must check staleness BEFORE pinging and force-close a zombie — close() routes into onclose -> backoff -> reconnect");
   assert.ok(/onopen[\s\S]{0,200}lastMsg = Date\.now\(\)/.test(hl),
     "the watchdog is armed at open, so a socket that never delivers even one message is also caught");
@@ -24366,4 +24366,109 @@ test("audit -67: fastify majors are past the advisories, redirects use the v5 ar
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   assert.equal((srv.match(/reply\.redirect\(30\d,/g) || []).length, 0, "no redirect uses the removed (code, url) order");
   assert.ok(/dotfiles: "deny"/.test(srv), "static never serves a dotfile");
+});
+
+// ===== build 2026.09.11-67: Medium findings ===================================================
+test("audit -67: /claim never mints an operator; bootstrap is transactional and one-shot", () => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const { openAccounts } = require("../src/accounts");
+  const A = openAccounts(fs.mkdtempSync(path.join(os.tmpdir(), "xyz-claim-")), { sessionDays: 1 });
+  const c = A.claim("first", "a-long-password-12", null);
+  assert.ok(c.ok && c.user.isAdmin === false, "first to claim is NOT admin");
+  const A2 = openAccounts(fs.mkdtempSync(path.join(os.tmpdir(), "xyz-claim2-")), { sessionDays: 1 });
+  const b = A2.bootstrap("op", "a-long-password-12", null);
+  assert.ok(b.ok && b.user.isAdmin === true, "bootstrap still mints the operator");
+  assert.equal(A2.bootstrap("op2", "a-long-password-12", null).ok, false, "and closes");
+  const src = fs.readFileSync(path.join(__dirname, "..", "src", "accounts.js"), "utf8");
+  assert.ok(/db\.exec\("BEGIN IMMEDIATE"\);\s*\n\s*try \{\s*\n\s*if \(S\.userCount\.get\(\)\.n > 0\)/.test(src), "count and insert share a transaction");
+});
+
+test("audit -67: sign-in answers every failure with the same words and one scrypt", () => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const { openAccounts } = require("../src/accounts");
+  const A = openAccounts(fs.mkdtempSync(path.join(os.tmpdir(), "xyz-login-")), { sessionDays: 1 });
+  A.bootstrap("gus", "a-long-password-12", null);
+  const uid = A.getUserByHandle("gus").uid;
+  const e1 = A.login("nobody", "whatever-long-pw").error, e2 = A.login("gus", "wrong-long-pw-12").error;
+  A.setDisabled(uid, true);
+  const e3 = A.login("gus", "a-long-password-12").error;
+  assert.ok(e1 === e2 && e2 === e3 && /wrong handle or password/.test(e1), "unknown, wrong and disabled read identically");
+  const src = fs.readFileSync(path.join(__dirname, "..", "src", "accounts.js"), "utf8");
+  assert.ok(/const DECOY_PW = hashPw\(crypto\.randomBytes\(24\)/.test(src), "the decoy is hashed once at open, not per attempt");
+  assert.ok(/if \(!u\) \{ verifyPw\(String\(password \|\| ""\), DECOY_PW\); return bad; \}/.test(src));
+});
+
+test("audit -67: reset codes still rotate on re-request; msgSeq matches stats", () => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const { openAccounts } = require("../src/accounts");
+  const A = openAccounts(fs.mkdtempSync(path.join(os.tmpdir(), "xyz-otp-")), { sessionDays: 1 });
+  A.bootstrap("gus", "a-long-password-12", null);
+  // Replacement on re-request is a documented decision (an old code in a chat history dies the
+  // moment a new one is asked for); the denial lever it opens is closed at /reset by the per-IP
+  // allowance instead (see server.test.js).
+  const r1 = A.otpRequest("gus"), r2 = A.otpRequest("gus");
+  assert.ok(r1.sent && r2.sent && r1.code !== r2.code);
+  assert.equal(A.msgSeq(), A.stats().messages, "msgSeq is the cheap read of what stats().messages reported");
+});
+
+test("audit -67: config-grade files fsync, keep a .bak, and quarantine a corrupt copy instead of overwriting it", () => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const { openStore } = require("../src/store");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-cfg-"));
+  const st = openStore(dir);
+  assert.equal(st.saveNotes([{ coin: "xyz:A", body: "thesis one" }]), true);
+  assert.equal(st.saveNotes([{ coin: "xyz:A", body: "thesis two" }]), true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, "notes.json.bak"), "utf8"))[0].body, "thesis one", "the previous version survives as .bak");
+  fs.writeFileSync(path.join(dir, "notes.json"), "{ this is not json");
+  const got = openStore(dir).loadNotes();
+  assert.equal(got && got[0].body, "thesis one", "a corrupt file falls back to the .bak rather than reading as first boot");
+  assert.ok(fs.readdirSync(dir).some((f) => /^notes\.json\.corrupt-\d+$/.test(f)), "and the corrupt copy is kept for forensics");
+  assert.equal(fs.existsSync(path.join(dir, "notes.json")), false);
+  for (const fn of ["saveRules", "saveBaskets", "saveLedger", "saveNotes"]) assert.ok(new RegExp(fn + "\\(data\\) \\{\\n\\s*try \\{ saveConfig\\(").test(fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8")), fn + " goes through saveConfig");
+  assert.ok(/fs\.fsyncSync\(fd\)/.test(fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8")), "the data is fsynced before the rename");
+});
+
+test("audit -67: the universe socket is healthy on DATA, not on pongs, and resets its backoff only after data", () => {
+  const { createUniverseSocket } = require("../src/hyperliquid");
+  const saved = globalThis.WebSocket;
+  let inst = null;
+  globalThis.WebSocket = class { constructor() { inst = this; this.readyState = 1; } send() {} close() { this.readyState = 3; if (this.onclose) this.onclose({}); } };
+  try {
+    const got = [];
+    const sock = createUniverseSocket({ onCtxs: (c) => got.push(c), log: () => {} });
+    inst.onopen();
+    inst.onmessage({ data: JSON.stringify({ channel: "pong" }) });
+    inst.onmessage({ data: JSON.stringify({ channel: "subscriptionResponse" }) });
+    assert.equal(sock.healthy(), false, "pongs alone never make the feed healthy");
+    inst.onmessage({ data: JSON.stringify({ channel: "allDexsAssetCtxs", data: { ctxs: [["xyz", []]] } }) });
+    assert.equal(sock.healthy(), true, "a ctxs event does");
+    assert.equal(got.length, 1);
+    sock.close();
+  } finally { globalThis.WebSocket = saved; }
+  const src = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "hyperliquid.js"), "utf8");
+  assert.ok(/if \(Date\.now\(\) - lastData > WS_STALE_MS\)/.test(src), "the watchdog reads data silence, so a dead subscription on a live socket is force-closed and re-subscribed");
+  assert.ok(/if \(!gotData\) \{ gotData = true; backoff = 1000; \}/.test(src) && !/onopen = \(\) => \{\s*\n\s*backoff = 1000;/.test(src), "backoff resets on first data, not on open");
+});
+
+test("audit -67: learned aliases must look like names; the ask universe is pinned to the live board", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  assert.equal(p.aliasOkNow("the", "NVDA"), false); assert.equal(p.aliasOkNow("and", "NVDA"), false);
+  assert.equal(p.aliasOkNow("shares", "NVDA"), false, "stopwords never become aliases");
+  assert.equal(p.aliasOkNow("nvidia", "NVDA"), false, "an alias needs a capital or a digit");
+  assert.equal(p.aliasOkNow("Nvidia", "NVDA"), true); assert.equal(p.aliasOkNow("Jensen Huang", "NVDA"), true);
+  const pol = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/lr = live\.get\(t\) \|\| null;\s*\n\s*if \(live\.size && !lr\) return null;/.test(pol), "a row for a ticker not on the board is dropped");
+  assert.ok(/if \(lr && lr\.px > 0\) o\.px = /.test(pol), "the mark is the server's");
+  assert.ok(/if \(!ASK_KEYS\.has\(k\) \|\| k === "t"\) continue;/.test(pol), "only the terminal's keys survive");
+  // The rest of the poller batch, pinned by text: boot guards, daily validation, candle clamp,
+  // calendar pacing, the claim opened inside the build chain.
+  assert.ok(/try \{ await pollUniverse\(\); \} catch \(e\) \{ log\("boot universe poll failed/.test(pol), "start() survives a failed first poll");
+  assert.ok(/if \(!Array\.isArray\(c\)\) throw new Error\("daily candles: non-array reply"\);/.test(pol));
+  assert.ok(/lo = Math\.max\(lo, hi - 370 \* DAY\);\s*\n\s*lo = Math\.floor\(lo \/ 300000\) \* 300000;/.test(pol), "5m reads are bounded and snapped");
+  assert.ok(/getCalChunked\(now - 370 \* DAY, now - 6 \* DAY, 7, 1200\)/.test(pol), "the history walk is paced under the free tier");
+  assert.ok(/if \(res\.status === 429 && a < 2\)/.test(pol), "and a 429 is retried after Retry-After");
+  assert.ok(/await chainBuild\("aireadClaim", async \(\) => openLedger\(rr, "airead"/.test(pol), "the analyst claim opens inside the build chain");
+  assert.ok(/PUSH_CODE_ALPHABET\[require\("crypto"\)\.randomInt\(PUSH_CODE_ALPHABET\.length\)\]/.test(pol), "link codes come from the CSPRNG");
 });

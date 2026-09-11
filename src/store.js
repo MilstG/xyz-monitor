@@ -124,6 +124,32 @@ function openStore(dataDir) {
   let dbuf = [];
   let dPruning = false;   // hold deriv appends in dbuf during the streaming rewrite, same as the OI prune
   let oiPreloaded = null; // set by preloadOI(); consumed once by the next loadAll()
+  // CONFIG-grade files (notes, rules, baskets, ledger): somebody typed these, or they are the
+  // record itself, and nothing can rebuild them. tmp+rename alone is durable only by ext4
+  // heuristics; on an overlay/network volume a kill after the rename can leave a zero-length file
+  // at the final path. So: write, fsync the data, rename, fsync the directory — and keep the
+  // previous version as .bak. On read, a file that does not parse is QUARANTINED (renamed with a
+  // timestamp) and the .bak tried, instead of being treated as first boot and overwritten empty
+  // on the next save — which is how a corrupt notes.json used to eat every note.
+  function saveConfig(file, data) {
+    const tmp = file + ".tmp";
+    const fd = fs.openSync(tmp, "w");
+    try { fs.writeSync(fd, JSON.stringify(data)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    try { if (fs.existsSync(file)) fs.copyFileSync(file, file + ".bak"); } catch (_) {}
+    fs.renameSync(tmp, file);
+    try { const dfd = fs.openSync(path.dirname(file), "r"); try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); } } catch (_) {}
+  }
+  function loadConfig(file, label) {
+    if (!fs.existsSync(file)) return null;
+    try { return JSON.parse(fs.readFileSync(file, "utf8")); }
+    catch (e) {
+      const q = file + ".corrupt-" + Date.now();
+      try { fs.renameSync(file, q); } catch (_) {}
+      console.error(`[store] ${label || path.basename(file)} did not parse (${e && e.message}) — quarantined as ${path.basename(q)}, trying the .bak`);
+      try { if (fs.existsSync(file + ".bak")) return JSON.parse(fs.readFileSync(file + ".bak", "utf8")); } catch (_) {}
+      return null;
+    }
+  }
   // One row of oi.log -> [coin, ts, oi, funding|null], or null for anything that is not exactly the
   // writer's four-field shape (a torn row is never a sample — see loadAll).
   function parseOiLine(ln) {
@@ -391,11 +417,8 @@ function openStore(dataDir) {
     // Signal ledger: every fired signal + its resolved out-of-sample outcome. Written atomically —
     // this file IS the track record; a truncated write would silently erase the honesty loop.
     saveLedger(data) {
-      try {
-        const tmp = ledgerFile + ".tmp";
-        fs.writeFileSync(tmp, JSON.stringify(data));
-        fs.renameSync(tmp, ledgerFile);
-      } catch (_) {}
+      try { saveConfig(ledgerFile, data); }
+      catch (_) {}
     },
     // Score-duel state (MOM vs MOM+ daily snapshots + rank-IC series). Same atomic write
     // discipline as the ledger blob: tmp + rename, so a crash mid-write never truncates the
@@ -410,9 +433,7 @@ function openStore(dataDir) {
     loadDuel() {
       try { return JSON.parse(fs.readFileSync(duelFile, "utf8")); } catch (_) { return null; }
     },
-    loadLedger() {
-      try { return JSON.parse(fs.readFileSync(ledgerFile, "utf8")); } catch (_) { return null; }
-    },
+    loadLedger() { return loadConfig(ledgerFile, "ledger.json"); },
     // Append-only archive for closed claims aged out of the in-memory retention cap: one JSON
     // line per entry, appended (never rewritten) to ledger-archive.jsonl on the volume. The
     // 4000-entry cap now bounds memory only — the record itself is permanent. Reads happen
@@ -460,50 +481,27 @@ function openStore(dataDir) {
     // so they get their own file: a corrupt delivery blob or a trimmed cache must never be able to
     // take the rule list with it. Same tmp+rename discipline as the ledger.
     saveRules(data) {
-      try {
-        const tmp = rulesFile + ".tmp";
-        fs.writeFileSync(tmp, JSON.stringify(data));
-        fs.renameSync(tmp, rulesFile);
-      } catch (_) {}
-    },
-    loadRules() {
-      try { if (fs.existsSync(rulesFile)) return JSON.parse(fs.readFileSync(rulesFile, "utf8")); }
+      try { saveConfig(rulesFile, data); }
       catch (_) {}
-      return null;
     },
+    loadRules() { return loadConfig(rulesFile, "alertrules.json"); },
     // Custom baskets: CONFIG like the rules above — somebody sat and typed a membership — so they
     // get their own file with the same tmp+rename discipline; a corrupt cache can never take the
     // registry with it. Built-in sector baskets are DERIVED at read time and never persisted here.
     saveBaskets(data) {
-      try {
-        const tmp = basketsFile + ".tmp";
-        fs.writeFileSync(tmp, JSON.stringify(data));
-        fs.renameSync(tmp, basketsFile);
-        return true;
-      } catch (_) { return false; }
+      try { saveConfig(basketsFile, data); return true; }
+      catch (_) { return false; }
     },
-    loadBaskets() {
-      try { if (fs.existsSync(basketsFile)) return JSON.parse(fs.readFileSync(basketsFile, "utf8")); }
-      catch (_) {}
-      return null;
-    },
+    loadBaskets() { return loadConfig(basketsFile, "baskets.json"); },
     // Per-ticker notes (build 2026.08.24-01). The highest-value CONFIG on the volume: a note is
     // prose somebody sat and typed about a name, and unlike a basket it cannot be reconstructed
     // from anything the server knows. Same tmp+rename discipline for exactly that reason — a
     // half-written file must never be able to eat the only copy of a thesis.
     saveNotes(data) {
-      try {
-        const tmp = notesFile + ".tmp";
-        fs.writeFileSync(tmp, JSON.stringify(data));
-        fs.renameSync(tmp, notesFile);
-        return true;
-      } catch (_) { return false; }
+      try { saveConfig(notesFile, data); return true; }
+      catch (_) { return false; }
     },
-    loadNotes() {
-      try { if (fs.existsSync(notesFile)) return JSON.parse(fs.readFileSync(notesFile, "utf8")); }
-      catch (_) {}
-      return null;
-    },
+    loadNotes() { return loadConfig(notesFile, "notes.json"); },
     // Weekly sector-audit record log (build 2026.08.05-02). Append-only in content, atomic in
     // write — CONFIG-grade like rules/baskets: an applied graduation is a classification the whole
     // board depends on, so a corrupt cache must never take it. Records are validated at fold time

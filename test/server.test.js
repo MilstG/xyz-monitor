@@ -138,3 +138,12 @@ test("limits: per-route body limits hold, the feature gate answers 403 only to a
   const tab = await app.inject({ method: "POST", url: "/api/features", headers: { cookie: gus.header(), "content-type": "application/json\t" }, payload: "{}" });
   assert.notEqual(tab.statusCode, 200, "a Content-Type with a trailing tab is not JSON");
 });
+
+test("health carries a stale flag; /reset has its own per-IP allowance", async () => {
+  const h = JSON.parse((await get("/api/health")).body);
+  assert.equal(h.stale, false); assert.equal(h.lastPollAgoMs, null, "no poll has run under test");
+  let last = 0;
+  for (let i = 0; i < 6; i++) last = (await post("/reset", { handle: "gus" }, null, { "x-forwarded-for": "203.0.113.9" })).statusCode;
+  assert.equal(last, 429, "the sixth reset in an hour from one address is refused");
+  assert.equal((await post("/reset", { handle: "gus" }, null, { "x-forwarded-for": "203.0.113.10" })).statusCode, 200, "another address is unaffected");
+});

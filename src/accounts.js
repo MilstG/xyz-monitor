@@ -451,6 +451,8 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
 
     pinSet: db.prepare("UPDATE dm_msg SET pinnedAt = ?, pinnedBy = ? WHERE id = ?"),
     pinsOf: db.prepare("SELECT * FROM dm_msg WHERE thread = ? AND pinnedAt IS NOT NULL AND deletedAt IS NULL ORDER BY pinnedAt DESC LIMIT 20"),
+    pinsCount: db.prepare("SELECT COUNT(*) AS n FROM dm_msg WHERE thread = ? AND pinnedAt IS NOT NULL AND deletedAt IS NULL"),
+    readAllOf: db.prepare("SELECT uid, readMsgId FROM dm_read WHERE thread = ?"),
 
     watchAdd: db.prepare("INSERT OR IGNORE INTO dm_watch (uid, coin, at) VALUES (?,?,?)"),
     watchDrop: db.prepare("DELETE FROM dm_watch WHERE uid = ? AND coin = ?"),
@@ -555,13 +557,18 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   }
   function listUsers() { return [...users.values()].map(pub); }
 
+  // One scrypt per sign-in attempt whatever the handle: an unknown handle verifies against a decoy
+  // hashed ONCE at open (the old code hashed a fresh decoy AND verified it — two scrypts — so an
+  // unknown handle took twice as long as a wrong password), and a disabled account is verified and
+  // then refused with the same words as a wrong password rather than short-circuiting with a
+  // distinct message in microseconds. Tell a disabled member out of band; the door must not.
+  const DECOY_PW = hashPw(crypto.randomBytes(24).toString("base64url"));
   function login(handle, password) {
     const u = getUserByHandle(handle);
-    // Hash a decoy anyway so a wrong handle and a wrong password cost the same wall time; without
-    // it the response time alone enumerates which handles exist.
-    if (!u) { verifyPw(String(password || ""), hashPw("decoy-" + Math.random())); return { ok: false, error: "wrong handle or password" }; }
-    if (u.disabledAt) return { ok: false, error: "this account is disabled — ask the operator" };
-    if (!verifyPw(password, u.pw)) return { ok: false, error: "wrong handle or password" };
+    const bad = { ok: false, error: "wrong handle or password" };
+    if (!u) { verifyPw(String(password || ""), DECOY_PW); return bad; }
+    const okPw = verifyPw(password, u.pw);
+    if (!okPw || u.disabledAt) return bad;
     try { S.userSeen.run(Date.now(), u.uid); u.lastSeen = Date.now(); } catch (_) {}
     return { ok: true, user: pub(u), token: tokenFor(u, options.sessionDays || 30) };
   }
@@ -821,8 +828,16 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     let uid = (priorOwner && typeof priorOwner === "string" && !users.get(priorOwner)) ? priorOwner : "";
     if (!uid) uid = crypto.randomBytes(12).toString("base64url");
     const now = Date.now();
-    try { S.userIns.run(uid, lc, display, hashPw(password), 1, now, null, now); }
-    catch (_) { return { ok: false, error: "that handle is taken — pick another", field: "handle" }; }
+    const pw = hashPw(password);
+    // The count and the insert are one transaction: two concurrent bootstraps must not both win.
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        if (S.userCount.get().n > 0) { db.exec("ROLLBACK"); return { ok: false, error: "accounts already exist — sign in instead" }; }
+        S.userIns.run(uid, lc, display, pw, 1, now, null, now);
+        db.exec("COMMIT");
+      } catch (e) { try { db.exec("ROLLBACK"); } catch (_) {} throw e; }
+    } catch (_) { return { ok: false, error: "that handle is taken — pick another", field: "handle" }; }
     hydrate();
     const nu = users.get(uid);
     return { ok: true, user: pub(nu), token: tokenFor(nu, options.sessionDays || 30) };
@@ -838,8 +853,12 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (getUserByHandle(lc)) return { ok: false, error: "that handle is taken — pick another", field: "handle" };
     let uid = (priorOwner && typeof priorOwner === "string" && !users.get(priorOwner)) ? priorOwner : "";
     if (!uid) uid = crypto.randomBytes(12).toString("base64url");
-    const now = Date.now(), first = countUsers() === 0;
-    try { S.userIns.run(uid, lc, display, hashPw(password), first ? 1 : 0, now, null, now); }
+    // NEVER admin: account #1 is the operator's, minted through /bootstrap with ADMIN_PASSWORD.
+    // "First to claim becomes operator" handed the panel to whichever shared-password holder
+    // posted first on the deploy that introduced accounts, and two concurrent claims could both
+    // read a zero count.
+    const now = Date.now();
+    try { S.userIns.run(uid, lc, display, hashPw(password), 0, now, null, now); }
     catch (_) { return { ok: false, error: "that handle is taken — pick another", field: "handle" }; }
     hydrate();
     const nu = users.get(uid);
@@ -1346,10 +1365,12 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       lastAt: t.lastAt, muted: !!rd.muted, boardNotify: !!rd.boardNotify,
       // What the OTHER side has read, so "did my call land" is answerable. The data was already
       // being stored for unread counts; showing it costs a lookup.
-      seen: mem.filter((x) => x.uid !== uid).map((x) => ({
-        uid: x.uid, handle: (users.get(x.uid) || {}).display || "—",
-        readMsgId: (S.readGet.get(t.id, x.uid) || { readMsgId: 0 }).readMsgId })),
-      pins: S.pinsOf.all(t.id).length,
+      // One query for the whole thread's read cursors, not one per member: threads() runs this
+      // for every thread on every sync, and a 50-member board was fifty statements a thread.
+      seen: (() => { const rd2 = new Map(S.readAllOf.all(t.id).map((r) => [r.uid, r.readMsgId]));
+        return mem.filter((x) => x.uid !== uid).map((x) => ({
+          uid: x.uid, handle: (users.get(x.uid) || {}).display || "—", readMsgId: rd2.get(x.uid) || 0 })); })(),
+      pins: S.pinsCount.get(t.id).n,
       unread: S.msgUnread.get(t.id, Math.max(rd.readMsgId || 0, rd.clearedUpTo || 0), uid).n,
       // Closed for this viewer: off the rail until a newer message id passes the watermark.
       hidden: (rd.hiddenUpTo || 0) > 0 && (rd.hiddenUpTo || 0) >= (t.lastMsgId || 0),
@@ -1728,6 +1749,9 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     return send(uid, null, raw, null, { thread: lastThread, via: "telegram" });
   }
 
+  // The global message sequence alone — what an SSE poke needs. stats() also scans the invite
+  // table and was being called on every typing keystroke, fanned out to every peer.
+  function msgSeq() { return S.msgMaxId.get().m; }
   function stats() {
     return { users: users.size, admins: [...users.values()].filter((u) => u.isAdmin && !u.disabledAt).length,
       invitesOpen: S.invList.all().filter((i) => inviteState(i, Date.now()) === "open").length,
@@ -1771,7 +1795,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   return {
     // identity
     signSession, sessionUser, tokenFor, countUsers, getUser, getUserByHandle, listUsers, pub, deriveKey,
-    backup, close, lastBackup: () => lastBackup,
+    backup, close, lastBackup: () => lastBackup, msgSeq,
     login, setPassword, signOutEverywhere, setDisabled, setAdmin, renameUser, touch, hydrate,
     // invites
     mintInvite, readInvite, revokeInvite, listInvites, redeem, bootstrap, claim, inviteState,

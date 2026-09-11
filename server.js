@@ -112,6 +112,17 @@ const ADMIN_DAYS = Number(process.env.ADMIN_DAYS || 30);
 // XYZ_QUIET silences the boot narration when server.js is built by the test suite.
 function log(msg) { if (!process.env.XYZ_QUIET) console.log(new Date().toISOString() + " " + msg); }
 
+// Say the dangerous defaults out loud once. Nothing here exits: a deploy that boots with a
+// warning beats one that dies on a variable the operator meant to set later, and the volume
+// heartbeat below already makes an ephemeral DATA_DIR self-evident on the second boot.
+{
+  const onRailway = !!process.env.RAILWAY_ENVIRONMENT;
+  const warn = [];
+  if (!process.env.DATA_DIR) warn.push("DATA_DIR is unset — data lives in ./data inside the container" + (onRailway ? " and WILL NOT survive a redeploy: point it at the volume mount" : ""));
+  if (!SITE_PASSWORD) warn.push("SITE_PASSWORD is unset — the site is open to anyone with the URL; AI routes and /claim stay closed");
+  if (!process.env.SEC_CONTACT) warn.push("SEC_CONTACT is unset — SEC requests go out with a placeholder contact, which their fair-access policy may block");
+  for (const w of warn) log("WARNING: " + w);
+}
 const store = openStore(DATA_DIR);
 // ---- accounts, invites and direct messages --------------------------------------------------
 // Its own SQLite file on the same volume. Deliberately separate from the market caches: none of
@@ -294,7 +305,7 @@ function getCookie(req, name) {
 }
 function cookieAttrs(req, maxAgeSec) {
   // Railway terminates TLS and forwards proto — mark Secure whenever the client came over https.
-  const secure = (req.headers["x-forwarded-proto"] || req.protocol) === "https" ? "; Secure" : "";
+  const secure = ((TRUST_PROXY && req.headers["x-forwarded-proto"]) || req.protocol) === "https" ? "; Secure" : "";
   return `; Path=/; SameSite=Lax; Max-Age=${maxAgeSec}${secure}`;
 }
 function setSessionCookies(reply, req, maxAgeSec, token) {
@@ -324,7 +335,7 @@ function aiUnlockOk(tok) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 function aiCookieAttrs(req, clear) {
-  const secure = (req.headers["x-forwarded-proto"] || req.protocol) === "https" ? "; Secure" : "";
+  const secure = ((TRUST_PROXY && req.headers["x-forwarded-proto"]) || req.protocol) === "https" ? "; Secure" : "";
   // No Max-Age on set => browser-session cookie (gone on close). Max-Age=0 on clear => delete now.
   return `; Path=/; SameSite=Lax${clear ? "; Max-Age=0" : ""}${secure}; HttpOnly`;
 }
@@ -390,8 +401,12 @@ function adminPwOk(pw) {
 // element, which the edge proxy in front of this service appends itself — taking the first
 // element (the old behavior) let any caller mint a fresh key per request and walk straight
 // past every damper below.
+// Behind Railway's edge the forwarded headers are trustworthy and the socket peer is the proxy;
+// exposed directly they are whatever the client typed. TRUST_PROXY=0 switches both the client-IP
+// damper key and the Secure-cookie decision to the socket's own view.
+const TRUST_PROXY = process.env.TRUST_PROXY !== "0";
 function clientIp(req) {
-  const xff = String(req.headers["x-forwarded-for"] || "").split(",").pop().trim();
+  const xff = TRUST_PROXY ? String(req.headers["x-forwarded-for"] || "").split(",").pop().trim() : "";
   return xff || String(req.ip || "");
 }
 // Brute-force damper for /login: 8 wrong passwords from one IP = 15 min lockout. In-memory —
@@ -961,9 +976,20 @@ async function buildServer() {
     if (meOf(req)) return reply.redirect("/", 302);
     return htmlNoStore(reply).send(authPage({ mode: "forgot" }));
   });
+  // /reset is its own lever: every post forces a Telegram send past quiet hours, so it gets a
+  // per-IP allowance of its own (the login damper only counted wrong passwords, never resets).
+  const resetHits = new Map();
+  const RESET_PER_HOUR = 5;
+  const resetAllowed = (ip) => {
+    const now = Date.now(), a = (resetHits.get(ip) || []).filter((t) => now - t < 3600e3);
+    if (a.length >= RESET_PER_HOUR) { resetHits.set(ip, a); return false; }
+    a.push(now); resetHits.set(ip, a);
+    if (resetHits.size > 5000) resetHits.delete(resetHits.keys().next().value);
+    return true;
+  };
   fastify.post("/reset", { bodyLimit: 4 * 1024 }, async (req, reply) => {
     const ip = clientIp(req);
-    if (loginLockedFor(ip)) { reply.code(429); return { ok: false, error: "too many attempts — try again shortly" }; }
+    if (loginLockedFor(ip) || !resetAllowed(ip)) { reply.code(429); return { ok: false, error: "too many attempts — try again shortly" }; }
     const handle = String((req.body || {}).handle || "").trim();
     const r = ACCOUNTS.otpRequest(handle);
     // The SAME answer whether the handle exists, has no Telegram linked, or is over its send cap.
@@ -1365,7 +1391,7 @@ async function buildServer() {
         // The thread is gone, so dmPoke (which resolves members) has nobody to resolve — wake the
         // collected members directly with a `gone` hint so their rails drop it now, not at the
         // next full load.
-        const frame = "data: " + JSON.stringify({ dm: { seq: ACCOUNTS.stats().messages, gone: r.deleted } }) + "\n\n";
+        const frame = "data: " + JSON.stringify({ dm: { seq: ACCOUNTS.msgSeq(), gone: r.deleted } }) + "\n\n";
         for (const uid of r.peers || []) { const set = sseByUid.get(uid); if (set) for (const e2 of set) sseWrite(e2, frame); }
       }
     }
@@ -1983,6 +2009,8 @@ async function buildServer() {
   // response is instead the EXACT per-rung series the trend ladder consumes (Trend-tab chart
   // modal) — [t,o,h,l,c] bars plus the live mark, so the client's plotted EMAs reproduce the
   // board's to the last bit. Unknown tf values fall through to the legacy hourly shape.
+  const grid5m = (v, up) => (v != null && v !== "" && Number.isFinite(+v) ? (up ? Math.ceil(+v / 300000) : Math.floor(+v / 300000)) * 300000 : "");
+  const intOr = (v) => (v != null && v !== "" && Number.isFinite(+v) ? Math.trunc(+v) : "");
   fastify.get("/api/candles", (req, reply) => {
     const coin = (req.query && req.query.coin) || "";
     const days = req.query && req.query.days;
@@ -1997,8 +2025,9 @@ async function buildServer() {
     // and chart, zero live fetches on modal open, and the pre-open/overnight bars come free
     // because the perps trade (and the capture lane records) around the clock.
     if (req.query && (req.query.res === "5m" || req.query.res === "5")) {
-      const from = req.query.from, to = req.query.to, max = req.query.max;
-      const key = "candles5m|" + coin + "|" + (from || "") + "|" + (to || "") + "|" + (max || "") + "|" + (poller.getM5Stamp ? poller.getM5Stamp(coin) : 0);
+      // from/to snapped to the 5m grid BEFORE the key (a 1ms change used to mint a fresh entry).
+      const from = grid5m(req.query.from, false), to = grid5m(req.query.to, true), max = intOr(req.query.max);
+      const key = "candles5m|" + coin + "|" + from + "|" + to + "|" + max + "|" + (poller.getM5Stamp ? poller.getM5Stamp(coin) : 0);
       return serveKeyed(req, reply, key, () => poller.getCandles5m(coin, from, to, max), { coin, res: "5m", enabled: false, candles: [], coverage: { enabled: false } });
     }
     // res=4h / res=12h / res=1d serve the deep-history archive (12h/1d since -01, 4h since -03) —
@@ -2344,7 +2373,7 @@ async function buildServer() {
   function sseHelloFrame(me) {
     const s = poller.getSnapshot();
     return "data: " + JSON.stringify({ dataTs: s ? s.dataTs : 0, alertVer: s ? s.alertVer : 0,
-      v: VERSION, dm: me ? { seq: ACCOUNTS.stats().messages } : undefined }) + "\n\n";
+      v: VERSION, dm: me ? { seq: ACCOUNTS.msgSeq() } : undefined }) + "\n\n";
   }
   const sseWrite = (entry, frame) => { try { entry.res.write(frame); } catch (_) {} };
   let sseLastTs = -1, sseLastAlert = -1;
@@ -2370,7 +2399,7 @@ async function buildServer() {
   function dmPoke(threadId, extra) {
     const peers = ACCOUNTS.threadPeers(threadId);
     if (!peers.length) return;
-    const frame = "data: " + JSON.stringify({ dm: Object.assign({ seq: ACCOUNTS.stats().messages }, extra || {}) }) + "\n\n";
+    const frame = "data: " + JSON.stringify({ dm: Object.assign({ seq: ACCOUNTS.msgSeq() }, extra || {}) }) + "\n\n";
     for (const uid of peers) {
       const set = sseByUid.get(uid);
       if (set) for (const e of set) sseWrite(e, frame);
@@ -2452,7 +2481,12 @@ async function buildServer() {
   const tgEsc = (x) => String(x == null ? "" : x)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-  fastify.get("/api/health", () => ({ ok: true, version: VERSION, volume: { boots: HEARTBEAT.boots, firstBoot: HEARTBEAT.firstBoot, dataDir: DATA_DIR },
+  // `stale` says the poller has not landed a universe poll in five minutes. Still a 200: a 503 would
+  // make Railway restart-loop a process whose only problem is upstream. Alert on the flag instead.
+  const STALE_MS = 5 * 60 * 1000;
+  fastify.get("/api/health", () => ({ ok: true, version: VERSION,
+    stale: poller.lastPollAt() > 0 && Date.now() - poller.lastPollAt() > STALE_MS, lastPollAgoMs: poller.lastPollAt() > 0 ? Date.now() - poller.lastPollAt() : null,
+    volume: { boots: HEARTBEAT.boots, firstBoot: HEARTBEAT.firstBoot, dataDir: DATA_DIR },
     // Live histogram read (current, still-open window) + the closed-window ring + worst-ever. The
     // live sample makes a stall visible within seconds of happening; the ring is the 7d evidence
     // trail the worker-thread decision gate reads. ~30 small numbers — negligible on the wire.
