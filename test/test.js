@@ -13348,7 +13348,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.11-70"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.11-71"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -24671,4 +24671,12 @@ test("chat terminal -69: a command result is a message with cmd, no stamp, no ed
     const row = [...guideSrc.matchAll(/\['([^']*)','[^']*','([a-z]+)'\]/g)].find((m) => m[1].split(/[\s|·]/)[0] === v);
     assert.ok(row && row[2].includes("t") && !row[2].includes("c"), "guide row for " + v + " must be tagged panel-only — the chat runner refuses it");
   }
+  // -71: every verb handler that fetches must RETURN its promise — the chat capture awaits the verb,
+  // and a promise dropped on the floor delivered `/whale season` into the hidden panel after the
+  // sink was gone ("nothing to post"). Scan the terminal handler bodies for a bare `fetchJSON(...).then(`.
+  const termSrc = app.slice(app.indexOf("//  ASK-THE-BOARD TERMINAL"), app.indexOf("function openDmGuide()"));
+  for (const m of termSrc.matchAll(/^(\s*)(fetchJSON|fetch)\(/gm))
+    assert.ok(false, "a terminal handler fires a fetch without returning or awaiting it at: " + termSrc.slice(m.index, m.index + 60));
+  for (const fn of ["termWhaleList", "termWhaleFund", "termWhaleSeason"])
+    assert.ok(new RegExp("function " + fn + "\\([^)]*\\)\\{[\\s\\S]{0,400}?return fetchJSON\\(").test(app), fn + " must return its promise so a chat capture can await it");
 });
