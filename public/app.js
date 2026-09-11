@@ -14314,7 +14314,8 @@ const dmState = { me: null, threads: [], members: [], online: new Set(),
   typing: new Map(), q: '', results: null, searching: false, manage: false, pendingFile: null,
   watching: [], admin: false, operatorReadsAll: false, calls: null, mode: 'chat', watchAdd: false,
   boards: [], meTg: false, adoptables: null,
-  replying: null, unreadMark: null, scrollToNew: false, showClosed: false };
+  replying: null, unreadMark: null, scrollToNew: false, showClosed: false,
+  callsBy: null, webPushOn: false, searchScope: 'all' };
 
 function dmSignedIn(){ return !!(window.__ME && window.__ME.uid); }
 function dmUnreadTotal(){ return dmState.threads.reduce((a,t)=>a+((t.muted||t.hidden)?0:(t.unread||0)),0); }
@@ -14511,7 +14512,7 @@ setInterval(async ()=>{
   if(!dmSignedIn()||state.view!=='dm') return;
   try{
     await dmLoad();   // presence, thread list and the pip stay fresh while the tab sits open
-    if(dmState.mode==='calls'){ const d=await fetchJSON('/api/dm/calls?limit=500'); if(d&&d.ok) dmState.calls=d; }
+    if(dmState.mode==='calls') await dmFetchCalls();
     else if(dmState.sel&&!dmState.results){
       const d=await fetchJSON('/api/dm/'+encodeURIComponent(dmState.sel));
       if(d&&d.ok){ dmMerge(d.messages); if(d.info){ d.info.more=!!d.more; dmState.info.set(dmState.sel,d.info); } }
@@ -14715,6 +14716,48 @@ function dmMentionPick(handle){
   if(!dmState.editing) dmDraftSave(dmState.sel,ta.value);
 }
 
+// ---- browser push ------------------------------------------------------------------------------
+// The offline escalation's browser leg: subscriptions live per account on the server, payloads
+// are built by the same sweep that feeds Telegram, and this side only turns the permission
+// handshake into one button. State is probed from the live subscription, never assumed.
+function dmB64ToU8(str){ const pad='='.repeat((4-str.length%4)%4);
+  const b=atob((str+pad).replace(/-/g,'+').replace(/_/g,'/'));
+  const a=new Uint8Array(b.length); for(let i=0;i<b.length;i++) a[i]=b.charCodeAt(i); return a; }
+function dmPushCapable(){ return 'serviceWorker' in navigator && 'PushManager' in window && typeof Notification!=='undefined'; }
+async function dmPushProbe(){
+  if(!dmPushCapable()) return;
+  try{
+    const reg=await navigator.serviceWorker.getRegistration(); if(!reg) return;
+    const sub=await reg.pushManager.getSubscription();
+    const on=!!sub&&Notification.permission==='granted';
+    if(on!==dmState.webPushOn){ dmState.webPushOn=on; if(state.view==='dm') dmRender(); }
+  }catch(_){}
+}
+async function dmPushEnable(){
+  if(!dmPushCapable()){ pushToast('this browser cannot do notifications'); return; }
+  try{
+    const perm=await Notification.requestPermission();
+    if(perm!=='granted'){ pushToast('notifications are blocked for this site — allow them in the browser first'); return; }
+    const reg=await navigator.serviceWorker.ready;
+    const k=await fetchJSON('/api/dm/push-key');
+    if(!k||!k.ok){ pushToast('push is not configured on this server'); return; }
+    const sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:dmB64ToU8(k.key)});
+    const r=await fetch('/api/dm/push-sub',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sub:sub.toJSON()})});
+    const d=await r.json().catch(()=>({}));
+    if(r.ok&&d&&d.ok){ dmState.webPushOn=true; pushToast('🔔 browser notifications on — unread messages reach this device even with the tab closed'); dmRender(); }
+    else pushToast('could not register — '+((d&&d.error)||'server error'));
+  }catch(_){ pushToast('could not enable notifications'); }
+}
+async function dmPushDisable(){
+  try{
+    const reg=await navigator.serviceWorker.ready;
+    const sub=await reg.pushManager.getSubscription();
+    if(sub){ try{ await fetch('/api/dm/push-sub',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({remove:sub.endpoint})}); }catch(_){}
+      await sub.unsubscribe(); }
+    dmState.webPushOn=false; dmRender();
+  }catch(_){ dmState.webPushOn=false; dmRender(); }
+}
+
 // ---- voice notes -------------------------------------------------------------------------------
 // One button: press to record, press to stop; the note lands as the pending attachment, sent like
 // any file. The server verifies the container by magic bytes and caps audio at 3 MB.
@@ -14796,7 +14839,7 @@ async function dmToNote(id){
 }
 async function dmOpenCalls(){
   dmState.mode='calls'; dmState.results=null; dmRender();
-  try{ const d=await fetchJSON('/api/dm/calls?limit=500'); if(d&&d.ok){ dmState.calls=d; dmRender(); } }
+  try{ await dmFetchCalls(); dmRender(); }
   catch(_){ dmState.calls={calls:[],summary:[]}; dmRender(); }
 }
 async function dmReact(id,emoji){
@@ -14839,7 +14882,8 @@ async function dmRunSearch(){
   if(q.length<2){ dmState.results=null; dmRender(); return; }
   dmState.searching=true; dmRender();
   try{
-    const d=await fetchJSON('/api/dm/search?q='+encodeURIComponent(q));
+    const scoped=dmState.searchScope==='thread'&&dmState.sel?'&thread='+encodeURIComponent(dmState.sel):'';
+    const d=await fetchJSON('/api/dm/search?q='+encodeURIComponent(q)+scoped);
     dmState.results=(d&&d.ok)?d.results:[];
   }catch(_){ dmState.results=[]; }
   dmState.searching=false; dmRender();
@@ -14881,14 +14925,35 @@ function dmStamp(m){
   const has=at!=null&&isFinite(at)&&at>0;
   const live=now!=null&&isFinite(now)&&now>0;
   const chg=(has&&live)?(now/at-1):null;
-  const cls=chg==null?'':(chg>0?'pos':(chg<0?'neg':'sec'));
-  const right=chg==null?'<span class="dm-tk-d sec" title="this market is no longer listed">—</span>'
-    :'<span class="dm-tk-d '+cls+'">'+(chg>0?'+':'')+(chg*100).toFixed(1)+'%</span>';
-  const sub=has?('sent at '+fmtPx(at)+(live?' · now '+fmtPx(now):' · no longer listed')):'no mark at send';
-  // The card is a door, not just a label: clicking it opens the market drawer for the name —
+  // The stamp knows its direction: the % shown stays the RAW price move, but the color says
+  // whether the CALL is winning \u2014 a short that falls paints green.
+  const side=m.side==='short'?'short':'long';
+  const adj=chg==null?null:(side==='short'?-chg:chg);
+  const cls=adj==null?'':(adj>0?'pos':(adj<0?'neg':'sec'));
+  const right=chg==null?'<span class="dm-tk-d sec" title="this market is no longer listed">\u2014</span>'
+    :'<span class="dm-tk-d '+cls+'" title="price move since sent \u2014 colored by whether the '+side+' is right">'+(chg>0?'+':'')+(chg*100).toFixed(1)+'%</span>';
+  const dirChip=has?' <span class="dm-dir '+(side==='short'?'neg':'pos')+'" title="read from the words around the ticker \u2014 short/sell/fade before it (or short/puts after) makes it a short; everything else is a long. One word in the message fixes a miscall.">'+(side==='short'?'\u25bc short':'\u25b2 long')+'</span>':'';
+  const bell=has?' <button type="button" class="dm-tool dm-tkbell" data-dmalert="'+esc(m.ref)+'" data-px="'+at+'" title="arm a price alert at the stamp ('+fmtPx(at)+') \u2014 fires when the market crosses back through the level this call was made at">\u2691 alert</button>':'';
+  const sub=has?('sent at '+fmtPx(at)+(live?' \u00b7 now '+fmtPx(now):' \u00b7 no longer listed')):'no mark at send';
+  // The card is a door, not just a label: clicking it opens the market drawer for the name \u2014
   // same in-place drawer the earnings rows and news badges use, so no tab switch.
-  return '<div class="dm-tk" data-coin="'+esc(m.ref)+'" title="open the '+esc(dmTkName(m.ref))+' drawer"><div><div class="dm-tk-s">'+esc(dmTkName(m.ref))+'</div>'
-    +'<div class="dm-tk-m">'+esc(sub)+'</div></div>'+right+'</div>';
+  return '<div class="dm-tk" data-coin="'+esc(m.ref)+'" title="open the '+esc(dmTkName(m.ref))+' drawer"><div><div class="dm-tk-s">'+esc(dmTkName(m.ref))+dirChip+'</div>'
+    +'<div class="dm-tk-m">'+esc(sub)+bell+'</div></div>'+right+'</div>';
+}
+// One tap on a stamp arms a "back to the level" alert: crossing DOWN through the stamp when the
+// market sits above it, UP when below \u2014 the retest/reclaim of the price the call was made at.
+async function dmArmCallAlert(coin, refPx){
+  if(!isFinite(refPx)||refPx<=0) return;
+  const r=state.rows.get(coin);
+  const cur=r&&isFinite(r.px)&&r.px>0?r.px:null;
+  const op=cur!=null&&cur>=refPx?'cross_dn':'cross_up';
+  try{
+    const res=await fetch('/api/alerts/rules',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({metric:'px',op:op,value:refPx,coin:coin,note:'call retest'})});
+    const d=await res.json().catch(()=>({}));
+    if(res.ok&&d&&d.ok!==false){ pushToast('\u2691 alert armed \u2014 '+(r?r.ticker:dmTkName(coin))+' crossing '+(op==='cross_dn'?'\u2193':'\u2191')+' '+fmtPx(refPx)); loadRules(); }
+    else pushToast('could not arm that alert'+(d&&d.error?' \u2014 '+d.error:''));
+  }catch(_){ pushToast('could not arm that alert'); }
 }
 function fmtPx(v){
   if(v==null||!isFinite(v)) return '—';
@@ -15082,8 +15147,16 @@ async function dmNewTopic(){
 // The away-delivery story, said where messages are written: with no Telegram linked to THIS
 // account, nothing nudges this member's phone. If the bot already messages a chat no account owns
 // (linked before accounts existed), it is offered for a code-verified claim.
+function dmPushBlockHtml(){
+  if(!dmPushCapable()) return '';
+  return '<div class="dm-sh" style="padding:10px 0 6px">Browser notifications</div>'
+    +(dmState.webPushOn
+      ?'<div class="dm-tgtxt">On for this device — unread messages arrive as system notifications even with every tab closed. <button type="button" class="dm-tool" id="dm-pushoff">turn off</button></div>'
+      :'<div class="dm-tgtxt">Unread messages as system notifications on this device, tab closed included — same 5-minute grace and mute rules as Telegram. <button type="button" class="dm-tool" id="dm-pushon">enable</button></div>');
+}
 function dmTgHintHtml(){
-  if(!dmState.loaded||dmState.meTg) return '';
+  if(!dmState.loaded) return '';
+  if(dmState.meTg){ const pb=dmPushBlockHtml(); return pb?('<div class="dm-tglink">'+pb+'</div>'):''; }
   return '<div class="dm-tglink"><div class="dm-sh" style="padding:0 0 6px">Telegram nudges</div>'
     +'<div class="dm-tgtxt">No Telegram linked — messages that arrive while you are away cannot reach your phone.</div>'
     +((dmState.adoptables&&dmState.adoptables.length)
@@ -15091,6 +15164,7 @@ function dmTgHintHtml(){
         +dmState.adoptables.map(c=>'<div class="dm-tgrow"><span class="grow">'+esc(c.name)+' <span class="acc-mu">'+esc(c.mask)+'</span></span>'
           +'<button type="button" class="dm-tool" data-dmadopt="'+esc(c.chat)+'" title="A 6-digit code goes to that Telegram; typing it back links the chat to your account.">this is me</button></div>').join('')
       :'<div class="dm-tgtxt">Link one from the alerts panel: mint a code there and send the bot /start CODE.</div>')
+    +dmPushBlockHtml()
     +'</div>';
 }
 
@@ -15205,22 +15279,38 @@ function dmCallsHtml(){
   if(!d) return '<div class="dm-log" id="dm-log"><div class="dm-empty">loading\u2026</div></div>';
   if(!d.calls.length) return '<div class="dm-log" id="dm-log"><div class="dm-empty">'
     +'No calls yet. Type <b>$TICKER</b> in a message and it carries the mark it was sent at \u2014 those land here.</div></div>';
-  const sum=d.summary.map(x=>'<div class="dm-callsum"><span class="grow">'+esc(x.who)+'</span>'
+  // Summary rows are the by-filter: click a person to read just their record (server-side
+  // filter, so it reaches past the newest page).
+  const sum=d.summary.map(x=>'<div class="dm-callsum'+(dmState.callsBy===x.uid?' sel':'')+'" data-dmcallsby="'+esc(x.uid)+'" title="'+(dmState.callsBy===x.uid?'show everyone':'show only '+esc(x.who)+'’s calls')+'"><span class="grow">'+esc(x.who)+'</span>'
     +'<span class="acc-mu">'+x.n+' call'+(x.n===1?'':'s')+'</span>'
-    +'<span class="'+(x.upPct>=0.5?'pos':'neg')+'">'+Math.round(x.upPct*100)+'% up</span>'
-    +'<span class="'+(x.avg>=0?'pos':'neg')+'">avg '+(x.avg>=0?'+':'')+(x.avg*100).toFixed(1)+'%</span></div>').join('');
+    +'<span class="'+(x.upPct>=0.5?'pos':'neg')+'" title="fraction of calls whose direction-adjusted move is positive — at the fixed 1d horizon once it has printed, live until then">'+Math.round(x.upPct*100)+'% right</span>'
+    +'<span class="'+(x.avg>=0?'pos':'neg')+'" title="average direction-adjusted move on the same yardstick">avg '+(x.avg>=0?'+':'')+(x.avg*100).toFixed(1)+'%</span></div>').join('');
+  const hz=(v)=>v==null?'<span class="sec">—</span>':'<span class="'+(v>0?'pos':(v<0?'neg':'sec'))+'">'+((v>0?'+':'')+(v*100).toFixed(1)+'%')+'</span>';
+  const head='<div class="dm-callrow dm-callhead"><span></span><span></span><span></span>'
+    +'<span class="dm-callpx">sent</span><span class="dm-callpx">now</span>'
+    +'<span title="raw price move since sent — colored by whether the call is right">move</span>'
+    +'<span class="dm-callhz" title="direction-adjusted move at the fixed 1-day horizon (the first daily close ≥ 24h after the call) — positive means the call was right">1d</span>'
+    +'<span class="dm-callhz" title="the same at the 7-day horizon">7d</span></div>';
   const rows=d.calls.map(c=>{
-    const cls=c.chg==null?'sec':(c.chg>0?'pos':'neg');
+    const cls=c.adj==null?'sec':(c.adj>0?'pos':'neg');
     const mv=c.chg==null?'\u2014':((c.chg>0?'+':'')+(c.chg*100).toFixed(1)+'%');
-    return '<div class="dm-callrow" data-dmjump-thread="'+c.thread+'" data-mid="'+c.id+'">'
-      +'<span class="dm-callt" data-coin="'+esc(c.ref)+'" title="open the '+esc(dmTkName(c.ref))+' drawer — the rest of the row jumps to the conversation">'+esc(dmTkName(c.ref))+'</span>'
-      +'<span class="dm-callb">'+esc(String(c.body||'').slice(0,120))+'</span>'
+    return '<div class="dm-callrow'+(c.deleted?' dm-calldel':'')+'" data-dmjump-thread="'+c.thread+'" data-mid="'+c.id+'">'
+      +'<span class="dm-callt" data-coin="'+esc(c.ref)+'" title="open the '+esc(dmTkName(c.ref))+' drawer \u2014 the rest of the row jumps to the conversation">'
+        +(c.side==='short'?'<span class="neg" title="short call">\u25bc</span>':'<span class="pos" title="long call">\u25b2</span>')+' '+esc(dmTkName(c.ref))+'</span>'
+      +'<span class="dm-callb">'+(c.deleted?'<span class="dm-calldelmk">message deleted \u2014 the stamp stands</span>':esc(String(c.body||'').slice(0,120)))+'</span>'
       +'<span class="acc-mu">'+esc(c.sender)+' \u00b7 '+esc(c.threadName)+' \u00b7 '+dmWhen(c.ts)+'</span>'
       +'<span class="dm-callpx" title="the mark when it was sent">'+(c.refPx!=null?fmtPx(c.refPx):'\u2014')+'</span>'
       +'<span class="dm-callpx dm-callnow" title="the current mark">'+(c.px!=null?fmtPx(c.px):'\u2014')+'</span>'
-      +'<span class="dm-callmv '+cls+'">'+mv+'</span></div>';
+      +'<span class="dm-callmv '+cls+'" title="price move since sent \u2014 colored by whether the '+(c.side||'long')+' is right">'+mv+'</span>'
+      +'<span class="dm-callhz">'+hz(c.adj1)+'</span>'
+      +'<span class="dm-callhz">'+hz(c.adj7)+'</span></div>';
   }).join('');
-  return '<div class="dm-log" id="dm-log"><div class="dm-callsums">'+sum+'</div>'+rows+'</div>';
+  return '<div class="dm-log" id="dm-log"><div class="dm-callsums">'+sum+'</div>'+head+rows+'</div>';
+}
+// One fetch for the calls board, filter included \u2014 both the open and the 45s tick ride it.
+async function dmFetchCalls(){
+  const by=dmState.callsBy?'&by='+encodeURIComponent(dmState.callsBy):'';
+  const d=await fetchJSON('/api/dm/calls?limit=500'+by); if(d&&d.ok) dmState.calls=d;
 }
 
 function dmRender(){
@@ -15251,11 +15341,16 @@ function dmRender(){
 
   let main;
   if(dmState.mode==='calls'){
+    const byName=dmState.callsBy?((dmState.members.find(m=>m.uid===dmState.callsBy)||{}).display||'one member'):null;
     main='<div class="dm-hd"><b>Calls</b>'
-      +'<span class="sec" data-tip="a stamped call is exempt from the 30d/7d message retention — the row is kept permanently, and the record reads it for as long as it exists">every price-stamped message — sent price, current price, and the move · kept forever, never ages out</span>'
+      +'<span class="sec" data-tip="a stamped call is exempt from the 30d/7d message retention — the row is kept permanently, and the record reads it for as long as it exists. Deleting a call removes its body, never its score.">every price-stamped message — sent price, current price, and the move · kept forever, never ages out</span>'
+      +(byName?'<span class="mk-chip" style="color:var(--accent)">'+esc(byName)+' only <button type="button" class="dm-tool" data-dmcallsby="'+esc(dmState.callsBy)+'" title="show everyone">✕</button></span>':'')
       +'<button type="button" class="btn dm-mutebtn" id="dm-backchat">back</button></div>'+dmCallsHtml();
   }else if(dmState.results||dmState.searching){   // `searching` alone covers the FIRST query, when no prior result set exists yet
-    main='<div class="dm-hd"><b>Search</b><span class="sec">'+esc(dmState.q)+'</span>'
+    const scopeCtl=dmState.sel?('<span class="dm-sscope">'
+      +'<button type="button" class="dm-tool'+(dmState.searchScope!=='thread'?' on':'')+'" data-dmsscope="all">everywhere</button>'
+      +'<button type="button" class="dm-tool'+(dmState.searchScope==='thread'?' on':'')+'" data-dmsscope="thread" title="only the conversation that was open when you searched">this conversation</button></span>'):'';
+    main='<div class="dm-hd"><b>Search</b><span class="sec">'+esc(dmState.q)+'</span>'+scopeCtl
       +'<button type="button" class="btn dm-mutebtn" id="dm-clearsearch">clear</button></div>'+dmResultsHtml();
   }else if(pendingPeer){
     main='<div class="dm-hd"><b>'+esc(pendingPeer.display)+'</b>'
@@ -15485,6 +15580,22 @@ function dmWire(){
     const emo=(dmState.reactions&&dmState.reactions[0])||null;
     if(emo) dmReact(+msg.dataset.mid,emo);
   });
+  // Long-press (500ms, no movement) opens the message's action bar on touch screens — the
+  // hover bar has no hover to ride there; a tap anywhere else folds it back up. Double-tap
+  // keeps its quick-reaction meaning; the two do not overlap in time.
+  let _lpT=0,_lpFired=false;
+  host.addEventListener('touchstart',(e)=>{
+    const msg=e.target.closest('.dm-msg[data-mid]');
+    if(!msg||e.target.closest('.dm-act')){ if(!e.target.closest('.dm-act')) host.querySelectorAll('.dm-msg.acton').forEach(x=>x.classList.remove('acton')); return; }
+    _lpFired=false;
+    _lpT=setTimeout(()=>{ _lpFired=true;
+      host.querySelectorAll('.dm-msg.acton').forEach(x=>x.classList.remove('acton'));
+      msg.classList.add('acton'); },500);
+  },{passive:true});
+  host.addEventListener('touchmove',()=>clearTimeout(_lpT),{passive:true});
+  host.addEventListener('touchcancel',()=>clearTimeout(_lpT),{passive:true});
+  host.addEventListener('touchend',(e)=>{ clearTimeout(_lpT);
+    if(_lpFired){ e.preventDefault(); _lpFired=false; } },{passive:false});
   host.addEventListener('click',(e)=>{
     const pinBtn=e.target.closest('[data-dmpin]');
     if(pinBtn){ dmPin(+pinBtn.dataset.dmpin, pinBtn.dataset.on==='1'); return; }
@@ -15495,6 +15606,15 @@ function dmWire(){
     if(e.target.closest('#dm-waddbtn')){ dmState.watchAdd=true; dmRender(); return; }
     if(e.target.closest('#dm-callsbtn')){ dmOpenCalls(); return; }
     if(e.target.closest('#dm-backchat')){ dmState.mode='chat'; dmRender(); return; }
+    const bell=e.target.closest('[data-dmalert]');
+    if(bell){ dmArmCallAlert(bell.dataset.dmalert, +bell.dataset.px); return; }
+    const cby=e.target.closest('[data-dmcallsby]');
+    if(cby){ dmState.callsBy=dmState.callsBy===cby.dataset.dmcallsby?null:cby.dataset.dmcallsby;
+      dmFetchCalls().then(()=>dmRender()); dmRender(); return; }
+    const ssc=e.target.closest('[data-dmsscope]');
+    if(ssc){ dmState.searchScope=ssc.dataset.dmsscope==='thread'?'thread':'all'; dmRunSearch(); return; }
+    if(e.target.closest('#dm-pushon')){ dmPushEnable(); return; }
+    if(e.target.closest('#dm-pushoff')){ dmPushDisable(); return; }
     const tk=e.target.closest('.dm-tk[data-coin],.dm-callt[data-coin]');
     if(tk){ const c=tk.dataset.coin;
       if(state.rows.has(c)) openDetail(c);
@@ -15592,6 +15712,7 @@ function dmKeys(e){
 
 async function openDM(){
   dmWire();
+  dmPushProbe();                  // reflect this browser's real subscription state, async
   dmRender();                     // paint the shell immediately, fill it as data lands
   await dmLoad();
   if(!dmState.sel&&dmState.threads.length) { await dmOpenThread(dmState.threads[0].id); return; }

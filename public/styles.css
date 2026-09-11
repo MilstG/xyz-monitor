@@ -2437,7 +2437,7 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .dm-callsum{display:flex;align-items:center;gap:12px;font-size:12.5px}
 .dm-callsum .grow{flex:1;min-width:70px}
 .dm-callsum span:not(.grow){font-family:var(--mono);font-size:11px}
-.dm-callrow{align-self:stretch;display:grid;grid-template-columns:56px 1fr auto 68px 68px 58px;gap:10px;align-items:center;
+.dm-callrow{align-self:stretch;display:grid;grid-template-columns:64px 1fr auto 68px 68px 58px 52px 52px;gap:10px;align-items:center;
   padding:7px 0;border-bottom:1px solid var(--grid);cursor:pointer;font-size:12.5px}
 .dm-callrow:hover{background:var(--panel2)}
 .dm-callt{font-family:var(--mono);font-weight:700;color:var(--text);
@@ -2449,7 +2449,26 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .dm-callpx{color:var(--muted)}
 .dm-callnow{color:var(--text)}
 .dm-callmv{font-weight:700}
-@media (max-width:820px){ .dm-callrow{grid-template-columns:48px 1fr 58px} .dm-callrow .acc-mu,.dm-callpx{display:none} }
+@media (max-width:820px){ .dm-callrow{grid-template-columns:56px 1fr 58px} .dm-callrow .acc-mu,.dm-callpx,.dm-callhz{display:none} }
+/* the column-label row above the record, and the tombstone row */
+.dm-callhead{border-bottom:1px solid var(--border);padding-bottom:4px;cursor:default}
+.dm-callhead span{font-size:9px;text-transform:uppercase;letter-spacing:.8px;color:var(--faint)}
+.dm-callhead:hover{background:none}
+.dm-callhz{font-family:var(--mono);font-size:11.5px;text-align:right}
+.dm-calldel .dm-callt,.dm-calldel .acc-mu{opacity:.55}
+.dm-calldelmk{color:var(--faint);font-style:italic}
+.dm-callsum{cursor:pointer;border-radius:5px;padding:1px 6px;margin:0 -6px}
+.dm-callsum:hover{background:var(--panel2)}
+.dm-callsum.sel{background:var(--panel2);outline:1px solid var(--accent-dim)}
+/* direction chip on the stamp card + the one-tap alert hand (dm-dir, NOT dm-side — that's the rail) */
+.dm-dir{font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:.5px;margin-left:7px;vertical-align:1px}
+.dm-tkbell{margin-left:8px;color:var(--muted)}
+.dm-tkbell:hover{color:var(--accent)}
+/* search scope chips */
+.dm-sscope{display:inline-flex;gap:8px;margin-left:4px}
+.dm-tool.on{color:var(--accent)}
+/* long-press opened the bar — same box the hover shows */
+.dm-msg.acton .dm-act{display:inline-flex}
 .dm-watch{border-top:1px solid var(--border);margin-top:10px;padding:11px 13px 12px;
   display:flex;flex-wrap:wrap;gap:5px;align-items:center}
 .dm-watch .dm-sh{width:100%;padding:0 0 6px}

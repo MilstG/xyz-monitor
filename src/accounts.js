@@ -273,6 +273,18 @@ CREATE TABLE IF NOT EXISTS dm_file (
   inline INTEGER NOT NULL DEFAULT 0,      -- 1 only for image types we verified by magic bytes
   createdAt INTEGER NOT NULL
 ) STRICT;
+
+-- Browser push subscriptions, one row per (endpoint); a member may hold several (phone + laptop).
+-- The endpoint IS the identity a push service hands out, so it is the key; a dead endpoint is
+-- dropped the moment the push service 404/410s it.
+CREATE TABLE IF NOT EXISTS dm_webpush (
+  endpoint TEXT PRIMARY KEY,
+  uid TEXT NOT NULL,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  ua TEXT,
+  addedAt INTEGER NOT NULL
+) STRICT;
 `);
 
   // ---- migration from the pair-columns schema --------------------------------------------------
@@ -285,7 +297,7 @@ CREATE TABLE IF NOT EXISTS dm_file (
   // what produced "table dm_msg has no column named sys" the first time round.
   const ADDED_COLUMNS = {
     dm_thread: [["kind", "TEXT NOT NULL DEFAULT 'dm'"], ["pairKey", "TEXT"], ["title", "TEXT"], ["createdBy", "TEXT"]],
-    dm_msg: [["sys", "TEXT"], ["fileId", "TEXT"], ["via", "TEXT"], ["pinnedAt", "INTEGER"], ["pinnedBy", "TEXT"], ["replyTo", "INTEGER"]],
+    dm_msg: [["sys", "TEXT"], ["fileId", "TEXT"], ["via", "TEXT"], ["pinnedAt", "INTEGER"], ["pinnedBy", "TEXT"], ["replyTo", "INTEGER"], ["side", "TEXT"]],
     dm_read: [["hiddenUpTo", "INTEGER NOT NULL DEFAULT 0"], ["clearedUpTo", "INTEGER NOT NULL DEFAULT 0"],
       ["boardNotify", "INTEGER NOT NULL DEFAULT 0"]],
   };
@@ -368,7 +380,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     memAll: db.prepare("SELECT * FROM dm_member WHERE thread = ?"),
     memLeave: db.prepare("UPDATE dm_member SET leftAt = ? WHERE thread = ? AND uid = ? AND leftAt IS NULL"),
 
-    msgIns: db.prepare("INSERT INTO dm_msg (thread, sender, ts, body, ref, refPx, sys, fileId, via, replyTo) VALUES (?,?,?,?,?,?,?,?,?,?)"),
+    msgIns: db.prepare("INSERT INTO dm_msg (thread, sender, ts, body, ref, refPx, side, sys, fileId, via, replyTo) VALUES (?,?,?,?,?,?,?,?,?,?,?)"),
     msgById: db.prepare("SELECT * FROM dm_msg WHERE id = ?"),
     msgEdit: db.prepare("UPDATE dm_msg SET body = ?, ref = ?, editedAt = ? WHERE id = ? AND sender = ? AND deletedAt IS NULL"),
     msgDrop: db.prepare("UPDATE dm_msg SET deletedAt = ?, body = '', fileId = NULL WHERE id = ? AND sender = ?"),
@@ -384,7 +396,14 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       LEFT JOIN dm_read rd ON rd.thread = s.thread AND rd.uid = m.uid
       WHERE m.uid = ? AND m.leftAt IS NULL AND s.deletedAt IS NULL AND s.sys IS NULL
         AND s.id > COALESCE(rd.clearedUpTo, 0)
+        AND (? IS NULL OR s.thread = ?)
         AND s.body LIKE ? ESCAPE '\\' ORDER BY s.id DESC LIMIT ?`),
+
+    wpAdd: db.prepare(`INSERT INTO dm_webpush (endpoint, uid, p256dh, auth, ua, addedAt) VALUES (?,?,?,?,?,?)
+      ON CONFLICT(endpoint) DO UPDATE SET uid = excluded.uid, p256dh = excluded.p256dh, auth = excluded.auth, ua = excluded.ua`),
+    wpDrop: db.prepare("DELETE FROM dm_webpush WHERE endpoint = ?"),
+    wpDropMine: db.prepare("DELETE FROM dm_webpush WHERE endpoint = ? AND uid = ?"),
+    wpFor: db.prepare("SELECT * FROM dm_webpush WHERE uid = ?"),
 
     readGet: db.prepare("SELECT * FROM dm_read WHERE thread = ? AND uid = ?"),
     readUp: db.prepare(`INSERT INTO dm_read (thread, uid, readMsgId) VALUES (?,?,?)
@@ -405,13 +424,13 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
 
     // Retention: candidates past their window, oldest first, capped per sweep so one tick never
     // stalls on a huge backlog. Pinned rows are exempt by the WHERE, not by caller discipline.
-    // Two exemptions: pins (a board's standing post) and PRICED CALLS (ref + refPx) — the calls
-    // record reads live messages, and a track record that self-destructs in a week is not a track
-    // record. Everything else ages out. The exemptions cover LIVE rows only: a tombstone keeps its
-    // ref/refPx and pinnedAt (msgDrop clears just body/file), and exempting those too meant every
-    // deleted call and deleted-while-pinned message was retained forever, counting for nothing.
+    // Two exemptions with different lifetimes: PINS are exempt only while LIVE (a deleted-while-
+    // pinned row is just a tombstone and ages out), but PRICED CALLS (ref + refPx) are exempt
+    // even as tombstones — the record is delete-proof by design: an author deleting a bad call
+    // removes the body, never the stamp, so a track record cannot be scrubbed. Everything else
+    // ages out.
     retainSweep: db.prepare(`SELECT m.id, m.fileId FROM dm_msg m JOIN dm_thread t ON t.id = m.thread
-      WHERE (m.deletedAt IS NOT NULL OR (m.pinnedAt IS NULL AND (m.ref IS NULL OR m.refPx IS NULL)))
+      WHERE ((m.pinnedAt IS NULL OR m.deletedAt IS NOT NULL) AND (m.ref IS NULL OR m.refPx IS NULL))
         AND m.ts < CASE WHEN t.kind = 'dm' THEN ? ELSE ? END
       ORDER BY m.id LIMIT 500`),
     retainDrop: db.prepare("DELETE FROM dm_msg WHERE id = ?"),
@@ -440,11 +459,12 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
 
     // Every stamped message, newest first. This is the record the price stamp exists to build.
     // The by-filter lives in the SQL, not JS-after-LIMIT: filtering the newest N overall meant a
-    // person whose calls were all older than the window came back as an empty record.
-    callsAll: db.prepare(`SELECT * FROM dm_msg WHERE ref IS NOT NULL AND deletedAt IS NULL
+    // person whose calls were all older than the window came back as an empty record. Tombstones
+    // are INCLUDED: deleting a call removes its body, never its score — see retainSweep.
+    callsAll: db.prepare(`SELECT * FROM dm_msg WHERE ref IS NOT NULL AND refPx IS NOT NULL
       AND (? IS NULL OR sender = ?) ORDER BY id DESC LIMIT ?`),
     callsMine: db.prepare(`SELECT m.* FROM dm_msg m JOIN dm_member mem ON mem.thread = m.thread
-      WHERE mem.uid = ? AND mem.leftAt IS NULL AND m.ref IS NOT NULL AND m.deletedAt IS NULL
+      WHERE mem.uid = ? AND mem.leftAt IS NULL AND m.ref IS NOT NULL AND m.refPx IS NOT NULL
       AND (? IS NULL OR m.sender = ?) ORDER BY m.id DESC LIMIT ?`),
 
     auditAdd: db.prepare("INSERT INTO dm_audit (uid, action, thread, detail, at) VALUES (?,?,?,?,?)"),
@@ -818,11 +838,27 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   }
 
   // ---- direct messages -------------------------------------------------------------------------
+  // Direction of a stamped call, read from the words AROUND the ticker — deliberately dumb and
+  // documented rather than clever: short/sell/fade in the 24 chars before the ticker, or
+  // short/puts in the 12 after, makes it a short; everything else is a long. One word fixes a
+  // miscall; a smarter parser fixes nothing and surprises everyone.
+  function callSide(text, sym) {
+    const t = String(text || ""), i = t.toUpperCase().indexOf("$" + String(sym).toUpperCase());
+    if (i < 0) return "long";
+    const before = t.slice(Math.max(0, i - 24), i);
+    const after = t.slice(i + String(sym).length + 1, i + String(sym).length + 13);
+    return (/(^|\W)(short|sell|fade)(\W|$)/i.test(before) || /^\s*(short|puts)\b/i.test(after)) ? "short" : "long";
+  }
+
   // markFor(coin) -> number|null is injected by the server so this module never reaches into the
   // poller. It reads the same row object the snapshot ships, so a stamped price is by construction
   // the price the sender was looking at.
   let markFor = options.markFor || (() => null);
   function setMarkSource(fn) { if (typeof fn === "function") markFor = fn; }
+  // pxHistory(coin, atTs) -> the first daily close printed at/after atTs, or null while that
+  // close is still in the future — the fixed-horizon leg of the calls scoreboard.
+  let pxHistory = options.pxHistory || (() => null);
+  function setPxHistory(fn) { if (typeof fn === "function") pxHistory = fn; }
   // tweetFor(body, thread) -> preview|{ok:false}|null is injected the same way: the server owns
   // the oEmbed cache and the network; this module only asks "does this body have a card yet".
   let tweetFor = options.tweetFor || (() => null);
@@ -949,7 +985,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   // way for the membership story to drift from the message history.
   function sysMessage(threadId, actor, kind, detail) {
     const now = Date.now();
-    const id = Number(S.msgIns.run(+threadId, actor || "", now, String(detail || ""), null, null, kind, null, null, null).lastInsertRowid);
+    const id = Number(S.msgIns.run(+threadId, actor || "", now, String(detail || ""), null, null, null, kind, null, null, null).lastInsertRowid);
     S.thrTouch.run(id, now, +threadId);
     return id;
   }
@@ -1197,6 +1233,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       sender: m.sender ? ((users.get(m.sender) || {}).display || "—") : "",
       ts: m.ts, body: m.deletedAt ? "" : m.body,
       ref: m.ref || null, refPx: m.refPx == null ? null : m.refPx,
+      side: m.side || null,
       px: m.ref ? markFor(m.ref) : null,          // live mark, derived at read — never stored
       edited: !!m.editedAt, deleted: !!m.deletedAt,
       sys: m.sys || null, via: m.via || null, pinned: !!m.pinnedAt,
@@ -1230,13 +1267,14 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       return { ok: false, error: "slow down — too many messages at once", retry: true };
 
     const sym = firstTickerRef(text);
-    let ref = null, refPx = null;
+    let ref = null, refPx = null, side = null;
     if (sym) {
       // No resolver (the Telegram bridge path) means NO stamp — falling back to the raw symbol
       // stamped every bridged $WORD as an unresolvable ref that sat in the calls record as a
       // permanent dead row with no price and no live mark.
       const coin = coinResolve ? coinResolve(sym) : null;
-      if (coin) { ref = coin; const px = markFor(coin); refPx = Number.isFinite(px) && px > 0 ? px : null; }
+      if (coin) { ref = coin; const px = markFor(coin); refPx = Number.isFinite(px) && px > 0 ? px : null;
+        side = callSide(text, sym); }
     }
     // A quote binds only inside its own conversation: a replyTo naming another thread's message is
     // dropped, not erred — the message still says what it says without the quote.
@@ -1246,7 +1284,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       if (rm && rm.thread === t.id && !rm.sys && !rm.deletedAt) replyTo = rm.id;
     }
     const now = Date.now();
-    const id = Number(S.msgIns.run(t.id, fromUid, now, text, ref, refPx, null, file ? file.id : null, o.via || null, replyTo).lastInsertRowid);
+    const id = Number(S.msgIns.run(t.id, fromUid, now, text, ref, refPx, side, null, file ? file.id : null, o.via || null, replyTo).lastInsertRowid);
     S.thrTouch.run(id, now, t.id);
     S.readUp.run(t.id, fromUid, id);            // your own message is read by definition
     return { ok: true, id, thread: t.id, message: wire(S.msgById.get(id), fromUid) };
@@ -1366,12 +1404,15 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   // Search runs over the caller's own membership by JOIN, so the scope IS the authorization — there
   // is no thread id to tamper with. LIKE rather than FTS5: no extension dependency, and at a desk's
   // volume of messages the scan is far cheaper than the index would be to maintain.
-  function search(uid, q, limit) {
+  function search(uid, q, limit, threadId) {
     const raw = String(q == null ? "" : q).trim();
     if (raw.length < 2) return { ok: true, q: raw, results: [] };
     const esc = raw.replace(/[\\%_]/g, (c) => "\\" + c);
     const n = Math.min(Math.max(+limit || 50, 1), 100);
-    const rows = S.msgSearch.all(uid, "%" + esc + "%", n);
+    // An optional thread scope: the JOIN already guarantees membership, so scoping is a WHERE
+    // clause, never a second authorization path.
+    const th = Number.isFinite(+threadId) && +threadId > 0 ? +threadId : null;
+    const rows = S.msgSearch.all(uid, th, th, "%" + esc + "%", n);
     return { ok: true, q: raw, results: rows.map((m) => {
       const t = S.thrById.get(m.thread);
       return Object.assign(wire(m, uid), { threadName: t ? threadName(t, uid) : "—", kind: t ? t.kind : "dm" });
@@ -1487,6 +1528,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const cfCache = new Map();
     const floor = (th) => { if (!cfCache.has(th)) cfCache.set(th, (S.readGet.get(th, uid) || {}).clearedUpTo || 0); return cfCache.get(th); };
     const out = [];
+    const DAY = 86400e3;
     for (const m of rows) {
       if (!o.all && m.id <= floor(m.thread)) continue;
       const t = S.thrById.get(m.thread);
@@ -1494,20 +1536,35 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       const at = m.refPx;
       const has = at != null && isFinite(at) && at > 0;
       const ok = has && live != null && isFinite(live) && live > 0;
+      // Direction-adjusted move: positive = the CALL is right. A short that falls 2% scores +2%.
+      const side = m.side === "short" ? "short" : "long";
+      const adjOf = (c) => (c == null ? null : (side === "short" ? -c : c));
+      // Fixed horizons: the first daily close printed at/after t+1d and t+7d. Null while that
+      // close is still in the future — "how is it doing" and "how did it do" are different
+      // questions, and the horizon columns only ever answer the second.
+      const hz = (msFwd) => { if (!has) return null;
+        const p = pxHistory(m.ref, m.ts + msFwd);
+        return p != null && isFinite(p) && p > 0 ? p / at - 1 : null; };
+      const chg1 = hz(DAY), chg7 = hz(7 * DAY);
       out.push({
         id: m.id, thread: m.thread, ts: m.ts,
         senderUid: m.sender, sender: (users.get(m.sender) || {}).display || "—",
         threadName: t ? threadName(t, uid) : "—", kind: t ? t.kind : "dm",
-        body: m.body, ref: m.ref, refPx: has ? at : null, px: ok ? live : null,
-        chg: ok ? live / at - 1 : null,
+        body: m.deletedAt ? "" : m.body, deleted: !!m.deletedAt,
+        ref: m.ref, refPx: has ? at : null, px: ok ? live : null, side,
+        chg: ok ? live / at - 1 : null, adj: adjOf(ok ? live / at - 1 : null),
+        chg1, adj1: adjOf(chg1), chg7, adj7: adjOf(chg7),
       });
     }
-    // The summary is per person, because "who is right" is the only question a call record answers.
+    // The summary is per person, because "who is right" is the only question a call record
+    // answers — scored on the DIRECTION-ADJUSTED move, at the 1d horizon once it has printed
+    // (a fixed yardstick), and on the live move until then.
     const byWho = new Map();
     for (const c of out) {
-      if (c.chg == null) continue;
+      const score = c.adj1 != null ? c.adj1 : c.adj;
+      if (score == null) continue;
       const e = byWho.get(c.senderUid) || { uid: c.senderUid, who: c.sender, n: 0, up: 0, sum: 0 };
-      e.n++; if (c.chg > 0) e.up++; e.sum += c.chg;
+      e.n++; if (score > 0) e.up++; e.sum += score;
       byWho.set(c.senderUid, e);
     }
     const summary = [...byWho.values()].map((e) => ({
@@ -1685,6 +1742,19 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     watchList, setWatch, pin, pinsOf, calls, exportThread,
     adminThreads, adminHistory, adminSearch, adminAuditLog,
     pendingEscalations, markEscalated,
+    setPxHistory,
+    // browser push subscriptions — stored here, delivered by the server (which holds the keys)
+    webPushAdd: (uid, sub, ua) => {
+      const e = sub && sub.endpoint, k = sub && sub.keys;
+      if (typeof e !== "string" || !/^https:\/\//.test(e) || e.length > 1024) return { ok: false, error: "bad endpoint" };
+      if (!k || typeof k.p256dh !== "string" || typeof k.auth !== "string" || k.p256dh.length > 256 || k.auth.length > 128)
+        return { ok: false, error: "bad keys" };
+      S.wpAdd.run(e, uid, k.p256dh, k.auth, String(ua || "").slice(0, 120), Date.now());
+      return { ok: true };
+    },
+    webPushDrop: (uid, endpoint) => { S.wpDropMine.run(String(endpoint || ""), uid); return { ok: true }; },
+    webPushDropDead: (endpoint) => { try { S.wpDrop.run(String(endpoint || "")); } catch (_) {} },
+    webPushFor: (uid) => S.wpFor.all(uid).map((r) => ({ endpoint: r.endpoint, keys: { p256dh: r.p256dh, auth: r.auth } })),
     stats,
     // testing seams
     _db: db,

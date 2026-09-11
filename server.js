@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.11-65";
+const VERSION = "2026.09.11-66";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -552,6 +552,10 @@ async function main() {
   // A symbol the server does not know stays plain text rather than being stamped with nothing.
   const coinForSymbol = (sym) => { refreshMarks(); return coinBySym.get(String(sym || "").toUpperCase()) || null; };
   ACCOUNTS.setMarkSource(markForCoin);
+  // The calls scoreboard's fixed horizons read the poller's daily spine; the desk digest reads
+  // the member's own calls record. Both injected here — neither module reaches into the other.
+  ACCOUNTS.setPxHistory((coin, atTs) => (poller.dailyCloseAt ? poller.dailyCloseAt(coin, atTs) : null));
+  if (poller.setDeskSource) poller.setDeskSource((uid) => ACCOUNTS.calls(uid, { limit: 100 }));
 
   // ---- tweet preview cards ---------------------------------------------------------------------
   // A message carrying an x.com/twitter.com status link gets a preview card: author, handle, text,
@@ -1148,8 +1152,62 @@ async function main() {
   fastify.get("/api/dm/search", (req, reply) => {
     reply.header("cache-control", "no-store");
     const me = dmMe(req, reply); if (!me) return;
-    return ACCOUNTS.search(me.uid, (req.query || {}).q, (req.query || {}).limit);
+    const q = req.query || {};
+    return ACCOUNTS.search(me.uid, q.q, q.limit, q.thread);
   });
+
+  // ===== browser push (build 2026.09.11-66) =====================================================
+  // The offline escalation's second leg: a member with no Telegram (or who just prefers the
+  // browser) can get the SAME digests as web push. Subscriptions are stored per account; VAPID
+  // keys are minted once and persist on the volume, so a redeploy never invalidates the desk's
+  // subscriptions. Delivery rides the escalation sweep below — same eligibility, same delay,
+  // same mention/watch piercing, zero new policy.
+  const WEBPUSH = (() => {
+    let wp = null;
+    try { wp = require("web-push"); } catch (_) { log("web-push module missing — browser push disabled"); return null; }
+    const keyFile = path.join(DATA_DIR, "webpush-keys.json");
+    let keys = null;
+    try { keys = JSON.parse(fs.readFileSync(keyFile, "utf8")); } catch (_) {}
+    if (!keys || !keys.publicKey || !keys.privateKey) {
+      keys = wp.generateVAPIDKeys();
+      try { fs.writeFileSync(keyFile, JSON.stringify(keys)); } catch (e) { log("WARN: could not persist VAPID keys (" + e.message + ") — subscriptions will not survive a redeploy"); }
+      log("browser push: minted new VAPID keys");
+    }
+    // The subject is a contact hint for push services, not an identity — deliberately generic.
+    wp.setVapidDetails(process.env.PUSH_VAPID_SUBJECT || "mailto:ops@example.com", keys.publicKey, keys.privateKey);
+    return { wp, publicKey: keys.publicKey };
+  })();
+  fastify.get("/api/dm/push-key", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    return WEBPUSH ? { ok: true, key: WEBPUSH.publicKey } : { ok: false, error: "push disabled" };
+  });
+  fastify.post("/api/dm/push-sub", { bodyLimit: 4 * 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    const b = req.body || {};
+    if (b.remove) return ACCOUNTS.webPushDrop(me.uid, String(b.remove));
+    const r = ACCOUNTS.webPushAdd(me.uid, b.sub, String(req.headers["user-agent"] || ""));
+    if (!r.ok) return reply.code(400).send(r);
+    log("browser push subscription registered for " + me.handle);
+    return r;
+  });
+  // One digest to every live subscription of a member; endpoints the push service has declared
+  // dead (404/410) are dropped on the spot. Returns true if anything was accepted.
+  async function webPushSend(uid, payload) {
+    if (!WEBPUSH) return false;
+    const subs = ACCOUNTS.webPushFor(uid);
+    if (!subs.length) return false;
+    let sent = 0;
+    for (const sub of subs) {
+      try { await WEBPUSH.wp.sendNotification(sub, JSON.stringify(payload), { TTL: 3600 }); sent++; }
+      catch (e) {
+        const sc = e && e.statusCode;
+        if (sc === 404 || sc === 410) ACCOUNTS.webPushDropDead(sub.endpoint);
+      }
+    }
+    return sent > 0;
+  }
   // Attachments arrive base64 in a JSON body rather than multipart: it costs ~33% on the wire for
   // an 8 MB ceiling and saves a dependency in a codebase that has deliberately stayed at four.
   fastify.post("/api/dm/upload", { bodyLimit: 14 * 1024 * 1024 }, (req, reply) => {
@@ -1360,7 +1418,12 @@ async function main() {
     icons: [{ src: "/icon.svg", sizes: "any", type: "image/svg+xml", purpose: "any" }],
   });
   const PWA_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="96" fill="#0E1116"/><rect x="24" y="24" width="464" height="464" rx="80" fill="none" stroke="#262E39" stroke-width="8"/><text x="256" y="330" text-anchor="middle" font-family="monospace" font-size="210" font-weight="700" fill="#E8B44B">MS</text></svg>`;
-  const PWA_SW = "self.addEventListener('install',()=>self.skipWaiting());self.addEventListener('activate',e=>e.waitUntil(self.clients.claim()));self.addEventListener('fetch',()=>{});";
+  // The worker grew push handlers (build -66) and moved to its own file; the inline string
+  // survives only as the fallback if the file ever goes missing — installability must not break.
+  const PWA_SW = (() => {
+    try { return fs.readFileSync(path.join(__dirname, "public", "sw.js"), "utf8"); }
+    catch (_) { return "self.addEventListener('install',()=>self.skipWaiting());self.addEventListener('activate',e=>e.waitUntil(self.clients.claim()));self.addEventListener('fetch',()=>{});"; }
+  })();
   fastify.get("/manifest.webmanifest", async (req, reply) => reply.type("application/manifest+json").header("cache-control", "no-cache").send(PWA_MANIFEST));
   fastify.get("/icon.svg", async (req, reply) => reply.type("image/svg+xml").header("cache-control", "no-cache").send(PWA_ICON));
   fastify.get("/sw.js", async (req, reply) => reply.type("text/javascript").header("cache-control", "no-cache").send(PWA_SW));
@@ -1646,7 +1709,7 @@ async function main() {
   fastify.post("/api/alerts/brief-test", { bodyLimit: 4 * 1024 }, async (req, reply) => {
     if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "admin only" });
     const b = req.body || {};
-    const fn = b.kind === "landscape" ? poller.landTest : poller.briefTest;
+    const fn = b.kind === "landscape" ? poller.landTest : b.kind === "desk" ? poller.deskTest : poller.briefTest;
     const r = await fn(b.chat || null, ownerFor(req, reply), true, !!b.fresh, !!b.operator || !!b.mine);
     return reply.code(r.ok ? 200 : 400).send(r);
   });
@@ -2288,7 +2351,7 @@ async function main() {
   // already exists — recipients, hourly caps and quiet hours all apply without a line of new
   // delivery code. Muted threads never escalate, and opening the terminal before the delay elapses
   // cancels it, because by then the member is online and the sweep skips them.
-  setInterval(() => {
+  setInterval(async () => {
     if (!poller.pushEnqueueNow) return;
     let pending;
     try { pending = ACCOUNTS.pendingEscalations(DM_ESCALATE_MS, (uid) => sseByUid.has(uid)); }
@@ -2307,12 +2370,20 @@ async function main() {
           dmReplyTarget.set(String(chat), { thread: p.thread, at: Date.now() });
         }
       }
+      // The browser leg of the same escalation: identical eligibility (this loop), plain-text
+      // payload — the service worker renders it as a system notification that opens Messages.
+      let pushed = false;
+      try {
+        pushed = await webPushSend(p.uid, { title: p.from + (p.kind === "group" ? " (group)" : ""),
+          body: p.n + " unread message" + (p.n === 1 ? "" : "s") + (p.lines.length ? " — " + p.lines[p.lines.length - 1].slice(0, 90) : ""),
+          thread: p.thread });
+      } catch (_) {}
       // Marked ONLY when something was actually sent. The old "mark either way" burned the
       // notification permanently for members with no Telegram linked — link one a day later and
       // the backlog would never nudge. Left unmarked, the rows come back each tick (a map lookup
       // and a skip, bounded by a desk's thread count) and go out as ONE digest the moment a chat
       // is linked or adopted.
-      if (targets.length) ACCOUNTS.markEscalated(p.uid, p.thread, p.upTo);
+      if (targets.length || pushed) ACCOUNTS.markEscalated(p.uid, p.thread, p.upTo);
     }
   }, 60 * 1000).unref();
   // Telegram sends with parse_mode HTML, so a message body is untrusted markup on that wire exactly
