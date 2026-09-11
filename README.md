@@ -150,11 +150,27 @@ instant, and the per-IP rate limit stops being a per-user problem.
   stray text to that chat, and turning any of it into a message posted under their name is a
   surprise you cannot take back.
 - **The calls record** (`/api/dm/calls`) — every price-stamped message in one place, with the move
-  since it was sent and a per-person summary (how many calls, what fraction went up, the average
-  move). This is what the stamp was FOR: without somewhere to read them together, each call died in
-  the conversation it was made in. An operator can promote any stamped message into the Notes book,
-  and the note keeps the message's own timestamp and price — re-stamping it at "now" would turn
-  last Tuesday's call at 113.90 into a different, false claim about today.
+  since it was sent and a per-person summary. This is what the stamp was FOR: without somewhere to
+  read them together, each call died in the conversation it was made in. Calls carry a
+  **direction** (write `short $HOOD` — or `$HOOD puts` — and it scores as a short; everything else
+  is a long), the board and summary score the **direction-adjusted** move (positive = the call is
+  right), and each call is also scored at **fixed 1d/7d horizons** (the first daily close past the
+  mark) so the record isn't a function of when you look. Click a person in the summary to filter
+  to their record. The record is **delete-proof**: deleting a call removes its body, never its
+  stamp or score. A stamp card also carries a one-tap **⚑ alert** that arms a price alert at the
+  called level (retest from above, reclaim from below). An operator can promote any stamped
+  message into the Notes book, and the note keeps the message's own timestamp and price —
+  re-stamping it at "now" would turn last Tuesday's call at 113.90 into a different, false claim
+  about today.
+- **Browser push + PWA** — the offline escalation's second leg: enable browser notifications in
+  the Messages rail and unread messages reach the device as system notifications (same 5-minute
+  grace, mute and mention-piercing rules as Telegram), tab closed included. VAPID keys are minted
+  once and persist on the volume. The app installs as a PWA; the service worker deliberately
+  caches nothing.
+- **Desk digest** — a third scheduled Telegram send next to the brief and the Landscape:
+  deterministic (no model call) and per member — your own calls and their scores, today's
+  earnings, live signals and the tape's 24h extremes. Opt-in by construction: it has no default
+  hour, so nothing sends until a member picks one in the alerts panel.
 - **Watched tickers in messages** — a per-person list, separate from the markets watchlist (which
   lives in localStorage and the server has never seen). A message whose `$TICKER` is on your list
   escalates to Telegram **immediately** and **pierces a muted conversation**: muting a busy group

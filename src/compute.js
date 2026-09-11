@@ -6645,6 +6645,11 @@ const SCHED_KINDS = [
   // work of its own. An hour after the brief on the days it runs.
   { k: "landscape", label: "The Landscape", defaultHour: 11, defaultDays: [1, 3, 5],
     tip: "written market commentary built from the headline corpus \u2014 which stories are the same story, and what hasn\u2019t been repriced. Interpretation, not measurement: unlike the brief its claims are not validated against the server\u2019s numbers, and it cites the headlines it rests on" },
+  // NO default hour: the desk digest is opt-in — it sends to nobody until a member picks an hour
+  // in the alerts panel. Deterministic (no model call), and per-RECIPIENT: the calls record it
+  // carries is that member's own membership-scoped view.
+  { k: "desk", label: "Desk digest", defaultHour: null,
+    tip: "your desk's calls and how they are scoring, today's earnings for the universe, live signals and the tape's 24h extremes \u2014 factual and per member, no model involved. Off until you pick an hour" },
 ];
 const SCHED_DAY_NAMES = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 // null means EVERY day. Normalising all-seven back to null matters: the panel should say "daily",

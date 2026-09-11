@@ -5277,11 +5277,16 @@ test("mobile suite -100: touch parity, mobile preset and PWA shell are fully wir
     assert.ok(html.includes(pin), `PWA head tag missing: ${pin}`);
   assert.ok(app.includes("serviceWorker.register('/sw.js')"), "SW registration missing");
   assert.ok(srv.includes("PWA_MANIFEST") && srv.includes("PWA_SW"), "inline PWA payloads missing from server");
-  // The SW must stay a no-op passthrough: install-prompt eligibility, zero caching.
-  const sw = srv.match(/const PWA_SW = "([^"]+)"/);
-  assert.ok(sw, "PWA_SW literal missing");
-  assert.ok(sw[1].includes("addEventListener('fetch'"), "SW needs a fetch handler for installability");
-  assert.ok(!sw[1].includes("caches") && !sw[1].includes("respondWith"), "SW must not cache or intercept — stale-client hazard");
+  // The worker lives in public/sw.js since -66 (it grew push handlers); the server reads it at
+  // boot with the old inline no-op as fallback. The contract stands either way: a fetch handler
+  // for installability, ZERO caching or interception — a stale client is worse than no client.
+  assert.ok(/const PWA_SW = \(\(\) => \{/.test(srv) && srv.includes('"public", "sw.js"'), "PWA_SW must read the worker file at boot");
+  assert.ok(/return "self\.addEventListener\('install'/.test(srv), "the inline no-op fallback must survive — installability must not break on a missing file");
+  const swf = fs.readFileSync(path.join(__dirname, "..", "public", "sw.js"), "utf8");
+  assert.ok(swf.includes('addEventListener("fetch"'), "SW needs a fetch handler for installability");
+  assert.ok(!swf.includes("caches") && !swf.includes("respondWith"), "SW must not cache or intercept — stale-client hazard");
+  assert.ok(swf.includes('addEventListener("push"') && swf.includes("showNotification"), "the push leg renders notifications");
+  assert.ok(swf.includes('addEventListener("notificationclick"'), "and a click lands the reader in the app");
   // Mobile CSS: sticky ticker column, full-width drawer, scrollable tab strip, touch targets.
   for (const pin of [".wrap tbody td:first-child{position:sticky", ".drawer{width:100vw", "(hover:none) and (pointer:coarse)"])
     assert.ok(css.includes(pin), `mobile css pin missing: ${pin}`);
@@ -13338,7 +13343,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.11-65"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.11-66"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -16348,12 +16353,12 @@ test("admin panel: landscape state block, test pair, and the route that serves t
   assert.ok(/Interpretation, not measurement/.test(app),
     "the honesty line sits where the operator reads it");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(/b\.kind === "landscape" \? poller\.landTest : poller\.briefTest/.test(srv));
+  assert.ok(/b\.kind === "landscape" \? poller\.landTest : b\.kind === "desk" \? poller\.deskTest : poller\.briefTest/.test(srv));
   // The recipient chips need no new machinery — they render from schedKinds, which now carries two
   // kinds. The behavioral admin-row test above (fixture schedKinds) already proves the chip path;
   // here we pin only that the registry actually ships both.
   const C = require("../src/compute");
-  assert.deepEqual(C.SCHED_KINDS.map((x) => x.k), ["brief", "landscape"]);
+  assert.deepEqual(C.SCHED_KINDS.map((x) => x.k), ["brief", "landscape", "desk"]);
 });
 
 // ===== landscape length + voice (build 2026.07.28-20) ==========================================
@@ -23767,16 +23772,102 @@ test("messages -65: the stamp is immutable under edit, and the bridge never stam
   assert.equal(br.message.ref, null, "the bridge has no resolver — a $WORD stays plain text, never a dead ref");
 });
 
-test("messages -65: a tombstoned call is not a call — deleted rows leave with the ordinary window", () => {
+test("messages -66: the record is delete-proof — a dropped call loses its body, never its score", () => {
   const marks = { "xyz:HOOD": 113.2 };
   const { A, g, l } = seedDesk(marks);
   const resolve = (s) => (marks["xyz:" + s] ? "xyz:" + s : null);
   const dm = A.threadFor(g.uid, l.uid, true).id;
   const call = A.send(g.uid, null, "long $HOOD", resolve, { thread: dm });
+  const plain = A.send(g.uid, null, "just words", null, { thread: dm });
   A.drop(g.uid, call.message.id);
-  A.sweepRetention(Date.now() + 31 * 86400e3);
-  assert.ok(A.history(g.uid, dm).messages.every((m) => m.id !== call.message.id),
-    "the tombstone ages out instead of being exempt forever");
+  A.drop(g.uid, plain.message.id);
+  marks["xyz:HOOD"] = 110;
+  const rec = A.calls(g.uid, {}).calls.find((c) => c.id === call.message.id);
+  assert.ok(rec, "the dropped call is still on the record");
+  assert.ok(rec.deleted && rec.body === "", "flagged deleted, body gone");
+  assert.ok(Math.abs(rec.chg - (110 / 113.2 - 1)) < 1e-9, "and still scored");
+  A.sweepRetention(Date.now() + 40 * 86400e3);
+  assert.ok(A.calls(g.uid, {}).calls.some((c) => c.id === call.message.id),
+    "retention keeps the stamped tombstone — the record cannot be scrubbed by deleting");
+  assert.ok(A.history(g.uid, dm).messages.every((m) => m.id !== plain.message.id),
+    "while an ordinary tombstone ages out with its window");
+});
+
+test("messages -66: call direction — parsed at send, immutable, and the scoreboard scores the CALL", () => {
+  const marks = { "xyz:HOOD": 100 };
+  const { A, g, l } = seedDesk(marks);
+  const resolve = (s) => (marks["xyz:" + s] ? "xyz:" + s : null);
+  const dm = A.threadFor(g.uid, l.uid, true).id;
+  const sh = A.send(g.uid, null, "short $HOOD into the print", resolve, { thread: dm });
+  const lg = A.send(g.uid, null, "long $HOOD off the base", resolve, { thread: dm });
+  const puts = A.send(g.uid, null, "$HOOD puts here", resolve, { thread: dm });
+  const bare = A.send(g.uid, null, "$HOOD looks heavy", resolve, { thread: dm });
+  assert.equal(sh.message.side, "short", "short before the ticker");
+  assert.equal(puts.message.side, "short", "puts after the ticker");
+  assert.equal(lg.message.side, "long", "long is long");
+  assert.equal(bare.message.side, "long", "no direction word defaults to long");
+  marks["xyz:HOOD"] = 98;   // price fell 2%
+  const rec = A.calls(g.uid, {});
+  const byId = new Map(rec.calls.map((c) => [c.id, c]));
+  assert.ok(byId.get(sh.message.id).adj > 0, "the short is RIGHT when price falls");
+  assert.ok(byId.get(lg.message.id).adj < 0, "the long is wrong on the same move");
+  assert.ok(Math.abs(byId.get(sh.message.id).chg - byId.get(lg.message.id).chg) < 1e-12, "raw move identical for both");
+  // fixed horizons ride the injected daily-close reader; null until a close has printed
+  assert.equal(byId.get(sh.message.id).adj1, null, "no 1d close yet — no 1d score");
+  A.setPxHistory((coin, ts) => 97);
+  const rec2 = A.calls(g.uid, {});
+  const s2 = rec2.calls.find((c) => c.id === sh.message.id);
+  assert.ok(Math.abs(s2.chg1 - (97 / 100 - 1)) < 1e-9 && s2.adj1 > 0, "the 1d horizon scores off the printed close, direction-adjusted");
+  // the summary scores the person on the adjusted 1d yardstick
+  const me = rec2.summary.find((x) => x.uid === g.uid);
+  assert.equal(me.n, 4, "all four calls counted");
+});
+
+test("messages -66: search takes an optional thread scope — membership still the only authorization", () => {
+  const { A, g, l, m } = seedDesk();
+  const dm = A.threadFor(g.uid, l.uid, true).id;
+  const gr = A.createGroup(g.uid, "desk", [l.uid]).thread;
+  A.send(g.uid, null, "needle in the dm", null, { thread: dm });
+  A.send(g.uid, null, "needle in the group", null, { thread: gr });
+  assert.equal(A.search(g.uid, "needle", 50).results.length, 2, "unscoped finds both");
+  assert.equal(A.search(g.uid, "needle", 50, dm).results.length, 1, "scoped finds one");
+  assert.equal(A.search(m.uid, "needle", 50, gr).results.length, 0, "a non-member's scope hands them nothing — the JOIN is the gate");
+});
+
+test("messages -66: web push subscriptions — stored per account, validated, dead endpoints dropped", () => {
+  const { A, g, l } = seedDesk();
+  assert.ok(!A.webPushAdd(g.uid, { endpoint: "http://insecure/x", keys: { p256dh: "a", auth: "b" } }, "").ok, "plain-http endpoints are refused");
+  assert.ok(!A.webPushAdd(g.uid, { endpoint: "https://push/x" }, "").ok, "keys are required");
+  assert.ok(A.webPushAdd(g.uid, { endpoint: "https://push.svc/one", keys: { p256dh: "a", auth: "b" } }, "ua").ok);
+  assert.ok(A.webPushAdd(g.uid, { endpoint: "https://push.svc/two", keys: { p256dh: "c", auth: "d" } }, "ua").ok);
+  assert.equal(A.webPushFor(g.uid).length, 2, "a member may hold several devices");
+  A.webPushDrop(l.uid, "https://push.svc/one");
+  assert.equal(A.webPushFor(g.uid).length, 2, "another account cannot remove your subscription");
+  A.webPushDrop(g.uid, "https://push.svc/one");
+  A.webPushDropDead("https://push.svc/two");
+  assert.equal(A.webPushFor(g.uid).length, 0, "owner-drop and dead-drop both land");
+});
+
+test("messages -66: the desk digest is per-recipient, deterministic, and off until an hour is picked", () => {
+  const { openStore } = require("../src/store");
+  const { createPoller } = require("../src/poller");
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyzdesk-"));
+  const p = createPoller({ dex: "xyz", store: openStore(dir), log: () => {}, version: "test", crypto: false });
+  // the kind registers with NO default hour — a recipient who never opted in is never due
+  const { SCHED_KINDS, schedResolve } = require("../src/compute");
+  const desk = SCHED_KINDS.find((k) => k.k === "desk");
+  assert.ok(desk, "the desk kind is registered");
+  assert.ok(!Number.isFinite(schedResolve(null, desk).hour), "no default hour: opt-in by construction");
+  // content assembles from the injected per-member calls source; sections it has no data for are absent
+  p.setDeskSource((uid) => ({ ok: true,
+    calls: [{ id: 1, ref: "xyz:HOOD", side: "short", sender: "gus", adj: 0.02, adj1: 0.03, adj7: null, deleted: false }],
+    summary: [{ uid, who: "gus", n: 1, upPct: 1, avg: 0.02 }] }));
+  const text = p.deskTextNow("u1", Date.now());
+  assert.ok(text.includes("Desk digest"), "titled");
+  assert.ok(text.includes("$HOOD") && text.includes("▼"), "the member's calls ride in, direction marked");
+  assert.ok(text.includes("100% right"), "the person summary scores");
+  assert.ok(!text.includes("Earnings today"), "no earnings cache, no earnings section — absent, never fabricated");
 });
 
 test("messages -65: the calls by-filter runs in SQL, before the LIMIT", () => {

@@ -8025,6 +8025,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // Sibling schedule, sibling isolation: a failing commentary generation must never take the
     // brief down with it, so the two ticks are separate timers with separate catches.
     setInterval(() => { landTick().catch((e) => log("landTick failed (isolated, server stays up): " + (e && e.message))); }, 5 * 60 * 1000);
+    setInterval(() => { try { deskTick(); } catch (e) { log("deskTick failed (isolated, server stays up): " + (e && e.message)); } }, 5 * 60 * 1000);
     // The EDGAR rotation covers 2 names a minute, so a full roster pass takes ~40 minutes. Priming
     // only after that means the 7-day backlog every name carries is seeded silently instead of
     // arriving as a wall of notifications on the first deploy of the day.
@@ -12449,6 +12450,84 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
   }
 
 
+  // ===== desk digest (build 2026.09.11-66) ======================================================
+  // The third scheduled send: deterministic (no model call, no budget) and per-RECIPIENT — the
+  // calls record is membership-scoped, so lena's digest carries lena's own view, read through the
+  // same ACCOUNTS.calls her tab uses (injected by server.js as deskSource). Opt-in by
+  // construction: the kind registers with no default hour, so nothing sends until a member picks
+  // one in the alerts panel.
+  const deskSent = new Map();          // chat -> YYYY-MM-DD already sent
+  let deskSource = null;               // (uid) -> the member's calls record
+  const dgEsc = (x) => String(x == null ? "" : x).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const dgPct = (v) => ((v == null || !isFinite(v)) ? "\u2014" : ((v >= 0 ? "+" : "") + (v * 100).toFixed(1) + "%"));
+  const dgTk = (ref) => String(ref || "").split(":").pop();
+  function deskDigestText(owner, now) {
+    const parts = ["<b>Desk digest</b> \u00b7 " + new Date(now).toISOString().slice(0, 10)];
+    if (deskSource && owner) {
+      let c = null; try { c = deskSource(owner); } catch (_) { c = null; }
+      if (c && c.ok && c.calls && c.calls.length) {
+        parts.push("");
+        parts.push("<b>Calls</b> (newest, direction-adjusted \u2014 positive means the call is right)");
+        for (const x of c.calls.slice(0, 6))
+          parts.push((x.side === "short" ? "\u25bc" : "\u25b2") + " $" + dgEsc(dgTk(x.ref)) + " " + dgEsc(x.sender)
+            + " \u00b7 " + dgPct(x.adj) + (x.adj1 != null ? " \u00b7 1d " + dgPct(x.adj1) : "")
+            + (x.adj7 != null ? " \u00b7 7d " + dgPct(x.adj7) : "") + (x.deleted ? " \u00b7 deleted" : ""));
+        for (const e of (c.summary || []).slice(0, 4))
+          parts.push(dgEsc(e.who) + ": " + e.n + " call" + (e.n === 1 ? "" : "s")
+            + (e.upPct != null ? " \u00b7 " + Math.round(e.upPct * 100) + "% right \u00b7 avg " + dgPct(e.avg) : ""));
+      }
+    }
+    const ec = earnCache;
+    if (ec && Array.isArray(ec.entries)) {
+      const today = ec.entries.filter((e) => { try { return earnDayDiff(e.d, now) === 0; } catch (_) { return false; } });
+      if (today.length) { parts.push("");
+        parts.push("<b>Earnings today</b>: " + today.slice(0, 10).map((e) => dgEsc(e.t) + (e.s ? " (" + dgEsc(e.s) + ")" : "")).join(", ")
+          + (today.length > 10 ? " +" + (today.length - 10) + " more" : "")); }
+    }
+    const sc = signalsCache;
+    if (sc && sc.count > 0) {
+      const names = (sc.signals || []).slice(0, 3).map((g) => dgEsc(g.tk || g.ticker || g.coin || "?")).filter(Boolean);
+      parts.push(""); parts.push("<b>Signals live</b>: " + sc.count + (names.length ? " \u00b7 " + names.join(", ") : ""));
+    }
+    const sn = snapshotCache;
+    if (sn && Array.isArray(sn.markets)) {
+      const rows2 = sn.markets.filter((m) => m.d1 != null && isFinite(m.d1) && m.ticker && !m.delisted);
+      if (rows2.length >= 6) {
+        const st = [...rows2].sort((a, b) => b.d1 - a.d1);
+        const f1 = (m) => dgEsc(m.ticker) + " " + ((m.d1 >= 0 ? "+" : "") + (+m.d1).toFixed(1) + "%");
+        parts.push(""); parts.push("<b>24h</b> \u00b7 " + st.slice(0, 3).map(f1).join(", ") + " \u00b7 " + st.slice(-3).reverse().map(f1).join(", "));
+      }
+    }
+    return parts.join("\n");
+  }
+  async function deskTick() {
+    if (!pushOn() || !pushRecipients.size) return 0;
+    const now = Date.now();
+    let sent = 0;
+    for (const rec of pushRecipients.values()) {
+      if (rec.muted) continue;
+      const res = schedFor(rec, "desk");
+      if (!Number.isFinite(res.hour)) continue;   // opt-in: no hour, no send
+      const tz = res.isDefault ? 0 : briefTzFor(rec);
+      const day = schedDueAt(res, now, tz);
+      if (!day) continue;
+      if (deskSent.get(rec.chat) === day) continue;
+      deskSent.set(rec.chat, day);
+      // force, like the brief: a scheduled send must not be the message the hourly cap eats.
+      pushEnqueue(rec.chat, deskDigestText(rec.owner || "", now), true);
+      sent++;
+    }
+    return sent;
+  }
+  function deskTestNow(chat, owner, isAdmin, fresh, operatorOnly) {
+    if (!pushOn()) return { ok: false, error: "disabled" };
+    const targets = testTargets(chat, owner, isAdmin, operatorOnly);
+    if (!targets.length) return { ok: false, error: chat ? "forbidden" : (operatorOnly ? "no-operator-designated" : "no-recipients") };
+    for (const c of targets) { const rec = pushRecipients.get(String(c));
+      pushEnqueue(c, deskDigestText((rec && rec.owner) || owner || "", Date.now()), true); }
+    return { ok: true, sent: targets.length };
+  }
+
   function briefDayKey(now) { return new Date(now).toISOString().slice(0, 10); }
   function briefDayLeft() {
     const d = briefDayKey(Date.now());
@@ -14204,7 +14283,24 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     generateBriefNow: generateBrief,
     briefTest: briefTestNow,
     landTest: landTestNow,
-    landTickNow: landTick,                       // harness: run delivery without waiting out the clock
+    landTickNow: landTick,
+    deskTickNow: deskTick,                       // harness: run delivery without waiting out the clock
+    deskTest: deskTestNow,
+    deskTextNow: deskDigestText,                 // harness: assemble a digest without a recipient
+    setDeskSource: (fn) => { deskSource = typeof fn === "function" ? fn : null; },
+    // The first daily close printed at/after atTs, or null while that close is still in the
+    // future — the calls scoreboard's fixed-horizon read. Bars are [t, c, ...] tuples whose
+    // close prints at t + 1 day.
+    dailyCloseAt: (coin, atTs) => {
+      const dc = dailyCache; if (!dc || !dc.daily) return null;
+      const arr = dc.daily[coin]; if (!arr || !arr.length) return null;
+      const now = Date.now();
+      for (const b of arr) {
+        const closeAt = b[0] + DAY;
+        if (closeAt >= atTs) { if (closeAt > now) return null; const c = +b[1]; return Number.isFinite(c) && c > 0 ? c : null; }
+      }
+      return null;
+    },                       // harness: run delivery without waiting out the clock
     landCtxNow: buildLandCtx,                    // harness: inspect the corpus the model is handed
     landCacheReset: () => { landCache = null; landSent.clear(); },
     landStateNow: () => ({ defaultHour: schedDefFor("landscape").defaultHour, perDay: LAND_PER_DAY,
