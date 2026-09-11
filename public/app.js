@@ -11165,7 +11165,12 @@ async function termAsk(text){
       if(d&&d.error==='ask-user-cap') return termOutAI(`your daily AI limit is reached — <span class="tp-err">${d.askUserPerDay||5}/${d.askUserPerDay||5}</span> of your ask calls used today, resets at midnight UTC. Local commands still work: try a ticker, <span class="ex" data-tcmd="top funding">top funding</span>, or <span class="ex" data-tcmd="screen">screen</span>.`);
       if(d&&d.error==='ask-daily-cap') return termOutAI(`the shared daily AI pool is exhausted — <span class="tp-err">${d.askPerDay||0}/${d.askPerDay||0}</span> ask calls used across all users today, resets at midnight UTC. Local commands still work: try a ticker, <span class="ex" data-tcmd="top funding">top funding</span>, or <span class="ex" data-tcmd="screen">screen</span>.`);
       return termErr(`couldn't resolve that — ${tesc((d&&d.error)||'error')}`); }
-    if(d.mode==='planner'&&d.query){ termHistPush(text,'→ '+d.query); termOutAI(`<span class="tp-trans">planned → ${tesc(d.query)}</span>`); return termExec(d.query); }   // AI planned, client computes
+    if(d.mode==='planner'&&d.query){
+      // A chat capture's allowlist applies to what the AI PLANS too: "compare nvda and amd" could
+      // plan `comp NVDA AMD`, which opens the chart view — from the panel that is the answer, from
+      // a conversation it would navigate the sender away mid-chat. The sink says what may run.
+      if(_termSink&&_termSink.check){ const why=_termSink.check(d.query); if(why) return termErr('planned → '+d.query+' — '+why); }
+      termHistPush(text,'→ '+d.query); termOutAI(`<span class="tp-trans">planned → ${tesc(d.query)}</span>`); return termExec(d.query); }   // AI planned, client computes
     if(d.mode==='analyst'){ termHistPush(text,d.answer||'');
       const tail=d.admin?' · <span class="tp-trans">admin — unlimited</span>'
         :d.askUserDayLeft!=null?` · <span style="color:${d.askUserDayLeft<=1?'var(--accent)':'var(--faint)'}">${d.askUserDayLeft} of ${d.askUserPerDay} of your ask calls left today</span>`
@@ -14946,11 +14951,14 @@ async function dmRunCmd(raw){
   if(/^admin\b/i.test(line)) cmd=line;
   else if(termGrammarComplete(p)) cmd=line;
   else { const nl=nlResolve(line); if(nl){ cmd=nl; mapped=nl; } }
-  if(cmd){ const why=dmCmdCheck(cmd); if(why) return dmLocal('\u2717 '+esc(line)+' \u2014 '+esc(why),'err'); }
+  // The panel redacts a password in its echo; the private error line here does the same — it is
+  // only the sender's screen, but a secret sitting in the DOM is a secret in a screenshot.
+  const shown=line.replace(/^(admin\s+(?:unlock|reset-reports))\s+\S+.*$/i,'$1 \u2022\u2022\u2022\u2022\u2022\u2022');
+  if(cmd){ const why=dmCmdCheck(cmd); if(why) return dmLocal('\u2717 '+esc(shown)+' \u2014 '+esc(why),'err'); }
   else if(!dmAskAllowed()) return dmLocal('\u2717 '+esc(line)+' \u2014 the grammar didn\u2019t understand that, and AI answers are admin-only in chat on this deployment. /help lists what runs here; the terminal (~) takes questions.','err');
   const ai=dmAskAllowed();
   dmState.cmdBusy=true; dmState.cmdLine=line; dmRender(); dmScrollBottom();
-  const sink={blocks:[],ai:ai,via:'dm'}; _termSink=sink;
+  const sink={blocks:[],ai:ai,via:'dm',check:dmCmdCheck}; _termSink=sink;
   try{
     if(cmd){ termHistPush(line,mapped?'\u2192 '+mapped+' (computed locally)':line); if(mapped) termOutTrans(mapped); await termExec(cmd); }
     else await termAsk(line);
@@ -15591,7 +15599,7 @@ function dmResultsHtml(){
   return '<div class="dm-log" id="dm-log">'+r.map(m=>
     '<div class="dm-res" data-dmres="'+m.thread+'" data-mid="'+m.id+'">'
     +'<div class="dm-meta">'+esc(m.threadName)+' · '+esc(m.mine?'you':m.sender)+' · '+dmWhen(m.ts)+'</div>'
-    +'<div class="dm-b">'+esc(m.body).replace(/\n/g,' ')+'</div></div>').join('')+'</div>';
+    +'<div class="dm-b">'+esc(m.cmd?'\u25b8 '+m.cmd+' \u00b7 ':'')+esc(m.body).replace(/\n/g,' ')+'</div></div>').join('')+'</div>';
 }
 
 // The panel is re-rendered wholesale, which means every render is a chance to destroy something
@@ -15746,7 +15754,7 @@ function dmRender(){
     const stripPins=thesis?pinned.slice(1):pinned;
     const pinStrip=stripPins.length?('<div class="dm-pinstrip">'+stripPins.slice(0,3).map(x=>
       '<div class="dm-pinrow" data-dmjump="'+x.id+'"><span class="dm-pinicon">\u2691</span>'
-      +'<span class="dm-pintext">'+esc(String((x.ref?'$'+x.ref+' \u00b7 ':'')+(x.body||'attachment')).slice(0,120))+'</span>'
+      +'<span class="dm-pintext">'+esc(String((x.ref?'$'+x.ref+' \u00b7 ':'')+(x.cmd?'\u25b8 '+x.cmd+' \u00b7 ':'')+(x.body||'attachment')).slice(0,120))+'</span>'
       +'<button type="button" class="dm-tool" data-dmpin="'+x.id+'" data-on="0">unpin</button></div>').join('')+'</div>'):'';
     // Day dividers carry the date once, so per-message headers can be bare clock times; each
     // message also sees its predecessor, which is what chat-style grouping keys on.

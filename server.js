@@ -1417,7 +1417,7 @@ async function buildServer() {
       // dm.ask on top of it for one the AI answered. Admin-locked by default on the AI half;
       // the feature panel flips either without a deploy. 403 with the key, same shape the route
       // gate answers, so the client can say which switch is closed rather than "could not send".
-      if (b.cmd != null) {
+      if (typeof b.cmd === "string") {
         const adm = isAdmin(req), flags = poller.getFlags();
         const closed = !featureVisible(flags, "dm.terminal", adm) ? "dm.terminal"
           : (b.cmdAi && !featureVisible(flags, "dm.ask", adm)) ? "dm.ask" : null;
@@ -1425,7 +1425,7 @@ async function buildServer() {
       }
       r = ACCOUNTS.send(me.uid, String(b.to || ""), b.body, coinForSymbol,
         { thread: b.thread || null, fileId: b.fileId || null, replyTo: b.replyTo || null,
-          cmd: b.cmd != null ? String(b.cmd) : null, cmdAi: !!b.cmdAi });
+          cmd: typeof b.cmd === "string" ? b.cmd : null, cmdAi: !!b.cmdAi });
     }
     if (!r.ok) return reply.code(r.retry ? 429 : 400).send(r);
     // Wake everybody in the conversation. The frame carries a sequence number, never the message —

@@ -24631,10 +24631,10 @@ test("chat terminal -69: a command result is a message with cmd, no stamp, no ed
 
   // Server: the gate lives in the handlers because the keys own no route.
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(/if \(b\.cmd != null\) \{[\s\S]{0,600}featureVisible\(flags, "dm\.terminal", adm\)[\s\S]{0,200}featureVisible\(flags, "dm\.ask", adm\)/.test(srv), "POST /api/dm gates cmd on dm.terminal and cmdAi on dm.ask");
+  assert.ok(/if \(typeof b\.cmd === "string"\) \{[\s\S]{0,600}featureVisible\(flags, "dm\.terminal", adm\)[\s\S]{0,200}featureVisible\(flags, "dm\.ask", adm\)/.test(srv), "POST /api/dm gates cmd on dm.terminal and cmdAi on dm.ask");
   assert.ok(/error: "feature-gated", feature: closed/.test(srv), "the refusal names the switch, same shape as the route gate");
   assert.ok(/b\.ctx\.via === "dm" && !featureVisible\(poller\.getFlags\(\), "dm\.ask", isAdmin\(req\)\)/.test(srv), "POST /api/ask applies dm.ask on top of ai.ask for a chat-bound question");
-  assert.ok(/cmd: b\.cmd != null \? String\(b\.cmd\) : null, cmdAi: !!b\.cmdAi/.test(srv), "the fields reach the store");
+  assert.ok(/cmd: typeof b\.cmd === "string" \? b\.cmd : null, cmdAi: !!b\.cmdAi/.test(srv), "the fields reach the store — a non-string cmd is no cmd, not \"[object Object]\"");
 
   // Client: one code path — the panel's handlers with the output redirected, the AI leg latched.
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
@@ -24651,7 +24651,9 @@ test("chat terminal -69: a command result is a message with cmd, no stamp, no ed
   for (const v of ["comp", "basket", "report", "admin", "clear", "stocks", "crypto"]) assert.ok(new RegExp("\\b" + v + ":'").test(app.slice(app.indexOf("const DM_CMD_BLOCKED="), app.indexOf("const DM_CMD_BLOCKED=") + 800)), v + " is refused from chat — it opens a view or changes state");
   assert.ok(/whale:\['add','pick','rm','ingest13f','pull','mute','unmute'\]/.test(app) && /earnings:\['backfill'\]/.test(app), "state-changing subverbs are refused too");
   assert.ok(/function dmAskAllowed\(\)\{ return IS_ADMIN\|\|featureOn\('dm\.ask'\); \}/.test(app), "the client's AI switch reads the resolved flag");
-  assert.ok(/const sink=\{blocks:\[\],ai:ai,via:'dm'\}; _termSink=sink;/.test(app) && /finally\{ _termSink=null; dmState\.cmdBusy=false;/.test(app), "the sink is released on every path");
+  assert.ok(/const sink=\{blocks:\[\],ai:ai,via:'dm',check:dmCmdCheck\}; _termSink=sink;/.test(app) && /finally\{ _termSink=null; dmState\.cmdBusy=false;/.test(app), "the sink is released on every path, and carries the allowlist");
+  assert.ok(/if\(_termSink&&_termSink\.check\)\{ const why=_termSink\.check\(d\.query\); if\(why\) return termErr/.test(app), "an AI-planned query obeys the chat allowlist — it must not navigate the sender away");
+  assert.ok(/const shown=line\.replace\(\/\^\(admin\\s\+\(\?:unlock\|reset-reports\)\)/.test(app), "an admin password typed into chat is redacted in the private echo");
   assert.ok(/cmd:line,cmdAi:!cmd\|\|r\.ai/.test(app), "a planner answer (AI planned, board computed) still posts as AI — the badge follows the spend");
   assert.ok(/\(m\.cmd\?'':'<button type="button" class="dm-tool" data-dmedit=/.test(app), "no edit button on a command result");
   assert.ok(/<pre class="dm-cmdout">'\+esc\(m\.body\)\+'<\/pre>/.test(app), "the output renders escaped, in a monospace block");
