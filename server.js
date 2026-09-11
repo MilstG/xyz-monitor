@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.11-67";
+const VERSION = "2026.09.11-68";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -505,7 +505,7 @@ function authPage(o) {
     ? '<a class="alt" href="/login">Back to sign in</a>' : "") +
 '</div>' +
 '<script>' + AUTH_JS + '</script>' +
-'<script>window.__AUTH=' + JSON.stringify({ action, mode }) + ';authInit();</script>' +
+'<script>window.__AUTH=' + JSON.stringify({ action, mode, next: o.next || null }) + ';authInit();</script>' +
 '</body></html>';
 }
 function newAccountFoot(o) {
@@ -541,7 +541,7 @@ const AUTH_JS =
 "function submit(){if(go.disabled)return;go.disabled=true;err.textContent='';" +
 "if(h)h.classList.remove('bad');if(p)p.classList.remove('bad');" +
 "var body={};if(h)body.handle=h.value;if(p)body.password=p.value;" +
-"if(c)body.code=c.value;" +
+"if(c)body.code=c.value;if(A.next)body.next=A.next;" +
 "fetch(A.action,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)})" +
 ".then(function(r){return r.json().catch(function(){return {};}).then(function(d){return {r:r,d:d};});})" +
 ".then(function(x){if(x.r.ok&&x.d.ok){location.replace(x.d.next||'/');return;}" +
@@ -843,9 +843,13 @@ async function buildServer() {
     reply.header("set-cookie", "xyzinv=" + encodeURIComponent(code) + cookieAttrs(req, code ? 900 : 0) + "; HttpOnly");
   const htmlNoStore = (reply) => reply.header("cache-control", "no-store").type("text/html; charset=utf-8");
 
+  // ?next= carries the tab and ticker a session-expired banner was sitting on. Same-origin paths
+  // only — never a scheme, never a protocol-relative //host.
+  const safeNext = (v) => { v = String(v == null ? "" : v); return /^\/(?![\/\\])[^\s]{0,200}$/.test(v) ? v : null; };
   fastify.get("/login", (req, reply) => {
-    if (meOf(req)) return reply.redirect("/", 302);
-    return htmlNoStore(reply).send(authPage({ mode: "signin" }));
+    const next = safeNext(req.query && req.query.next);
+    if (meOf(req)) return reply.redirect(next || "/", 302);
+    return htmlNoStore(reply).send(authPage({ mode: "signin", next }));
   });
 
   // One prompt, four outcomes, checked in this order:
@@ -868,7 +872,7 @@ async function buildServer() {
         loginFails.delete(ip);
         signIn(reply, req, r.user, r.token);
         log(`sign-in: ${r.user.handle}${r.user.isAdmin ? " (admin)" : ""}`);
-        return { ok: true, next: "/" };
+        return { ok: true, next: safeNext(b.next) || "/" };
       }
       // Fall through to the password-only doors below rather than failing here: an operator typing
       // ADMIN_PASSWORD into a form that also has a handle box should still get in.

@@ -1671,8 +1671,8 @@ test("pre-epoch crypto purge: claims stamped under the OLD geometry leave the le
     "const shPanel=d&&d.shadows&&(state.scope==='crypto'?d.shadows.main:d.shadows.xyz);",
     // Signals and Actionable are in scope for crypto again; markets stays PINNED public so the
     // tabVisible fallback can never itself be gated.
-    "const CRYPTO_VIEWS=new Set(['markets','trend','charts','report','corr','backtest','sessions','funding','signals','actionable'])",   // charts joined 2026.08.21-01, funding 2026.08.26-34 — both work in either universe
-    "if(!tabVisible(v)) v='markets';",
+    "const CRYPTO_VIEWS=new Set(['markets','trend','charts','report','corr','backtest','sessions','funding','signals','actionable','dm','notes'])",   // charts joined 2026.08.21-01, funding 2026.08.26-34 — both work in either universe
+    "if(!tabVisible(v)){",
     "strategy shadows (earning their record)"])
     assert.ok(app.includes(pin), `client scope pin missing: ${pin}`);
   // BOTH record-set selection sites must go through the scoped key — a hardcoded 'x' would show
@@ -8903,7 +8903,7 @@ test("tabs: backtest is hidden from the strip by default without withdrawing the
   assert.ok(/\{v:'actionable',label:'Actionable'\}/.test(s), "the actionable tab must be listed in the command palette");
   // ...but the palette must FILTER on visibility, because it is a third route into a view that is
   // independent of the nav strip: without this, a gated tab stays reachable by name.
-  assert.ok(/CMDK_TABS\.filter\(t=>tabVisible\(t\.v\)/.test(s), "the command palette must filter on tabVisible");
+  assert.ok(/cmdkTabs\(\)\.filter\(t=>tabVisible\(t\.v\)/.test(s), "the command palette must filter on tabVisible");
   // HASH_VIEWS stays COMPLETE — the routing table lists every view, and the gate is applied at
   // dispatch. That is the difference from the old posture: an admin's #backtest still works, a public
   // caller's does not. A short routing table would instead make a tab unreachable for everyone.
@@ -9496,10 +9496,10 @@ test("client flags: tabVisible is the single composition point and every entry p
     "the row-scope predicate must survive untouched — activeRows() feeds the board through it");
   for (const [what, re] of [
     ["nav strip", /t\.hidden = !tabVisible\(t\.dataset\.view\)/],
-    ["showView", /if\(!tabVisible\(v\)\) v='markets';/],
+    ["showView", /if\(!tabVisible\(v\)\)\{[\s\S]{0,600}?v='markets'; \}/],
     ["applyScope", /if\(!tabVisible\(state\.view\)\) \{ showView\('markets'\); \}/],
     ["hash deep link", /HASH_VIEWS\.has\(h\) && tabVisible\(h\)/],
-    ["command palette", /CMDK_TABS\.filter\(t=>tabVisible\(t\.v\)/],
+    ["command palette", /cmdkTabs\(\)\.filter\(t=>tabVisible\(t\.v\)/],
     ["treemap installer", /btn\.hidden = !tabVisible\('treemap'\)/],
     ["treemap deep link", /==='treemap' && typeof showView==='function' && tabVisible\('treemap'\)/],
   ]) assert.ok(re.test(s), `${what} must route its visibility decision through tabVisible`);
@@ -10607,7 +10607,7 @@ test("client: the feed is the record — fire* interrupt only, and read state is
     "…and against the clear watermark too, or the badge counts rows the panel no longer shows");
   assert.ok(/seenSeq:state\.alerts\.seenSeq/.test(app), "the watermark is persisted");
   assert.ok(/Number\.isFinite\(d\.seenSeq\)\) state\.alerts\.seenSeq=d\.seenSeq/.test(app), "…and restored");
-  assert.ok(/if\(pop\.hidden\)\{[^}]*alertMarkRead\(\);[^}]*\}/.test(app),
+  assert.ok(/function closeAlertPop\(\)\{[^}]*alertMarkRead\(\);/.test(app),
     "opening the bell marks the feed read (pinned as behaviour, not as an exact call list — the open handler legitimately gains loaders)");
 
   // A client cannot delete from the server's ring; "read" is the only state a browser owns here.
@@ -13348,7 +13348,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.11-67"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.11-68"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -24491,7 +24491,7 @@ test("audit -67 client: stale responses cannot paint over newer state; one bad t
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   assert.ok(/const mySeq=\(FOCCH\.seq=\(FOCCH\.seq\|\|0\)\+1\);/.test(app) && /if\(mySeq!==FOCCH\.seq\) return;   \/\/ superseded while in flight/.test(app), "focus chart fetches are sequenced like the trend modal's");
   assert.ok(/if\(q!==dmState\.q\.trim\(\)\) return;   \/\/ the box moved on/.test(app), "a DM search answer for an older query is dropped");
-  const lt = app.slice(app.indexOf("for(const ev of d.events){"), app.indexOf("for(const ev of d.events){") + 700);
+  const lt = app.slice(app.indexOf("for(const ev of d.events){"), app.indexOf("for(const ev of d.events){") + 1600);
   assert.ok(/try\{\s*\n\s*const k=ev\.kind\|\|'setup';/.test(lt) && /\}catch\(_\)\{ \/\* this event is broken, the batch is not \*\/ \}/.test(lt), "each event is isolated so trigSeqSet always runs");
   assert.ok(/esc\(String\(ev\.side\|\|''\)\.toUpperCase\(\)\)/.test(app) && /esc\(String\(r\.side\|\|''\)\.toUpperCase\(\)\)/.test(app), "a missing side renders empty instead of throwing");
   assert.ok(/el\('dstar'\)\.onclick=\(\)=>\{ toggleWatch\(coin\);/.test(app) && !/toggleWatch\(coin\); openDetail\(coin\);/.test(app), "starring no longer rebuilds the drawer (and the note being typed in it)");
@@ -24530,4 +24530,48 @@ test("audit -67 lows: shutdown ends the right object, admin writes recheck authz
   assert.ok(!fs.existsSync(path.join(__dirname, "..", "xyz-monitor-features.html")) && fs.existsSync(path.join(__dirname, "..", "docs", "xyz-monitor-features.html")), "design docs live in docs/");
   const gi = fs.readFileSync(path.join(__dirname, "..", ".gitignore"), "utf8");
   assert.ok(/\*\.db-wal/.test(gi) && /\*\.bak/.test(gi));
+});
+
+// ===== build 2026.09.11-68: UI/UX audit fixes =================================================
+test("ux -68: one funding colour convention, alert kinds routed to channels, unread marked on close", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  assert.ok(/c:f>0\?'neg':\(f<0\?'pos':'sec'\)/.test(app), "positive funding (longs pay) is red in the table, as on the heatmap and the sessions clock");
+  assert.ok(/red = positive \(longs pay/.test(html), "the footer legend says so");
+  assert.ok(/const ALERT_CHANNELS=\{[\s\S]*?rule:\{toast:true/.test(app) && /if\(ALERT_CHANNELS\[k\]&&ALERT_CHANNELS\[k\]\.toast\)\{ fireGeneric\(ev\); continue; \}/.test(app), "rule/trend/ma200 events toast");
+  assert.ok(/function alertMatrixHtml\(\)/.test(app) && /alertMatrixHtml\(\)\+buildPushSection\(\)/.test(app), "and the matrix the code runs is the one the Delivery fold shows");
+  assert.ok(/function closeAlertPop\(\)\{[^}]*alertMarkRead\(\);/.test(app) && !/if\(pop\.hidden\)\{ loadPush\(\); loadRules\(\); alertMarkRead\(\); \}/.test(app), "unread survives opening the panel");
+});
+
+test("ux -68: the phone gets its table back, controls reach the keyboard, quiet text clears AA", () => {
+  const fs = require("fs"), path = require("path");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  assert.ok(/viewport-fit=cover/.test(html) && /env\(safe-area-inset-bottom\)/.test(css), "safe areas for the installed PWA");
+  assert.ok(/\.controls\{flex-wrap:nowrap;overflow-x:auto/.test(css) && /\.sub\{display:none\}/.test(css), "the six-row control stack is one strip under 680px");
+  assert.ok(/--dim:#7A8592/.test(css) && !/color:var\(--faint\)/.test(css), "--faint is no longer used for text");
+  assert.ok(/input:focus-visible,textarea:focus-visible,select:focus-visible,\[role="button"\]:focus-visible,tr\[data-coin\]:focus-visible\{outline:2px solid var\(--accent\)!important/.test(css), "one ring on every control");
+  assert.ok(/<tr data-coin="\$\{esc\(r\.coin\)\}"\$\{cls\} tabindex="0"/.test(app) && /t\.matches\('tr\[data-coin\]'\)&&e\.key==='Enter'/.test(app), "rows are focusable and Enter opens them");
+  assert.ok((app.match(/role="button" tabindex="0"/g) || []).length >= 20, "custom controls are buttons to the keyboard");
+  assert.ok(/role="dialog" aria-modal="true" aria-label="Ticker detail"/.test(html) && /aria-live="polite"/.test(html), "drawer is a dialog; toasts are announced");
+  assert.ok(/prefers-reduced-motion:reduce\)\{\*\{animation:none!important;transition-duration:\.01ms!important\}/.test(css) && /behavior:SCROLL_B/.test(app) && !/behavior:'smooth'/.test(app), "reduced motion covers transitions and smooth scrolls");
+  assert.ok(/\.term-fab,#dm-dock\{bottom:calc\(12px \+ env\(safe-area-inset-bottom\)\)\}/.test(css) && /body\[data-view="dm"\] #dm-dock/.test(css), "the floating buttons respect the inset and the dock hides on Messages");
+});
+
+test("ux -68: typed prose is protected, sessions expire into a banner, the drawer leads with actions and metrics", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(/function ntCloseCompose\(force\)\{[\s\S]{0,200}confirm\('Discard this note\?/.test(app) && /sessionStorage\.setItem\(ntDraftKey\(coin\), box\.value\)/.test(app), "Escape asks, and a draft survives");
+  assert.ok(/if\(confirm\('Remove this rule\?'\)\) deleteAlertRule/.test(app) && /confirm\('Remove this rule\? It fires from the server/.test(app), "rules are not deleted by a mis-tap");
+  assert.ok(/function sessionExpired\(\)\{/.test(app) && !/window\.__reauth=1; location\.reload\(\)/.test(app), "a 401 is a banner, not a reload over your typing");
+  assert.ok(/const safeNext = \(v\) =>/.test(srv) && /next: safeNext\(b\.next\) \|\| "\/"/.test(srv) && /if\(A\.next\)body\.next=A\.next;/.test(srv), "/login honours a same-origin ?next=");
+  const od = app.slice(app.indexOf("el('drawer').innerHTML=`"), app.indexOf("el('drawer').innerHTML=`") + 4000);
+  assert.ok(od.indexOf('<div class="dact">') < od.indexOf("${sessDrawerHtml(r)}") && od.indexOf('<div class="dsec">Metrics</div>') < od.indexOf("${sessDrawerHtml(r)}"), "actions and metrics paint above the async panels");
+  assert.ok(/function openRuleFor\(r\)\{/.test(app) && /#dcandles\{min-height:176px\}/.test(fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8")), "⚑ alert pre-fills the rule form; async panels reserve their height");
+  assert.ok(/'dm','notes'\]\)/.test(app) && /is not available in /.test(app), "Messages and Notes survive Crypto scope; a hidden view says so");
+  assert.ok(/Object\.assign\(HELP,\{\s*\n\s*dm:`/.test(app) && /const HELP_KEYS=/.test(app) && /if\(e\.key==='\?'\)\{ e\.preventDefault\(\); openHelp\(\); return; \}/.test(app), "every tab has help, with a keyboard section, on ?");
+  assert.ok(/function cmdkTabs\(\)\{/.test(app) && /window\.addEventListener\('hashchange'/.test(app) && /function dmStampPreview\(text\)\{/.test(app) && /did you mean/.test(app), "palette from the ribbon, live hash routing, stamp preview, terminal suggestions");
 });
