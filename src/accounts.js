@@ -331,7 +331,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     userDisable: db.prepare("UPDATE user SET disabledAt = ?, epoch = epoch + 1 WHERE uid = ?"),
     userEnable: db.prepare("UPDATE user SET disabledAt = NULL WHERE uid = ?"),
     userAdmin: db.prepare("UPDATE user SET isAdmin = ? WHERE uid = ?"),
-    userRename: db.prepare("UPDATE user SET handle = ?, display = ? WHERE uid = ?"),
+    userRename: db.prepare("UPDATE user SET display = ? WHERE uid = ?"),
     userSeen: db.prepare("UPDATE user SET lastSeen = ? WHERE uid = ?"),
 
     invByCode: db.prepare("SELECT * FROM invite WHERE code = ?"),
@@ -533,21 +533,29 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     return { ok: true, user: pub(u), token: tokenFor(u, options.sessionDays || 30) };
   }
 
-  // The operator renames a member. The uid never changes — messages, calls, rules and alert
-  // recipients all key on it — so a rename is one row update that every surface picks up on its
-  // next read: names resolve live, never denormalized. Sessions survive (the token carries uid and
-  // epoch, not the handle); the member simply signs in under the new name next time. @mentions in
-  // OLD message text keep the old spelling — history says what it said.
+  // The operator renames a member's DISPLAY name — how they read everywhere — while the sign-in
+  // handle (and @mentions, which key on it) stays exactly what it was. The uid never changes and
+  // names resolve live at read, so one row update re-titles every message, conversation and call.
+  // A display is looser than a handle (spaces are fine: "El Vaquero"), but it must not collide
+  // with anyone else's display OR handle, and the reserved names stay reserved — a member reading
+  // as "admin" is a phishing surface whatever field it came from.
   function renameUser(uid, raw) {
     const u = users.get(uid);
     if (!u) return { ok: false, error: "no such account" };
-    const display = String(raw == null ? "" : raw).trim().slice(0, 24);
-    const bad = handleError(display);
-    if (bad) return { ok: false, error: bad };
+    let display = "";
+    for (const ch of String(raw == null ? "" : raw)) {
+      const c = ch.codePointAt(0);
+      if (c < 32 || c === 127) continue;
+      display += ch;
+    }
+    display = display.replace(/\s+/g, " ").trim().slice(0, 24);
+    if (display.length < 2) return { ok: false, error: "a name needs 2 characters or more" };
     const lc = display.toLowerCase();
-    const taken = getUserByHandle(lc);
-    if (taken && taken.uid !== uid) return { ok: false, error: "that handle is taken — pick another" };
-    S.userRename.run(lc, display, uid);
+    if (HANDLE_RESERVED.has(lc)) return { ok: false, error: "that name is reserved — pick another" };
+    for (const o of users.values())
+      if (o.uid !== uid && (String(o.display || "").toLowerCase() === lc || o.handle === lc))
+        return { ok: false, error: "another member already reads as that — pick something distinct" };
+    S.userRename.run(display, uid);
     hydrate();
     return { ok: true, user: pub(users.get(uid)) };
   }
