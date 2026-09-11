@@ -173,8 +173,9 @@ setInterval(rollLoopWindow, LOOP_WINDOW).unref();
 
 // Kill-switch: CRYPTO=0 disables main-dex polling entirely — one-variable rollback on Railway.
 const CRYPTO = process.env.CRYPTO !== "0";
-const poller = createPoller({ dex: DEX, store, log, version: VERSION, crypto: CRYPTO });
-log(`Crypto (Hyperliquid main dex): ${CRYPTO ? "ENABLED — top-60 perps, 31d hourly / 90d daily retention" : "disabled via CRYPTO=0"}`);
+// Built in main(), after the OI log has streamed in (store.preloadOI): its constructor is
+// synchronous and used to read the whole year-long log with readFileSync on the event loop.
+let poller = null;
 
 // Weak ETag from the payload's data version so an unchanged snapshot revalidates to 304
 // (browsers polling every 30s get a tiny empty response instead of the full table).
@@ -538,6 +539,13 @@ const AUTH_JS =
 const LOGIN_HTML = authPage({ mode: "signin" });
 
 async function main() {
+  {
+    const t0 = Date.now();
+    const n = await store.preloadOI();
+    log(`OI log streamed in: ${n} sample(s) in ${Date.now() - t0}ms`);
+  }
+  poller = createPoller({ dex: DEX, store, log, version: VERSION, crypto: CRYPTO });
+  log(`Crypto (Hyperliquid main dex): ${CRYPTO ? "ENABLED — top-60 perps, 31d hourly / 90d daily retention" : "disabled via CRYPTO=0"}`);
   const fastify = Fastify({ logger: false });
 
   // True when a request carries a valid session cookie or correct HTTP Basic creds. Shared by the

@@ -123,6 +123,27 @@ function openStore(dataDir) {
   const whaleFile = path.join(dataDir, "whale.json");        // 13F watchlist + cached quarterly books + unseen state + season builds
   let dbuf = [];
   let dPruning = false;   // hold deriv appends in dbuf during the streaming rewrite, same as the OI prune
+  let oiPreloaded = null; // set by preloadOI(); consumed once by the next loadAll()
+  // One row of oi.log -> [coin, ts, oi, funding|null], or null for anything that is not exactly the
+  // writer's four-field shape (a torn row is never a sample — see loadAll).
+  function parseOiLine(ln) {
+    if (!ln) return null;
+    const parts = ln.split("\t");
+    if (parts.length !== 4) return null;
+    const ts = +parts[1], oi = +parts[2];
+    if (!Number.isFinite(ts) || !Number.isFinite(oi)) return null;
+    const f = parts[3] !== "" ? +parts[3] : null;
+    return [parts[0], ts, oi, Number.isFinite(f) ? f : null];
+  }
+  function fileEndsWithNewline(f) {
+    try {
+      const sz = fs.statSync(f).size;
+      if (!sz) return true;
+      const fd = fs.openSync(f, "r");
+      try { const b = Buffer.alloc(1); fs.readSync(fd, b, 0, 1, sz - 1); return b[0] === 10; }
+      finally { fs.closeSync(fd); }
+    } catch (_) { return true; }
+  }
   let buf = [];
   let pruning = false;   // while true, hold appends in `buf` so we never touch the file mid-rewrite
   let hourlyWriting = false;   // while true, an async hourly NDJSON write is in flight — skip overlapping ticks
@@ -265,8 +286,43 @@ function openStore(dataDir) {
       }
       return removed;
     },
+    // Streaming boot load. readFileSync + split materialised ~3x the file — a year of 5-minute
+    // samples is hundreds of MB — on the event loop at exactly the moment Railway's healthcheck
+    // decides whether the deploy is alive. server.js awaits this before building the poller, and
+    // loadAll() below hands the preloaded map over (once), so the poller keeps its synchronous
+    // constructor and every harness that calls loadAll() directly is unchanged.
+    async preloadOI() {
+      const m = new Map();
+      if (!fs.existsSync(file)) { oiPreloaded = m; return 0; }
+      const endsNl = fileEndsWithNewline(file);
+      let pending = null, n = 0;
+      const take = (ln) => {
+        const r = parseOiLine(ln);
+        if (!r) return;
+        let a = m.get(r[0]);
+        if (!a) { a = []; m.set(r[0], a); }
+        a.push([r[1], r[2], r[3]]); n++;
+      };
+      await new Promise((resolve, reject) => {
+        const input = fs.createReadStream(file, { encoding: "utf8" });
+        const rl = readline.createInterface({ input, crlfDelay: Infinity });
+        // readline emits a final partial line too; hold each line one step so the last one can be
+        // dropped when the file does not end in a newline (a torn append).
+        rl.on("line", (ln) => { if (pending != null) take(pending); pending = ln; });
+        rl.on("close", () => { if (pending != null && endsNl) take(pending); resolve(); });
+        rl.on("error", reject); input.on("error", reject);
+      });
+      for (const a of m.values()) a.sort((x, y) => x[0] - y[0]);
+      oiPreloaded = m;
+      return n;
+    },
     loadAll(since) {
       const m = new Map();
+      if (oiPreloaded) {
+        const pre = oiPreloaded; oiPreloaded = null;   // consumed: never hold two copies of the history
+        for (const [coin, a] of pre) { const f = since > 0 ? a.filter((r) => r[0] >= since) : a; if (f.length) m.set(coin, f); }
+        return m;
+      }
       try {
         if (!fs.existsSync(file)) return m;
         const text = fs.readFileSync(file, "utf8");

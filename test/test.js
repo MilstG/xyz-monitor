@@ -24227,3 +24227,27 @@ test("audit -67: young listings stop re-pulling the wide candle window; feed tic
   assert.ok(!/finnhub\.io[^`"']*token=/.test(pol), "no Finnhub URL carries the key in its query string");
   assert.ok((pol.match(/"X-Finnhub-Token": token/g) || []).length >= 6, "the key rides the header Finnhub documents");
 });
+
+// loadAll read the whole year-long OI log with readFileSync+split (~3x the file in memory, on the
+// event loop) at exactly the moment the healthcheck decides whether the deploy is alive. Boot now
+// streams it (preloadOI) and loadAll hands the preloaded map over once.
+test("audit -67: the OI log streams in at boot and loadAll serves the preloaded map once", async () => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const { openStore } = require("../src/store");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-oi2-"));
+  const now = Date.now(), rows = [];
+  for (let i = 500; i > 0; i--) rows.push(`xyz:A\t${now - i * 60000}\t${1000 + i}\t0.0001`);
+  rows.push(`xyz:B\t${now - 30000}\t7\t`);
+  fs.writeFileSync(path.join(dir, "oi.log"), rows.join("\n") + "\nxyz:A\t" + now + "\t12");   // torn tail
+  const st = openStore(dir);
+  assert.equal(await st.preloadOI(), 501, "every whole row, never the torn one");
+  const m = st.loadAll(now - 100 * 60000);
+  assert.equal(m.get("xyz:A").length, 100, "the since filter still applies");
+  assert.deepEqual(m.get("xyz:B"), [[now - 30000, 7, null]]);
+  assert.ok(m.get("xyz:A").every((r, i, a) => i === 0 || a[i - 1][0] < r[0]), "ascending");
+  // Consumed once: a second loadAll goes back to disk rather than holding two copies.
+  assert.equal(st.loadAll(0).get("xyz:A").length, 500);
+  // A file that ends cleanly keeps its last row.
+  fs.writeFileSync(path.join(dir, "oi.log"), rows.join("\n") + "\n");
+  assert.equal(await openStore(dir).preloadOI(), 501);
+});
