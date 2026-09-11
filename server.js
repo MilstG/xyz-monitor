@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.11-66";
+const VERSION = "2026.09.11-67";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -39,12 +39,10 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 const SITE_PASSWORD = process.env.SITE_PASSWORD || ""; // set to require a shared password
 const SITE_USER = process.env.SITE_USER || "friend";
 const SESSION_DAYS = Number(process.env.SESSION_DAYS || 30);
-// Session-signing secret. Derived from the credentials unless overridden, so changing the
-// password on Railway invalidates every outstanding session with zero extra config, while
-// plain restarts/redeploys keep everyone logged in.
-const SESSION_SECRET = process.env.SESSION_SECRET
-  ? crypto.createHash("sha256").update(String(process.env.SESSION_SECRET)).digest()
-  : crypto.createHash("sha256").update(`xyzmon-session|${SITE_USER}|${SITE_PASSWORD}`).digest();
+// Session-signing secret for the LEGACY shared-password door: see the derivation next to ACCOUNTS
+// below. It still folds the password in, so changing the password on Railway invalidates every
+// outstanding legacy session with zero extra config, while plain restarts keep everyone logged in.
+let SESSION_SECRET = null;
 // ---- per-browser alert ownership -----------------------------------------------------------
 // The app has ONE shared site password and no user accounts, so there is no "who" to attribute a
 // linked Telegram account to. That was a real hole: alert delivery was designed per-person, but the
@@ -56,22 +54,31 @@ const SESSION_SECRET = process.env.SESSION_SECRET
 // to see and manage the recipients linked FROM that browser. It is signed so it cannot be forged,
 // and random so it cannot be guessed; whoever holds it controls those recipients, exactly like the
 // session cookie itself. Admin sees and manages everything regardless.
-const OWNER_SECRET = crypto.createHash("sha256").update(`xyzmon-alert-owner|${SITE_USER}|${SITE_PASSWORD}`).digest();
-function signOwner(id) {
-  return id + "." + crypto.createHmac("sha256", OWNER_SECRET).update("own|" + id).digest("base64url");
+// Derived next to ACCOUNTS below, from the random on-disk key — never from the password alone.
+let OWNER_SECRET = null;
+// The pre-accounts derivation. Still ACCEPTED on verify (never used to sign) while a real password
+// exists, so nobody's alert-owner handle changes underneath their linked recipients; with no
+// password it is a public constant and must not verify anything.
+const OWNER_SECRET_LEGACY = SITE_PASSWORD
+  ? crypto.createHash("sha256").update(`xyzmon-alert-owner|${SITE_USER}|${SITE_PASSWORD}`).digest() : null;
+function signOwnerWith(secret, id) {
+  return id + "." + crypto.createHmac("sha256", secret).update("own|" + id).digest("base64url");
 }
+function signOwner(id) { return signOwnerWith(OWNER_SECRET, id); }
 function ownerOf(tok) {
   if (!tok || typeof tok !== "string" || tok.length > 128) return null;
   const i = tok.indexOf(".");
   if (i <= 0) return null;
   const id = tok.slice(0, i);
-  let ok = false;
-  try {
-    const want = Buffer.from(signOwner(id));
-    const got = Buffer.from(tok);
-    ok = want.length === got.length && crypto.timingSafeEqual(want, got);
-  } catch (_) { ok = false; }
-  return ok ? id : null;
+  const got = Buffer.from(tok);
+  for (const secret of [OWNER_SECRET, OWNER_SECRET_LEGACY]) {
+    if (!secret) continue;
+    try {
+      const want = Buffer.from(signOwnerWith(secret, id));
+      if (want.length === got.length && crypto.timingSafeEqual(want, got)) return id;
+    } catch (_) {}
+  }
+  return null;
 }
 // Reads the caller's handle, minting one if they don't have it yet. Lazy on purpose: a visitor who
 // never opens the alerts panel never gets a cookie.
@@ -110,12 +117,22 @@ const store = openStore(DATA_DIR);
 // this is market data, none of it is on the 15s path, and all of it wants transactions rather
 // than the whole-file tmp+rename discipline the JSON caches use.
 const ACCOUNTS = openAccounts(DATA_DIR, { sessionDays: SESSION_DAYS });
+// The legacy-door secrets, keyed by the accounts' random secret so they are never guessable. The
+// old derivation hashed `xyzmon-session|user|password` directly: with SITE_PASSWORD unset (the
+// documented open posture) that was a constant anyone could recompute, and a forged legacy token
+// satisfied sessionOk at /claim (mint an account — the first one admin) and the AI-cost gate.
+SESSION_SECRET = process.env.SESSION_SECRET
+  ? crypto.createHash("sha256").update(String(process.env.SESSION_SECRET)).digest()
+  : ACCOUNTS.deriveKey(`legacy-session|${SITE_USER}|${SITE_PASSWORD}`);
+OWNER_SECRET = ACCOUNTS.deriveKey("alert-owner");
 // How long a DM sits unread before it is worth interrupting somebody's evening over. The delay IS
 // the feature: without it two people typing at each other generate a push per line.
 const DM_ESCALATE_MS = Number(process.env.DM_ESCALATE_MS || 5 * 60 * 1000);
 // The legacy shared-password door. Once accounts exist it stays open only while the operator is
 // still migrating people, and it lands them on the claim page rather than straight into the app.
-const LEGACY_DOOR = process.env.LEGACY_SHARED_PASSWORD !== "0";
+// No shared password means no shared-password door: with SITE_PASSWORD empty, credsOk and the
+// legacy token would otherwise both accept a caller who knows nothing.
+const LEGACY_DOOR = !!SITE_PASSWORD && process.env.LEGACY_SHARED_PASSWORD !== "0";
 // Definitive volume-persistence check: boot #1 on every deploy = the data dir is ephemeral
 // (DATA_DIR not pointing at the volume mount, or no volume attached). Boot #N, first boot
 // dating back days = the volume is fine and every warm cache above it can be trusted.
@@ -244,6 +261,7 @@ function serveKeyed(req, reply, etagKey, build, fallback) {
 // the comparison safe for unequal-length inputs (timingSafeEqual throws on those).
 const sha = (s) => crypto.createHash("sha256").update(String(s)).digest();
 function credsOk(u, p) {
+  if (!SITE_PASSWORD) return false;   // an empty password is "no password", never "any password"
   const uOk = crypto.timingSafeEqual(sha(u), sha(SITE_USER));
   const pOk = crypto.timingSafeEqual(sha(p), sha(SITE_PASSWORD));
   return (uOk & pOk) === 1;   // bitwise: both comparisons always execute (no short-circuit timing)
@@ -316,17 +334,39 @@ function clearAiUnlockCookie(reply, req) { reply.header("set-cookie", "xyzai=x" 
 // token, xyzadmin=1 is a JS-visible marker with no secret in it (forging it gets you an Admin tab
 // whose every route still 403s — the server never trusts it). Fastify appends repeated set-cookie
 // headers rather than overwriting, so this composes with setSessionCookies in one response.
-function signAdminView(expMs) {
+// Two token shapes share the cookie:
+//   break-glass  "<exp>.<mac>"                 minted by the ADMIN_PASSWORD login / `admin unlock`
+//   account      "<uid>.<epoch>.<exp>.<mac>"   minted at sign-in for a flagged account
+// The account form is BOUND to the account: verifying it re-reads the live user row and requires
+// enabled + isAdmin + the same epoch. Before this the cookie was signed over the expiry alone, so
+// a demoted or disabled admin kept /api/access and the DM read-through for up to ADMIN_DAYS, with
+// audit rows attributed to "legacy-admin". The break-glass form stays uid-less on purpose: it is
+// how an operator gets back in after locking themselves out of their own account.
+function signAdminView(expMs, uid, epoch) {
+  if (uid != null) return uid + "." + epoch + "." + expMs + "." + crypto.createHmac("sha256", ADMIN_VIEW_SECRET)
+    .update("adm|" + uid + "|" + epoch + "|" + expMs).digest("base64url");
   return expMs + "." + crypto.createHmac("sha256", ADMIN_VIEW_SECRET).update("adm|" + expMs).digest("base64url");
 }
 function adminViewOk(tok) {
-  if (!ADMIN_PASSWORD || !tok || tok.length > 128) return false;   // unset admin password => fail closed
-  const dot = tok.indexOf(".");
-  if (dot < 1) return false;
-  const exp = Number(tok.slice(0, dot));
+  if (!ADMIN_PASSWORD || !tok || tok.length > 256) return false;   // unset admin password => fail closed
+  const p = tok.split(".");
+  if (p.length !== 2 && p.length !== 4) return false;
+  const exp = Number(p[p.length - 2]);
   if (!Number.isFinite(exp) || exp < Date.now()) return false;
-  const a = Buffer.from(tok), b = Buffer.from(signAdminView(exp));
+  let want;
+  if (p.length === 4) {
+    const u = ACCOUNTS.getUser(p[0]);
+    if (!u || !u.isAdmin || u.disabledAt || String(u.epoch) !== p[1]) return false;
+    want = signAdminView(exp, p[0], p[1]);
+  } else want = signAdminView(exp);
+  const a = Buffer.from(tok), b = Buffer.from(want);
   return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+// Who an admin cookie speaks for: the account uid for the bound form, null for break-glass.
+function adminViewUid(tok) {
+  if (!adminViewOk(tok)) return null;
+  const p = String(tok).split(".");
+  return p.length === 4 ? p[0] : null;
 }
 function setAdminCookies(reply, req, maxAgeSec, token) {
   reply.header("set-cookie", [
@@ -510,6 +550,10 @@ async function main() {
   const reqAuthed = (req) => {
     if (meOf(req)) return true;
     if (LEGACY_DOOR && sessionOk(getCookie(req, "xyzsess"))) return true;
+    // Break-glass: the ADMIN_PASSWORD login mints a legacy token beside its admin lease, and that
+    // lease is ADMIN_PASSWORD-derived (fail-closed when unset) — so it authenticates even with the
+    // legacy door shut.
+    if (adminViewOk(getCookie(req, "xyzadm"))) return true;
     const hdr = req.headers.authorization || "";
     const [scheme, enc] = hdr.split(" ");
     if (scheme === "Basic" && enc) {
@@ -762,7 +806,10 @@ async function main() {
     setSessionCookies(reply, req, SESSION_DAYS * 86400, token);
     // An account-flagged admin gets the view lease too, so the Admin tab paints on the first frame
     // instead of after a round trip. It is a mirror of the flag, never the source of it.
-    if (user && user.isAdmin) setAdminCookies(reply, req, ADMIN_DAYS * 86400, signAdminView(Date.now() + ADMIN_DAYS * 864e5));
+    if (user && user.isAdmin) {
+      const row = ACCOUNTS.getUser(user.uid) || {};
+      setAdminCookies(reply, req, ADMIN_DAYS * 86400, signAdminView(Date.now() + ADMIN_DAYS * 864e5, user.uid, row.epoch));
+    }
   };
   const inviteCookie = (reply, req, code) =>
     reply.header("set-cookie", "xyzinv=" + encodeURIComponent(code) + cookieAttrs(req, code ? 900 : 0) + "; HttpOnly");
@@ -1019,7 +1066,7 @@ async function main() {
     reply.header("cache-control", "no-store");
     if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "forbidden" });
     const me = meOf(req);
-    const by = me ? me.uid : "legacy-admin";
+    const by = me ? me.uid : (adminViewUid(getCookie(req, "xyzadm")) || "legacy-admin");
     const b = req.body || {};
     const op = String(b.op || "");
     const uid = String(b.uid || "");
@@ -1340,7 +1387,7 @@ async function main() {
     reply.code(403).header("cache-control", "no-store").send({ ok: false, error: "forbidden" });
     return false;
   };
-  const adminUid = (req) => { const me = meOf(req); return me ? me.uid : "legacy-admin"; };
+  const adminUid = (req) => { const me = meOf(req); return me ? me.uid : (adminViewUid(getCookie(req, "xyzadm")) || "legacy-admin"); };
 
   fastify.get("/api/access/dm", (req, reply) => {
     reply.header("cache-control", "no-store");

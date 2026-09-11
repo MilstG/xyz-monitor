@@ -508,6 +508,15 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     fs.renameSync(tmp, secretFile);
   }
 
+  // Keyed derivation for other secrets that must not be guessable. server.js used to derive its
+  // legacy session and alert-owner secrets from SITE_PASSWORD, which is a public constant when the
+  // password is unset — so a forged legacy token could reach /claim and the AI-cost routes on an
+  // open deployment. Deriving them from THIS random key keeps "rotate the password → invalidate"
+  // semantics (the label can carry the password) without a guessable fallback.
+  function deriveKey(label) {
+    return crypto.createHmac("sha256", sessionSecret).update("derive|" + String(label)).digest();
+  }
+
   function signSession(uid, epoch, expMs) {
     const mac = crypto.createHmac("sha256", sessionSecret)
       .update("s2|" + uid + "|" + epoch + "|" + expMs).digest("base64url");
@@ -1727,7 +1736,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
 
   return {
     // identity
-    signSession, sessionUser, tokenFor, countUsers, getUser, getUserByHandle, listUsers, pub,
+    signSession, sessionUser, tokenFor, countUsers, getUser, getUserByHandle, listUsers, pub, deriveKey,
     login, setPassword, signOutEverywhere, setDisabled, setAdmin, renameUser, touch, hydrate,
     // invites
     mintInvite, readInvite, revokeInvite, listInvites, redeem, bootstrap, claim, inviteState,

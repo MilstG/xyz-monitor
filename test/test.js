@@ -11750,7 +11750,8 @@ test("ownership is a signed handle, not a guessable id, and legacy rows stay adm
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   // Signed so it cannot be forged, random so it cannot be guessed, HttpOnly so page script cannot
   // read it. It grants nothing except management of the recipients linked from that browser.
-  assert.ok(/const OWNER_SECRET = crypto\.createHash/.test(srv) && /function signOwner/.test(srv));
+  // Keyed by the accounts' random secret, never by the password alone (see the build -67 test below).
+  assert.ok(/OWNER_SECRET = ACCOUNTS\.deriveKey\("alert-owner"\)/.test(srv) && /function signOwner/.test(srv));
   assert.ok(/crypto\.timingSafeEqual/.test(srv.slice(srv.indexOf("function ownerOf"), srv.indexOf("function ensureOwner"))),
     "handle verification must be constant-time like every other token check here");
   assert.ok(/crypto\.randomBytes\(12\)/.test(srv), "the id must be random, not derived from anything a visitor controls");
@@ -13343,7 +13344,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract â€
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.11-66"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.11-67"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -24047,4 +24048,59 @@ test("admin panel: every segment is foldable and collapsed in the markup", () =>
   const srv = R("server.js");
   assert.ok(srv.includes('<link rel="icon" href="/icon.svg"'), "the auth pages declare the app icon");
   assert.ok(/u === "\/icon\.svg" \|\| u === "\/manifest\.webmanifest"/.test(srv), "and the gate does not 401 it");
+});
+
+// ===== build 2026.09.11-67: audit fixes ========================================================
+// The legacy shared-password secrets were sha256("xyzmon-session|user|password") â€” a constant anyone
+// could recompute once SITE_PASSWORD was unset (the documented open posture). A forged legacy token
+// then satisfied sessionOk at /claim (mint an account, the first one admin) and the AI-cost gate,
+// and `Basic friend:` passed credsOk outright. Both secrets now key off the random session-secret
+// file accounts.js already persists, and an empty password closes every shared-password door.
+test("audit -67: legacy secrets key off the random accounts secret and fail closed without a password", () => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(!/xyzmon-session\|\$\{SITE_USER\}\|\$\{SITE_PASSWORD\}`\)\.digest\(\)/.test(srv),
+    "the password-only session derivation is gone");
+  assert.ok(/SESSION_SECRET = process\.env\.SESSION_SECRET[\s\S]{0,200}ACCOUNTS\.deriveKey\(`legacy-session\|\$\{SITE_USER\}\|\$\{SITE_PASSWORD\}`\)/.test(srv),
+    "the legacy session secret is HMAC-derived from the accounts secret, password folded in as the label");
+  assert.ok(/OWNER_SECRET = ACCOUNTS\.deriveKey\("alert-owner"\)/.test(srv), "the owner secret no longer depends on the password");
+  assert.ok(/const OWNER_SECRET_LEGACY = SITE_PASSWORD\s*\?/.test(srv) && /for \(const secret of \[OWNER_SECRET, OWNER_SECRET_LEGACY\]\)/.test(srv),
+    "existing owner cookies keep verifying while a real password exists, and never without one");
+  assert.ok(/const LEGACY_DOOR = !!SITE_PASSWORD && process\.env\.LEGACY_SHARED_PASSWORD !== "0"/.test(srv),
+    "no password means no legacy door");
+  assert.ok(/function credsOk\(u, p\) \{\n  if \(!SITE_PASSWORD\) return false;/.test(srv), "credsOk refuses when there is no password");
+
+  // deriveKey: deterministic per label, distinct across labels, and not the raw secret.
+  const { openAccounts } = require("../src/accounts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-acc-"));
+  const A = openAccounts(dir, { sessionDays: 1 });
+  const k1 = A.deriveKey("legacy-session|friend|"), k2 = A.deriveKey("legacy-session|friend|"), k3 = A.deriveKey("alert-owner");
+  assert.equal(k1.length, 32); assert.ok(k1.equals(k2)); assert.ok(!k1.equals(k3));
+  const raw = fs.readFileSync(path.join(dir, "session-secret"), "utf8").trim();
+  assert.ok(!Buffer.from(raw, "base64").equals(k1), "a derived key is never the secret itself");
+  // A second open of the same volume derives the same key: restarts keep everyone signed in.
+  const B = openAccounts(dir, { sessionDays: 1 });
+  assert.ok(B.deriveKey("alert-owner").equals(k3));
+});
+
+// The admin-view cookie was signed over its expiry alone, so a demoted or disabled admin kept the
+// operator surface for up to ADMIN_DAYS and their audit rows read "legacy-admin". Account-issued
+// cookies are now bound to uid|epoch and re-checked against the live user row; the uid-less form
+// survives only for the ADMIN_PASSWORD break-glass paths.
+test("audit -67: an account-issued admin cookie is bound to the account and dies with its flag", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(/function signAdminView\(expMs, uid, epoch\)/.test(srv), "the signer takes the account binding");
+  const body = srv.slice(srv.indexOf("function adminViewOk"), srv.indexOf("function adminViewUid"));
+  assert.ok(/if \(p\.length !== 2 && p\.length !== 4\) return false;/.test(body), "exactly two shapes verify");
+  assert.ok(/const u = ACCOUNTS\.getUser\(p\[0\]\);\s*\n\s*if \(!u \|\| !u\.isAdmin \|\| u\.disabledAt \|\| String\(u\.epoch\) !== p\[1\]\) return false;/.test(body),
+    "the bound form re-reads the live row: enabled, still admin, same epoch");
+  assert.ok(/crypto\.timingSafeEqual/.test(body), "still constant-time");
+  // signIn mints the bound form; the break-glass login and `admin unlock` keep the uid-less one.
+  assert.ok(/signAdminView\(Date\.now\(\) \+ ADMIN_DAYS \* 864e5, user\.uid, row\.epoch\)/.test(srv), "sign-in binds the cookie to the account");
+  const bg = srv.slice(srv.indexOf("if (adminPwOk(pw)) {"), srv.indexOf("if (adminPwOk(pw)) {") + 400);
+  assert.ok(/signAdminView\(Date\.now\(\) \+ ADMIN_DAYS \* 864e5\)\)/.test(bg), "break-glass stays uid-less");
+  // Audit attribution follows the binding rather than collapsing to "legacy-admin".
+  assert.ok((srv.match(/adminViewUid\(getCookie\(req, "xyzadm"\)\) \|\| "legacy-admin"/g) || []).length >= 2,
+    "access and read-through audit rows name the bound uid");
 });
