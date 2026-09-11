@@ -2347,6 +2347,64 @@ function ratioSvg(d, opt){
     +`</svg>`;
   return {svg, pts, W, H, PT, PB};
 }
+// The static picture of a ratio (build 2026.09.11-74): what /ratio posts into a chat. Same candle
+// geometry as ratioSvg above (rebased 100, EMA on the same scale), plus everything a PICTURE needs
+// that the interactive panel gets from hover — a time axis, a y axis with room, the EMA named, the
+// last close tagged, the pair and window in the header. Pure: no DOM, colours come in as literals
+// (CSS variables don't resolve inside an <img>), so the suite can execute it against a fixture.
+function ratioImageSvg(d, opt){
+  const C=Object.assign({bg:'#0E1116',panel:'#151A21',border:'#262E39',grid:'#1A212A',text:'#E8E3D7',muted:'#8A93A0',dim:'#7A8592',accent:'#E3A53C',up:'#46B97E',down:'#E5604D',blue:'#6f93c9'},(opt&&opt.colors)||{});
+  const ks=d.candles||[]; if(!ks.length) return {svg:'',W:0,H:0,n:0};
+  const W=1200, H=560, PL=70, PR=84, PT=76, PB=54, mono='ui-monospace,Menlo,Consolas,monospace';
+  const f=(opt&&opt.scale==='raw')?1:100/ks[0].o;
+  const ema=d.ema200?d.ema200.map(v=>v==null?null:v*f):null;
+  let lo=Infinity, hi=-Infinity;
+  for(const k of ks){ if(k.l*f<lo) lo=k.l*f; if(k.h*f>hi) hi=k.h*f; }
+  if(ema) for(const v of ema){ if(v!=null){ if(v<lo)lo=v; if(v>hi)hi=v; } }
+  const pad=(hi-lo)*0.07||1e-9; lo-=pad; hi+=pad;
+  const pw=W-PL-PR, ph=H-PT-PB;
+  const X=i=>PL+(i+0.5)*pw/ks.length, Y=v=>PT+(hi-v)*ph/(hi-lo);
+  const bw=Math.max(3, Math.min(14, pw/ks.length*0.68));
+  const dp=(hi-lo)<0.5?4:(hi-lo)<5?3:(hi-lo)<50?2:1;
+  const esc_=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  let g='';
+  for(let i=0;i<=5;i++){ const v=lo+pad+(hi-lo-2*pad)*i/5, y=Y(v).toFixed(1);
+    g+=`<line x1="${PL}" x2="${W-PR}" y1="${y}" y2="${y}" stroke="${C.grid}" stroke-width="1"/>`
+      +`<text x="${PL-10}" y="${(+y+4).toFixed(1)}" fill="${C.dim}" font-family="${mono}" font-size="12" text-anchor="end">${v.toFixed(dp)}</text>`; }
+  // Time axis: ~6 ticks on candle timestamps, labelled at the resolution the timeframe needs.
+  const tf=String(d.tf||opt&&opt.tf||'').toLowerCase();
+  const lbl=t=>{ if(!t) return ''; const dt=new Date(+t); const o={timeZone:'America/New_York',month:'short',day:'2-digit'}; if(tf!=='1d') Object.assign(o,{hour:'2-digit',hour12:false});
+    try{ const t=dt.toLocaleString('en-US',o).replace(',',''); return tf==='1d'?t:t.replace(/ (\d\d)$/,' $1h'); }catch(_){ return dt.toISOString().slice(5,16).replace('T',' '); } };
+  const step=Math.max(1,Math.round(ks.length/6)); let xa='';
+  for(let i=0;i<ks.length;i+=step){ const x=X(i).toFixed(1);
+    xa+=`<line x1="${x}" x2="${x}" y1="${PT}" y2="${H-PB}" stroke="${C.grid}" stroke-width="1"/>`
+      +`<text x="${x}" y="${H-PB+20}" fill="${C.dim}" font-family="${mono}" font-size="12" text-anchor="middle">${esc_(lbl(ks[i].t))}</text>`; }
+  let body='';
+  for(let i=0;i<ks.length;i++){ const k=ks[i], x=X(i), up=k.c>=k.o, col=up?C.up:C.down;
+    const yo=Y(k.o*f), yc=Y(k.c*f), yh=Y(k.h*f), yl=Y(k.l*f), top=Math.min(yo,yc), hh=Math.max(1.2,Math.abs(yo-yc));
+    body+=`<line x1="${x.toFixed(1)}" x2="${x.toFixed(1)}" y1="${yh.toFixed(1)}" y2="${yl.toFixed(1)}" stroke="${col}" stroke-width="1.2"/>`
+      +`<rect class="ri-k" x="${(x-bw/2).toFixed(1)}" y="${top.toFixed(1)}" width="${bw.toFixed(1)}" height="${hh.toFixed(1)}" fill="${col}"/>`; }
+  let emaPath='', emaLeg='';
+  if(ema){ let dstr='', pen=false;
+    for(let i=0;i<ks.length;i++){ const v=ema[i]; if(v==null){ pen=false; continue; } dstr+=(pen?'L':'M')+X(i).toFixed(1)+' '+Y(v).toFixed(1)+' '; pen=true; }
+    if(dstr){ emaPath=`<path class="ri-ema" d="${dstr.trim()}" fill="none" stroke="${C.blue}" stroke-width="2" opacity="0.95"/>`;
+      emaLeg=`<line x1="${W-PR-96}" x2="${W-PR-72}" y1="${PT-14}" y2="${PT-14}" stroke="${C.blue}" stroke-width="2"/><text x="${W-PR-64}" y="${PT-10}" fill="${C.blue}" font-family="${mono}" font-size="12">EMA ${d.emaSpan||200}</text>`; } }
+  // Last close: a dashed level across the plot and a tag in the right gutter.
+  const last=ks[ks.length-1], first=ks[0], lv=last.c*f, ly=Y(lv), chg=first.o>0?(last.c/first.o-1)*100:null, upW=chg==null||chg>=0;
+  const tag=`<line x1="${PL}" x2="${W-PR}" y1="${ly.toFixed(1)}" y2="${ly.toFixed(1)}" stroke="${C.accent}" stroke-width="1" stroke-dasharray="4 4" opacity="0.8"/>`
+    +`<rect x="${W-PR+6}" y="${(ly-11).toFixed(1)}" width="${PR-12}" height="22" rx="4" fill="${C.accent}"/>`
+    +`<text x="${W-PR/2}" y="${(ly+4).toFixed(1)}" fill="${C.bg}" font-family="${mono}" font-size="12" font-weight="700" text-anchor="middle">${lv.toFixed(dp)}</text>`;
+  const pair=`${d.numBasket?'⬒ ':''}${d.num||''} ÷ ${d.denBasket?'⬒ ':''}${d.den||''}`;
+  const head=`<text x="${PL}" y="30" fill="${C.accent}" font-family="${mono}" font-size="12" font-weight="700" letter-spacing="1">RATIO</text>`
+    +`<text x="${PL+62}" y="31" fill="${C.text}" font-family="${mono}" font-size="20" font-weight="700">${esc_(pair)}</text>`
+    +`<text x="${PL}" y="52" fill="${C.muted}" font-family="${mono}" font-size="12">${esc_(`${tf.toUpperCase()} candles · ${(opt&&opt.scale==='raw')?'raw ratio':'rebased 100 at window start'} · last ${d.shown||ks.length}/${d.bars||ks.length} bars`)}</text>`
+    +(chg!=null?`<text x="${W-PR}" y="31" fill="${upW?C.up:C.down}" font-family="${mono}" font-size="20" font-weight="700" text-anchor="end">${chg>=0?'+':''}${chg.toFixed(2)}%</text>`
+      +`<text x="${W-PR}" y="52" fill="${C.muted}" font-family="${mono}" font-size="12" text-anchor="end">window · last ${esc_(last.c.toFixed(Math.abs(last.c)>=100?2:4))} raw</text>`:'');
+  const foot=`<text x="${PL}" y="${H-12}" fill="${C.dim}" font-family="${mono}" font-size="11">bucketed from hourly ratio closes · intrabar extremes finer than 1H not captured</text>`;
+  const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><rect width="${W}" height="${H}" fill="${C.bg}"/>`
+    +`<rect x="${PL}" y="${PT}" width="${pw}" height="${ph}" fill="${C.panel}" stroke="${C.border}"/>`+head+g+xa+body+emaPath+emaLeg+tag+foot+`</svg>`;
+  return {svg, W, H, n:ks.length};
+}
 function renderRatio(){
   const p=el('ratiopanel'); if(!p) return;
   if(!featureOn('baskets')||state.view!=='corr'||RATIO.closed||!RATIO.num){ p.hidden=true; return; }
@@ -14550,7 +14608,10 @@ const dmState = { me: null, threads: [], members: [], online: new Set(),
   callsBy: null, webPushOn: false, searchScope: 'all',
   // Chat terminal (build 2026.09.11-69): per-thread lines only this viewer sees (help, errors,
   // "running…"), never sent anywhere; and the one-at-a-time latch for a command in flight.
-  localOut: new Map(), cmdBusy: false, cmdLine: '', compIdx: 0 };
+  localOut: new Map(), cmdBusy: false, cmdLine: '', compIdx: 0,
+  // Timeframe switches on posted ratio charts: per message, the viewer's own live redraw (tf +
+  // svg). Never sent — the posted picture is the record, this is a lens on it.
+  rtLive: new Map() };
 
 function dmSignedIn(){ return !!(window.__ME && window.__ME.uid); }
 function dmUnreadTotal(){ return dmState.threads.reduce((a,t)=>a+((t.muted||t.hidden)?0:(t.unread||0)),0); }
@@ -15022,16 +15083,12 @@ async function dmRatioChart(args){
   catch(e){ return {error:'ratio fetch failed \u2014 '+(e&&e.message||'network error')}; }
   if(!d||!d.ok) return {error:(d&&d.error)||'ratio unavailable'};
   if(!d.candles||!d.candles.length) return {error:'no candles for that pair yet'};
-  const S=ratioSvg(d,{scale:'reb',ema:!!d.ema200});
-  const cs=getComputedStyle(document.documentElement), v=n=>(cs.getPropertyValue(n)||'').trim()||'#888';
+  const cs=getComputedStyle(document.documentElement), v=n=>(cs.getPropertyValue(n)||'').trim()||null;
+  const colors={}; for(const k of ['bg','panel','border','grid','text','muted','dim','accent','up','down','blue']){ const c=v('--'+k); if(c) colors[k]=c; }
+  if(!d.tf) d.tf=tf;
+  const S=ratioImageSvg(d,{scale:'reb',colors,tf});
   const title=`${d.num} \u00f7 ${d.den} \u00b7 ${tf.toUpperCase()} \u00b7 rebased 100${d.ema200?' \u00b7 EMA '+(d.emaSpan||200):''} \u00b7 last ${d.shown||d.candles.length}/${d.bars||d.candles.length} bars`;
-  const inner=S.svg.replace(/^<svg[^>]*>/,'').replace(/<\/svg>$/,'')
-    .replace(/var\(--([a-z0-9-]+)\)/g,(m,n)=>v('--'+n));
-  const W=S.W, H=S.H+22;
-  const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><rect width="${W}" height="${H}" fill="${v('--bg')}"/>`
-    +`<text x="12" y="15" fill="${v('--accent')}" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="11" font-weight="600">RATIO</text>`
-    +`<text x="60" y="15" fill="${v('--muted')}" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="11">${esc(title)}</text>`
-    +`<g transform="translate(0,22)">${inner}</g></svg>`;
+  const W=S.W, H=S.H, svg=S.svg;
   const png=await new Promise((res)=>{
     const img=new Image(); const url=URL.createObjectURL(new Blob([svg],{type:'image/svg+xml;charset=utf-8'}));
     img.onload=()=>{ try{ const c=document.createElement('canvas'); c.width=W*2; c.height=H*2; const g=c.getContext('2d'); g.scale(2,2); g.drawImage(img,0,0); c.toBlob(bl=>{ URL.revokeObjectURL(url); res(bl); },'image/png'); }catch(_){ URL.revokeObjectURL(url); res(null); } };
@@ -15085,6 +15142,41 @@ function dmCompPick(x){
   ta.value='/'+x+(/[>\/]$/.test(x)?'':' '); ta.selectionStart=ta.selectionEnd=ta.value.length;
   dmAutoGrow(ta); dmDraftSave(dmState.sel,ta.value);
   if(box) box.hidden=true; dmState.compIdx=0; dmCmdPop(ta); ta.focus();
+}
+// A posted ratio chart carries a timeframe row (build 2026.09.11-74). The picture in the message is
+// the record and never changes; the pills fetch the same pair at another timeframe and redraw the
+// same picture LIVE in the bubble for this viewer only. The posted timeframe restores the image.
+const DM_RT_TFS=['1h','4h','12h','1d'];
+function dmRatioArgs(cmd){
+  const p=String(cmd||'').trim().split(/\s+/); if((p[0]||'').toLowerCase()!=='ratio') return null;
+  let a=p[1]||'', b=p[2]||'', tf=p[3];
+  if(a.includes('/')){ const s=a.split('/'); a=s[0]; b=s[1]; tf=p[2]; }
+  tf=(tf||'4h').toLowerCase(); if(!DM_RT_TFS.includes(tf)) tf='4h';
+  return (a&&b)?{a:a.toUpperCase(),b:b.toUpperCase(),tf}:null;
+}
+function dmRatioBlock(m){
+  const ra=(m.file&&m.file.inline)?dmRatioArgs(m.cmd):null;
+  if(!ra) return dmFile(m);
+  const live=dmState.rtLive.get(m.id);
+  const pills='<div class="dm-rtf">'+DM_RT_TFS.map(t=>'<button type="button" class="cg-pill'+((live?live.tf:ra.tf)===t?' on':'')+'" data-dmrtf="'+t+'" data-mid="'+m.id+'" title="'+(t===ra.tf?'the posted timeframe':'redraw at '+t.toUpperCase()+' \u2014 for you only, nothing is posted')+'">'+t.toUpperCase()+'</button>').join('')
+    +(live&&live.tf!==ra.tf?'<span class="dm-rtnote">live \u00b7 posted at '+esc(ra.tf.toUpperCase())+'</span>':'')+'</div>';
+  const pic=(live&&live.tf!==ra.tf&&live.svg)?'<div class="dm-img dm-rtlive">'+live.svg+'</div>':dmFile(m);
+  return pic+pills;
+}
+async function dmRatioSwitch(mid,tf){
+  const m=dmMsgs(dmState.sel).find(x=>x.id===mid); if(!m) return;
+  const ra=dmRatioArgs(m.cmd); if(!ra) return;
+  if(tf===ra.tf){ dmState.rtLive.delete(mid); dmRender(); return; }
+  const cur=dmState.rtLive.get(mid); if(cur&&cur.tf===tf&&cur.svg) return;
+  dmState.rtLive.set(mid,{tf,svg:''}); dmRender();
+  let d; try{ d=await fetchJSON('/api/ratio?num='+encodeURIComponent(ra.a)+'&den='+encodeURIComponent(ra.b)+'&tf='+encodeURIComponent(tf)); }catch(e){ d={ok:false,error:e&&e.message||'network error'}; }
+  const now=dmState.rtLive.get(mid); if(!now||now.tf!==tf) return;   // the viewer moved on
+  if(!d||!d.ok||!d.candles||!d.candles.length){ dmState.rtLive.delete(mid); dmRender(); dmLocal('\u2717 ratio '+esc(ra.a+'/'+ra.b+' '+tf)+' \u2014 '+esc((d&&d.error)||'no candles for that timeframe yet'),'err'); return; }
+  const cs=getComputedStyle(document.documentElement), v=n=>(cs.getPropertyValue(n)||'').trim()||null;
+  const colors={}; for(const k of ['bg','panel','border','grid','text','muted','dim','accent','up','down','blue']){ const c=v('--'+k); if(c) colors[k]=c; }
+  d.tf=tf; const S=ratioImageSvg(d,{scale:'reb',colors,tf});
+  now.svg=S.svg.replace(/^<svg([^>]*?) width="\d+" height="\d+"/,'<svg$1 width="100%" style="display:block;height:auto;border:1px solid var(--border);border-radius:6px"');
+  dmRender();
 }
 async function dmRunCmd(raw){
   const ta=el('dm-input');
@@ -15597,7 +15689,7 @@ function dmMessageHtml(m,t,p){
     // monospace block so the panel's padded columns line up. No stamp, no tweet, no quote —
     // it is the board's output under a name, not a message about anything.
     ? '<div class="dm-b dm-cmdb" title="'+esc(who+' \u00b7 '+dmWhen(m.ts))+'"><div class="dm-cmdhd"><span class="dm-cmdpr">\u25b8</span> '+esc(m.cmd)
-      +' <span class="tp-badge '+(m.cmdAi?'ai':'c')+'">'+(m.cmdAi?'AI':'computed')+'</span></div>'+dmFile(m)+'<pre class="dm-cmdout">'+esc(m.body)+'</pre>'+marks+'</div>'
+      +' <span class="tp-badge '+(m.cmdAi?'ai':'c')+'">'+(m.cmdAi?'AI':'computed')+'</span></div>'+dmRatioBlock(m)+'<pre class="dm-cmdout">'+esc(m.body)+'</pre>'+marks+'</div>'
     : '<div class="dm-b" title="'+esc(who+' \u00b7 '+dmWhen(m.ts))+'">'+quote
       +(m.body?dmMentionHtml(esc(m.body)).replace(/\n/g,'<br>'):'')+marks+dmFile(m)+dmStamp(m)+dmTweet(m)+'</div>';
   return '<div class="dm-msg'+(own?' out':'')+(head?' hd':'')+(m.cmd&&!m.deleted?' cmd':'')+'" data-mid="'+m.id+'">'+meta
@@ -16234,6 +16326,7 @@ function dmWire(){
     if(e.target.closest('#dm-send')){ dmSend(); return; }
     if(e.target.closest('#dm-guide')||e.target.closest('[data-dmguide]')){ openDmGuide(); return; }
     { const co=e.target.closest('[data-dmcomp]'); if(co){ dmCompPick(co.dataset.dmcomp); return; } }
+    { const rt=e.target.closest('[data-dmrtf]'); if(rt){ dmRatioSwitch(+rt.dataset.mid, rt.dataset.dmrtf); return; } }
     if(e.target.closest('#dm-mute')){ dmToggleMute(); return; }
     if(e.target.closest('#dm-bnotify')){ dmToggleBoardNotify(); return; }
     if(e.target.closest('#dm-mic')){ dmMicToggle(); return; }

@@ -13348,7 +13348,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.11-73"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.11-74"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -24656,7 +24656,7 @@ test("chat terminal -69: a command result is a message with cmd, no stamp, no ed
   assert.ok(/const shown=line\.replace\(\/\^\(admin\\s\+\(\?:unlock\|reset-reports\)\)/.test(app), "an admin password typed into chat is redacted in the private echo");
   assert.ok(/cmd:line,cmdAi:!cmd\|\|r\.ai/.test(app), "a planner answer (AI planned, board computed) still posts as AI — the badge follows the spend");
   assert.ok(/\(m\.cmd\?'':'<button type="button" class="dm-tool" data-dmedit=/.test(app), "no edit button on a command result");
-  assert.ok(/<\/div>'\+dmFile\(m\)\+'<pre class="dm-cmdout">'\+esc\(m\.body\)\+'<\/pre>/.test(app), "the output renders escaped, in a monospace block, with the attachment (the ratio chart) ABOVE it — the first cut never called dmFile on a command result, so the chart posted and never drew");
+  assert.ok(/<\/div>'\+dmRatioBlock\(m\)\+'<pre class="dm-cmdout">'\+esc\(m\.body\)\+'<\/pre>/.test(app) && /if\(!ra\) return dmFile\(m\);/.test(app), "the output renders escaped, in a monospace block, with the attachment ABOVE it — the first cut never rendered a command result's attachment, so the chart posted and never drew");
   assert.ok(/\/help for commands\)/.test(app), "the composer placeholder points at /help");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   for (const pin of [".dm-b.dm-cmdb{", ".dm-cmdout{", ".dm-local{", ".dm-local.err{", ".dm-localmk{", ".dm-guidebtn{", ".hlp-cmd{", ".hlp-chip.chat{", ".dm-msg.cmd:has(.dm-img){", ".dm-cmdb .dm-img img{width:100%}"]) assert.ok(css.includes(pin), "css pin missing: " + pin);
@@ -24689,8 +24689,31 @@ test("chat terminal -69: a command result is a message with cmd, no stamp, no ed
   assert.ok(!app.includes("can't parse \"${tesc(c)}\""), "termErr escapes — a pre-escaped clause rendered as &gt; on screen");
   assert.ok(/return \{text:real\?out\.join\('\\n'\):'',errs:errs\.join\('\\n'\),ai:ai\};/.test(app), "a capture with no real output block (translation line only) has nothing to post");
   // -72: /ratio posts the chart as a PNG through the ordinary attachment path; Tab completes.
-  assert.ok(/async function dmRatioChart\(args\)\{/.test(app) && /ratioSvg\(d,\{scale:'reb',ema:!!d\.ema200\}\)/.test(app), "/ratio renders the same SVG the Correlation tab draws");
-  assert.ok(/\.replace\(\/var\\\(--\(\[a-z0-9-\]\+\)\\\)\/g,\(m,n\)=>v\('--'\+n\)\)/.test(app), "CSS variables are substituted before rasterising — they do not resolve inside an <img>");
+  assert.ok(/async function dmRatioChart\(args\)\{/.test(app) && /const S=ratioImageSvg\(d,\{scale:'reb',colors,tf\}\);/.test(app), "/ratio renders the static picture builder with the theme's colours passed in as literals");
+  {
+    // Execute the picture builder against a fixture, as the suite does for ratioSvg: a chart that
+    // posts into a chat must carry what hover would otherwise supply.
+    const grab2 = (name) => { const i = app.indexOf("function " + name + "("); let depth = 0, j = i; for (; j < app.length; j++) { if (app[j] === "{") depth++; else if (app[j] === "}") { depth--; if (!depth) break; } } return app.slice(i, j + 1); };
+    const ratioImageSvg = new Function(grab2("ratioImageSvg") + "\nreturn ratioImageSvg;")();
+    const HOUR = 3600e3, t0 = 1700000000000;
+    const candles = Array.from({ length: 40 }, (_, i) => { const o = 2 + i * 0.01, c = o + (i % 2 ? 0.02 : -0.015); return { t: t0 + i * 4 * HOUR, o, h: Math.max(o, c) + 0.01, l: Math.min(o, c) - 0.01, c }; });
+    const out = ratioImageSvg({ candles, ema200: candles.map((k, i) => (i < 3 ? null : k.c - 0.005)), num: "INTC", den: "NVDA", tf: "4h", emaSpan: 200, bars: 400, shown: 40 }, { scale: "reb" });
+    assert.equal((out.svg.match(/class="ri-k"/g) || []).length, 40, "one candle body per bar");
+    assert.ok(out.svg.includes('class="ri-ema"') && out.svg.includes(">EMA 200<"), "the EMA is drawn AND named — a picture has no hover to say what the blue line is");
+    assert.ok((out.svg.match(/text-anchor="middle">[A-Z][a-z]{2} \d\d \d\dh</g) || []).length >= 5, "a time axis with dated ticks at intraday resolution");
+    assert.ok(out.svg.includes("INTC ÷ NVDA") && out.svg.includes("4H candles") && /stroke-dasharray="4 4"/.test(out.svg), "header names the pair and timeframe; the last close is tagged");
+    assert.ok(out.svg.startsWith('<svg xmlns="http://www.w3.org/2000/svg"') && !/var\(--/.test(out.svg), "a standalone SVG with literal colours — nothing an <img> can't resolve");
+    assert.equal(ratioImageSvg({ candles: [] }, {}).n, 0, "no candles -> nothing, never a fabricated frame");
+    const day = ratioImageSvg({ candles: candles.map((k, i) => Object.assign({}, k, { t: t0 + i * 24 * HOUR })), num: "A", den: "B", tf: "1d" }, {});
+    assert.ok(!/\d\dh</.test(day.svg), "daily candles label the axis by date only");
+  }
+  // -74: timeframe pills on a posted ratio chart redraw LIVE for the viewer; the picture stays.
+  assert.ok(/const DM_RT_TFS=\['1h','4h','12h','1d'\];/.test(app) && /function dmRatioBlock\(m\)\{/.test(app) && /async function dmRatioSwitch\(mid,tf\)\{/.test(app), "the switch exists");
+  assert.ok(/<\/div>'\+dmRatioBlock\(m\)\+'<pre class="dm-cmdout">/.test(app), "a command result renders through dmRatioBlock, which falls back to dmFile for anything that is not a ratio chart");
+  assert.ok(/if\(tf===ra\.tf\)\{ dmState\.rtLive\.delete\(mid\); dmRender\(\); return; \}/.test(app), "the posted timeframe restores the posted image");
+  assert.ok(!/dmPost\(\{[^}]*rtLive/.test(app) && /Never sent — the posted picture is the record/.test(app), "a timeframe switch never posts");
+  assert.ok(/\{ const rt=e\.target\.closest\('\[data-dmrtf\]'\); if\(rt\)\{ dmRatioSwitch\(\+rt\.dataset\.mid, rt\.dataset\.dmrtf\); return; \} \}/.test(app), "pills are wired through the tab's one delegated listener");
+  for (const pin of [".dm-rtf{", ".dm-cmdb .dm-rtlive svg{"]) assert.ok(css.includes(pin), "css pin missing: " + pin);
   assert.ok(/new File\(\[png\],`ratio-\$\{d\.num\}-\$\{d\.den\}-\$\{tf\}\.png`,\{type:'image\/png'\}\)/.test(app), "the chart is a PNG file — the only inline type the upload sniff admits for a drawing");
   assert.ok(/const res=await dmPost\(\{thread:t\.id,body:r\.body,cmd:line,fileId:up\.id\}\);/.test(app), "the chart posts as a command result WITH an attachment");
   assert.ok(!/ratio:'opens the ratio chart'/.test(app), "ratio is no longer refused from chat");
