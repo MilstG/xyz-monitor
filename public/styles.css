@@ -1,4 +1,9 @@
 :root{
+  /* The app is dark everywhere, but without this the UA didn't know it: every native scrollbar
+     (the DM log's overflow bar, the composer textarea) and form control rendered in LIGHT
+     chrome — bright white strips on a dark UI. Declared once here; the two per-input
+     color-scheme spot patches below predate it and are now redundant but harmless. */
+  color-scheme:dark;
   --bg:#0E1116; --panel:#151A21; --panel2:#1B222B; --border:#262E39;
   --text:#E8E3D7; --muted:#7E8794; --faint:#4C5662;
   --accent:#E3A53C; --accent-dim:#8a6a28; --blue:#6f93c9;
@@ -2215,7 +2220,9 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
    dividers. The old always-on reaction row and per-message header are gone — a message at rest is
    just its bubble, and everything actionable rides a hover bar. */
 .dm-log{flex:1;min-height:0;padding:10px 12px 6px;display:flex;flex-direction:column;
-  align-items:flex-start;gap:1px;overflow-y:auto}
+  align-items:flex-start;gap:1px;overflow-y:auto;
+  /* nothing in a chat log ever scrolls sideways — bubbles wrap and the hover bar stays inside */
+  overflow-x:hidden}
 /* Conversations anchor to the BOTTOM, next to the composer — a short thread must not float at
    the top of a tall pane. margin-top:auto on the first real row (not justify-content:flex-end,
    which breaks scrolling in overflowed flex columns) collapses to 0 once history fills the pane. */
@@ -2230,14 +2237,21 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
   display:flex;align-items:center;gap:8px}
 .dm-msg.out .dm-meta{justify-content:flex-end}
 .dm-who{font-weight:700;font-size:10px;letter-spacing:.2px}
-/* hover action bar: react, pin, note, edit, delete — floats over the bubble's top edge */
-.dm-act{display:none;position:absolute;top:-11px;right:4px;z-index:6;align-items:center;gap:7px;
+/* hover action bar: react, pin, note, edit, delete — floats over the bubble's top edge.
+   Anchored to the bubble's PANE-EDGE side so it always grows toward the pane's center: the old
+   anchors were backwards (out-messages grew rightward off the pane edge), which cropped the bar
+   on short bubbles and fed the log a horizontal scrollbar. */
+.dm-act{display:none;position:absolute;top:-11px;left:4px;z-index:6;align-items:center;gap:7px;
   background:var(--panel);border:1px solid var(--border);border-radius:7px;padding:2px 8px;
-  box-shadow:0 2px 8px rgba(0,0,0,.35)}
-.dm-msg.out .dm-act{right:auto;left:4px}
+  box-shadow:0 2px 8px rgba(0,0,0,.35);
+  /* abspos auto-width is capped at the containing block — a short bubble squeezed the bar into
+     wrapping its own labels; max-content keeps the pill one line at its natural width */
+  width:max-content}
+.dm-msg.out .dm-act{left:auto;right:4px}
 .dm-msg:hover .dm-act{display:inline-flex}
 .dm-tool{background:none;border:none;color:var(--muted);font-family:var(--mono);font-size:9.5px;
-  cursor:pointer;padding:0;text-decoration:underline}
+  cursor:pointer;padding:0;text-decoration:underline;
+  white-space:nowrap}   /* "→ note" is one label — never let a squeezed bar fold it in half */
 .dm-tool:hover{color:var(--accent)}
 .dm-act .dm-tool{text-decoration:none}
 .dm-b{background:var(--panel2);border:1px solid var(--border);border-radius:13px;padding:5px 10px;

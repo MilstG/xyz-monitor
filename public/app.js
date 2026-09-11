@@ -15138,6 +15138,14 @@ function dmCapture(){
     focus: document.activeElement===ta?'input':(document.activeElement===q?'q':''),
     qSelA: q?q.selectionStart:0, qSelB: q?q.selectionEnd:0 };
 }
+// Composer autosize. scrollHeight is content+padding, but the box is border-box — the old bare
+// Math.min(scrollHeight,160) left the textarea exactly its 2px of borders shorter than its own
+// content, i.e. permanently overflowed, i.e. a permanent scrollbar riding next to Send. Add the
+// border back, and allow a scrollbar only once the 160px cap is genuinely hit.
+function dmAutoGrow(ta){ if(!ta) return; ta.style.height='auto';
+  const need=ta.scrollHeight+(ta.offsetHeight-ta.clientHeight);
+  ta.style.height=Math.min(need,160)+'px';
+  ta.style.overflowY=need>160?'auto':'hidden'; }
 let _dmClearOnNextRender=false;
 function dmRestore(c){
   if(!c) return;
@@ -15147,7 +15155,7 @@ function dmRestore(c){
   const ta=el('dm-input');
   if(ta&&c.text!=null&&!dmState.editing){
     ta.value=c.text;
-    ta.style.height='auto'; ta.style.height=Math.min(ta.scrollHeight,160)+'px';
+    dmAutoGrow(ta);
   }
   if(c.focus==='input'&&ta){ ta.focus(); try{ ta.setSelectionRange(c.selA,c.selB); }catch(_){} }
   if(c.focus==='q'){ const q=el('dm-q'); if(q){ q.focus(); try{ q.setSelectionRange(c.qSelA,c.qSelB); }catch(_){} } }
@@ -15348,7 +15356,7 @@ function dmRender(){
   if(ta){
     if(dmState.editing){ const m=dmMsgs(dmState.sel).find(x=>x.id===dmState.editing); if(m) ta.value=m.body; }
     ta.addEventListener('input',()=>{
-      ta.style.height='auto'; ta.style.height=Math.min(ta.scrollHeight,160)+'px';
+      dmAutoGrow(ta);
       dmDraftSave(dmState.sel,ta.value);
       dmMentionPop(ta);
       dmTypingPing(); });
