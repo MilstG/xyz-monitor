@@ -407,9 +407,11 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     // stalls on a huge backlog. Pinned rows are exempt by the WHERE, not by caller discipline.
     // Two exemptions: pins (a board's standing post) and PRICED CALLS (ref + refPx) — the calls
     // record reads live messages, and a track record that self-destructs in a week is not a track
-    // record. Everything else ages out.
+    // record. Everything else ages out. The exemptions cover LIVE rows only: a tombstone keeps its
+    // ref/refPx and pinnedAt (msgDrop clears just body/file), and exempting those too meant every
+    // deleted call and deleted-while-pinned message was retained forever, counting for nothing.
     retainSweep: db.prepare(`SELECT m.id, m.fileId FROM dm_msg m JOIN dm_thread t ON t.id = m.thread
-      WHERE m.pinnedAt IS NULL AND (m.ref IS NULL OR m.refPx IS NULL)
+      WHERE (m.deletedAt IS NOT NULL OR (m.pinnedAt IS NULL AND (m.ref IS NULL OR m.refPx IS NULL)))
         AND m.ts < CASE WHEN t.kind = 'dm' THEN ? ELSE ? END
       ORDER BY m.id LIMIT 500`),
     retainDrop: db.prepare("DELETE FROM dm_msg WHERE id = ?"),
@@ -437,11 +439,13 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     watchHas: db.prepare("SELECT 1 AS x FROM dm_watch WHERE uid = ? AND coin = ?"),
 
     // Every stamped message, newest first. This is the record the price stamp exists to build.
+    // The by-filter lives in the SQL, not JS-after-LIMIT: filtering the newest N overall meant a
+    // person whose calls were all older than the window came back as an empty record.
     callsAll: db.prepare(`SELECT * FROM dm_msg WHERE ref IS NOT NULL AND deletedAt IS NULL
-      ORDER BY id DESC LIMIT ?`),
+      AND (? IS NULL OR sender = ?) ORDER BY id DESC LIMIT ?`),
     callsMine: db.prepare(`SELECT m.* FROM dm_msg m JOIN dm_member mem ON mem.thread = m.thread
       WHERE mem.uid = ? AND mem.leftAt IS NULL AND m.ref IS NOT NULL AND m.deletedAt IS NULL
-      ORDER BY m.id DESC LIMIT ?`),
+      AND (? IS NULL OR m.sender = ?) ORDER BY m.id DESC LIMIT ?`),
 
     auditAdd: db.prepare("INSERT INTO dm_audit (uid, action, thread, detail, at) VALUES (?,?,?,?,?)"),
     auditList: db.prepare("SELECT * FROM dm_audit ORDER BY id DESC LIMIT ?"),
@@ -1173,16 +1177,21 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   // A reply carries a one-level preview of what it quotes, resolved at read: the quote renders
   // without a second fetch, and a quoted message later deleted honestly says so instead of
   // resurrecting its text.
-  function replyPreview(id) {
+  function replyPreview(id, uid) {
     const q = S.msgById.get(+id);
     if (!q) return null;
-    return { id: q.id, sender: q.sender ? ((users.get(q.sender) || {}).display || "—") : "",
-      body: q.deletedAt ? "" : String(q.body || (q.fileId ? "sent a file" : "")).slice(0, 120),
-      ref: q.deletedAt ? null : (q.ref || null), deleted: !!q.deletedAt };
+    // The viewer's cleared floor applies to the quote too: history, sync, search and export all
+    // honor clearedUpTo, and a reply must not resurrect a body its reader chose to forget.
+    const cf = uid ? ((S.readGet.get(q.thread, uid) || {}).clearedUpTo || 0) : 0;
+    const gone = !!q.deletedAt || q.id <= cf;
+    return { id: q.id, senderUid: q.sender || null,
+      sender: q.sender ? ((users.get(q.sender) || {}).display || "—") : "",
+      body: gone ? "" : String(q.body || (q.fileId ? "sent a file" : "")).slice(0, 120),
+      ref: gone ? null : (q.ref || null), deleted: gone };
   }
   function wire(m, uid) {
     return { id: m.id, thread: m.thread, mine: m.sender === uid,
-      replyTo: m.replyTo || null, reply: m.replyTo ? replyPreview(m.replyTo) : null,
+      replyTo: m.replyTo || null, reply: m.replyTo ? replyPreview(m.replyTo, uid) : null,
       tweet: (m.deletedAt || m.sys) ? null : tweetFor(m.body, m.thread),
       senderUid: m.sender || null,
       sender: m.sender ? ((users.get(m.sender) || {}).display || "—") : "",
@@ -1223,7 +1232,10 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const sym = firstTickerRef(text);
     let ref = null, refPx = null;
     if (sym) {
-      const coin = coinResolve ? coinResolve(sym) : sym;
+      // No resolver (the Telegram bridge path) means NO stamp — falling back to the raw symbol
+      // stamped every bridged $WORD as an unresolvable ref that sat in the calls record as a
+      // permanent dead row with no price and no live mark.
+      const coin = coinResolve ? coinResolve(sym) : null;
       if (coin) { ref = coin; const px = markFor(coin); refPx = Number.isFinite(px) && px > 0 ? px : null; }
     }
     // A quote binds only inside its own conversation: a replyTo naming another thread's message is
@@ -1246,10 +1258,11 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (m.deletedAt) return { ok: false, error: "that message was deleted" };
     const text = cleanBody(body);
     if (!text) return { ok: false, error: "write something first" };
-    // The reference can move with an edit, but refPx deliberately does NOT: the claim was made at
-    // that price. Same discipline notes apply to a rewritten body.
-    const sym = firstTickerRef(text);
-    S.msgEdit.run(text, sym ? (m.ref || sym) : null, Date.now(), +id, uid);
+    // The stamp is immutable under an edit — exactly what the composer promises ("the original
+    // timestamp and price stamp stand"). The old code re-derived ref from the rewritten body:
+    // editing the ticker out silently removed the call from the record (and stranded refPx on a
+    // ref-less row), while editing an unresolved $WORD in stamped a raw symbol as a dead ref.
+    S.msgEdit.run(text, m.ref || null, Date.now(), +id, uid);
     return { ok: true, thread: m.thread, message: wire(S.msgById.get(+id), uid) };
   }
   function drop(uid, id) {
@@ -1333,10 +1346,21 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const out = [];
     for (const t of S.thrMine.all(uid)) {
       const cf = (S.readGet.get(t.id, uid) || {}).clearedUpTo || 0;
-      for (const m of S.msgSince.all(t.id, Math.max(s, cf), n)) out.push(wire(m, uid));
+      // n+1, not n: a single thread holding exactly n new messages would otherwise fill the
+      // slice without ever tripping the truncation check below.
+      for (const m of S.msgSince.all(t.id, Math.max(s, cf), n + 1)) out.push(wire(m, uid));
     }
     out.sort((a, b) => a.id - b.id);
-    return { ok: true, cursor: S.msgMaxId.get().m, messages: out.slice(0, n), threads: threads(uid) };
+    // The cursor must never claim messages the slice dropped: advancing to the global max while
+    // truncating meant everything past the Nth message was skipped forever ("the client's cursor
+    // is authoritative" is only true if it is honest). When truncated, the cursor stops at the
+    // last id actually delivered and `more` tells the client to come straight back for the rest.
+    const truncated = out.length > n;
+    const sliced = truncated ? out.slice(0, n) : out;
+    return { ok: true,
+      cursor: truncated ? sliced[sliced.length - 1].id : S.msgMaxId.get().m,
+      more: truncated || undefined,
+      messages: sliced, threads: threads(uid) };
   }
 
   // Search runs over the caller's own membership by JOIN, so the scope IS the authorization — there
@@ -1455,10 +1479,16 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   function calls(uid, opts) {
     const o = opts || {};
     const n = Math.min(Math.max(+o.limit || 200, 1), 500);
-    const rows = o.all ? S.callsAll.all(n) : S.callsMine.all(uid, n);
+    const by = o.by || null;
+    const rows = o.all ? S.callsAll.all(by, by, n) : S.callsMine.all(uid, by, by, n);
+    // The caller's own cleared floor holds here exactly as it does in history/sync/search: a
+    // member who cleared a thread must not get its stamped bodies re-delivered by the record.
+    // The operator's all-view is the separate, audited read-through surface and stays unfiltered.
+    const cfCache = new Map();
+    const floor = (th) => { if (!cfCache.has(th)) cfCache.set(th, (S.readGet.get(th, uid) || {}).clearedUpTo || 0); return cfCache.get(th); };
     const out = [];
     for (const m of rows) {
-      if (o.by && m.sender !== o.by) continue;
+      if (!o.all && m.id <= floor(m.thread)) continue;
       const t = S.thrById.get(m.thread);
       const live = markFor(m.ref);
       const at = m.refPx;

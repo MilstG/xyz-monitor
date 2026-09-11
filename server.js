@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.11-64";
+const VERSION = "2026.09.11-65";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -344,6 +344,14 @@ function adminPwOk(pw) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+// The IP a rate limiter may key on. X-Forwarded-For is client-writable except for the LAST
+// element, which the edge proxy in front of this service appends itself — taking the first
+// element (the old behavior) let any caller mint a fresh key per request and walk straight
+// past every damper below.
+function clientIp(req) {
+  const xff = String(req.headers["x-forwarded-for"] || "").split(",").pop().trim();
+  return xff || String(req.ip || "");
+}
 // Brute-force damper for /login: 8 wrong passwords from one IP = 15 min lockout. In-memory —
 // a restart clears it, which is fine; this is a speed bump, not a vault. Map is size-capped
 // so a spoofed-IP flood can't grow it unbounded.
@@ -654,6 +662,9 @@ async function main() {
       if (u === "/api/health" || u === "/logout" || u === "/login"
           || u === "/join" || u.startsWith("/join/") || u === "/claim" || u === "/bootstrap"
           || u === "/reset" || u === "/reset/code"
+          // The invite-request hand is FOR people with no session — behind the gate it was
+          // unreachable by exactly its stated audience. The route is its own throttle (1/IP-hour).
+          || u === "/api/dm/request-invite"
           // A site icon is not protected content, and 401ing it only puts a spurious console
           // error on the login page of every signed-out visitor.
           || u === "/icon.svg" || u === "/manifest.webmanifest" || u === "/favicon.ico") return;
@@ -765,7 +776,7 @@ async function main() {
   //   3. the legacy shared password                -> a session that can ONLY reach /claim
   //   4. nothing                                   -> 401, and the IP damper counts it
   fastify.post("/login", { bodyLimit: 8 * 1024 }, async (req, reply) => {
-    const ip = String(req.headers["x-forwarded-for"] || req.ip).split(",")[0].trim();
+    const ip = clientIp(req);
     const lockedMin = loginLockedFor(ip);
     if (lockedMin) { reply.code(429); return { ok: false, error: `too many attempts — locked for ${lockedMin} min` }; }
     const b = req.body || {};
@@ -849,7 +860,7 @@ async function main() {
   });
 
   fastify.post("/join", { bodyLimit: 8 * 1024 }, async (req, reply) => {
-    const ip = String(req.headers["x-forwarded-for"] || req.ip).split(",")[0].trim();
+    const ip = clientIp(req);
     if (loginLockedFor(ip)) { reply.code(429); return { ok: false, error: "too many attempts — try again shortly" }; }
     const code = decodeURIComponent(getCookie(req, "xyzinv") || "");
     const b = req.body || {};
@@ -887,7 +898,7 @@ async function main() {
     return htmlNoStore(reply).send(authPage({ mode: "forgot" }));
   });
   fastify.post("/reset", { bodyLimit: 4 * 1024 }, async (req, reply) => {
-    const ip = String(req.headers["x-forwarded-for"] || req.ip).split(",")[0].trim();
+    const ip = clientIp(req);
     if (loginLockedFor(ip)) { reply.code(429); return { ok: false, error: "too many attempts — try again shortly" }; }
     const handle = String((req.body || {}).handle || "").trim();
     const r = ACCOUNTS.otpRequest(handle);
@@ -912,7 +923,7 @@ async function main() {
     return htmlNoStore(reply).send(authPage({ mode: "otp" }));
   });
   fastify.post("/reset/code", { bodyLimit: 8 * 1024 }, async (req, reply) => {
-    const ip = String(req.headers["x-forwarded-for"] || req.ip).split(",")[0].trim();
+    const ip = clientIp(req);
     if (loginLockedFor(ip)) { reply.code(429); return { ok: false, error: "too many attempts — try again shortly" }; }
     const handle = decodeURIComponent(getCookie(req, "xyzotp") || "");
     if (!handle) { reply.code(400); return { ok: false, error: "start again from the reset page" }; }
@@ -1089,9 +1100,15 @@ async function main() {
   fastify.post("/api/dm/request-invite", { bodyLimit: 2 * 1024 }, (req, reply) => {
     reply.header("cache-control", "no-store");
     if (meOf(req)) return { ok: true, already: true };
-    const ip = String(req.headers["x-forwarded-for"] || req.ip).split(",")[0].trim();
+    const ip = clientIp(req);
     if (Date.now() - (inviteAsk.get(ip) || 0) < 3600e3) return { ok: true, sent: true };   // idempotent to the asker — no spam lever
-    if (inviteAsk.size > 2000) inviteAsk.clear();
+    // Purge expired entries before the size cap; clear() as the fallback wiped every legitimate
+    // IP's throttle the moment an attacker filled the table.
+    if (inviteAsk.size > 2000) {
+      const cut = Date.now() - 3600e3;
+      for (const [k, t] of inviteAsk) if (t < cut) inviteAsk.delete(k);
+      if (inviteAsk.size > 2000) return { ok: true, sent: true };   // still full of live keys: swallow, never wipe
+    }
     inviteAsk.set(ip, Date.now());
     // The name rides into a Telegram HTML message: markup-significant characters go, at the door.
     const who = String((req.body || {}).name || "").replace(/[<>&\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60);
