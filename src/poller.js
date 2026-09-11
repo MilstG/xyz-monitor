@@ -2,7 +2,7 @@
 // Owns all Hyperliquid I/O. Polls the universe, backfills candle history, samples OI,
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket, createCoinalyze } = require("./hyperliquid");
-const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly } = require("./compute");
+const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly, closedDailyCloses } = require("./compute");
 const { claimGeometryOk, clusterDays, evMeta, capPerUniverse, detectCascExhaust, latestCascade, tradeableNow } = require("./compute");
 const { sectorAuditDecide, mergeSectorAudit, sectorAuditDue } = require("./compute");
 const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFeatures, featureCounts, featureSettable, featureScopeVis, coinScope, scopeFilterSignals, scopeFilterActionable, scopeEventVisible, epLatSplit } = require("./compute");
@@ -157,7 +157,7 @@ const EARN_ALIAS = { BRKB: "BRK.B" }; // xyz ticker -> US exchange symbol where 
 // the shared 60/min Finnhub budget (news + earnings + this).
 const FUND_ALIAS = EARN_ALIAS;
 const FUND_BATCH = 3;              // tickers per 60s tick (2 calls each: metric + profile2)
-const FUND_TTL = 22 * HOUR;        // a name is "due" only once its cache is this stale
+const FUND_DUE_TTL = 22 * HOUR;    // a name is "due" only once its cache is this stale (the SEC cache's own FUND_TTL is a different, inner constant)
 // Signals whose claim spans a session boundary (drift, gap, breakout follow-through): an earnings
 // print inside the horizon is a different return distribution than the study sample, so the
 // evidence contribution is capped — same mechanism and same cap as the no-live-edge guard.
@@ -177,8 +177,9 @@ function rnd(x, dp) { return Number.isFinite(x) ? +x.toFixed(dp) : null; }
 function sig(x, n) { return Number.isFinite(x) ? (x === 0 ? 0 : +x.toPrecision(n)) : null; }
 const sigq = sig;   // alias for scopes that shadow `sig` locally (buildDaily declares its content-signature as `sig`)
 
-function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, pushFetch: pushFetchOpt, extFetch: extFetchOpt, t13fCap: t13fCapOpt, congressGap: congressGapOpt, congressConc: congressConcOpt }) {
+function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, pushFetch: pushFetchOpt, extFetch: extFetchOpt, metaFetch: metaFetchOpt, t13fCap: t13fCapOpt, congressGap: congressGapOpt, congressConc: congressConcOpt }) {
   const rows = new Map();          // coin -> row
+  const fetchMeta = metaFetchOpt || fetchMetaAndCtxs;   // harness: inject a universe reply without network
   const hist = store.loadAll(Date.now() - OI_RETENTION); // coin -> [[ts, oi], ...]
   let order = [];
   let benchCoin = null;
@@ -255,7 +256,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   let earnCache = null, earnVer = 0, earnSig = "", lastEarnOk = 0, earnErr = null;   // /api/earnings payload + freshness
   let trendCache = null, trendVer = 0, trendSig = "", trendBuilt = 0, trendByCoin = new Map();   // /api/trend — lazy, memoized, ETag rides content
   const earnMap = new Map();   // ticker -> sorted upcoming [{d, s, eps}] for badge/guard proximity lookups
-  let earnPrints = [], earnHistDone = false, earnStudy = {};   // past prints (persisted, self-accruing) + per-ticker reaction stats
+  let earnPrints = [], earnHistDone = false, earnHistBusy = false, earnStudy = {};   // past prints (persisted, self-accruing) + per-ticker reaction stats
   let earnVoids = new Set();   // operator tombstones (ticker|date): feed-garbage prints, permanently ignored at every ingest point
   const regimeHist = store.loadRegime(Date.now() - REGIME_RETENTION);   // [[ts, corr], ...]
   let curCorr = null, curCorrPct = null, curCorrN = 0, lastRegimeSample = 0;
@@ -568,9 +569,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
 
   async function pollUniverse() {
     let data;
-    try { data = await fetchMetaAndCtxs(dex); }
+    try { data = await fetchMeta(dex); }
     catch (e) { log("universe poll failed: " + e.message); return; }
     const meta = data[0], ctxs = data[1], uni = (meta && meta.universe) || [];
+    // A 200 with an empty or badly shortened universe is a broken reply, not a delisting wave:
+    // acting on it deleted every row AND its in-memory OI history (the main-dex branch already
+    // refuses a failed poll for exactly this reason). Keep the last good roster and try again.
+    if (!Array.isArray(uni) || !uni.length || (order.length && uni.length < order.length / 2)) {
+      log(`universe poll: refusing a ${Array.isArray(uni) ? uni.length : "non-array"}-market reply against a ${order.length}-market roster`);
+      return;
+    }
     order = uni.map((u) => u.name);
     const seen = new Set();
     let newCount = 0;
@@ -610,7 +618,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // heavy data) and kept in `seen` so the removal sweep never deletes their warm state mid-day.
   async function pollMainUniverse(seen, hourNow, addNew) {
     let md = null;
-    try { md = await fetchMetaAndCtxs(MAIN_DEX); }
+    try { md = await fetchMeta(MAIN_DEX); }
     catch (e) { log("main-dex poll failed: " + e.message); }
     if (!md) { for (const k of rows.keys()) if (!k.includes(":")) seen.add(k); return; }   // failed poll must not delete crypto rows
     try {
@@ -714,10 +722,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const histDays = r.uni === "main" ? MAIN_SPINE_DAYS : HOURLY_HISTORY_DAYS;
     const spine = Array.isArray(r.hourlyRaw) ? r.hourlyRaw : null;   // packed [[t,o,h,l,c,v], ...]
     const firstT = spine && spine.length ? +spine[0][0] : Infinity;
-    const deep = spine && spine.length > 48 && firstT <= now - (histDays - (r.uni === "main" ? 14 : 30)) * DAY;
+    // "Deep" = the spine already covers everything a wide pull could return. The age test alone
+    // can never be true for a market listed less than histDays-30 ago, so every young listing
+    // re-pulled the 130-weight window on every refresh, forever — 6.5x the tail's budget for the
+    // one class of market a dex that auto-detects listings has most of. A completed wide pull
+    // stamps the spine as full; that stamp is cleared whenever the spine is rebuilt from scratch.
+    const deep = spine && spine.length > 48
+      && (r.hourlyFull === true || firstT <= now - (histDays - (r.uni === "main" ? 14 : 30)) * DAY);
     if (!deep) {
       const wide = await fetchCandles(coin, "1h", now - histDays * DAY, now, r.uni === "main" ? MAIN_HOURLY_WEIGHT : HOURLY_FETCH_WEIGHT);
-      if (Array.isArray(wide)) r.hourlyRaw = packHours(wide);
+      if (Array.isArray(wide)) { r.hourlyRaw = packHours(wide); r.hourlyFull = r.hourlyRaw.length > 48; }
       else if (!spine) r.hourlyRaw = null;           // keep a shallow spine over nothing if the wide pull fails
     } else {
       const lastT = spine.length ? +spine[spine.length - 1][0] : 0;
@@ -744,6 +758,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const c = r.uni === "main"
       ? await fetchCandles(coin, "1d", now - MAIN_DAILY_DAYS * DAY, now, MAIN_DAILY_WEIGHT)
       : await fetchCandles(coin, "1d", now - 370 * DAY, now, 27);
+    // A non-array body (an upstream error page with a 200) must not replace a warm 370d spine:
+    // needDaily would see a truthy value with a fresh stamp and not retry for six hours.
+    if (!Array.isArray(c)) throw new Error("daily candles: non-array reply");
     r.dailyRaw = c; r.dailyTs = Date.now(); r.isNew = false;
     buildDaily();
   }
@@ -1679,7 +1696,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     if (!d) return;
     if (Array.isArray(d.open)) for (const e of d.open) if (e && e.key) ledgerOpen.set(e.key, e);
     if (Array.isArray(d.closed)) {
-      if (d.closed.length > 4000 && store.archiveClosed) store.archiveClosed(d.closed.slice(0, d.closed.length - 4000));
+      if (d.closed.length > 4000 && store.archiveClosed) { store.archiveClosed(d.closed.slice(0, d.closed.length - 4000)); ledgerDirty = true; }   // dirty, or a deploy loop archives the same overflow again
       ledgerClosed = d.closed.slice(-4000);
     }
     // Settled-board record restore: episodes ride the same blob (see persistLedger). Shape-guarded
@@ -2707,7 +2724,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     for (const r of activeMarkets().concat(crypto ? mainMarkets() : [])) {
       if (r.delisted || r.px == null) continue;
       if (++yN % BUILD_YIELD_EVERY === 0) await buildYield();
-      const closes = deepDaily.get(r.coin) || dc.daily[r.coin] || null, dayFunding = dc.funding[r.coin] || null;   // -28: detectors read full depth; the wire's cap is the wire's business
+      // CLOSED bars only: the raw daily spine ends with today's forming UTC bar, and the studies and
+      // detectors below read the last element as a close — so "close-confirmed" setups fired at 00:10
+      // UTC and every study's forward returns drifted on each rebuild (the -20 shadows already trim
+      // theirs at `ccl`). One trim here covers studiesFor, compressionNow and every detector in this loop.
+      const closes = closedDailyCloses(deepDaily.get(r.coin) || dc.daily[r.coin] || null), dayFunding = dc.funding[r.coin] || null;   // -28: detectors read full depth; the wire's cap is the wire's business
       const st = studiesFor(r, closes, dayFunding);
       const ac = acOf(r);
       if (st.bigmove && st.bigmove.raw) { feed(ac, "bigmove", "d1", st.bigmove.raw.d1); }
@@ -4523,7 +4544,18 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       ttlHours: 72, error: newsErr, count: items.length,
       flStat: { lastOk: edgarStat.lastOk, lastErr: edgarStat.lastErr, names: edgarStat.names, roster: earnEligible().size } };
   }
+  // The four feed ticks below run on setInterval with no in-flight guard and, until now, no
+  // fetch timeout: one hung socket meant a new run every minute, each mutating newsItems and
+  // rewriting news.json underneath the others. Every fetch now carries a signal and each tick
+  // skips itself while its previous run is still going.
+  let newsCompanyBusy = false, newsTapeBusy = false, tgBusy = false, edgarBusy = false;
+  const FEED_FETCH_MS = 20000;
   async function newsCompanyTick() {
+    if (newsCompanyBusy) return;
+    newsCompanyBusy = true;
+    try { await newsCompanyTickBody(); } finally { newsCompanyBusy = false; }
+  }
+  async function newsCompanyTickBody() {
     const token = process.env.FINNHUB_TOKEN || "";
     if (!token) { newsErr = "FINNHUB_TOKEN not set"; buildNewsPayload(); return; }
     const roster = [...earnEligible().values()];
@@ -4535,8 +4567,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     for (const m of batch) {
       newsTkAt.set(m.ticker, now);   // stamped before the call: a failing name must not wedge the rotation
       try {
-        const res = await fetch(`https://finnhub.io/api/v1/company-news?symbol=${encodeURIComponent(m.ticker)}&from=${iso(now - 3 * DAY)}&to=${iso(now)}&token=${encodeURIComponent(token)}`,
-          { headers: { accept: "application/json" } });
+        const res = await fetch(`https://finnhub.io/api/v1/company-news?symbol=${encodeURIComponent(m.ticker)}&from=${iso(now - 3 * DAY)}&to=${iso(now)}`,
+          { headers: { accept: "application/json", "X-Finnhub-Token": token }, signal: AbortSignal.timeout(FEED_FETCH_MS) });
         if (!res.ok) { if (res.status === 401 || res.status === 403) { newsErr = `Finnhub company-news: HTTP ${res.status} (entitlement)`; } continue; }
         got = got.concat(gateCompanyItems(newsParse(await res.json(), m.ticker)));
         newsErr = null;
@@ -4550,11 +4582,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
   }
   async function newsTapeTick() {
+    if (newsTapeBusy) return;
+    newsTapeBusy = true;
+    try { await newsTapeTickBody(); } finally { newsTapeBusy = false; }
+  }
+  async function newsTapeTickBody() {
     const token = process.env.FINNHUB_TOKEN || "";
     if (!token) { newsErr = "FINNHUB_TOKEN not set"; buildNewsPayload(); return; }
     try {
-      const res = await fetch(`https://finnhub.io/api/v1/news?category=general&token=${encodeURIComponent(token)}`,
-        { headers: { accept: "application/json" } });
+      const res = await fetch(`https://finnhub.io/api/v1/news?category=general`,
+        { headers: { accept: "application/json", "X-Finnhub-Token": token }, signal: AbortSignal.timeout(FEED_FETCH_MS) });
       if (!res.ok) { newsErr = `Finnhub news: HTTP ${res.status}`; buildNewsPayload(); return; }
       newsItems = mergeNews(newsItems, newsParse(await res.json(), null), Date.now());
       pruneSecTape();
@@ -4614,7 +4651,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const now = Date.now();
     const due = roster
       .map((m) => ({ sym: fundSym(m.ticker) }))
-      .filter((x) => now - (fundAt.get(x.sym) || 0) >= FUND_TTL)
+      .filter((x) => now - (fundAt.get(x.sym) || 0) >= FUND_DUE_TTL)
       .sort((a, b) => (fundAt.get(a.sym) || 0) - (fundAt.get(b.sym) || 0));
     if (!due.length) return;
     const batch = due.slice(0, FUND_BATCH);
@@ -4622,13 +4659,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     for (const { sym } of batch) {
       fundAt.set(sym, now);   // stamped BEFORE the calls: a failing/empty name must not wedge the rotation, and "tried but empty" is exactly the foreign-listing signal getFundamentals reads
       try {
-        const mres = await fetch(`https://finnhub.io/api/v1/stock/metric?symbol=${encodeURIComponent(sym)}&metric=all&token=${encodeURIComponent(token)}`,
-          { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) });
+        const mres = await fetch(`https://finnhub.io/api/v1/stock/metric?symbol=${encodeURIComponent(sym)}&metric=all`,
+          { headers: { accept: "application/json", "X-Finnhub-Token": token }, signal: AbortSignal.timeout(20000) });
         if (!mres.ok) { if (mres.status === 401 || mres.status === 403) fundErr = `Finnhub metric: HTTP ${mres.status} (entitlement)`; continue; }
         const mj = await mres.json();
         let pj = {};
-        const pres = await fetch(`https://finnhub.io/api/v1/stock/profile2?symbol=${encodeURIComponent(sym)}&token=${encodeURIComponent(token)}`,
-          { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) });
+        const pres = await fetch(`https://finnhub.io/api/v1/stock/profile2?symbol=${encodeURIComponent(sym)}`,
+          { headers: { accept: "application/json", "X-Finnhub-Token": token }, signal: AbortSignal.timeout(20000) });
         if (pres.ok) pj = await pres.json();
         const rec = parseFundamentals(mj, pj, now);
         if (rec) { fundData.set(sym, rec); changed = true; fundErr = null; }
@@ -4704,13 +4741,34 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
     return m;
   }
+  // A learned alias is write-once and re-gates the whole tape, so a headline crafted to steer the
+  // classifier into returning "the" or "and" for a roster ticker would attribute broad swaths of
+  // the tape to that name. An alias must be a name: no stopwords, a capital or a digit somewhere,
+  // and it must not already match more than a fifth of the current headlines.
+  const ALIAS_STOP = new Set(["the", "and", "for", "with", "from", "that", "this", "inc", "corp", "stock", "stocks", "shares", "market", "markets", "news", "today", "report", "company", "group", "holdings", "said", "says", "will", "after", "before", "over", "under", "into", "than", "more", "less", "new", "big", "top", "best", "buy", "sell", "trade", "price", "rally", "drop", "surge", "fall"]);
+  function aliasOk(n, T) {
+    const low = n.toLowerCase().trim();
+    if (low.length < 3 || ALIAS_STOP.has(low)) return false;
+    if (!/[A-Z0-9]/.test(n)) return false;
+    if (low === String(T).toLowerCase()) return true;
+    const heads = newsItems.map((a) => String(a.h || "").toLowerCase());
+    if (heads.length >= 10) {
+      const hits = heads.filter((h) => h.includes(low)).length;
+      if (hits > heads.length * 0.2) return false;
+    }
+    return true;
+  }
   async function tgTick() {
-    if (!tgChannels.length) return;
+    if (!tgChannels.length || tgBusy) return;
+    tgBusy = true;
+    try { await tgTickBody(); } finally { tgBusy = false; }
+  }
+  async function tgTickBody() {
     const roster = tgRoster();
     let got = [];
     for (const ch of tgChannels) {
       try {
-        const res = await fetch(`https://t.me/s/${encodeURIComponent(ch)}`, { headers: { accept: "text/html" } });
+        const res = await fetch(`https://t.me/s/${encodeURIComponent(ch)}`, { headers: { accept: "text/html" }, signal: AbortSignal.timeout(FEED_FETCH_MS) });
         if (!res.ok) { tgStatus.set(ch, { lastOk: (tgStatus.get(ch) || {}).lastOk || null, error: "HTTP " + res.status, posts: 0 }); continue; }
         const { items, blocks } = parseTgPreview(await res.text(), ch, Date.now());
         if (!items.length && blocks > 0) {
@@ -4766,6 +4824,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   let edgarStat = { lastOk: null, lastErr: null, lastErrAt: null, ok: 0, http4: 0, http403: 0, fail: 0, names: 0, lastItems: 0 };
   let edgarLastLogged = "";
   async function edgarTick() {
+    if (edgarBusy) return;
+    edgarBusy = true;
+    try { await edgarTickBody(); } finally { edgarBusy = false; }
+  }
+  async function edgarTickBody() {
     const roster = [...earnEligible().values()];
     if (!roster.length) return;
     roster.sort((a, b) => (edgarTkAt.get(a.ticker) || 0) - (edgarTkAt.get(b.ticker) || 0));
@@ -4775,7 +4838,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       edgarTkAt.set(m.ticker, now);   // stamped before the call: a failing name must not wedge the rotation
       try {
         const res = await fetch(`https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${encodeURIComponent(m.ticker)}&type=&dateb=&owner=include&count=20&output=atom`,
-          { headers: { accept: "application/atom+xml", "user-agent": SEC_UA } });
+          { headers: { accept: "application/atom+xml", "user-agent": SEC_UA }, signal: AbortSignal.timeout(FEED_FETCH_MS) });
         if (!res.ok) {
           // 4xx on a foreign listing is expected; 403 across the board means the UA or the
           // egress IP is being rejected — the difference is exactly what the counters show
@@ -5064,10 +5127,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   const etfCache = new Map();      // SYMBOL -> { at, res }
   const extInflight = new Map();   // "fund:T" | "etf:S" -> Promise
   let cikMaps = null, cikMapsAt = 0;   // { co: SYM->{cik,name}, mf: SYM->{cik,seriesId,name} }
-  async function extGet(url, kind) {
+  async function extGet(url, kind, extraHeaders) {
     const ac = new AbortController(); const t = setTimeout(() => ac.abort(), EXT_TIMEOUT_MS);
     try {
-      const res = await extFetch(url, { headers: { "user-agent": SEC_UA, accept: kind === "xml" ? "application/xml" : "application/json" }, signal: ac.signal });
+      const res = await extFetch(url, { headers: Object.assign({ "user-agent": SEC_UA, accept: kind === "xml" ? "application/xml" : "application/json" }, extraHeaders || {}), signal: ac.signal });
       if (!res.ok) return { ok: false, error: "HTTP " + res.status };
       return { ok: true, body: kind === "xml" ? await res.text() : await res.json() };
     } catch (e) { return { ok: false, error: "fetch failed: " + (e && e.message) }; } finally { clearTimeout(t); }
@@ -7002,7 +7065,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     return ok !== false;
   }
   async function finnProfile(sym, token) {
-    const r = await extGet("https://finnhub.io/api/v1/stock/profile2?symbol=" + encodeURIComponent(sym) + "&token=" + encodeURIComponent(token), "json");
+    const r = await extGet("https://finnhub.io/api/v1/stock/profile2?symbol=" + encodeURIComponent(sym), "json", { "X-Finnhub-Token": token });
     if (!r.ok || !r.body || typeof r.body !== "object" || !r.body.name) return null;
     return { name: r.body.name || null, exchange: r.body.exchange || null, ipo: r.body.ipo || null,
       finnhubIndustry: r.body.finnhubIndustry || null };
@@ -7297,7 +7360,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (!e || !e.t || !Array.isArray(e.names)) continue;
       const T = String(e.t).toUpperCase();
       if (nameLearned[T] || !pend.names.includes(T)) continue;
-      const clean = e.names.filter((n) => typeof n === "string" && n.trim().length >= 3).map((n) => n.trim().slice(0, 60)).slice(0, 4);
+      const clean = e.names.filter((n) => typeof n === "string" && n.trim().length >= 3).map((n) => n.trim().slice(0, 60))
+        .filter((n) => aliasOk(n, T)).slice(0, 4);
       if (clean.length) { nameLearned[T] = clean; applied++; }
     }
     applied += regatePending();
@@ -7316,11 +7380,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // epsActual/revenueActual on the same calendar row after the report) and then graduates into the
   // persisted print history.
   function earnCalFetchers(token, elig) {
+    // One retry on 429 honouring Retry-After: the free tier is 60 calls/min and the chunk walks
+    // below are paced under it, but the news lane shares the key.
     const getCal = async (f, t) => {
-      const res = await fetch(`https://finnhub.io/api/v1/calendar/earnings?from=${f}&to=${t}&token=${encodeURIComponent(token)}`,
-        { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) });
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      return parseEarningsCalendar(await res.json(), elig);
+      for (let a = 0; ; a++) {
+        const res = await fetch(`https://finnhub.io/api/v1/calendar/earnings?from=${f}&to=${t}`,
+          { headers: { accept: "application/json", "X-Finnhub-Token": token }, signal: AbortSignal.timeout(20000) });
+        if (res.status === 429 && a < 2) { const ra = parseInt(res.headers.get("retry-after"), 10); await sleep((Number.isFinite(ra) && ra > 0 ? Math.min(60, ra) : 15) * 1000); continue; }
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return parseEarningsCalendar(await res.json(), elig);
+      }
     };
     // The free-tier calendar TRUNCATES long windows, serving the FAR end first — a 19-day
     // earnings-season pull returned only its last 9 days and silently dropped a same-day NFLX
@@ -7353,7 +7422,6 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   //
   // Re-pulling is idempotent by construction: mergeEarnPrints dedupes on ticker+date and upgrades a
   // row in place, so a second walk over the same window changes nothing and a wider one only adds.
-  let earnHistBusy = false;
   async function earnHistBackfill(opts) {
     const o = opts || {};
     if (earnHistBusy) return { ok: false, error: "a history backfill is already running" };
@@ -7404,13 +7472,18 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       // history" across the board). Flag is VERSIONED (histDone2): volumes that completed the
       // truncated v1 backfill re-run it chunked once; the print merge dedupes and upgrades in
       // place, so re-pulling is idempotent. Flagged done only on full chunk success.
-      if (!earnHistDone) {
+      // 52 chunks at 1.2s ≈ 50 calls/min, under the free tier's 60 (the old 300ms pace was ~200/min
+      // and failed the whole walk on the first 429, every six hours, forever). The busy flag is
+      // shared with the operator-forced backfill so the two never reassign earnPrints past each other.
+      if (!earnHistDone && !earnHistBusy) {
+        earnHistBusy = true;
         try {
-          const hist = await getCalChunked(now - 370 * DAY, now - 6 * DAY, 7, 300);
+          const hist = await getCalChunked(now - 370 * DAY, now - 6 * DAY, 7, 1200);
           earnPrints = mergeEarnPrints(earnPrints, hist, now);
           earnHistDone = true;
           log(`Earnings history backfill (chunked): ${hist.length} past print(s) retrieved (feed depth is whatever the free tier serves — study self-accrues from here)`);
         } catch (he) { log("Earnings history backfill failed (will retry): " + (he && he.message)); }
+        finally { earnHistBusy = false; }
       }
       const entries = [], past = [];
       for (const e of parsed) ((earnDayDiff(e.d, now) >= 0) ? entries : past).push(e);
@@ -7893,6 +7966,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         if (d1) log(`1m opening-hour archive: ${d1} bar(s) evicted past ${M1_RETENTION_DAYS}d`);
       } catch (e) { log("1m evict failed: " + (e && e.message)); }
     }
+    try {   // the GC and coverage tail below ran bare: a throw here was an unhandled rejection off a setInterval (fatal under Node 22)
     // Heavy-data GC for markets delisted > 7d. They stay in Hyperliquid's meta forever (so the
     // row itself must survive to keep the universe index-aligned for the WS feed), but there's
     // no reason to keep holding their 60d hourly spine, funding map and OI history in memory.
@@ -7915,6 +7989,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     for (const r of rows.values()) if (r.fundH && r.fundH.size) { let d = false; for (const t of r.fundH.keys()) if (t < fcut) { r.fundH.delete(t); d = true; } if (d) r._fVer = (r._fVer || 0) + 1; }
     const fc = fundingCoverage();
     log(`Daily audit: ${total} active market(s), ${pending} awaiting history backfill; hourly spine: ${hc.coins} market(s), ${hc.candles} candle(s); funding[${fc.endpoint}]: ${fc.coins} market(s), ${fc.points} hour(s)`);
+    } catch (e) { log("maintenance tail failed: " + (e && e.message)); }
   }
 
   async function start() {
@@ -8046,9 +8121,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     if (crypto) czBoot();
     hydrateDuel();
     if (duel.ic.length) log(`Restored score duel: ${duel.ic.length} IC day(s) — the MOM vs MOM+ record carries across this deploy`);
-    await pollUniverse();
-    seedFundingFromOI();
-    buildSnapshot(); buildDaily();
+    // The boot poll and first builds are isolated the same way the analytics builds below are: a
+    // throw here used to reject start() before any interval was armed — a zombie process with a
+    // green healthcheck. sampleOI/buildSnapshot were bare; the fetch inside pollUniverse was not.
+    try { await pollUniverse(); } catch (e) { log("boot universe poll failed: " + (e && e.message)); }
+    try { seedFundingFromOI(); } catch (e) { log("boot funding seed failed: " + (e && e.message)); }
+    try { buildSnapshot(); } catch (e) { log("boot snapshot build failed: " + (e && e.message)); }
+    try { buildDaily(); } catch (e) { log("boot daily build failed: " + (e && e.message)); }
     // Isolate each universe's boot build: a throw here used to abort the rest of start() — including
     // the analytics rebuild interval registered further down — so one bad build left BOTH tabs stuck
     // on "warming up the spines" forever with no retry. Now a failure is logged and the interval still
@@ -8203,6 +8282,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     let hi = Number.isFinite(+to) ? +to : now;
     let lo = Number.isFinite(+from) ? +from : hi - 30 * DAY;
     if (lo > hi) { const t = lo; lo = hi; hi = t; }
+    // Bounded by retention and snapped to the bar grid: from=0 used to scan the whole 370d @ 5m
+    // archive on the request path, and every distinct millisecond minted a fresh cache entry.
+    hi = Math.min(hi, now + HOUR);
+    lo = Math.max(lo, hi - 370 * DAY);
+    lo = Math.floor(lo / 300000) * 300000; hi = Math.ceil(hi / 300000) * 300000;
     // BASE SPLICE (build 2026.08.18-04). Where the 1m opening-hour archive covers a span, it is
     // AUTHORITATIVE and the overlapping 5m rows are dropped rather than merged — the two archives
     // hold the same trades, so folding both in would double every volume in the window and put a
@@ -9707,11 +9791,13 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
               const rets = []; for (let i = 1; i < cls.length; i++) rets.push((cls[i] / cls[i - 1] - 1) * 100);
               sd0 = retStd(rets.slice(-30), 15);
             } catch (_) {}
-            openLedger(rr, "airead", { score: 0, reading: "" }, bias === "long" ? 1 : -1,
+            // Inside the serialised build chain: this runs after an awaited model call, i.e. at an
+            // arbitrary point relative to a yielding buildSignals that mutates ledgerOpen.
+            await chainBuild("aireadClaim", async () => openLedger(rr, "airead", { score: 0, reading: "" }, bias === "long" ? 1 : -1,
               { sd0: sd0 != null ? +sd0.toFixed(3) : undefined, psd: bias, pn: 1,
                 stp: +(+vdv).toPrecision(6),
                 mv: tg ? +(Math.abs(tg.value / mk - 1) * 100).toFixed(2) : undefined,
-                rm: used }, 0);
+                rm: used }, 0));
           }
         }
       } catch (e) { log("airead claim open failed (isolated, report unaffected): " + (e && e.message)); }
@@ -9982,9 +10068,28 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     askHits.push(now);
     // Enrich each row with the canonical company name from sectors.js (server-owned, so the
     // analyst maps ticker->company reliably instead of guessing). Unseeded names stay ticker-only.
+    // The client's compact rows are ACCEPTED only for names on the live board, only for the keys
+    // the terminal ships, only as finite numbers — and the mark is the server's, not theirs.
+    // Before this the 256 KB body went verbatim into the prompt: any member could inflate every
+    // call to tens of thousands of tokens against the shared pool, or feed the analyst fabricated
+    // "live" numbers it is instructed to treat as the board's.
+    const ASK_KEYS = new Set(["t", "px", "d1", "f", "fp", "sqz", "mom", "vs", "oi", "vol", "doi", "beta", "dd", "sector", "h1", "h4", "d7", "d30", "gap", "pr", "rv", "adr", "v30", "rs", "hitr", "ddy", "yo", "mo", "m20", "m50", "m100", "m200", "vw"]);
+    const live = new Map();
+    for (const r of rows.values()) if (!r.delisted && r.ticker) live.set(String(r.ticker).toUpperCase(), r);
     const markets = Array.isArray(ctx.universe) ? ctx.universe.slice(0, 160).map((m) => {
-      const nm = companyName(m && m.t); return nm ? Object.assign({ name: nm }, m) : m;
-    }) : [];
+      if (!m || typeof m !== "object") return null;
+      const t = String(m.t || "").toUpperCase().slice(0, 24), lr = live.get(t) || null;
+      if (live.size && !lr) return null;   // a board exists and this name is not on it
+      const o = { t };
+      for (const k of Object.keys(m)) {
+        if (!ASK_KEYS.has(k) || k === "t") continue;
+        const v = m[k];
+        if (k === "sector") { if (typeof v === "string") o.sector = v.slice(0, 40); continue; }
+        if (typeof v === "number" && Number.isFinite(v) && Math.abs(v) < 1e15) o[k] = v;
+      }
+      if (lr && lr.px > 0) o.px = +(+lr.px).toPrecision(9);   // the mark every read anchors on is the server's
+      const nm = companyName(t); return nm ? Object.assign({ name: nm }, o) : o;
+    }).filter(Boolean) : [];
     const tickerSet = new Set(markets.map((m) => String(m && m.t || "").toUpperCase()).filter(Boolean));
     // Terminal calls run at medium effort — fast enough for a console, deep enough to plan or
     // reason correctly. The token budgets look oversized for one-line outputs because OpenAI
@@ -11259,6 +11364,19 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   const PUSH_DRAIN_MS = 1000;               // outbox tick; the gap above does the actual pacing
   const PUSH_MAX_TRIES = 5;
   const PUSH_LOG_RING = 40;
+  // Command replies are throttled per chat: every /help from ANY chat used to earn a forced reply
+  // on the one shared outbox, so a stranger who found the bot could keep the 1-per-3s drain busy
+  // and evict real alerts. Linked chats get a small per-minute allowance; unlinked chats also get
+  // an hourly one and share a global per-minute budget so twenty strangers cannot do together what
+  // one cannot alone. Bad /start codes count toward a per-chat silence (they used to be free).
+  const PUSH_CMD_PER_MIN = 3;
+  const PUSH_CMD_UNLINKED_PER_HOUR = 10;
+  const PUSH_CMD_STRANGERS_PER_MIN = 5;
+  const PUSH_START_FAILS = 5;               // bad codes per chat per 10 min before that chat is ignored
+  const PUSH_START_FAIL_WINDOW = 10 * 60 * 1000;
+  const pushCmdSeen = new Map();            // chat -> [ts of replies earned]
+  const pushStartFails = new Map();         // chat -> [ts of rejected /start codes]
+  let pushStrangerSeen = [];                // ts of replies earned by unlinked chats, all of them
   const pushFetch = pushFetchOpt || ((...a) => fetch(...a));
   const PUSH_TOKEN = () => process.env.TG_BOT_TOKEN || "";
   const pushOn = () => !!PUSH_TOKEN();
@@ -11356,7 +11474,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const now = Date.now();
     for (const [c, v] of pushCodes) if (now - v.t > PUSH_LINK_TTL) pushCodes.delete(c);
     let code = "";
-    for (let i = 0; i < 6; i++) code += PUSH_CODE_ALPHABET[Math.floor(Math.random() * PUSH_CODE_ALPHABET.length)];
+    for (let i = 0; i < 6; i++) code += PUSH_CODE_ALPHABET[require("crypto").randomInt(PUSH_CODE_ALPHABET.length)];   // binds a chat AND stamps admin: never Math.random
     pushCodes.set(code, { t: now, owner: owner || "", admin: !!isAdmin });
     return { ok: true, code, expiresAt: now + PUSH_LINK_TTL };
   }
@@ -11377,7 +11495,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       // Admin-ness is stamped at LINK time from the browser that minted the code. Re-linking is how
       // it changes, which is deliberate: an alert channel whose contents silently change when a
       // cookie expires elsewhere is worse than one you re-authorise on purpose.
-      admin: !!rec.admin || (prev ? !!prev.admin : false),
+      admin: !!rec.admin,
       chat: key, name: name || key, since: prev ? prev.since : Date.now(),
       // A new recipient starts CAUGHT UP, never with the backlog: the ring holds up to 200 events
       // and nobody wants their first message from this bot to be two hundred stale setups.
@@ -11481,6 +11599,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
 
   async function pushUpdatesTick() {
     if (!pushOn()) return;
+    const offsetBefore = pushOffset;
     const r = await tgApi("getUpdates", { offset: pushOffset || undefined, timeout: 0, allowed_updates: ["message"] });
     if (!r.ok) { pushLastErr = r.error; return; }
     pushLastErr = null;
@@ -11492,11 +11611,15 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       const txt = m.text.trim();
       const start = txt.match(/^\/start(?:@\S+)?\s+(\S+)/i);
       if (start) {
+        const now = Date.now(), key = String(chat);
+        const fails = (pushStartFails.get(key) || []).filter((t) => now - t < PUSH_START_FAIL_WINDOW);
+        if (fails.length >= PUSH_START_FAILS) { pushStartFails.set(key, fails); continue; }   // silent: no oracle, no reply budget
         const res = pushBind(start[1], chat, name);
-        pushEnqueue(String(chat), res.ok
+        if (!res.ok) { fails.push(now); pushStartFails.set(key, fails); } else pushStartFails.delete(key);
+        pushReply(chat, res.ok
           ? "<b>Linked.</b>\nYou'll get alerts here. Send /stop to unlink."
           : (res.error === "expired" ? "That code has expired \u2014 generate a new one in the alerts panel."
-            : "That code isn't valid \u2014 check the alerts panel for a current one."), true);
+            : "That code isn't valid \u2014 check the alerts panel for a current one."));
         continue;
       }
       if (/^\/stop(?:@\S+)?$/i.test(txt)) {
@@ -11505,7 +11628,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         // Telegram account is a stronger claim than any browser handle. /stop must always work —
         // it is the one escape hatch that needs no panel, no cookie and no admin.
         if (had) pushUnlink(chat, null, true);
-        pushEnqueue(String(chat), had ? "<b>Unlinked.</b>\nNo further alerts will be sent here." : "You weren't linked.", true);
+        pushReply(chat, had ? "<b>Unlinked.</b>\nNo further alerts will be sent here." : "You weren't linked.", had);
         continue;
       }
       // Direct-message reply bridge (build 2026.08.31-47). COMMAND-ONLY, deliberately: people
@@ -11515,36 +11638,66 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       const rm = /^\/r(?:@\S+)?(?:\s+([\s\S]+))?$/i.exec(txt);
       if (rm) {
         const body = (rm[1] || "").trim();
-        if (!dmBridge) pushEnqueue(String(chat), "Messages aren't available on this deployment.", true);
-        else if (!body) pushEnqueue(String(chat), "Send <code>/r your message</code>, or <code>/r @handle your message</code>.", true);
+        if (!dmBridge) pushReply(chat, "Messages aren't available on this deployment.");
+        else if (!body) pushReply(chat, "Send <code>/r your message</code>, or <code>/r @handle your message</code>.");
+        else if (!pushRecipients.has(String(chat))) pushReply(chat, "Not linked. Open the alerts panel for a link code, then send /start CODE.");
         else {
           let res;
           try { res = dmBridge(String(chat), body); }
           catch (e) { res = { ok: false, error: "That didn't send \u2014 try again." }; }
-          pushEnqueue(String(chat), res && res.ok ? "\u2713 Sent." : "\u26a0 " + ((res && res.error) || "Could not send."), true);
+          pushReply(chat, res && res.ok ? "\u2713 Sent." : "\u26a0 " + ((res && res.error) || "Could not send."));
         }
         continue;
       }
       if (/^\/(status|help)(?:@\S+)?$/i.test(txt)) {
         const r2 = pushRecipients.get(String(chat));
-        pushEnqueue(String(chat), r2
+        pushReply(chat, r2
           ? "<b>Linked</b> \u00b7 classes: " + (r2.classes && r2.classes.length ? r2.classes.join(", ") : "all")
             + "\n/r &lt;message&gt; replies to your last message notification \u00b7 /r @handle &lt;message&gt; picks the person."
             + "\n/stop to unlink."
-          : "Not linked. Open the alerts panel for a link code, then send /start CODE.", true);
+          : "Not linked. Open the alerts panel for a link code, then send /start CODE.");
       }
     }
-    if (pushOffset) persistPush();
+    pushCmdPrune();
+    if (pushOffset && pushOffset !== offsetBefore) persistPush();   // every 20s poll used to rewrite push.json whether or not the cursor moved
+  }
+  // One reply per command, and only when the chat has budget left. `linkedOverride` lets /stop's
+  // confirmation ride the linked allowance even though the chat was just unlinked.
+  function pushReply(chat, text, linkedOverride) {
+    const key = String(chat), now = Date.now();
+    const linked = linkedOverride != null ? !!linkedOverride : pushRecipients.has(key);
+    const seen = (pushCmdSeen.get(key) || []).filter((t) => now - t < 3600e3);
+    if (seen.filter((t) => now - t < 60e3).length >= PUSH_CMD_PER_MIN) { pushCmdSeen.set(key, seen); return false; }
+    if (!linked) {
+      pushStrangerSeen = pushStrangerSeen.filter((t) => now - t < 60e3);
+      if (seen.length >= PUSH_CMD_UNLINKED_PER_HOUR || pushStrangerSeen.length >= PUSH_CMD_STRANGERS_PER_MIN) { pushCmdSeen.set(key, seen); return false; }
+      pushStrangerSeen.push(now);
+    }
+    seen.push(now); pushCmdSeen.set(key, seen);
+    // `force` (skip the hourly ALERT cap) only for a linked person: their command reply is not an
+    // alert. A stranger's reply never forces anything and is marked so the drain sends alerts first.
+    pushEnqueue(key, text, linked, 0, true);
+    return true;
+  }
+  function pushCmdPrune() {
+    const now = Date.now();
+    for (const [k, arr] of pushCmdSeen) { const a = arr.filter((t) => now - t < 3600e3); if (a.length) pushCmdSeen.set(k, a); else pushCmdSeen.delete(k); }
+    for (const [k, arr] of pushStartFails) { const a = arr.filter((t) => now - t < PUSH_START_FAIL_WINDOW); if (a.length) pushStartFails.set(k, a); else pushStartFails.delete(k); }
   }
 
   // ---- outbox ---------------------------------------------------------------------------------
   // Bounded, paced, and never silently lossy: an overflow increments a counter the panel shows and
   // the next delivered message discloses. `force` bypasses the per-recipient hourly cap for replies
   // to a human who just typed a command at the bot — a /stop confirmation is not an alert.
-  function pushEnqueue(chat, text, force, after) {
+  function pushEnqueue(chat, text, force, after, reply) {
     if (!text) return;
-    if (pushQueue.length >= PUSH_QUEUE_MAX) { pushQueue.shift(); pushDropped++; }
-    pushQueue.push({ chat: String(chat), text, tries: 0, at: Date.now(), force: !!force, after: after || 0 });
+    if (pushQueue.length >= PUSH_QUEUE_MAX) {
+      // Overflow evicts a bot reply before it evicts an alert: a dropped "/help" answer costs a
+      // retype, a dropped setup costs the setup.
+      const ri = pushQueue.findIndex((q) => q.reply);
+      if (ri >= 0) pushQueue.splice(ri, 1); else { pushQueue.shift(); pushDropped++; }
+    }
+    pushQueue.push({ chat: String(chat), text, tries: 0, at: Date.now(), force: !!force, after: after || 0, reply: !!reply });
   }
   function pushRecent(chat, now) {
     const r = pushRecipients.get(String(chat));
@@ -11564,7 +11717,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     // their cap parked everyone else's alerts, a minute at a time, until it cleared.
     const deliverable = (q) => (!q.after || q.after <= now)
       && (q.force || pushRecent(q.chat, now) < PUSH_CAP_HOUR);
-    const idx = pushQueue.findIndex(deliverable);
+    // Alerts first, then bot replies: a reply can wait a pacing gap, an alert is the product.
+    let idx = pushQueue.findIndex((q) => !q.reply && deliverable(q));
+    if (idx < 0) idx = pushQueue.findIndex(deliverable);
     if (idx < 0) {
       // Nothing sendable this tick. If something is due but capped, re-check in a minute instead
       // of spinning the drain: the cap HOLDS, it never drops — the message keeps its place and
@@ -12085,8 +12240,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // the generation path, comparing against the stance the previous cached report published.
   function aiFlipCheck(coin, prevRep, nextRep) {
     try {
-      const a = prevRep && prevRep.report && prevRep.report.action;
-      const b = nextRep && nextRep.report && nextRep.report.action;
+      // Stored reports carry computed.action (aiAssemble); `.report.action` never existed, so this
+      // class could never fire — and the test fixture had been written to the same wrong shape.
+      const a = prevRep && prevRep.computed && prevRep.computed.action;
+      const b = nextRep && nextRep.computed && nextRep.computed.action;
       if (!a || !b || !a.stance || !b.stance) return null;
       if (a.stance === b.stance) return null;
       const r = rows.get(coin);
@@ -12424,10 +12581,10 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
       const day = schedDueAt(res, now, tz);
       if (!day) continue;
       if (landSent.get(rec.chat) === day) continue;
-      landSent.set(rec.chat, day);
       let b = null;
       try { b = await generateLandscape(now); }
       catch (e) { log("landscape generate failed (isolated): " + (e && e.message)); continue; }
+      landSent.set(rec.chat, day);   // after generation, same as the brief: a throw leaves the day open to retry
       // force, like the brief: a scheduled send is not one of the day's alerts and must not be the
       // message the hourly cap happens to eat.
       pushEnqueue(rec.chat, b.message, true);
@@ -13172,9 +13329,9 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       const day = schedDueAt(res, now, tz);
       if (!day) continue;
       if (briefSent.get(rec.chat) === day) continue;
-      briefSent.set(rec.chat, day);
       let b = null;
       try { b = await generateBrief(now, tz); } catch (e) { log("brief generate failed (isolated): " + (e && e.message)); continue; }
+      briefSent.set(rec.chat, day);   // marked AFTER generation: a throw above must leave the day open to retry, not silently lost
       // force: a scheduled brief is not one of the day's alerts and must not be the message the
       // hourly cap happens to eat. Both parts ride force for the same reason — half a brief is worse
       // than none, and the cap must not be able to swallow the conclusions while delivering the data.
@@ -14360,6 +14517,10 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       if (!trendCache) trendCache = { ts: Date.now() };
       trendBuilt = Number.MAX_SAFE_INTEGER / 2;
     },
+    pollUniverseNow: pollUniverse,     // harness: one universe poll through the injected metaFetch
+    lastPollAt: () => lastPoll,        // /api/health: the stale flag reads this
+    aliasOkNow: aliasOk,               // harness: the learned-alias guard
+    orderNow: () => order.slice(),     // harness: the live roster
     seedRowNow: (coin, fields) => {   // harness: seed a synthetic market so builds are testable without network; main-universe seeds join the main roster exactly as the refresh would place them
       const r = Object.assign(getRow(coin), fields);
       if (Array.isArray(r.hourlyRaw)) r.hourlyRaw = packHours(r.hourlyRaw);   // seed the packed spine exactly as refreshHourly/hydrate would (accepts object or packed input)

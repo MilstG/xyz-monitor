@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
 <title>Milst Screener · Hyperliquid HIP-3</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -99,7 +99,7 @@
 <div class="controls">
   <div class="search">
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-    <input id="filter" type="text" placeholder="Filter ticker…" autocomplete="off" spellcheck="false"/>
+    <input id="filter" aria-label="Filter tickers" type="text" placeholder="Filter ticker…" autocomplete="off" spellcheck="false"/>
   </div>
   <span class="drillchip" id="drillchip" hidden></span>
   <div class="seg" id="grpseg" role="group" aria-label="Grouping" title="Group lens — the same board, one row per name, sector or industry. Sector/industry rows are the weighted average of exactly the names the table shows (hover any cell for weighting + coverage); click a group row to drill into its members.">
@@ -133,13 +133,13 @@
   <div class="filtermenu">
     <button class="btn" id="filtersBtn" aria-haspopup="true" aria-expanded="false" title="Volume / OI thresholds & watchlist">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/></svg>Filters<span class="filt-dot" id="filtDot" hidden></span>
-    </button>
+    </button><span id="fcount2" class="fchip-cnt" hidden></span>
     <div class="filterpop" id="filterpop" hidden>
       <div class="cphead">Filter the table</div>
       <div class="fpg"><span class="flbl" title="In millions by default: 1 = 1M, 0.1 = 100K. Suffixes override: 500k, 2.5b">24h Vol <span class="sec">(M)</span></span>
-        <input class="fnum" id="volMin" placeholder="min" autocomplete="off" spellcheck="false"/><span class="fdash">–</span><input class="fnum" id="volMax" placeholder="max" autocomplete="off" spellcheck="false"/></div>
+        <input class="fnum" id="volMin" aria-label="Minimum 24h volume" placeholder="min" autocomplete="off" spellcheck="false"/><span class="fdash">–</span><input class="fnum" id="volMax" aria-label="Maximum 24h volume" placeholder="max" autocomplete="off" spellcheck="false"/></div>
       <div class="fpg"><span class="flbl" title="In millions by default: 1 = 1M, 0.1 = 100K. Suffixes override: 500k, 2.5b">OI <span class="sec">(M)</span></span>
-        <input class="fnum" id="oiMin" placeholder="min" autocomplete="off" spellcheck="false"/><span class="fdash">–</span><input class="fnum" id="oiMax" placeholder="max" autocomplete="off" spellcheck="false"/></div>
+        <input class="fnum" id="oiMin" aria-label="Minimum open interest" placeholder="min" autocomplete="off" spellcheck="false"/><span class="fdash">–</span><input class="fnum" id="oiMax" aria-label="Maximum open interest" placeholder="max" autocomplete="off" spellcheck="false"/></div>
       <div class="fpg fpg-act">
         <button class="btn" id="watchOnly" title="Show only watchlisted tickers">★ only</button>
         <button class="btn" id="noteOnly" title="Show only names you have written a note on">◢ noted</button>
@@ -280,7 +280,7 @@
   <div class="controls">
     <div class="search">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-      <input id="corrsearch" type="text" placeholder="Focus tickers… e.g. AAPL, NVDA, SPX" autocomplete="off" spellcheck="false"/>
+      <input id="corrsearch" aria-label="Search correlation names" type="text" placeholder="Focus tickers… e.g. AAPL, NVDA, SPX" autocomplete="off" spellcheck="false"/>
     </div>
     <div class="seg" id="corrtf" role="group" aria-label="Correlation lookback">
       <span class="seglbl">lookback</span>
@@ -333,7 +333,7 @@
   <div class="controls" style="margin-bottom:10px;flex-wrap:wrap">
     <div class="search" data-tip="the audit trail behind the aggregate record: every visible claim the engine ever fired — filter by ticker, by signal type, or both. Outcomes shown in the unit each claim resolved in">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-      <input id="sighist-q" type="text" placeholder="Ticker history… e.g. MSTR" autocomplete="off" spellcheck="false"/>
+      <input id="sighist-q" aria-label="Search signal history" type="text" placeholder="Ticker history… e.g. MSTR" autocomplete="off" spellcheck="false"/>
     </div>
     <select id="sighist-ev" class="btn" title="Browse the claim history by signal type — every claim of that kind ever fired, across all tickers (or combined with the ticker search)"><option value="">any signal type…</option></select>
     <span id="sig-introtxt" class="sec" style="font-size:11.5px;line-height:1.5"></span>
@@ -387,7 +387,7 @@
   <div class="controls" style="flex-wrap:wrap">
     <div class="search" style="position:relative" data-tip="type a ticker from either universe — only names in the live universe match; free text never reaches the API">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-      <input id="ai-q" type="text" placeholder="Ticker… any universe" autocomplete="off" spellcheck="false"/>
+      <input id="ai-q" aria-label="Ask the analyst" type="text" placeholder="Ticker… any universe" autocomplete="off" spellcheck="false"/>
       <div class="ai-sug" id="ai-sug" hidden></div>
     </div>
     <span class="sec" id="ai-note" style="align-self:center;font-size:11.5px;line-height:1.5"></span>
@@ -481,7 +481,7 @@
 </section>
 
 <div class="drawer-bg" id="drawerbg"></div>
-<aside class="drawer" id="drawer" aria-hidden="true"></aside>
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-label="Ticker detail" aria-hidden="true"></aside>
 <div class="help-bg" id="helpbg" hidden></div>
 <div class="help-modal" id="helpmodal" hidden role="dialog" aria-modal="true" aria-label="How to read this tab"></div>
 <div class="help-bg" id="tchartbg" hidden></div>
@@ -492,19 +492,19 @@
   <div class="cmdk-list" id="cmdk-list"></div>
   <div class="cmdk-foot"><span><b>↑↓</b> move</span><span><b>⏎</b> open</span><span><b>⇧⏎</b> AI report</span><span><b>esc</b> close</span></div>
 </div>
-<div class="toast-wrap" id="toastwrap"></div>
+<div class="toast-wrap" id="toastwrap" aria-live="polite"></div>
 
 <button class="term-fab" id="termFab" title="Ask the board — natural-language query console (press ~)" aria-label="Open the ask-the-board terminal"><span class="tf-ic">▸_</span><span class="tf-t">Ask</span></button>
 <div class="term-panel" id="termPanel" hidden role="dialog" aria-label="Terminal — ask the board">
   <div class="tp-bar"><span class="tp-dot"></span><span class="tp-brand">Milst <b>Screener</b> · ask the board</span><span class="tp-lock" id="termLock" hidden title="AI generation is locked — run: admin unlock &lt;password&gt;">🔒 AI</span><span class="tp-budget" id="termBudget" title="shared ask-AI budget for the group — resets midnight UTC">ask&nbsp;<b>—</b></span><span class="tp-exp" id="termExpand" title="expand (bigger console)">⤢</span><span class="tp-min" id="termMin" title="minimize (Esc)">▾</span></div>
   <div class="tp-scroll" id="termScroll"></div>
-  <div class="tp-in"><span class="tp-pr">▸</span><span class="tp-wrap"><span id="termGhost"></span><textarea id="termCmd" rows="1" autocomplete="off" spellcheck="false" placeholder="ask anything — a ticker, 'top funding', 'most crowded shorts'…"></textarea></span></div>
+  <div class="tp-in"><span class="tp-pr">▸</span><span class="tp-wrap"><span id="termGhost"></span><textarea id="termCmd" aria-label="Terminal command" rows="1" autocomplete="off" spellcheck="false" placeholder="ask anything — a ticker, 'top funding', 'most crowded shorts'…"></textarea></span></div>
   <div class="tp-hint" id="termHint"></div>
 </div>
 
 <footer>
   Data: Hyperliquid public REST API, fetched once server-side and cached; your browser reads a single pre-computed snapshot.
-  Funding = annualized (hourly ×24×365), <span class="pos">green = positive</span>, <span class="neg">red = negative</span>.
+  Funding = annualized (hourly ×24×365), <span class="neg">red = positive (longs pay — crowded long)</span>, <span class="pos">green = negative (longs receive)</span>, the same colouring as the Funding heatmap and the sessions clock.
   <b>Momentum</b> (−100…+100): risk-adjusted 1h–30d returns × 7d trend quality, tilted by range position, then modulated by OI conviction; <span class="hotdot">●</span> = volume above the market's own norm.
   <b>MOM+</b> = the candidate score running head-to-head with it (regime-qualified OI + funding-crowding haircut), adjudicated on daily forward rank IC in the Backtest tab's Score duel — promotion only on a locked verdict.
   <b>vs S&amp;P</b> = excess return over the window. <b>ΔOI</b> = open-interest change over the window with a regime tag
@@ -512,7 +512,7 @@
   OI history is stored server-side and persists across restarts. New HIP-3 listings are detected automatically and backfilled. Not investment advice.
 </footer>
 
-<script src="/app.js"></script>
+<script src="/app.js" defer></script>
   
 </body>
 </html>

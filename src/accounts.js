@@ -451,6 +451,8 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
 
     pinSet: db.prepare("UPDATE dm_msg SET pinnedAt = ?, pinnedBy = ? WHERE id = ?"),
     pinsOf: db.prepare("SELECT * FROM dm_msg WHERE thread = ? AND pinnedAt IS NOT NULL AND deletedAt IS NULL ORDER BY pinnedAt DESC LIMIT 20"),
+    pinsCount: db.prepare("SELECT COUNT(*) AS n FROM dm_msg WHERE thread = ? AND pinnedAt IS NOT NULL AND deletedAt IS NULL"),
+    readAllOf: db.prepare("SELECT uid, readMsgId FROM dm_read WHERE thread = ?"),
 
     watchAdd: db.prepare("INSERT OR IGNORE INTO dm_watch (uid, coin, at) VALUES (?,?,?)"),
     watchDrop: db.prepare("DELETE FROM dm_watch WHERE uid = ? AND coin = ?"),
@@ -508,6 +510,15 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     fs.renameSync(tmp, secretFile);
   }
 
+  // Keyed derivation for other secrets that must not be guessable. server.js used to derive its
+  // legacy session and alert-owner secrets from SITE_PASSWORD, which is a public constant when the
+  // password is unset — so a forged legacy token could reach /claim and the AI-cost routes on an
+  // open deployment. Deriving them from THIS random key keeps "rotate the password → invalidate"
+  // semantics (the label can carry the password) without a guessable fallback.
+  function deriveKey(label) {
+    return crypto.createHmac("sha256", sessionSecret).update("derive|" + String(label)).digest();
+  }
+
   function signSession(uid, epoch, expMs) {
     const mac = crypto.createHmac("sha256", sessionSecret)
       .update("s2|" + uid + "|" + epoch + "|" + expMs).digest("base64url");
@@ -546,13 +557,18 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   }
   function listUsers() { return [...users.values()].map(pub); }
 
+  // One scrypt per sign-in attempt whatever the handle: an unknown handle verifies against a decoy
+  // hashed ONCE at open (the old code hashed a fresh decoy AND verified it — two scrypts — so an
+  // unknown handle took twice as long as a wrong password), and a disabled account is verified and
+  // then refused with the same words as a wrong password rather than short-circuiting with a
+  // distinct message in microseconds. Tell a disabled member out of band; the door must not.
+  const DECOY_PW = hashPw(crypto.randomBytes(24).toString("base64url"));
   function login(handle, password) {
     const u = getUserByHandle(handle);
-    // Hash a decoy anyway so a wrong handle and a wrong password cost the same wall time; without
-    // it the response time alone enumerates which handles exist.
-    if (!u) { verifyPw(String(password || ""), hashPw("decoy-" + Math.random())); return { ok: false, error: "wrong handle or password" }; }
-    if (u.disabledAt) return { ok: false, error: "this account is disabled — ask the operator" };
-    if (!verifyPw(password, u.pw)) return { ok: false, error: "wrong handle or password" };
+    const bad = { ok: false, error: "wrong handle or password" };
+    if (!u) { verifyPw(String(password || ""), DECOY_PW); return bad; }
+    const okPw = verifyPw(password, u.pw);
+    if (!okPw || u.disabledAt) return bad;
     try { S.userSeen.run(Date.now(), u.uid); u.lastSeen = Date.now(); } catch (_) {}
     return { ok: true, user: pub(u), token: tokenFor(u, options.sessionDays || 30) };
   }
@@ -812,8 +828,16 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     let uid = (priorOwner && typeof priorOwner === "string" && !users.get(priorOwner)) ? priorOwner : "";
     if (!uid) uid = crypto.randomBytes(12).toString("base64url");
     const now = Date.now();
-    try { S.userIns.run(uid, lc, display, hashPw(password), 1, now, null, now); }
-    catch (_) { return { ok: false, error: "that handle is taken — pick another", field: "handle" }; }
+    const pw = hashPw(password);
+    // The count and the insert are one transaction: two concurrent bootstraps must not both win.
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        if (S.userCount.get().n > 0) { db.exec("ROLLBACK"); return { ok: false, error: "accounts already exist — sign in instead" }; }
+        S.userIns.run(uid, lc, display, pw, 1, now, null, now);
+        db.exec("COMMIT");
+      } catch (e) { try { db.exec("ROLLBACK"); } catch (_) {} throw e; }
+    } catch (_) { return { ok: false, error: "that handle is taken — pick another", field: "handle" }; }
     hydrate();
     const nu = users.get(uid);
     return { ok: true, user: pub(nu), token: tokenFor(nu, options.sessionDays || 30) };
@@ -829,8 +853,12 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (getUserByHandle(lc)) return { ok: false, error: "that handle is taken — pick another", field: "handle" };
     let uid = (priorOwner && typeof priorOwner === "string" && !users.get(priorOwner)) ? priorOwner : "";
     if (!uid) uid = crypto.randomBytes(12).toString("base64url");
-    const now = Date.now(), first = countUsers() === 0;
-    try { S.userIns.run(uid, lc, display, hashPw(password), first ? 1 : 0, now, null, now); }
+    // NEVER admin: account #1 is the operator's, minted through /bootstrap with ADMIN_PASSWORD.
+    // "First to claim becomes operator" handed the panel to whichever shared-password holder
+    // posted first on the deploy that introduced accounts, and two concurrent claims could both
+    // read a zero count.
+    const now = Date.now();
+    try { S.userIns.run(uid, lc, display, hashPw(password), 0, now, null, now); }
     catch (_) { return { ok: false, error: "that handle is taken — pick another", field: "handle" }; }
     hydrate();
     const nu = users.get(uid);
@@ -1168,7 +1196,10 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       fs.writeFileSync(tmp, buf);
       fs.renameSync(tmp, path.join(fileDir, id));
     } catch (_) { return { ok: false, error: "could not store that file" }; }
-    S.fileIns.run(id, +threadId, uid, fileNameClean(name), sniff.mime, buf.length, sniff.inline, Date.now());
+    // The row is what the sweeper sees: a throw here (a STRICT type error on an odd threadId) used
+    // to strand up to 8 MB on disk forever.
+    try { S.fileIns.run(id, Math.trunc(+threadId), uid, fileNameClean(name), sniff.mime, buf.length, sniff.inline, Date.now()); }
+    catch (_) { try { fs.unlinkSync(path.join(fileDir, id)); } catch (_) {} return { ok: false, error: "could not store that file" }; }
     return { ok: true, file: S.fileById.get(id) };
   }
   // ---- retention --------------------------------------------------------------------------------
@@ -1337,10 +1368,12 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       lastAt: t.lastAt, muted: !!rd.muted, boardNotify: !!rd.boardNotify,
       // What the OTHER side has read, so "did my call land" is answerable. The data was already
       // being stored for unread counts; showing it costs a lookup.
-      seen: mem.filter((x) => x.uid !== uid).map((x) => ({
-        uid: x.uid, handle: (users.get(x.uid) || {}).display || "—",
-        readMsgId: (S.readGet.get(t.id, x.uid) || { readMsgId: 0 }).readMsgId })),
-      pins: S.pinsOf.all(t.id).length,
+      // One query for the whole thread's read cursors, not one per member: threads() runs this
+      // for every thread on every sync, and a 50-member board was fifty statements a thread.
+      seen: (() => { const rd2 = new Map(S.readAllOf.all(t.id).map((r) => [r.uid, r.readMsgId]));
+        return mem.filter((x) => x.uid !== uid).map((x) => ({
+          uid: x.uid, handle: (users.get(x.uid) || {}).display || "—", readMsgId: rd2.get(x.uid) || 0 })); })(),
+      pins: S.pinsCount.get(t.id).n,
       unread: S.msgUnread.get(t.id, Math.max(rd.readMsgId || 0, rd.clearedUpTo || 0), uid).n,
       // Closed for this viewer: off the rail until a newer message id passes the watermark.
       hidden: (rd.hiddenUpTo || 0) > 0 && (rd.hiddenUpTo || 0) >= (t.lastMsgId || 0),
@@ -1369,7 +1402,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const t = S.thrById.get(+threadId);
     if (!t || !isMember(t.id, uid)) return { ok: false, error: "no such conversation" };
     const b = Number.isFinite(+before) && +before > 0 ? +before : Number.MAX_SAFE_INTEGER;
-    const n = Math.min(Math.max(+limit || 50, 1), 200);
+    const n = Math.trunc(Math.min(Math.max(+limit || 50, 1), 200));
     const cf = (S.readGet.get(t.id, uid) || {}).clearedUpTo || 0;
     const rows = S.msgPage.all(t.id, b, cf, n).reverse().map((m) => wire(m, uid));
     return { ok: true, thread: t.id, info: threadInfo(t, uid), messages: rows,
@@ -1380,7 +1413,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   // message id is global rather than per-thread: a single `since` answers "what did I miss".
   function sync(uid, since, limit) {
     const s = Number.isFinite(+since) && +since >= 0 ? +since : 0;
-    const n = Math.min(Math.max(+limit || 200, 1), 500);
+    const n = Math.trunc(Math.min(Math.max(+limit || 200, 1), 500));
     const out = [];
     for (const t of S.thrMine.all(uid)) {
       const cf = (S.readGet.get(t.id, uid) || {}).clearedUpTo || 0;
@@ -1408,7 +1441,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const raw = String(q == null ? "" : q).trim();
     if (raw.length < 2) return { ok: true, q: raw, results: [] };
     const esc = raw.replace(/[\\%_]/g, (c) => "\\" + c);
-    const n = Math.min(Math.max(+limit || 50, 1), 100);
+    const n = Math.trunc(Math.min(Math.max(+limit || 50, 1), 100));
     // An optional thread scope: the JOIN already guarantees membership, so scoping is a WHERE
     // clause, never a second authorization path.
     const th = Number.isFinite(+threadId) && +threadId > 0 ? +threadId : null;
@@ -1519,7 +1552,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   // together, every call dies in the conversation it was made in.
   function calls(uid, opts) {
     const o = opts || {};
-    const n = Math.min(Math.max(+o.limit || 200, 1), 500);
+    const n = Math.trunc(Math.min(Math.max(+o.limit || 200, 1), 500));
     const by = o.by || null;
     const rows = o.all ? S.callsAll.all(by, by, n) : S.callsMine.all(uid, by, by, n);
     // The caller's own cleared floor holds here exactly as it does in history/sync/search: a
@@ -1604,7 +1637,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     try { S.auditAdd.run(uid, action, thread == null ? null : +thread, detail || null, Date.now()); } catch (_) {}
   }
   function adminThreads(limit) {
-    return S.thrAll.all(Math.min(Math.max(+limit || 200, 1), 500)).map((t) => {
+    return S.thrAll.all(Math.trunc(Math.min(Math.max(+limit || 200, 1), 500))).map((t) => {
       const mem = S.memAll.all(t.id);
       const last = S.msgLast.get(t.id);
       return { id: t.id, kind: t.kind, title: t.title || null, lastAt: t.lastAt,
@@ -1617,7 +1650,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const t = S.thrById.get(+threadId);
     if (!t) return { ok: false, error: "no such conversation" };
     const b = Number.isFinite(+before) && +before > 0 ? +before : Number.MAX_SAFE_INTEGER;
-    const n = Math.min(Math.max(+limit || 100, 1), 300);
+    const n = Math.trunc(Math.min(Math.max(+limit || 100, 1), 300));
     const rows = S.msgPage.all(t.id, b, 0, n).reverse();   // read-through: no per-viewer clear floor
     adminAudit(adminUid, "read-thread", t.id, "" + rows.length + " message(s)");
     return { ok: true, thread: t.id, kind: t.kind,
@@ -1634,7 +1667,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const raw = String(q == null ? "" : q).trim();
     if (raw.length < 2) return { ok: true, q: raw, results: [] };
     const esc = raw.replace(/[\\%_]/g, (c) => "\\" + c);
-    const n = Math.min(Math.max(+limit || 100, 1), 200);
+    const n = Math.trunc(Math.min(Math.max(+limit || 100, 1), 200));
     const rows = S.msgSearchAll.all("%" + esc + "%", n);
     adminAudit(adminUid, "search", null, raw.slice(0, 64) + " (" + rows.length + " hit(s))");
     return { ok: true, q: raw, results: rows.map((m) => {
@@ -1645,7 +1678,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
           : S.memAll.all(t.id).map((x) => (users.get(x.uid) || {}).display || x.uid).join(" ↔ ")) : "—" };
     }) };
   }
-  const adminAuditLog = (limit) => S.auditList.all(Math.min(Math.max(+limit || 100, 1), 500))
+  const adminAuditLog = (limit) => S.auditList.all(Math.trunc(Math.min(Math.max(+limit || 100, 1), 500)))
     .map((r) => ({ at: r.at, who: (users.get(r.uid) || {}).display || r.uid, action: r.action, thread: r.thread, detail: r.detail }));
 
   // ---- offline escalation ----------------------------------------------------------------------
@@ -1719,15 +1752,53 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     return send(uid, null, raw, null, { thread: lastThread, via: "telegram" });
   }
 
+  // The global message sequence alone — what an SSE poke needs. stats() also scans the invite
+  // table and was being called on every typing keystroke, fanned out to every peer.
+  function msgSeq() { return S.msgMaxId.get().m; }
   function stats() {
     return { users: users.size, admins: [...users.values()].filter((u) => u.isAdmin && !u.disabledAt).length,
       invitesOpen: S.invList.all().filter((i) => inviteState(i, Date.now()) === "open").length,
       messages: S.msgMaxId.get().m };
   }
 
+  // ---- backup + close --------------------------------------------------------------------------
+  // accounts.db is the one file on the volume with no other copy anywhere: users, password hashes,
+  // invites, every message and every attachment. VACUUM INTO writes a consistent, compacted copy
+  // while the database stays live (WAL readers keep reading, writers keep writing), into a rotated
+  // set beside the database — or into ACCOUNTS_BACKUP_DIR when the operator mounts a second
+  // volume, which is what turns "survives a bad migration" into "survives losing the volume".
+  // Deliberately NOT the GitHub ledger backup: this file carries PII.
+  let lastBackup = null;
+  function backup(dir, keep) {
+    const out = dir || path.join(dataDir, "backups");
+    const n = Number.isFinite(keep) && keep >= 1 ? Math.floor(keep) : 7;
+    try {
+      fs.mkdirSync(out, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+      const file = path.join(out, `accounts-${stamp}-${Date.now() % 100000}.db`);
+      const tmp = file + ".tmp";
+      try { fs.unlinkSync(tmp); } catch (_) {}
+      db.exec("VACUUM INTO '" + tmp.replace(/'/g, "''") + "'");
+      fs.renameSync(tmp, file);
+      const bytes = fs.statSync(file).size;
+      // Rotate: newest n stay, the rest go. Names sort chronologically by construction.
+      const old = fs.readdirSync(out).filter((f) => /^accounts-\d{8}-\d{6}-\d+\.db$/.test(f)).sort();
+      for (const f of old.slice(0, Math.max(0, old.length - n))) { try { fs.unlinkSync(path.join(out, f)); } catch (_) {} }
+      lastBackup = { at: Date.now(), file, bytes };
+      return { ok: true, file, bytes, kept: Math.min(n, old.length) };
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || String(e) };
+    }
+  }
+  function close() {
+    try { db.exec("PRAGMA wal_checkpoint(TRUNCATE);"); } catch (_) {}
+    try { db.close(); } catch (_) {}
+  }
+
   return {
     // identity
-    signSession, sessionUser, tokenFor, countUsers, getUser, getUserByHandle, listUsers, pub,
+    signSession, sessionUser, tokenFor, countUsers, getUser, getUserByHandle, listUsers, pub, deriveKey,
+    backup, close, lastBackup: () => lastBackup, msgSeq,
     login, setPassword, signOutEverywhere, setDisabled, setAdmin, renameUser, touch, hydrate,
     // invites
     mintInvite, readInvite, revokeInvite, listInvites, redeem, bootstrap, claim, inviteState,

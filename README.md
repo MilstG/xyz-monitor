@@ -220,7 +220,7 @@ instant, and the per-IP rate limit stops being a per-user problem.
   per browser in localStorage; the active layout shows a • when the live view has unsaved changes.
 - **Persistent OI** — open interest accrues over time and can't be re-fetched, so every
   sample is written to an append-only log on a mounted volume (`$DATA_DIR/oi.log`) and
-  reloaded on boot. It survives restarts and redeploys. Pruned to 31 days daily.
+  reloaded on boot. It survives restarts and redeploys. Retained 365 days: full resolution for 31, thinned to hourly beyond (the main-dex roster keeps a flat 31); pruned daily.
 - **WebSocket universe feed** — subscribes to `allDexsAssetCtxs` for real-time price /
   funding / OI pushes at zero rate-limit cost; REST drops to a slow reconciliation poll
   while the socket is healthy and instantly resumes 30s polling if it goes quiet.
@@ -230,6 +230,12 @@ instant, and the per-IP rate limit stops being a per-user problem.
   wasn't there before is logged (`NEW market detected: …`) and its candle history is
   backfilled immediately (new listings jump the queue). A daily audit line logs the active
   count and anything still awaiting backfill.
+
+## Design notes and mocks
+
+`docs/` holds the feature map, system map, mechanics and signal reference pages plus the design
+mocks that preceded the funding heatmap, notes, insiders and backtest-target work. They are not
+served by the app.
 
 ## Project layout
 

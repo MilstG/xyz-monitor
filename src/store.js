@@ -123,6 +123,53 @@ function openStore(dataDir) {
   const whaleFile = path.join(dataDir, "whale.json");        // 13F watchlist + cached quarterly books + unseen state + season builds
   let dbuf = [];
   let dPruning = false;   // hold deriv appends in dbuf during the streaming rewrite, same as the OI prune
+  let oiPreloaded = null; // set by preloadOI(); consumed once by the next loadAll()
+  // CONFIG-grade files (notes, rules, baskets, ledger): somebody typed these, or they are the
+  // record itself, and nothing can rebuild them. tmp+rename alone is durable only by ext4
+  // heuristics; on an overlay/network volume a kill after the rename can leave a zero-length file
+  // at the final path. So: write, fsync the data, rename, fsync the directory — and keep the
+  // previous version as .bak. On read, a file that does not parse is QUARANTINED (renamed with a
+  // timestamp) and the .bak tried, instead of being treated as first boot and overwritten empty
+  // on the next save — which is how a corrupt notes.json used to eat every note.
+  function saveConfig(file, data) {
+    const tmp = file + ".tmp";
+    const fd = fs.openSync(tmp, "w");
+    try { fs.writeSync(fd, JSON.stringify(data)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    try { if (fs.existsSync(file)) fs.copyFileSync(file, file + ".bak"); } catch (_) {}
+    fs.renameSync(tmp, file);
+    try { const dfd = fs.openSync(path.dirname(file), "r"); try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); } } catch (_) {}
+  }
+  function loadConfig(file, label) {
+    if (!fs.existsSync(file)) return null;
+    try { return JSON.parse(fs.readFileSync(file, "utf8")); }
+    catch (e) {
+      const q = file + ".corrupt-" + Date.now();
+      try { fs.renameSync(file, q); } catch (_) {}
+      console.error(`[store] ${label || path.basename(file)} did not parse (${e && e.message}) — quarantined as ${path.basename(q)}, trying the .bak`);
+      try { if (fs.existsSync(file + ".bak")) return JSON.parse(fs.readFileSync(file + ".bak", "utf8")); } catch (_) {}
+      return null;
+    }
+  }
+  // One row of oi.log -> [coin, ts, oi, funding|null], or null for anything that is not exactly the
+  // writer's four-field shape (a torn row is never a sample — see loadAll).
+  function parseOiLine(ln) {
+    if (!ln) return null;
+    const parts = ln.split("\t");
+    if (parts.length !== 4) return null;
+    const ts = +parts[1], oi = +parts[2];
+    if (!Number.isFinite(ts) || !Number.isFinite(oi)) return null;
+    const f = parts[3] !== "" ? +parts[3] : null;
+    return [parts[0], ts, oi, Number.isFinite(f) ? f : null];
+  }
+  function fileEndsWithNewline(f) {
+    try {
+      const sz = fs.statSync(f).size;
+      if (!sz) return true;
+      const fd = fs.openSync(f, "r");
+      try { const b = Buffer.alloc(1); fs.readSync(fd, b, 0, 1, sz - 1); return b[0] === 10; }
+      finally { fs.closeSync(fd); }
+    } catch (_) { return true; }
+  }
   let buf = [];
   let pruning = false;   // while true, hold appends in `buf` so we never touch the file mid-rewrite
   let hourlyWriting = false;   // while true, an async hourly NDJSON write is in flight — skip overlapping ticks
@@ -234,6 +281,7 @@ function openStore(dataDir) {
             if (!ln) return;
             const i1 = ln.indexOf("\t"), i2 = ln.indexOf("\t", i1 + 1);
             if (i1 < 0 || i2 < 0) return;
+            if (ln.indexOf("\t", i2 + 1) < 0) { removed++; return; }   // three fields: a torn row, never a sample
             const t = +ln.slice(i1 + 1, i2);
             if (!Number.isFinite(t)) { removed++; return; }
             const coin = ln.slice(0, i1);
@@ -264,15 +312,56 @@ function openStore(dataDir) {
       }
       return removed;
     },
+    // Streaming boot load. readFileSync + split materialised ~3x the file — a year of 5-minute
+    // samples is hundreds of MB — on the event loop at exactly the moment Railway's healthcheck
+    // decides whether the deploy is alive. server.js awaits this before building the poller, and
+    // loadAll() below hands the preloaded map over (once), so the poller keeps its synchronous
+    // constructor and every harness that calls loadAll() directly is unchanged.
+    async preloadOI() {
+      const m = new Map();
+      if (!fs.existsSync(file)) { oiPreloaded = m; return 0; }
+      const endsNl = fileEndsWithNewline(file);
+      let pending = null, n = 0;
+      const take = (ln) => {
+        const r = parseOiLine(ln);
+        if (!r) return;
+        let a = m.get(r[0]);
+        if (!a) { a = []; m.set(r[0], a); }
+        a.push([r[1], r[2], r[3]]); n++;
+      };
+      await new Promise((resolve, reject) => {
+        const input = fs.createReadStream(file, { encoding: "utf8" });
+        const rl = readline.createInterface({ input, crlfDelay: Infinity });
+        // readline emits a final partial line too; hold each line one step so the last one can be
+        // dropped when the file does not end in a newline (a torn append).
+        rl.on("line", (ln) => { if (pending != null) take(pending); pending = ln; });
+        rl.on("close", () => { if (pending != null && endsNl) take(pending); resolve(); });
+        rl.on("error", reject); input.on("error", reject);
+      });
+      for (const a of m.values()) a.sort((x, y) => x[0] - y[0]);
+      oiPreloaded = m;
+      return n;
+    },
     loadAll(since) {
       const m = new Map();
+      if (oiPreloaded) {
+        const pre = oiPreloaded; oiPreloaded = null;   // consumed: never hold two copies of the history
+        for (const [coin, a] of pre) { const f = since > 0 ? a.filter((r) => r[0] >= since) : a; if (f.length) m.set(coin, f); }
+        return m;
+      }
       try {
         if (!fs.existsSync(file)) return m;
-        const lines = fs.readFileSync(file, "utf8").split("\n");
+        const text = fs.readFileSync(file, "utf8");
+        // A crash mid-append leaves a torn final line ("coin\tts\t12" cut from "...\t123456.7\t0.01\n").
+        // The writer always emits four fields and ends every row with a newline, so anything after
+        // the last newline is not a sample — reading "12" as the OI would feed a fake -99.99% /
+        // +10^6% move into every squeeze and funding-flip base rate, and the next prune would
+        // re-emit it with a newline and make it permanent.
+        const lines = (text.endsWith("\n") ? text : text.slice(0, text.lastIndexOf("\n") + 1)).split("\n");
         for (const ln of lines) {
           if (!ln) continue;
           const parts = ln.split("\t");
-          if (parts.length < 3) continue;
+          if (parts.length !== 4) continue;
           const coin = parts[0], ts = +parts[1], oi = +parts[2];
           const f = parts.length >= 4 && parts[3] !== "" ? +parts[3] : null;
           if (!Number.isFinite(ts) || !Number.isFinite(oi) || ts < since) continue;
@@ -328,11 +417,8 @@ function openStore(dataDir) {
     // Signal ledger: every fired signal + its resolved out-of-sample outcome. Written atomically —
     // this file IS the track record; a truncated write would silently erase the honesty loop.
     saveLedger(data) {
-      try {
-        const tmp = ledgerFile + ".tmp";
-        fs.writeFileSync(tmp, JSON.stringify(data));
-        fs.renameSync(tmp, ledgerFile);
-      } catch (_) {}
+      try { saveConfig(ledgerFile, data); }
+      catch (_) {}
     },
     // Score-duel state (MOM vs MOM+ daily snapshots + rank-IC series). Same atomic write
     // discipline as the ledger blob: tmp + rename, so a crash mid-write never truncates the
@@ -347,9 +433,7 @@ function openStore(dataDir) {
     loadDuel() {
       try { return JSON.parse(fs.readFileSync(duelFile, "utf8")); } catch (_) { return null; }
     },
-    loadLedger() {
-      try { return JSON.parse(fs.readFileSync(ledgerFile, "utf8")); } catch (_) { return null; }
-    },
+    loadLedger() { return loadConfig(ledgerFile, "ledger.json"); },
     // Append-only archive for closed claims aged out of the in-memory retention cap: one JSON
     // line per entry, appended (never rewritten) to ledger-archive.jsonl on the volume. The
     // 4000-entry cap now bounds memory only — the record itself is permanent. Reads happen
@@ -397,50 +481,27 @@ function openStore(dataDir) {
     // so they get their own file: a corrupt delivery blob or a trimmed cache must never be able to
     // take the rule list with it. Same tmp+rename discipline as the ledger.
     saveRules(data) {
-      try {
-        const tmp = rulesFile + ".tmp";
-        fs.writeFileSync(tmp, JSON.stringify(data));
-        fs.renameSync(tmp, rulesFile);
-      } catch (_) {}
-    },
-    loadRules() {
-      try { if (fs.existsSync(rulesFile)) return JSON.parse(fs.readFileSync(rulesFile, "utf8")); }
+      try { saveConfig(rulesFile, data); }
       catch (_) {}
-      return null;
     },
+    loadRules() { return loadConfig(rulesFile, "alertrules.json"); },
     // Custom baskets: CONFIG like the rules above — somebody sat and typed a membership — so they
     // get their own file with the same tmp+rename discipline; a corrupt cache can never take the
     // registry with it. Built-in sector baskets are DERIVED at read time and never persisted here.
     saveBaskets(data) {
-      try {
-        const tmp = basketsFile + ".tmp";
-        fs.writeFileSync(tmp, JSON.stringify(data));
-        fs.renameSync(tmp, basketsFile);
-        return true;
-      } catch (_) { return false; }
+      try { saveConfig(basketsFile, data); return true; }
+      catch (_) { return false; }
     },
-    loadBaskets() {
-      try { if (fs.existsSync(basketsFile)) return JSON.parse(fs.readFileSync(basketsFile, "utf8")); }
-      catch (_) {}
-      return null;
-    },
+    loadBaskets() { return loadConfig(basketsFile, "baskets.json"); },
     // Per-ticker notes (build 2026.08.24-01). The highest-value CONFIG on the volume: a note is
     // prose somebody sat and typed about a name, and unlike a basket it cannot be reconstructed
     // from anything the server knows. Same tmp+rename discipline for exactly that reason — a
     // half-written file must never be able to eat the only copy of a thesis.
     saveNotes(data) {
-      try {
-        const tmp = notesFile + ".tmp";
-        fs.writeFileSync(tmp, JSON.stringify(data));
-        fs.renameSync(tmp, notesFile);
-        return true;
-      } catch (_) { return false; }
+      try { saveConfig(notesFile, data); return true; }
+      catch (_) { return false; }
     },
-    loadNotes() {
-      try { if (fs.existsSync(notesFile)) return JSON.parse(fs.readFileSync(notesFile, "utf8")); }
-      catch (_) {}
-      return null;
-    },
+    loadNotes() { return loadConfig(notesFile, "notes.json"); },
     // Weekly sector-audit record log (build 2026.08.05-02). Append-only in content, atomic in
     // write — CONFIG-grade like rules/baskets: an applied graduation is a classification the whole
     // board depends on, so a corrupt cache must never take it. Records are validated at fold time
@@ -833,11 +894,12 @@ function openStore(dataDir) {
       const m = new Map();
       try {
         if (!fs.existsSync(derivFile)) return m;
-        const lines = fs.readFileSync(derivFile, "utf8").split("\n");
+        const text = fs.readFileSync(derivFile, "utf8");
+        const lines = (text.endsWith("\n") ? text : text.slice(0, text.lastIndexOf("\n") + 1)).split("\n");   // drop a torn tail (see loadAll)
         for (const ln of lines) {
           if (!ln) continue;
           const p = ln.split("\t");
-          if (p.length < 5) continue;
+          if (p.length !== 5) continue;
           const ts = +p[1];
           if (!Number.isFinite(ts) || ts < since) continue;
           const row = [ts, p[2] === "" ? null : +p[2], p[3] === "" ? null : +p[3], p[4] === "" ? null : +p[4]];

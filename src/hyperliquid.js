@@ -21,48 +21,72 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const limiter = (() => {
   const MAX = 1150;
   let ev = [];
+  // A 429 from Hyperliquid pauses EVERY caller, not just the one that saw it: with 4% headroom
+  // under the 1200 cap, one caller backing off while the rest keep firing at full budget is how
+  // a blip turned into a minute of 429s. Retry-After when they send one, a growing pause if not.
+  let pausedUntil = 0;
   return {
     async acquire(w) {
+      w = Math.min(Math.max(0, w || 0), MAX);   // a weight above the window could never be granted
       for (;;) {
         const now = Date.now();
+        if (now < pausedUntil) { await sleep(Math.min(pausedUntil - now, 5000)); continue; }
         ev = ev.filter((e) => now - e.t < 60000);
         const used = ev.reduce((s, e) => s + e.w, 0);
         if (used + w <= MAX) { ev.push({ t: now, w }); return; }
-        await sleep(Math.max(60000 - (now - ev[0].t) + 40, 120));
+        const wait = ev.length ? 60000 - (now - ev[0].t) + 40 : 120;
+        await sleep(Math.max(wait, 120) + Math.floor(Math.random() * 200));
       }
     },
+    pause(ms) { pausedUntil = Math.max(pausedUntil, Date.now() + ms); },
     usage() {
       const now = Date.now();
       ev = ev.filter((e) => now - e.t < 60000);
       const used = ev.reduce((s, e) => s + e.w, 0);
-      return { used, max: MAX, pct: Math.round((100 * used) / MAX) };
+      return { used, max: MAX, pct: Math.round((100 * used) / MAX), pausedMs: Math.max(0, pausedUntil - now) };
     },
   };
 })();
 function limiterUsage() { return limiter.usage(); }
 
-async function infoPost(payload, weight) {
-  await limiter.acquire(weight);
+// Every ATTEMPT is charged to the limiter — the weight is spent on the wire whether or not the
+// reply is usable, and charging once for up to three sends was how retries overshot the cap. A
+// 4xx other than 429/408 is the request's fault and is not retried; the last failure does not
+// sleep before throwing.
+const RETRYABLE = (status) => status === 429 || status === 408 || status >= 500;
+async function infoPost(payload, weight, fetchImpl) {
+  const doFetch = fetchImpl || fetch;
   let lastErr;
   for (let a = 0; a < 3; a++) {
+    await limiter.acquire(weight);
     try {
       const ctrl = new AbortController();
       const to = setTimeout(() => ctrl.abort(), 20000);
       let res;
       try {
-        res = await fetch(API, {
+        res = await doFetch(API, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
           signal: ctrl.signal,
         });
       } finally { clearTimeout(to); }
-      if (res.status === 429) { await sleep(2500 * (a + 1)); continue; }
-      if (!res.ok) throw new Error("HTTP " + res.status);
+      if (res.status === 429) {
+        const ra = parseInt(res.headers && res.headers.get && res.headers.get("retry-after"), 10);
+        limiter.pause(Number.isFinite(ra) && ra > 0 ? Math.min(60, ra) * 1000 : 2500 * (a + 1));
+        lastErr = new Error("HTTP 429");
+        continue;
+      }
+      if (!res.ok) {
+        const err = new Error("HTTP " + res.status);
+        if (!RETRYABLE(res.status)) throw Object.assign(err, { fatal: true });
+        throw err;
+      }
       return await res.json();
     } catch (e) {
+      if (e && e.fatal) throw e;
       lastErr = e;
-      await sleep(700 * (a + 1));
+      if (a < 2) await sleep(700 * (a + 1) + Math.floor(Math.random() * 300));
     }
   }
   throw lastErr || new Error("request failed");
@@ -91,21 +115,25 @@ function createUniverseSocket({ onCtxs, log }) {
     return { enabled: false, healthy: () => false, status: () => ({ enabled: false }), close() {} };
   }
   let ws = null, pingT = null, closed = false;
-  let lastMsg = 0, msgs = 0, reconnects = 0, backoff = 1000, loggedUp = false;
+  // lastMsg: anything from the peer (pongs included) — proves the socket is alive.
+  // lastData: a ctxs event — proves the SUBSCRIPTION is alive. Health and the watchdog read the
+  // second: pongs kept a dead subscription looking healthy, REST dropped to its slow reconcile
+  // cadence, and the board went 150s stale while status said "connected".
+  let lastMsg = 0, lastData = 0, msgs = 0, reconnects = 0, backoff = 1000, loggedUp = false, gotData = false;
 
   function connect() {
     if (closed) return;
     try { ws = new WebSocket(WS_URL); } catch (_) { retry(); return; }
     ws.onopen = () => {
-      backoff = 1000;
-      lastMsg = Date.now();   // arm the watchdog at open, so a socket that never delivers a single message is also caught
+      gotData = false;   // backoff resets on the first DATA event, not here (accept-then-close must not loop at 1s)
+      lastMsg = Date.now(); lastData = lastMsg;   // arm the watchdog at open, so a socket that never delivers a single message is also caught
       try { ws.send(JSON.stringify({ method: "subscribe", subscription: { type: "allDexsAssetCtxs" } })); } catch (_) {}
       clearInterval(pingT);
       pingT = setInterval(() => {
         // Watchdog first: total silence past the threshold means the peer is gone even though
         // the socket claims open — force-close so onclose fires and the backoff reconnect runs.
         // Repeat fires while CLOSING are harmless (close() no-ops / throws into the catch).
-        if (Date.now() - lastMsg > WS_STALE_MS) { try { ws.close(); } catch (_) {} return; }
+        if (Date.now() - lastData > WS_STALE_MS) { try { ws.close(); } catch (_) {} return; }   // no DATA — dead peer or dead subscription, same cure
         try { if (ws && ws.readyState === 1) ws.send('{"method":"ping"}'); } catch (_) {}
       }, 45000);
     };
@@ -114,6 +142,8 @@ function createUniverseSocket({ onCtxs, log }) {
       if (!m || typeof m !== "object") return;
       if (m.channel === "pong" || m.channel === "subscriptionResponse") { lastMsg = Date.now(); return; }
       if (m.channel !== "allDexsAssetCtxs" || !m.data || !Array.isArray(m.data.ctxs)) return;
+      lastData = Date.now();
+      if (!gotData) { gotData = true; backoff = 1000; }
       lastMsg = Date.now(); msgs++;
       if (!loggedUp) { loggedUp = true; log("WebSocket universe feed LIVE (allDexsAssetCtxs) — prices now push in real time; REST drops to a slow reconciliation poll"); }
       try { onCtxs(m.data.ctxs); } catch (_) {}
@@ -124,7 +154,7 @@ function createUniverseSocket({ onCtxs, log }) {
   function retry() {
     if (closed) return;
     reconnects++;
-    setTimeout(connect, backoff);
+    setTimeout(connect, backoff + Math.floor(Math.random() * backoff * 0.4));   // jitter: a fleet reconnecting in lockstep is its own outage
     backoff = Math.min(backoff * 2, 60000);
   }
   connect();
@@ -132,7 +162,7 @@ function createUniverseSocket({ onCtxs, log }) {
   return {
     enabled: true,
     // healthy = we've decoded at least one ctxs event and heard from the server recently
-    healthy: () => msgs > 0 && Date.now() - lastMsg < 90000,
+    healthy: () => msgs > 0 && Date.now() - lastData < 90000,
     status: () => ({
       enabled: true,
       connected: !!(ws && ws.readyState === 1),
@@ -214,4 +244,4 @@ function createCoinalyze({ key, log }) {
   };
 }
 
-module.exports = { infoPost, fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket, createCoinalyze };
+module.exports = { infoPost, fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, limiter, createUniverseSocket, createCoinalyze };

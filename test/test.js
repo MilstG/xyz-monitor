@@ -355,7 +355,7 @@ test("ask-the-board 2C: analyst may use identity/business knowledge, scoped to t
     assert.ok(pol.includes(pin), `analyst identity/numbers rule missing: ${pin}`);
   // And the canonical name must actually be threaded onto each analyst row server-side, so the
   // model maps ticker->company from the payload rather than guessing.
-  assert.ok(pol.includes("const nm = companyName(m && m.t)") && pol.includes('require("./sectors")'),
+  assert.ok(pol.includes("const nm = companyName(t); return nm ? Object.assign({ name: nm }, o) : o;") && pol.includes('require("./sectors")'),
     "company-name injection not wired into askBoard markets");
   assert.ok(/companyName/.test(pol), "companyName must be imported/used in poller");
 });
@@ -658,11 +658,14 @@ test("gap study F-gap: the forward session uses the TRUE close, honoring early-c
   const spine = [];
   const start = Date.UTC(2025, 5, 20, 12, 0), end = Date.UTC(2025, 6, 3, 22, 0);
   const open = Date.UTC(2025, 6, 3, 13, 30), trueClose = Date.UTC(2025, 6, 3, 17, 0), phantom = Date.UTC(2025, 6, 3, 20, 0);
+  // A row's t is the bar's OPEN; its close is the print at t+1h (the -67 priceAsOf semantics), so
+  // the regimes are keyed on the bar's close time.
   for (let t = start; t <= end; t += HH) {
+    const ct = t + HH;
     let c = 100 + 0.3 * Math.sin(t / (7 * HH));   // gentle sub-threshold wiggle
-    if (t >= open && t < trueClose) c = 110;
-    else if (t >= trueClose && t < phantom) c = 130;
-    else if (t >= phantom) c = 101;
+    if (ct > open && ct < trueClose) c = 110;
+    else if (ct >= trueClose && ct < phantom) c = 130;
+    else if (ct >= phantom) c = 101;
     spine.push([t, c, c, c, c]);
   }
   // Gap windows: 11 tiny filler gaps (sub-threshold, to build the sd sample) on prior days, plus
@@ -1668,8 +1671,8 @@ test("pre-epoch crypto purge: claims stamped under the OLD geometry leave the le
     "const shPanel=d&&d.shadows&&(state.scope==='crypto'?d.shadows.main:d.shadows.xyz);",
     // Signals and Actionable are in scope for crypto again; markets stays PINNED public so the
     // tabVisible fallback can never itself be gated.
-    "const CRYPTO_VIEWS=new Set(['markets','trend','charts','report','corr','backtest','sessions','funding','signals','actionable'])",   // charts joined 2026.08.21-01, funding 2026.08.26-34 — both work in either universe
-    "if(!tabVisible(v)) v='markets';",
+    "const CRYPTO_VIEWS=new Set(['markets','trend','charts','report','corr','backtest','sessions','funding','signals','actionable','dm','notes'])",   // charts joined 2026.08.21-01, funding 2026.08.26-34 — both work in either universe
+    "if(!tabVisible(v)){",
     "strategy shadows (earning their record)"])
     assert.ok(app.includes(pin), `client scope pin missing: ${pin}`);
   // BOTH record-set selection sites must go through the scoped key — a hardcoded 'x' would show
@@ -4801,7 +4804,7 @@ test("client + server integrity: the Report tab ships end to end (markers, style
   // shadows at 216) for eight builds while the 370d retention sat unread. The loop must read the
   // deep map, and the deep map must be written before the wire slice.
   assert.ok(pol.includes("deepDaily.set(r.coin, dr);"), "full crypto tuples stashed for the signal loop");
-  assert.ok(pol.includes("const closes = deepDaily.get(r.coin) || dc.daily[r.coin] || null"), "the signal loop prefers full depth");
+  assert.ok(pol.includes("const closes = closedDailyCloses(deepDaily.get(r.coin) || dc.daily[r.coin] || null)"), "the signal loop prefers full depth (closed bars only, -67)");
 });
 
 test("ai report: OpenAI provider — Chat Completions shape, Bearer auth, Terra→Sol fallback on refusal", async () => {
@@ -6285,7 +6288,7 @@ test("fundamentals: poller module wired, gated on the earnings roster, price-tri
   // the ETag key folds a coarse px bucket so the live trio isn't frozen behind a cached body
   assert.ok(/Math\.round\(Math\.log\(r\.px\) \* 400\)/.test(pol), "fundamentalsKey must fold a coarse px bucket so the derived trio refreshes as the mark moves");
   // slow rotation + warm cache persistence
-  assert.ok(pol.includes("const FUND_TTL = 22 * HOUR"), "each name re-fetches at most ~daily (fundamentals are quarterly)");
+  assert.ok(pol.includes("const FUND_DUE_TTL = 22 * HOUR"), "each name re-fetches at most ~daily (fundamentals are quarterly)");
   assert.ok(pol.includes("hydrateFund()") && pol.includes("store.saveFund(") , "cache is persisted and restored across redeploys");
   assert.ok(sto.includes("saveFund(data)") && sto.includes("loadFund()"), "store must expose saveFund/loadFund");
   // server route via serveKeyed, exactly once, keyed off the poller
@@ -7126,7 +7129,7 @@ test("levels study -10: manifest — engine, control and exports are pinned", ()
   // DEFAULT closure: detectLevels with pass-through opts, and the walk feeding it the prefix only.
   assert.ok(/const detect = typeof o\.detect === "function" \? o\.detect\s*\n\s*: \(pb, px2, sd2\) => detectLevels\(pb, px2, sd2, dOpts\);/.test(cmp),
     "levelOutcomes' default detector must be the shipping detectLevels with pass-through opts (one code path)");
-  assert.ok(/const lv = detect\(b\.slice\(0, i \+ 1\), px, sd30\);/.test(cmp),
+  assert.ok(/const lv = detect\(b\.slice\(0, i \+ 1\), px, sdHere\);/.test(cmp),
     "the walk hands the detector the PREFIX only — injected or default alike");
   assert.ok(cmp.includes("// The null for a SET of levels is the mean of each level's own touch probability"),
     "the Jensen note must survive — it explains why grouped cells average per-event controls");
@@ -8900,7 +8903,7 @@ test("tabs: backtest is hidden from the strip by default without withdrawing the
   assert.ok(/\{v:'actionable',label:'Actionable'\}/.test(s), "the actionable tab must be listed in the command palette");
   // ...but the palette must FILTER on visibility, because it is a third route into a view that is
   // independent of the nav strip: without this, a gated tab stays reachable by name.
-  assert.ok(/CMDK_TABS\.filter\(t=>tabVisible\(t\.v\)/.test(s), "the command palette must filter on tabVisible");
+  assert.ok(/cmdkTabs\(\)\.filter\(t=>tabVisible\(t\.v\)/.test(s), "the command palette must filter on tabVisible");
   // HASH_VIEWS stays COMPLETE — the routing table lists every view, and the gate is applied at
   // dispatch. That is the difference from the old posture: an admin's #backtest still works, a public
   // caller's does not. A short routing table would instead make a tab unreachable for everyone.
@@ -9493,10 +9496,10 @@ test("client flags: tabVisible is the single composition point and every entry p
     "the row-scope predicate must survive untouched — activeRows() feeds the board through it");
   for (const [what, re] of [
     ["nav strip", /t\.hidden = !tabVisible\(t\.dataset\.view\)/],
-    ["showView", /if\(!tabVisible\(v\)\) v='markets';/],
+    ["showView", /if\(!tabVisible\(v\)\)\{[\s\S]{0,600}?v='markets'; \}/],
     ["applyScope", /if\(!tabVisible\(state\.view\)\) \{ showView\('markets'\); \}/],
     ["hash deep link", /HASH_VIEWS\.has\(h\) && tabVisible\(h\)/],
-    ["command palette", /CMDK_TABS\.filter\(t=>tabVisible\(t\.v\)/],
+    ["command palette", /cmdkTabs\(\)\.filter\(t=>tabVisible\(t\.v\)/],
     ["treemap installer", /btn\.hidden = !tabVisible\('treemap'\)/],
     ["treemap deep link", /==='treemap' && typeof showView==='function' && tabVisible\('treemap'\)/],
   ]) assert.ok(re.test(s), `${what} must route its visibility decision through tabVisible`);
@@ -9682,8 +9685,9 @@ test("BTC-excess leg + tape-day clustering: the two disclosures a correlated uni
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: true });
   const HOUR = 3600e3, now = Date.now();
   // BTC rose 10% over the window; ALT rose 15%. The raw leg says +15%, the excess leg +5%.
-  const spine = (from, to) => { const h = []; for (let i = 30; i >= 0; i--) {
-    const c = from + (to - from) * ((30 - i) / 30); h.push([now - i * HOUR, c, c, c, c, 1e5]); } return h; };
+  // 32 bars: the claim opens at now-30h and priceAsOf reads the bar that had CLOSED by then (-67).
+  const spine = (from, to) => { const h = []; for (let i = 31; i >= 0; i--) {
+    const c = from + (to - from) * ((31 - i) / 31); h.push([now - i * HOUR, c, c, c, c, 1e5]); } return h; };
   p.seedRowNow("BTC", { px: 110, ticker: "BTC", uni: "main", hourlyRaw: spine(100, 110), hourlyTs: now });
   p.seedRowNow("ALT", { px: 115, ticker: "ALT", uni: "main", hourlyRaw: spine(100, 115), hourlyTs: now });
   const e = p.openLedgerNow("ALT", "breakout", { score: 9, reading: "", play: { side: "long", stop: 94, target: 130 } }, 1, { sd0: 5 });
@@ -10603,7 +10607,7 @@ test("client: the feed is the record — fire* interrupt only, and read state is
     "…and against the clear watermark too, or the badge counts rows the panel no longer shows");
   assert.ok(/seenSeq:state\.alerts\.seenSeq/.test(app), "the watermark is persisted");
   assert.ok(/Number\.isFinite\(d\.seenSeq\)\) state\.alerts\.seenSeq=d\.seenSeq/.test(app), "…and restored");
-  assert.ok(/if\(pop\.hidden\)\{[^}]*alertMarkRead\(\);[^}]*\}/.test(app),
+  assert.ok(/function closeAlertPop\(\)\{[^}]*alertMarkRead\(\);/.test(app),
     "opening the bell marks the feed read (pinned as behaviour, not as an exact call list — the open handler legitimately gains loaders)");
 
   // A client cannot delete from the server's ring; "read" is the only state a browser owns here.
@@ -10958,7 +10962,7 @@ test("earnings alerts are scoped to open announced claims, once per report date"
 test("analyst flip fires only on an actual stance change", () => {
   const p = ctxHarness();
   p.seedRowNow("AAA", { ticker: "AAA", px: 10, uni: "xyz" });
-  const rep = (stance) => ({ report: { action: { stance, note: "because" } } });
+  const rep = (stance) => ({ computed: { action: { stance, note: "because" } } });   // the shape aiAssemble actually stores (-67)
   const ai = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "ai");
 
   assert.equal(p.aiFlipCheckNow("AAA", null, rep("wait")), null, "a first report is not a flip — there is nothing to have changed from");
@@ -10967,7 +10971,7 @@ test("analyst flip fires only on an actual stance change", () => {
   assert.equal(ai().length, 1, "the report changing its mind is the part worth interrupting for");
   assert.equal(ai()[0].from, "wait");
   assert.equal(ai()[0].to, "enter_on_pullback");
-  assert.equal(p.aiFlipCheckNow("AAA", rep("wait"), { report: {} }), null, "a malformed report is not a flip");
+  assert.equal(p.aiFlipCheckNow("AAA", rep("wait"), { computed: {} }), null, "a malformed report is not a flip");
   assert.equal(p.aiFlipCheckNow("AAA", rep("wait"), null), null);
 });
 
@@ -11643,7 +11647,7 @@ test("the drain picks the first ELIGIBLE item, so a deferred message cannot head
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   assert.ok(/const deliverable = \(q\) => \(!q\.after \|\| q\.after <= now\)/.test(pol)
-    && /const idx = pushQueue\.findIndex\(deliverable\);/.test(pol),
+    && /let idx = pushQueue\.findIndex\(\(q\) => !q\.reply && deliverable\(q\)\);\s*\n\s*if \(idx < 0\) idx = pushQueue\.findIndex\(deliverable\);/.test(pol),
     "a message held until 07:00 sitting at the head would block every urgent one behind it for hours");
   const drain = pol.slice(pol.indexOf("async function pushDrain()"), pol.indexOf("function pushLogAdd"));
   assert.ok(!/pushQueue\.shift\(\)/.test(drain), "every removal in the drain must target the chosen index, not the head");
@@ -11750,7 +11754,8 @@ test("ownership is a signed handle, not a guessable id, and legacy rows stay adm
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   // Signed so it cannot be forged, random so it cannot be guessed, HttpOnly so page script cannot
   // read it. It grants nothing except management of the recipients linked from that browser.
-  assert.ok(/const OWNER_SECRET = crypto\.createHash/.test(srv) && /function signOwner/.test(srv));
+  // Keyed by the accounts' random secret, never by the password alone (see the build -67 test below).
+  assert.ok(/OWNER_SECRET = ACCOUNTS\.deriveKey\("alert-owner"\)/.test(srv) && /function signOwner/.test(srv));
   assert.ok(/crypto\.timingSafeEqual/.test(srv.slice(srv.indexOf("function ownerOf"), srv.indexOf("function ensureOwner"))),
     "handle verification must be constant-time like every other token check here");
   assert.ok(/crypto\.randomBytes\(12\)/.test(srv), "the id must be random, not derived from anything a visitor controls");
@@ -12653,7 +12658,7 @@ test("ws watchdog: a mute socket that never closes is force-closed into the reco
   const fs = require("fs"), path = require("path");
   const hl = fs.readFileSync(path.join(__dirname, "..", "src", "hyperliquid.js"), "utf8");
   assert.ok(hl.includes("const WS_STALE_MS = 120000"), "staleness threshold pinned at 120s — two missed ping cycles of total silence");
-  assert.ok(/if \(Date\.now\(\) - lastMsg > WS_STALE_MS\) \{ try \{ ws\.close\(\); \} catch \(_\) \{\} return; \}/.test(hl),
+  assert.ok(/if \(Date\.now\(\) - lastData > WS_STALE_MS\) \{ try \{ ws\.close\(\); \} catch \(_\) \{\} return; \}/.test(hl),
     "the ping tick must check staleness BEFORE pinging and force-close a zombie — close() routes into onclose -> backoff -> reconnect");
   assert.ok(/onopen[\s\S]{0,200}lastMsg = Date\.now\(\)/.test(hl),
     "the watchdog is armed at open, so a socket that never delivers even one message is also caught");
@@ -13343,7 +13348,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.11-66"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.11-68"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -17050,7 +17055,7 @@ test("sse push 2026.07.29-07: client — poll survives stretched, snaps back on 
   assert.ok(app.includes("typeof EventSource==='undefined'||_sseSrc"), "no-EventSource browsers keep the poll untouched; double-start guarded");
   assert.ok(app.includes("function _cycleMs(){ return _sseOk?Math.max(state.refreshMs,120000):state.refreshMs; }"),
     "healthy stream stretches the poll to a 120s fallback — never kills it (half-open streams are real)");
-  assert.ok(app.includes("_sseSrc.onerror=()=>{ if(_sseOk){ _sseOk=false; startCycle(); } }"), "stream error snaps cadence back instantly");
+  assert.ok(/_sseSrc\.onerror=\(\)=>\{\s*\n\s*if\(_sseOk\)\{ _sseOk=false; startCycle\(\); \}/.test(app), "stream error snaps cadence back instantly");
   assert.ok(app.includes("if(d&&d.dataTs&&d.dataTs!==state.dataTs){ loadSnapshot();"),
     "a pushed version triggers the EXISTING loadSnapshot — the stream changes when we pull, never what");
   assert.ok(app.includes("startEvents();   // push channel first"), "stream armed at boot");
@@ -23129,7 +23134,7 @@ test("server: the invite door strips the code from the URL before anything rende
   // The redirect is the security step: after it the code is not in the address bar, the history,
   // or any Referer a later request carries.
   assert.ok(/inviteCookie\(reply, req, r\.invite\.code\)/.test(join), "the code moves into a cookie");
-  assert.ok(/reply\.redirect\(302, "\/join"\)/.test(join), "and the URL is redirected to a bare /join");
+  assert.ok(/reply\.redirect\("\/join", 302\)/.test(join), "and the URL is redirected to a bare /join");
   assert.ok(!/authPage\(\{ mode: "join"/.test(join), "GET /join/:code must never render the claim page itself");
   assert.ok(/xyzinv=[\s\S]{0,120}HttpOnly/.test(srv), "the invite cookie is HttpOnly");
   assert.ok(/log\("invite: opened \(code redacted\)"\)/.test(srv), "the one log line that sees a code redacts it");
@@ -24047,4 +24052,526 @@ test("admin panel: every segment is foldable and collapsed in the markup", () =>
   const srv = R("server.js");
   assert.ok(srv.includes('<link rel="icon" href="/icon.svg"'), "the auth pages declare the app icon");
   assert.ok(/u === "\/icon\.svg" \|\| u === "\/manifest\.webmanifest"/.test(srv), "and the gate does not 401 it");
+});
+
+// ===== build 2026.09.11-67: audit fixes ========================================================
+// The legacy shared-password secrets were sha256("xyzmon-session|user|password") — a constant anyone
+// could recompute once SITE_PASSWORD was unset (the documented open posture). A forged legacy token
+// then satisfied sessionOk at /claim (mint an account, the first one admin) and the AI-cost gate,
+// and `Basic friend:` passed credsOk outright. Both secrets now key off the random session-secret
+// file accounts.js already persists, and an empty password closes every shared-password door.
+test("audit -67: legacy secrets key off the random accounts secret and fail closed without a password", () => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(!/xyzmon-session\|\$\{SITE_USER\}\|\$\{SITE_PASSWORD\}`\)\.digest\(\)/.test(srv),
+    "the password-only session derivation is gone");
+  assert.ok(/SESSION_SECRET = process\.env\.SESSION_SECRET[\s\S]{0,200}ACCOUNTS\.deriveKey\(`legacy-session\|\$\{SITE_USER\}\|\$\{SITE_PASSWORD\}`\)/.test(srv),
+    "the legacy session secret is HMAC-derived from the accounts secret, password folded in as the label");
+  assert.ok(/OWNER_SECRET = ACCOUNTS\.deriveKey\("alert-owner"\)/.test(srv), "the owner secret no longer depends on the password");
+  assert.ok(/const OWNER_SECRET_LEGACY = SITE_PASSWORD\s*\?/.test(srv) && /for \(const secret of \[OWNER_SECRET, OWNER_SECRET_LEGACY\]\)/.test(srv),
+    "existing owner cookies keep verifying while a real password exists, and never without one");
+  assert.ok(/const LEGACY_DOOR = !!SITE_PASSWORD && process\.env\.LEGACY_SHARED_PASSWORD !== "0"/.test(srv),
+    "no password means no legacy door");
+  assert.ok(/function credsOk\(u, p\) \{\n  if \(!SITE_PASSWORD\) return false;/.test(srv), "credsOk refuses when there is no password");
+
+  // deriveKey: deterministic per label, distinct across labels, and not the raw secret.
+  const { openAccounts } = require("../src/accounts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-acc-"));
+  const A = openAccounts(dir, { sessionDays: 1 });
+  const k1 = A.deriveKey("legacy-session|friend|"), k2 = A.deriveKey("legacy-session|friend|"), k3 = A.deriveKey("alert-owner");
+  assert.equal(k1.length, 32); assert.ok(k1.equals(k2)); assert.ok(!k1.equals(k3));
+  const raw = fs.readFileSync(path.join(dir, "session-secret"), "utf8").trim();
+  assert.ok(!Buffer.from(raw, "base64").equals(k1), "a derived key is never the secret itself");
+  // A second open of the same volume derives the same key: restarts keep everyone signed in.
+  const B = openAccounts(dir, { sessionDays: 1 });
+  assert.ok(B.deriveKey("alert-owner").equals(k3));
+});
+
+// The admin-view cookie was signed over its expiry alone, so a demoted or disabled admin kept the
+// operator surface for up to ADMIN_DAYS and their audit rows read "legacy-admin". Account-issued
+// cookies are now bound to uid|epoch and re-checked against the live user row; the uid-less form
+// survives only for the ADMIN_PASSWORD break-glass paths.
+test("audit -67: an account-issued admin cookie is bound to the account and dies with its flag", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(/function signAdminView\(expMs, uid, epoch\)/.test(srv), "the signer takes the account binding");
+  const body = srv.slice(srv.indexOf("function adminViewOk"), srv.indexOf("function adminViewUid"));
+  assert.ok(/if \(p\.length !== 2 && p\.length !== 4\) return false;/.test(body), "exactly two shapes verify");
+  assert.ok(/const u = ACCOUNTS\.getUser\(p\[0\]\);\s*\n\s*if \(!u \|\| !u\.isAdmin \|\| u\.disabledAt \|\| String\(u\.epoch\) !== p\[1\]\) return false;/.test(body),
+    "the bound form re-reads the live row: enabled, still admin, same epoch");
+  assert.ok(/crypto\.timingSafeEqual/.test(body), "still constant-time");
+  // signIn mints the bound form; the break-glass login and `admin unlock` keep the uid-less one.
+  assert.ok(/signAdminView\(Date\.now\(\) \+ ADMIN_DAYS \* 864e5, user\.uid, row\.epoch\)/.test(srv), "sign-in binds the cookie to the account");
+  const bg = srv.slice(srv.indexOf("if (adminPwOk(pw)) {"), srv.indexOf("if (adminPwOk(pw)) {") + 400);
+  assert.ok(/signAdminView\(Date\.now\(\) \+ ADMIN_DAYS \* 864e5\)\)/.test(bg), "break-glass stays uid-less");
+  // Audit attribution follows the binding rather than collapsing to "legacy-admin".
+  assert.ok((srv.match(/adminViewUid\(getCookie\(req, "xyzadm"\)\) \|\| "legacy-admin"/g) || []).length >= 2,
+    "access and read-through audit rows name the bound uid");
+});
+
+// Every /help from ANY chat earned a forced reply on the one shared outbox; a stranger who found
+// the bot could keep the 1-per-3s drain busy and evict real alerts. Replies are now budgeted per
+// chat (and globally for strangers), bad /start codes count toward a silence, and the drain sends
+// alerts before replies.
+test("audit -67: bot command replies are throttled per chat, strangers share a budget, alerts go first", async () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  const { p, queue, calls } = pushHarness();
+  const upd = (id, text, chat) => ({ update_id: id, message: { chat: { id: chat }, from: { first_name: "x" }, text } });
+  const reply = (result) => ({ body: { ok: true, result } });
+  let id = 100;
+  // One unlinked chat, ten /help in a row: three replies, not ten.
+  queue.push(reply(Array.from({ length: 10 }, () => upd(id++, "/help", 7001))));
+  await p.pushUpdatesNow();
+  assert.equal(p.pushStateNow().queue, 3, "a stranger earns three replies a minute, then silence");
+  // Ten different strangers: the global stranger budget caps them together.
+  queue.push(reply(Array.from({ length: 10 }, (_, i) => upd(id++, "/help", 8000 + i))));
+  await p.pushUpdatesNow();
+  assert.equal(p.pushStateNow().queue, 5, "strangers share five replies a minute between them");
+  // Bad /start codes: five rejections then the chat is ignored (no reply consumed, no oracle).
+  const { p: p2, queue: q2 } = pushHarness();
+  q2.push(reply(Array.from({ length: 8 }, () => upd(id++, "/start NOPE" + id, 7002))));
+  await p2.pushUpdatesNow();
+  assert.ok(p2.pushStateNow().queue <= 3, "bad-code replies are budgeted like any other (" + p2.pushStateNow().queue + ")");
+  q2.length = 0;
+  q2.push(reply([upd(id++, "/start " + p2.pushMintCode("own-a", true).code, 7002)]));
+  await p2.pushUpdatesNow();
+  assert.equal(p2.getPush("own-a", false).recipients.length, 0, "after five bad codes the chat is ignored for a while, even with a real code");
+  // A linked person's command reply is forced past the ALERT cap (it is not an alert) but an alert
+  // enqueued after it still goes out first.
+  const { p: p3, queue: q3, calls: c3 } = pushHarness();
+  const m = p3.pushMintCode("own-a", true); p3.pushBindNow(m.code, 1, "a");
+  q3.push(reply([upd(id++, "/help", 1)]));
+  await p3.pushUpdatesNow();
+  p3.pushOpsNow("setup", "the alert"); p3.pushTickNow();
+  assert.equal(p3.pushStateNow().queue, 2);
+  await p3.pushDrainNow();
+  const sends = c3.filter((c) => /sendMessage/.test(c.url));
+  assert.ok(sends.length === 1 && /the alert/.test(sends[0].body.text), "the alert is sent before the reply that was queued first");
+  await p3.pushDrainNow();
+  assert.equal(c3.filter((c) => /sendMessage/.test(c.url)).length, 1, "the pacing gap still holds between the two");
+  delete process.env.TG_BOT_TOKEN;
+});
+
+// A 200 with an empty universe deleted every row AND its in-memory OI history (the main-dex branch
+// already refused a failed poll for exactly this reason).
+test("audit -67: an empty or badly shortened universe reply keeps the last good roster", async () => {
+  const { createPoller } = require("../src/poller");
+  const mk = (names) => async () => [{ universe: names.map((n) => ({ name: n })) }, names.map(() => ({ markPx: "10", funding: "0.0001", openInterest: "5" }))];
+  let reply = mk(["A", "B", "C", "D"]);
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, metaFetch: (...a) => reply(...a) });
+  await p.pollUniverseNow();
+  assert.deepEqual(p.orderNow(), ["A", "B", "C", "D"]);
+  reply = async () => [{}, []];
+  await p.pollUniverseNow();
+  assert.deepEqual(p.orderNow(), ["A", "B", "C", "D"], "an empty reply changes nothing");
+  reply = mk(["A"]);
+  await p.pollUniverseNow();
+  assert.deepEqual(p.orderNow(), ["A", "B", "C", "D"], "a reply under half the roster is refused too");
+  reply = mk(["A", "B", "C"]);
+  await p.pollUniverseNow();
+  assert.deepEqual(p.orderNow(), ["A", "B", "C"], "a plausible delisting is still applied");
+});
+
+// The OI writer always emits four tab-separated fields and a trailing newline; the reader accepted
+// three, so a crash mid-append loaded a truncated number as a real sample, and the prune re-emitted
+// it with a newline.
+test("audit -67: a torn last line in oi.log is never a sample, on load or through the prune", async () => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const { openStore } = require("../src/store");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-oi-"));
+  const now = Date.now();
+  fs.writeFileSync(path.join(dir, "oi.log"),
+    `xyz:AAPL\t${now - 3000}\t123456.7\t0.01\nxyz:AAPL\t${now - 2000}\t123500.2\t\nxyz:AAPL\t${now - 1000}\t12`);
+  const st = openStore(dir);
+  const m = st.loadAll(0);
+  assert.deepEqual(m.get("xyz:AAPL").map((r) => r[1]), [123456.7, 123500.2], "the torn tail is dropped; an empty funding field is still a row");
+  // A three-field row WITH a newline (already legitimised by an older prune) is dropped on load
+  // and removed by the prune rather than carried forward.
+  fs.writeFileSync(path.join(dir, "oi.log"), `xyz:AAPL\t${now - 3000}\t123456.7\t0.01\nxyz:AAPL\t${now - 2000}\t12\n`);
+  assert.equal(openStore(dir).loadAll(0).get("xyz:AAPL").length, 1);
+  await st.prune(0);
+  assert.equal(fs.readFileSync(path.join(dir, "oi.log"), "utf8").split("\n").filter(Boolean).length, 1, "the prune drops the torn row");
+  fs.writeFileSync(path.join(dir, "derivs.log"), `BTC\t${now - 1000}\t1\t2\t3\nBTC\t${now}\t1\t2`);
+  assert.equal(openStore(dir).loadDerivs(0).get("BTC").length, 1, "derivs: same rule");
+});
+
+// The limiter charged one weight for up to three sends, and a 429 paused only the caller that saw
+// it while everyone else kept firing at the 4% headroom.
+test("audit -67: every Hyperliquid attempt is charged, a 429 pauses every caller, hard 4xx never retries", async () => {
+  const { infoPost, limiter } = require("../src/hyperliquid");
+  const mk = (status, headers) => async () => ({ ok: status < 400, status, headers: { get: (k) => (headers || {})[k] || null }, json: async () => ({ ok: 1 }) });
+  const before = limiter.usage().used;
+  await assert.rejects(infoPost({ type: "x" }, 5, mk(400)), /HTTP 400/);
+  assert.equal(limiter.usage().used - before, 5, "one attempt, one charge — a 400 is the request's fault");
+  let calls = 0;
+  const flaky = async () => { calls++; return calls < 3 ? { ok: false, status: 429, headers: { get: () => "1" } } : { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ ok: 1 }) }; };
+  const t0 = Date.now();
+  const r = await infoPost({ type: "y" }, 7, flaky);
+  assert.deepEqual(r, { ok: 1 });
+  assert.equal(calls, 3);
+  assert.ok(limiter.usage().used - before >= 5 + 21, "each retry is charged (" + (limiter.usage().used - before) + ")");
+  assert.ok(Date.now() - t0 >= 1900, "Retry-After of 1s was honoured on each 429, for everyone (" + (Date.now() - t0) + "ms)");
+});
+
+test("audit -67: young listings stop re-pulling the wide candle window; feed ticks carry timeouts and busy guards; Finnhub keys travel in a header", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/r\.hourlyFull === true \|\| firstT <= now -/.test(pol), "a completed wide pull marks the spine full");
+  assert.ok(/r\.hourlyRaw = packHours\(wide\); r\.hourlyFull = r\.hourlyRaw\.length > 48;/.test(pol));
+  for (const fn of ["newsCompanyTick", "newsTapeTick", "tgTick", "edgarTick"]) {
+    const body = pol.slice(pol.indexOf("async function " + fn + "()"), pol.indexOf("async function " + fn + "Body()"));
+    assert.ok(/Busy\) return;/.test(body) && /finally \{ \w+Busy = false; \}/.test(body), fn + " skips itself while a run is in flight");
+  }
+  for (const fn of ["newsCompanyTickBody", "newsTapeTickBody", "tgTickBody", "edgarTickBody"]) {
+    const start = pol.indexOf("async function " + fn + "()");
+    const body = pol.slice(start, start + 2500);
+    assert.ok(/signal: AbortSignal\.timeout\(FEED_FETCH_MS\)/.test(body), fn + " fetches with a timeout");
+  }
+  assert.ok(!/finnhub\.io[^`"']*token=/.test(pol), "no Finnhub URL carries the key in its query string");
+  assert.ok((pol.match(/"X-Finnhub-Token": token/g) || []).length >= 6, "the key rides the header Finnhub documents");
+});
+
+// loadAll read the whole year-long OI log with readFileSync+split (~3x the file in memory, on the
+// event loop) at exactly the moment the healthcheck decides whether the deploy is alive. Boot now
+// streams it (preloadOI) and loadAll hands the preloaded map over once.
+test("audit -67: the OI log streams in at boot and loadAll serves the preloaded map once", async () => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const { openStore } = require("../src/store");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-oi2-"));
+  const now = Date.now(), rows = [];
+  for (let i = 500; i > 0; i--) rows.push(`xyz:A\t${now - i * 60000}\t${1000 + i}\t0.0001`);
+  rows.push(`xyz:B\t${now - 30000}\t7\t`);
+  fs.writeFileSync(path.join(dir, "oi.log"), rows.join("\n") + "\nxyz:A\t" + now + "\t12");   // torn tail
+  const st = openStore(dir);
+  assert.equal(await st.preloadOI(), 501, "every whole row, never the torn one");
+  const m = st.loadAll(now - 100 * 60000);
+  assert.equal(m.get("xyz:A").length, 100, "the since filter still applies");
+  assert.deepEqual(m.get("xyz:B"), [[now - 30000, 7, null]]);
+  assert.ok(m.get("xyz:A").every((r, i, a) => i === 0 || a[i - 1][0] < r[0]), "ascending");
+  // Consumed once: a second loadAll goes back to disk rather than holding two copies.
+  assert.equal(st.loadAll(0).get("xyz:A").length, 500);
+  // A file that ends cleanly keeps its last row.
+  fs.writeFileSync(path.join(dir, "oi.log"), rows.join("\n") + "\n");
+  assert.equal(await openStore(dir).preloadOI(), 501);
+});
+
+// priceAsOf returned the close of the bar that STARTS at or before the anchor — the print an hour
+// after it. A 16:00 ET cash close read the 17:00 print and every "held close→open" hold contained
+// the open auction. It now reads the last bar that had closed by the anchor.
+test("audit -67: priceAsOf reads the last bar that closed by the anchor, never a later print", () => {
+  const C = require("../src/compute");
+  const t0 = Date.UTC(2026, 0, 5, 12, 0);
+  const rows = []; for (let i = 0; i < 12; i++) rows.push([t0 + i * HOUR, 0, 0, 0, 100 + i, 1]);   // bar i closes at t0+(i+1)h with 100+i
+  assert.equal(C.priceAsOf(rows, t0 + 5 * HOUR, 3 * HOUR), 104, "on the hour: the bar that ends exactly then");
+  assert.equal(C.priceAsOf(rows, t0 + 5 * HOUR + 30 * 60e3, 3 * HOUR), 104, "half past: still the last CLOSED bar, not the one in progress");
+  assert.equal(C.priceAsOf(rows, t0 + 30 * 60e3, 3 * HOUR), null, "nothing has closed yet");
+  assert.equal(C.priceAsOf(rows, t0 + 12 * HOUR + 4 * HOUR, 3 * HOUR), null, "beyond tol after the last close");
+  assert.equal(C.priceAsOf(rows, t0 + 12 * HOUR + 2 * HOUR, 3 * HOUR), 111, "within tol after the last close");
+});
+
+test("audit -67: the forming daily bar is dropped before detectors and studies read a 'close'", () => {
+  const C = require("../src/compute");
+  const now = Date.now(), day0 = Math.floor(now / DAY) * DAY;
+  const closes = []; for (let i = 80; i >= 0; i--) closes.push([day0 - i * DAY, 100]);
+  assert.equal(C.closedDailyCloses(closes, now).length, 80, "today's bar is forming");
+  assert.equal(C.closedDailyCloses(closes, day0 + DAY).length, 81, "once its day has ended it is a close");
+  assert.equal(C.closedDailyCloses([], now).length, 0);
+  // A base breakout that only exists on today's forming bar must not fire.
+  const b = closes.slice(0, -1).map((k, i) => [k[0], 100 + 0.1 * Math.sin(i)]);
+  b.push([day0, 120]);   // today: "broke out" — but the day is not over
+  const px = 121, sd30 = 1;
+  assert.ok(C.detectBaseBreak(b, px, sd30, null) != null, "raw: the forming bar reads as a breakout close");
+  assert.equal(C.detectBaseBreak(C.closedDailyCloses(b, now), px, sd30, null), null, "trimmed: nothing has closed above the base yet");
+  // earnReactionsFor: today's reaction candle is not a reaction yet.
+  const daily = []; for (let i = 30; i >= 0; i--) daily.push({ t: day0 - i * DAY, c: 100 });
+  daily[daily.length - 1].c = 130;
+  const d = (t) => new Date(t).toISOString().slice(0, 10);
+  const st = C.earnReactionsFor([{ d: d(day0), s: "BMO" }, { d: d(day0 - 10 * DAY), s: "BMO" }], daily, now);
+  assert.equal(st && st.n, 1, "only the settled print counts (" + (st && st.n) + ")");
+});
+
+// levelOutcomes and emaCrossOutcomes normalised a 370-bar walk with TODAY's σ: a name whose σ
+// doubled had its old pivots clustered at today's tolerance and its old outcomes scored at half
+// their true R. σ is now trailing per prefix (excluding the event bar's own return), today's value
+// only where the prefix is too short.
+test("audit -67: level and EMA outcome studies score history in the σ the tape had at the time", () => {
+  const C = require("../src/compute");
+  const t0 = Date.UTC(2025, 0, 1), bars = [];
+  // 200 quiet bars (±1% oscillation) then 200 loud ones (±4%), deterministic, crossing the line often.
+  for (let i = 0; i < 400; i++) { const amp = i < 200 ? 1 : 4; const c = 100 * (1 + (amp / 100) * Math.sin(i * 0.9)); bars.push({ t: t0 + i * DAY, c, h: c * 1.003, l: c * 0.997, v: 1 }); }
+  const sdToday = 4;
+  const trail = C.emaCrossOutcomes(bars, sdToday, { N: 20, horizon: 5, rearm: 3, bufSd: 0.25 });
+  const fixed = C.emaCrossOutcomes(bars, sdToday, { N: 20, horizon: 5, rearm: 3, bufSd: 0.25, trailingSd: false });
+  const early = (r) => r.events.filter((e) => e.vr === "raw" && e.t < t0 + 190 * DAY);
+  const late = (r) => r.events.filter((e) => e.vr === "raw" && e.t > t0 + 260 * DAY);
+  assert.ok(early(trail).length > 10 && late(trail).length > 10, "events on both halves");
+  const meanAbs = (evs) => evs.reduce((a, e) => a + Math.abs(e.fwd), 0) / evs.length;
+  // The property: in R, a regime's own moves read the same size whether it was the quiet or the
+  // loud one — under today's σ the quiet era shrinks to a fraction of the loud one.
+  const ratioTrail = meanAbs(early(trail)) / meanAbs(late(trail)), ratioFixed = meanAbs(early(fixed)) / meanAbs(late(fixed));
+  assert.ok(ratioTrail > 0.7 && ratioTrail < 1.4, "trailing σ: quiet-era and loud-era |R| are comparable (" + ratioTrail.toFixed(2) + ")");
+  assert.ok(ratioFixed < 0.5, "today's σ: the quiet era is scored at a fraction of its true R (" + ratioFixed.toFixed(2) + ")");
+  const lv = C.levelOutcomes(bars, sdToday, { stride: 5, horizon: 10, minBars: 60 });
+  const lvF = C.levelOutcomes(bars, sdToday, { stride: 5, horizon: 10, minBars: 60, trailingSd: false });
+  const dEarly = (r) => r.events.filter((e) => e.t < t0 + 190 * DAY).map((e) => e.distSd);
+  assert.ok(dEarly(lv).length && dEarly(lvF).length);
+  const med = (a) => { const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
+  assert.ok(med(dEarly(lv)) > 1.5 * med(dEarly(lvF)), "a quiet-era level sits further away in quiet-era σ");
+  // Pinned convention: the σ window ends BEFORE the event bar (no one-bar look-ahead).
+  const cmp = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "compute.js"), "utf8");
+  assert.equal((cmp.match(/sdAt\(rets, i\); return v != null && v > 0 \? v : sd(30|Tf); \}/g) || []).length, 2);
+});
+
+// accounts.db — users, password hashes, every message and attachment — had no backup path at all
+// (only the ledger is shipped). A VACUUM INTO copy is taken after boot and daily, rotated.
+test("audit -67: accounts.db backs up as a consistent rotated copy and closes cleanly", () => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const { openAccounts } = require("../src/accounts");
+  const { DatabaseSync } = require("node:sqlite");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-acc-bk-"));
+  const A = openAccounts(dir, { sessionDays: 1 });
+  const b = A.bootstrap("gus", "a-long-password-12");
+  assert.ok(b.ok, "fixture account");
+  const r1 = A.backup(null, 2);
+  assert.ok(r1.ok && r1.bytes > 0 && r1.file.startsWith(path.join(dir, "backups")), JSON.stringify(r1));
+  const copy = new DatabaseSync(r1.file, { readOnly: true });
+  assert.equal(copy.prepare("SELECT count(*) AS n FROM user").get().n, 1, "the copy carries the data");
+  copy.close();
+  const r2 = A.backup(null, 2), r3 = A.backup(null, 2);
+  assert.ok(r2.ok && r3.ok);
+  const left = fs.readdirSync(path.join(dir, "backups")).filter((f) => f.endsWith(".db"));
+  assert.equal(left.length, 2, "rotation keeps the newest two");
+  assert.ok(!left.includes(path.basename(r1.file)) && left.includes(path.basename(r3.file)));
+  assert.ok(A.lastBackup() && A.lastBackup().file === r3.file);
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-acc-bk2-"));
+  assert.ok(A.backup(other, 7).ok, "an operator-mounted directory works too");
+  A.close();
+  assert.ok(!fs.existsSync(path.join(dir, "accounts.db-wal")) || fs.statSync(path.join(dir, "accounts.db-wal")).size === 0, "the WAL is checkpointed on close");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(/setInterval\(accountsBackup, 24 \* 3600 \* 1000\)/.test(srv), "scheduled daily");
+  assert.ok((srv.match(/try \{ ACCOUNTS\.close\(\); \} catch \(_\) \{\}/g) || []).length === 2, "closed on shutdown and on crash");
+});
+
+// fastify 4.29 / @fastify/static 7 carried five high advisories (a static route-guard bypass via
+// path traversal, a Content-Type body-validation bypass among them). Pinned to the majors that
+// close them; reply.redirect takes (url, code) in v5.
+test("audit -67: fastify majors are past the advisories, redirects use the v5 argument order, dotfiles are denied", () => {
+  const fs = require("fs"), path = require("path");
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"));
+  const major = (r) => parseInt(String(r).replace(/^[^\d]*/, ""), 10);
+  assert.ok(major(pkg.dependencies.fastify) >= 5, "fastify >= 5");
+  assert.ok(major(pkg.dependencies["@fastify/static"]) >= 10, "@fastify/static >= 10");
+  assert.ok(major(pkg.dependencies["@fastify/compress"]) >= 8, "@fastify/compress for fastify 5");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.equal((srv.match(/reply\.redirect\(30\d,/g) || []).length, 0, "no redirect uses the removed (code, url) order");
+  assert.ok(/dotfiles: "deny"/.test(srv), "static never serves a dotfile");
+});
+
+// ===== build 2026.09.11-67: Medium findings ===================================================
+test("audit -67: /claim never mints an operator; bootstrap is transactional and one-shot", () => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const { openAccounts } = require("../src/accounts");
+  const A = openAccounts(fs.mkdtempSync(path.join(os.tmpdir(), "xyz-claim-")), { sessionDays: 1 });
+  const c = A.claim("first", "a-long-password-12", null);
+  assert.ok(c.ok && c.user.isAdmin === false, "first to claim is NOT admin");
+  const A2 = openAccounts(fs.mkdtempSync(path.join(os.tmpdir(), "xyz-claim2-")), { sessionDays: 1 });
+  const b = A2.bootstrap("op", "a-long-password-12", null);
+  assert.ok(b.ok && b.user.isAdmin === true, "bootstrap still mints the operator");
+  assert.equal(A2.bootstrap("op2", "a-long-password-12", null).ok, false, "and closes");
+  const src = fs.readFileSync(path.join(__dirname, "..", "src", "accounts.js"), "utf8");
+  assert.ok(/db\.exec\("BEGIN IMMEDIATE"\);\s*\n\s*try \{\s*\n\s*if \(S\.userCount\.get\(\)\.n > 0\)/.test(src), "count and insert share a transaction");
+});
+
+test("audit -67: sign-in answers every failure with the same words and one scrypt", () => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const { openAccounts } = require("../src/accounts");
+  const A = openAccounts(fs.mkdtempSync(path.join(os.tmpdir(), "xyz-login-")), { sessionDays: 1 });
+  A.bootstrap("gus", "a-long-password-12", null);
+  const uid = A.getUserByHandle("gus").uid;
+  const e1 = A.login("nobody", "whatever-long-pw").error, e2 = A.login("gus", "wrong-long-pw-12").error;
+  A.setDisabled(uid, true);
+  const e3 = A.login("gus", "a-long-password-12").error;
+  assert.ok(e1 === e2 && e2 === e3 && /wrong handle or password/.test(e1), "unknown, wrong and disabled read identically");
+  const src = fs.readFileSync(path.join(__dirname, "..", "src", "accounts.js"), "utf8");
+  assert.ok(/const DECOY_PW = hashPw\(crypto\.randomBytes\(24\)/.test(src), "the decoy is hashed once at open, not per attempt");
+  assert.ok(/if \(!u\) \{ verifyPw\(String\(password \|\| ""\), DECOY_PW\); return bad; \}/.test(src));
+});
+
+test("audit -67: reset codes still rotate on re-request; msgSeq matches stats", () => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const { openAccounts } = require("../src/accounts");
+  const A = openAccounts(fs.mkdtempSync(path.join(os.tmpdir(), "xyz-otp-")), { sessionDays: 1 });
+  A.bootstrap("gus", "a-long-password-12", null);
+  // Replacement on re-request is a documented decision (an old code in a chat history dies the
+  // moment a new one is asked for); the denial lever it opens is closed at /reset by the per-IP
+  // allowance instead (see server.test.js).
+  const r1 = A.otpRequest("gus"), r2 = A.otpRequest("gus");
+  assert.ok(r1.sent && r2.sent && r1.code !== r2.code);
+  assert.equal(A.msgSeq(), A.stats().messages, "msgSeq is the cheap read of what stats().messages reported");
+});
+
+test("audit -67: config-grade files fsync, keep a .bak, and quarantine a corrupt copy instead of overwriting it", () => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const { openStore } = require("../src/store");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-cfg-"));
+  const st = openStore(dir);
+  assert.equal(st.saveNotes([{ coin: "xyz:A", body: "thesis one" }]), true);
+  assert.equal(st.saveNotes([{ coin: "xyz:A", body: "thesis two" }]), true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, "notes.json.bak"), "utf8"))[0].body, "thesis one", "the previous version survives as .bak");
+  fs.writeFileSync(path.join(dir, "notes.json"), "{ this is not json");
+  const got = openStore(dir).loadNotes();
+  assert.equal(got && got[0].body, "thesis one", "a corrupt file falls back to the .bak rather than reading as first boot");
+  assert.ok(fs.readdirSync(dir).some((f) => /^notes\.json\.corrupt-\d+$/.test(f)), "and the corrupt copy is kept for forensics");
+  assert.equal(fs.existsSync(path.join(dir, "notes.json")), false);
+  for (const fn of ["saveRules", "saveBaskets", "saveLedger", "saveNotes"]) assert.ok(new RegExp(fn + "\\(data\\) \\{\\n\\s*try \\{ saveConfig\\(").test(fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8")), fn + " goes through saveConfig");
+  assert.ok(/fs\.fsyncSync\(fd\)/.test(fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8")), "the data is fsynced before the rename");
+});
+
+test("audit -67: the universe socket is healthy on DATA, not on pongs, and resets its backoff only after data", () => {
+  const { createUniverseSocket } = require("../src/hyperliquid");
+  const saved = globalThis.WebSocket;
+  let inst = null;
+  globalThis.WebSocket = class { constructor() { inst = this; this.readyState = 1; } send() {} close() { this.readyState = 3; if (this.onclose) this.onclose({}); } };
+  try {
+    const got = [];
+    const sock = createUniverseSocket({ onCtxs: (c) => got.push(c), log: () => {} });
+    inst.onopen();
+    inst.onmessage({ data: JSON.stringify({ channel: "pong" }) });
+    inst.onmessage({ data: JSON.stringify({ channel: "subscriptionResponse" }) });
+    assert.equal(sock.healthy(), false, "pongs alone never make the feed healthy");
+    inst.onmessage({ data: JSON.stringify({ channel: "allDexsAssetCtxs", data: { ctxs: [["xyz", []]] } }) });
+    assert.equal(sock.healthy(), true, "a ctxs event does");
+    assert.equal(got.length, 1);
+    sock.close();
+  } finally { globalThis.WebSocket = saved; }
+  const src = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "hyperliquid.js"), "utf8");
+  assert.ok(/if \(Date\.now\(\) - lastData > WS_STALE_MS\)/.test(src), "the watchdog reads data silence, so a dead subscription on a live socket is force-closed and re-subscribed");
+  assert.ok(/if \(!gotData\) \{ gotData = true; backoff = 1000; \}/.test(src) && !/onopen = \(\) => \{\s*\n\s*backoff = 1000;/.test(src), "backoff resets on first data, not on open");
+});
+
+test("audit -67: learned aliases must look like names; the ask universe is pinned to the live board", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  assert.equal(p.aliasOkNow("the", "NVDA"), false); assert.equal(p.aliasOkNow("and", "NVDA"), false);
+  assert.equal(p.aliasOkNow("shares", "NVDA"), false, "stopwords never become aliases");
+  assert.equal(p.aliasOkNow("nvidia", "NVDA"), false, "an alias needs a capital or a digit");
+  assert.equal(p.aliasOkNow("Nvidia", "NVDA"), true); assert.equal(p.aliasOkNow("Jensen Huang", "NVDA"), true);
+  const pol = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/lr = live\.get\(t\) \|\| null;\s*\n\s*if \(live\.size && !lr\) return null;/.test(pol), "a row for a ticker not on the board is dropped");
+  assert.ok(/if \(lr && lr\.px > 0\) o\.px = /.test(pol), "the mark is the server's");
+  assert.ok(/if \(!ASK_KEYS\.has\(k\) \|\| k === "t"\) continue;/.test(pol), "only the terminal's keys survive");
+  // The rest of the poller batch, pinned by text: boot guards, daily validation, candle clamp,
+  // calendar pacing, the claim opened inside the build chain.
+  assert.ok(/try \{ await pollUniverse\(\); \} catch \(e\) \{ log\("boot universe poll failed/.test(pol), "start() survives a failed first poll");
+  assert.ok(/if \(!Array\.isArray\(c\)\) throw new Error\("daily candles: non-array reply"\);/.test(pol));
+  assert.ok(/lo = Math\.max\(lo, hi - 370 \* DAY\);\s*\n\s*lo = Math\.floor\(lo \/ 300000\) \* 300000;/.test(pol), "5m reads are bounded and snapped");
+  assert.ok(/getCalChunked\(now - 370 \* DAY, now - 6 \* DAY, 7, 1200\)/.test(pol), "the history walk is paced under the free tier");
+  assert.ok(/if \(res\.status === 429 && a < 2\)/.test(pol), "and a 429 is retried after Retry-After");
+  assert.ok(/await chainBuild\("aireadClaim", async \(\) => openLedger\(rr, "airead"/.test(pol), "the analyst claim opens inside the build chain");
+  assert.ok(/PUSH_CODE_ALPHABET\[require\("crypto"\)\.randomInt\(PUSH_CODE_ALPHABET\.length\)\]/.test(pol), "link codes come from the CSPRNG");
+});
+
+test("audit -67 client: the SSE stream is recreated after a terminal close, foregrounding re-syncs, and typing no longer re-renders per keystroke", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const sse = app.slice(app.indexOf("function startEvents()"), app.indexOf("function startEvents()") + 1600);
+  assert.ok(/if\(_sseSrc&&_sseSrc\.readyState===2\)\{ try\{ _sseSrc\.close\(\); \}catch\(_\)\{\} _sseSrc=null;/.test(sse), "a CLOSED source is dropped so startEvents can run again");
+  assert.ok(/_sseRetryT=setTimeout\(startEvents,_sseBackoff\); _sseBackoff=Math\.min\(_sseBackoff\*2,60000\)/.test(sse), "and re-opened with backoff");
+  assert.ok(/_sseSrc\.onopen=\(\)=>\{ _sseOk=true; _sseBackoff=2000;/.test(sse), "backoff resets on a good open");
+  assert.ok(/document\.addEventListener\('visibilitychange',\(\)=>\{ if\(document\.hidden\) return;\s*\n\s*if\(!_sseSrc\) startEvents\(\);\s*\n\s*if\(typeof dmSync==='function'&&dmState&&dmState\.me\)/.test(app), "foregrounding reopens the stream and pulls messages once");
+  assert.ok(/el\('filter'\)\.addEventListener\('input', e=>\{ state\.filter=e\.target\.value; scheduleRender\(\); savePrefs\(\); \}\);/.test(app), "the markets filter renders once per frame");
+  assert.ok(/updateFilterChip\(\); scheduleRender\(\); savePrefs\(\);\n\}\n\['volMin'/.test(app), "so do the numeric filters");
+  assert.ok(/nfT=setTimeout\(\(\)=>\{ renderNews\(\);[\s\S]{0,200}\},120\); \}; \}/.test(app), "the news filter debounces");
+});
+
+test("audit -67 client: stale responses cannot paint over newer state; one bad trigger event cannot replay the batch; starring keeps the drawer", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(/const mySeq=\(FOCCH\.seq=\(FOCCH\.seq\|\|0\)\+1\);/.test(app) && /if\(mySeq!==FOCCH\.seq\) return;   \/\/ superseded while in flight/.test(app), "focus chart fetches are sequenced like the trend modal's");
+  assert.ok(/if\(q!==dmState\.q\.trim\(\)\) return;   \/\/ the box moved on/.test(app), "a DM search answer for an older query is dropped");
+  const lt = app.slice(app.indexOf("for(const ev of d.events){"), app.indexOf("for(const ev of d.events){") + 1600);
+  assert.ok(/try\{\s*\n\s*const k=ev\.kind\|\|'setup';/.test(lt) && /\}catch\(_\)\{ \/\* this event is broken, the batch is not \*\/ \}/.test(lt), "each event is isolated so trigSeqSet always runs");
+  assert.ok(/esc\(String\(ev\.side\|\|''\)\.toUpperCase\(\)\)/.test(app) && /esc\(String\(r\.side\|\|''\)\.toUpperCase\(\)\)/.test(app), "a missing side renders empty instead of throwing");
+  assert.ok(/el\('dstar'\)\.onclick=\(\)=>\{ toggleWatch\(coin\);/.test(app) && !/toggleWatch\(coin\); openDetail\(coin\);/.test(app), "starring no longer rebuilds the drawer (and the note being typed in it)");
+  assert.ok(/const release=\(\)=>\{ if\(sv\._d&&sv\._last\)\{ const e=sv\._last; sv\._d=0; sv\._last=null; at\(e\); \} sv\._d=0; \};/.test(app), "floor histogram drags commit once on release");
+});
+
+test("audit -67 lows: shutdown ends the right object, admin writes recheck authz, rejected invites count, the tweet cache evicts one, config timestamps never throw", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(/for \(const e of sseClients\) \{ try \{ e\.res\.end\(\); \}/.test(srv), "sseClients holds {res, uid}; shutdown ends the socket, not the entry");
+  for (const r of ['"/api/earnings/void"', '"/api/news/channels"']) {
+    const at = srv.indexOf("fastify.post(" + r);
+    assert.ok(/bodyLimit: \d+ \* 1024/.test(srv.slice(at, at + 120)) && /if \(!isAdmin\(req\)\) return reply\.code\(403\)/.test(srv.slice(at, at + 260)), r + " rechecks isAdmin inline and carries a body limit");
+  }
+  assert.ok(/loginFail\(clientIp\(req\)\);   \/\/ a rejected code counts/.test(srv), "GET /join/:code feeds the damper");
+  assert.ok(/tweetCache\.delete\(tweetCache\.keys\(\)\.next\(\)\.value\)/.test(srv) && !/tweetCache\.clear\(\)/.test(srv), "LRU-ish eviction, never a wipe");
+  assert.ok(/strict-transport-security/.test(srv), "HSTS behind TLS");
+  const acc = fs.readFileSync(path.join(__dirname, "..", "src", "accounts.js"), "utf8");
+  assert.equal((acc.match(/Math\.trunc\(Math\.min\(Math\.max\(\+(o\.)?limit \|\| \d+, 1\), \d+\)\)/g) || []).length, 8, "every limit clamp is an integer (LIMIT ? rejects a REAL)");
+  assert.ok(/catch \(_\) \{ try \{ fs\.unlinkSync\(path\.join\(fileDir, id\)\); \} catch \(_\) \{\} return \{ ok: false, error: "could not store that file" \}; \}/.test(acc), "a failed row insert removes the bytes it would have orphaned");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/const FUND_DUE_TTL = 22 \* HOUR;/.test(pol) && /const FUND_TTL = 24 \* HOUR, EXT_ERR_TTL/.test(pol) && !/>= FUND_TTL\)/.test(pol), "the two TTLs have two names and the outer one is used");
+  assert.ok(/store\.archiveClosed\(d\.closed\.slice\(0, d\.closed\.length - 4000\)\); ledgerDirty = true; \}/.test(pol), "archiving overflow at boot marks the ledger dirty");
+  assert.ok(/continue; \}\n\s*briefSent\.set\(rec\.chat, day\);/.test(pol) && /continue; \}\n\s*landSent\.set\(rec\.chat, day\);/.test(pol), "scheduled sends are marked after generation succeeds");
+  assert.ok(/if \(pushOffset && pushOffset !== offsetBefore\) persistPush\(\);/.test(pol), "push.json is rewritten only when the cursor moved");
+  assert.ok(/\} catch \(e\) \{ log\("maintenance tail failed: "/.test(pol), "the maintenance tail is caught");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(!/\$\{'\$\{\(sc\.covered/.test(app) && /scoped to the \$\{\(sc\.covered \|\| 0\)\.toLocaleString\(\)\}/.test(app), "the insiders footer renders the number, not the placeholder text");
+  assert.ok(/function hsgNum\(v,d\)/.test(app) && !/sf\.last\.v\.toFixed\(2\)/.test(app), "housing KPIs are null-safe");
+  assert.ok(/function isoUtc\(ts,a,b\)/.test(app) && !/new Date\(L\.maxEver\.t\)\.toISOString/.test(app) && !/new Date\(e\.tShow\)\.toISOString/.test(app), "server stamps format through a guard");
+  assert.ok(/function safeHref\(u\)/.test(app) && (app.match(/href="\$\{esc\(safeHref\(/g) || []).length >= 6, "href sinks refuse non-http(s) schemes");
+  assert.ok(/data-tcmd="\$\{tesc\(x\.r\.ticker\)\}"/.test(app) && /data-tcmd="report \$\{tesc\(r\.ticker\)\}"/.test(app) && /data-tcmd="\$\{tesc\(g\.ticker\)\}"/.test(app), "terminal tickers are escaped into the command attribute");
+  assert.ok(/esc\(String\(r\.body\|\|''\)\.slice\(0,140\)\)/.test(app), "truncate before escaping, never after");
+  assert.ok(/tr\[data-coin="\$\{CSS\.escape\(coin\)\}"\]/.test(app), "selector built with CSS.escape");
+  assert.ok(/if\(\(_hoverSeq&15\)===0\) for\(const k in _hoverReg\) if\(!document\.getElementById\(k\)\) delete _hoverReg\[k\];/.test(app), "hover registry sweeps itself");
+  assert.ok(!fs.existsSync(path.join(__dirname, "..", "xyz-monitor-features.html")) && fs.existsSync(path.join(__dirname, "..", "docs", "xyz-monitor-features.html")), "design docs live in docs/");
+  const gi = fs.readFileSync(path.join(__dirname, "..", ".gitignore"), "utf8");
+  assert.ok(/\*\.db-wal/.test(gi) && /\*\.bak/.test(gi));
+});
+
+// ===== build 2026.09.11-68: UI/UX audit fixes =================================================
+test("ux -68: one funding colour convention, alert kinds routed to channels, unread marked on close", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  assert.ok(/c:f>0\?'neg':\(f<0\?'pos':'sec'\)/.test(app), "positive funding (longs pay) is red in the table, as on the heatmap and the sessions clock");
+  assert.ok(/red = positive \(longs pay/.test(html), "the footer legend says so");
+  assert.ok(/const ALERT_CHANNELS=\{[\s\S]*?rule:\{toast:true/.test(app) && /if\(ALERT_CHANNELS\[k\]&&ALERT_CHANNELS\[k\]\.toast\)\{ fireGeneric\(ev\); continue; \}/.test(app), "rule/trend/ma200 events toast");
+  assert.ok(/function alertMatrixHtml\(\)/.test(app) && /alertMatrixHtml\(\)\+buildPushSection\(\)/.test(app), "and the matrix the code runs is the one the Delivery fold shows");
+  assert.ok(/function closeAlertPop\(\)\{[^}]*alertMarkRead\(\);/.test(app) && !/if\(pop\.hidden\)\{ loadPush\(\); loadRules\(\); alertMarkRead\(\); \}/.test(app), "unread survives opening the panel");
+});
+
+test("ux -68: the phone gets its table back, controls reach the keyboard, quiet text clears AA", () => {
+  const fs = require("fs"), path = require("path");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  assert.ok(/viewport-fit=cover/.test(html) && /env\(safe-area-inset-bottom\)/.test(css), "safe areas for the installed PWA");
+  assert.ok(/\.controls\{flex-wrap:nowrap;overflow-x:auto/.test(css) && /\.sub\{display:none\}/.test(css), "the six-row control stack is one strip under 680px");
+  assert.ok(/--dim:#7A8592/.test(css) && !/color:var\(--faint\)/.test(css), "--faint is no longer used for text");
+  assert.ok(/input:focus-visible,textarea:focus-visible,select:focus-visible,\[role="button"\]:focus-visible,tr\[data-coin\]:focus-visible\{outline:2px solid var\(--accent\)!important/.test(css), "one ring on every control");
+  assert.ok(/<tr data-coin="\$\{esc\(r\.coin\)\}"\$\{cls\} tabindex="0"/.test(app) && /t\.matches\('tr\[data-coin\]'\)&&e\.key==='Enter'/.test(app), "rows are focusable and Enter opens them");
+  assert.ok((app.match(/role="button" tabindex="0"/g) || []).length >= 20, "custom controls are buttons to the keyboard");
+  assert.ok(/role="dialog" aria-modal="true" aria-label="Ticker detail"/.test(html) && /aria-live="polite"/.test(html), "drawer is a dialog; toasts are announced");
+  assert.ok(/prefers-reduced-motion:reduce\)\{\*\{animation:none!important;transition-duration:\.01ms!important\}/.test(css) && /behavior:SCROLL_B/.test(app) && !/behavior:'smooth'/.test(app), "reduced motion covers transitions and smooth scrolls");
+  assert.ok(/\.term-fab,#dm-dock\{bottom:calc\(12px \+ env\(safe-area-inset-bottom\)\)\}/.test(css) && /body\[data-view="dm"\] #dm-dock/.test(css), "the floating buttons respect the inset and the dock hides on Messages");
+});
+
+test("ux -68: typed prose is protected, sessions expire into a banner, the drawer leads with actions and metrics", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(/function ntCloseCompose\(force\)\{[\s\S]{0,200}confirm\('Discard this note\?/.test(app) && /sessionStorage\.setItem\(ntDraftKey\(coin\), box\.value\)/.test(app), "Escape asks, and a draft survives");
+  assert.ok(/if\(confirm\('Remove this rule\?'\)\) deleteAlertRule/.test(app) && /confirm\('Remove this rule\? It fires from the server/.test(app), "rules are not deleted by a mis-tap");
+  assert.ok(/function sessionExpired\(\)\{/.test(app) && !/window\.__reauth=1; location\.reload\(\)/.test(app), "a 401 is a banner, not a reload over your typing");
+  assert.ok(/const safeNext = \(v\) =>/.test(srv) && /next: safeNext\(b\.next\) \|\| "\/"/.test(srv) && /if\(A\.next\)body\.next=A\.next;/.test(srv), "/login honours a same-origin ?next=");
+  const od = app.slice(app.indexOf("el('drawer').innerHTML=`"), app.indexOf("el('drawer').innerHTML=`") + 4000);
+  assert.ok(od.indexOf('<div class="dact">') < od.indexOf("${sessDrawerHtml(r)}") && od.indexOf('<div class="dsec">Metrics</div>') < od.indexOf("${sessDrawerHtml(r)}"), "actions and metrics paint above the async panels");
+  assert.ok(/function openRuleFor\(r\)\{/.test(app) && /#dcandles\{min-height:176px\}/.test(fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8")), "⚑ alert pre-fills the rule form; async panels reserve their height");
+  assert.ok(/'dm','notes'\]\)/.test(app) && /is not available in /.test(app), "Messages and Notes survive Crypto scope; a hidden view says so");
+  assert.ok(/Object\.assign\(HELP,\{\s*\n\s*dm:`/.test(app) && /const HELP_KEYS=/.test(app) && /if\(e\.key==='\?'\)\{ e\.preventDefault\(\); openHelp\(\); return; \}/.test(app), "every tab has help, with a keyboard section, on ?");
+  assert.ok(/function cmdkTabs\(\)\{/.test(app) && /window\.addEventListener\('hashchange'/.test(app) && /function dmStampPreview\(text\)\{/.test(app) && /did you mean/.test(app), "palette from the ribbon, live hash routing, stamp preview, terminal suggestions");
 });

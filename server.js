@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.11-66";
+const VERSION = "2026.09.11-68";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -39,12 +39,10 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 const SITE_PASSWORD = process.env.SITE_PASSWORD || ""; // set to require a shared password
 const SITE_USER = process.env.SITE_USER || "friend";
 const SESSION_DAYS = Number(process.env.SESSION_DAYS || 30);
-// Session-signing secret. Derived from the credentials unless overridden, so changing the
-// password on Railway invalidates every outstanding session with zero extra config, while
-// plain restarts/redeploys keep everyone logged in.
-const SESSION_SECRET = process.env.SESSION_SECRET
-  ? crypto.createHash("sha256").update(String(process.env.SESSION_SECRET)).digest()
-  : crypto.createHash("sha256").update(`xyzmon-session|${SITE_USER}|${SITE_PASSWORD}`).digest();
+// Session-signing secret for the LEGACY shared-password door: see the derivation next to ACCOUNTS
+// below. It still folds the password in, so changing the password on Railway invalidates every
+// outstanding legacy session with zero extra config, while plain restarts keep everyone logged in.
+let SESSION_SECRET = null;
 // ---- per-browser alert ownership -----------------------------------------------------------
 // The app has ONE shared site password and no user accounts, so there is no "who" to attribute a
 // linked Telegram account to. That was a real hole: alert delivery was designed per-person, but the
@@ -56,22 +54,31 @@ const SESSION_SECRET = process.env.SESSION_SECRET
 // to see and manage the recipients linked FROM that browser. It is signed so it cannot be forged,
 // and random so it cannot be guessed; whoever holds it controls those recipients, exactly like the
 // session cookie itself. Admin sees and manages everything regardless.
-const OWNER_SECRET = crypto.createHash("sha256").update(`xyzmon-alert-owner|${SITE_USER}|${SITE_PASSWORD}`).digest();
-function signOwner(id) {
-  return id + "." + crypto.createHmac("sha256", OWNER_SECRET).update("own|" + id).digest("base64url");
+// Derived next to ACCOUNTS below, from the random on-disk key — never from the password alone.
+let OWNER_SECRET = null;
+// The pre-accounts derivation. Still ACCEPTED on verify (never used to sign) while a real password
+// exists, so nobody's alert-owner handle changes underneath their linked recipients; with no
+// password it is a public constant and must not verify anything.
+const OWNER_SECRET_LEGACY = SITE_PASSWORD
+  ? crypto.createHash("sha256").update(`xyzmon-alert-owner|${SITE_USER}|${SITE_PASSWORD}`).digest() : null;
+function signOwnerWith(secret, id) {
+  return id + "." + crypto.createHmac("sha256", secret).update("own|" + id).digest("base64url");
 }
+function signOwner(id) { return signOwnerWith(OWNER_SECRET, id); }
 function ownerOf(tok) {
   if (!tok || typeof tok !== "string" || tok.length > 128) return null;
   const i = tok.indexOf(".");
   if (i <= 0) return null;
   const id = tok.slice(0, i);
-  let ok = false;
-  try {
-    const want = Buffer.from(signOwner(id));
-    const got = Buffer.from(tok);
-    ok = want.length === got.length && crypto.timingSafeEqual(want, got);
-  } catch (_) { ok = false; }
-  return ok ? id : null;
+  const got = Buffer.from(tok);
+  for (const secret of [OWNER_SECRET, OWNER_SECRET_LEGACY]) {
+    if (!secret) continue;
+    try {
+      const want = Buffer.from(signOwnerWith(secret, id));
+      if (want.length === got.length && crypto.timingSafeEqual(want, got)) return id;
+    } catch (_) {}
+  }
+  return null;
 }
 // Reads the caller's handle, minting one if they don't have it yet. Lazy on purpose: a visitor who
 // never opens the alerts panel never gets a cookie.
@@ -102,20 +109,42 @@ const AI_UNLOCK_MS = 24 * 3600 * 1000;   // hard ceiling on an unlock's life, ev
 const ADMIN_VIEW_SECRET = crypto.createHash("sha256").update(`xyzmon-admin-view|${ADMIN_PASSWORD}`).digest();
 const ADMIN_DAYS = Number(process.env.ADMIN_DAYS || 30);
 
-function log(msg) { console.log(new Date().toISOString() + " " + msg); }
+// XYZ_QUIET silences the boot narration when server.js is built by the test suite.
+function log(msg) { if (!process.env.XYZ_QUIET) console.log(new Date().toISOString() + " " + msg); }
 
+// Say the dangerous defaults out loud once. Nothing here exits: a deploy that boots with a
+// warning beats one that dies on a variable the operator meant to set later, and the volume
+// heartbeat below already makes an ephemeral DATA_DIR self-evident on the second boot.
+{
+  const onRailway = !!process.env.RAILWAY_ENVIRONMENT;
+  const warn = [];
+  if (!process.env.DATA_DIR) warn.push("DATA_DIR is unset — data lives in ./data inside the container" + (onRailway ? " and WILL NOT survive a redeploy: point it at the volume mount" : ""));
+  if (!SITE_PASSWORD) warn.push("SITE_PASSWORD is unset — the site is open to anyone with the URL; AI routes and /claim stay closed");
+  if (!process.env.SEC_CONTACT) warn.push("SEC_CONTACT is unset — SEC requests go out with a placeholder contact, which their fair-access policy may block");
+  for (const w of warn) log("WARNING: " + w);
+}
 const store = openStore(DATA_DIR);
 // ---- accounts, invites and direct messages --------------------------------------------------
 // Its own SQLite file on the same volume. Deliberately separate from the market caches: none of
 // this is market data, none of it is on the 15s path, and all of it wants transactions rather
 // than the whole-file tmp+rename discipline the JSON caches use.
 const ACCOUNTS = openAccounts(DATA_DIR, { sessionDays: SESSION_DAYS });
+// The legacy-door secrets, keyed by the accounts' random secret so they are never guessable. The
+// old derivation hashed `xyzmon-session|user|password` directly: with SITE_PASSWORD unset (the
+// documented open posture) that was a constant anyone could recompute, and a forged legacy token
+// satisfied sessionOk at /claim (mint an account — the first one admin) and the AI-cost gate.
+SESSION_SECRET = process.env.SESSION_SECRET
+  ? crypto.createHash("sha256").update(String(process.env.SESSION_SECRET)).digest()
+  : ACCOUNTS.deriveKey(`legacy-session|${SITE_USER}|${SITE_PASSWORD}`);
+OWNER_SECRET = ACCOUNTS.deriveKey("alert-owner");
 // How long a DM sits unread before it is worth interrupting somebody's evening over. The delay IS
 // the feature: without it two people typing at each other generate a push per line.
 const DM_ESCALATE_MS = Number(process.env.DM_ESCALATE_MS || 5 * 60 * 1000);
 // The legacy shared-password door. Once accounts exist it stays open only while the operator is
 // still migrating people, and it lands them on the claim page rather than straight into the app.
-const LEGACY_DOOR = process.env.LEGACY_SHARED_PASSWORD !== "0";
+// No shared password means no shared-password door: with SITE_PASSWORD empty, credsOk and the
+// legacy token would otherwise both accept a caller who knows nothing.
+const LEGACY_DOOR = !!SITE_PASSWORD && process.env.LEGACY_SHARED_PASSWORD !== "0";
 // Definitive volume-persistence check: boot #1 on every deploy = the data dir is ephemeral
 // (DATA_DIR not pointing at the volume mount, or no volume attached). Boot #N, first boot
 // dating back days = the volume is fine and every warm cache above it can be trusted.
@@ -156,8 +185,9 @@ setInterval(rollLoopWindow, LOOP_WINDOW).unref();
 
 // Kill-switch: CRYPTO=0 disables main-dex polling entirely — one-variable rollback on Railway.
 const CRYPTO = process.env.CRYPTO !== "0";
-const poller = createPoller({ dex: DEX, store, log, version: VERSION, crypto: CRYPTO });
-log(`Crypto (Hyperliquid main dex): ${CRYPTO ? "ENABLED — top-60 perps, 31d hourly / 90d daily retention" : "disabled via CRYPTO=0"}`);
+// Built in main(), after the OI log has streamed in (store.preloadOI): its constructor is
+// synchronous and used to read the whole year-long log with readFileSync on the event loop.
+let poller = null;
 
 // Weak ETag from the payload's data version so an unchanged snapshot revalidates to 304
 // (browsers polling every 30s get a tiny empty response instead of the full table).
@@ -244,6 +274,7 @@ function serveKeyed(req, reply, etagKey, build, fallback) {
 // the comparison safe for unequal-length inputs (timingSafeEqual throws on those).
 const sha = (s) => crypto.createHash("sha256").update(String(s)).digest();
 function credsOk(u, p) {
+  if (!SITE_PASSWORD) return false;   // an empty password is "no password", never "any password"
   const uOk = crypto.timingSafeEqual(sha(u), sha(SITE_USER));
   const pOk = crypto.timingSafeEqual(sha(p), sha(SITE_PASSWORD));
   return (uOk & pOk) === 1;   // bitwise: both comparisons always execute (no short-circuit timing)
@@ -274,7 +305,7 @@ function getCookie(req, name) {
 }
 function cookieAttrs(req, maxAgeSec) {
   // Railway terminates TLS and forwards proto — mark Secure whenever the client came over https.
-  const secure = (req.headers["x-forwarded-proto"] || req.protocol) === "https" ? "; Secure" : "";
+  const secure = ((TRUST_PROXY && req.headers["x-forwarded-proto"]) || req.protocol) === "https" ? "; Secure" : "";
   return `; Path=/; SameSite=Lax; Max-Age=${maxAgeSec}${secure}`;
 }
 function setSessionCookies(reply, req, maxAgeSec, token) {
@@ -304,7 +335,7 @@ function aiUnlockOk(tok) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 function aiCookieAttrs(req, clear) {
-  const secure = (req.headers["x-forwarded-proto"] || req.protocol) === "https" ? "; Secure" : "";
+  const secure = ((TRUST_PROXY && req.headers["x-forwarded-proto"]) || req.protocol) === "https" ? "; Secure" : "";
   // No Max-Age on set => browser-session cookie (gone on close). Max-Age=0 on clear => delete now.
   return `; Path=/; SameSite=Lax${clear ? "; Max-Age=0" : ""}${secure}; HttpOnly`;
 }
@@ -316,17 +347,39 @@ function clearAiUnlockCookie(reply, req) { reply.header("set-cookie", "xyzai=x" 
 // token, xyzadmin=1 is a JS-visible marker with no secret in it (forging it gets you an Admin tab
 // whose every route still 403s — the server never trusts it). Fastify appends repeated set-cookie
 // headers rather than overwriting, so this composes with setSessionCookies in one response.
-function signAdminView(expMs) {
+// Two token shapes share the cookie:
+//   break-glass  "<exp>.<mac>"                 minted by the ADMIN_PASSWORD login / `admin unlock`
+//   account      "<uid>.<epoch>.<exp>.<mac>"   minted at sign-in for a flagged account
+// The account form is BOUND to the account: verifying it re-reads the live user row and requires
+// enabled + isAdmin + the same epoch. Before this the cookie was signed over the expiry alone, so
+// a demoted or disabled admin kept /api/access and the DM read-through for up to ADMIN_DAYS, with
+// audit rows attributed to "legacy-admin". The break-glass form stays uid-less on purpose: it is
+// how an operator gets back in after locking themselves out of their own account.
+function signAdminView(expMs, uid, epoch) {
+  if (uid != null) return uid + "." + epoch + "." + expMs + "." + crypto.createHmac("sha256", ADMIN_VIEW_SECRET)
+    .update("adm|" + uid + "|" + epoch + "|" + expMs).digest("base64url");
   return expMs + "." + crypto.createHmac("sha256", ADMIN_VIEW_SECRET).update("adm|" + expMs).digest("base64url");
 }
 function adminViewOk(tok) {
-  if (!ADMIN_PASSWORD || !tok || tok.length > 128) return false;   // unset admin password => fail closed
-  const dot = tok.indexOf(".");
-  if (dot < 1) return false;
-  const exp = Number(tok.slice(0, dot));
+  if (!ADMIN_PASSWORD || !tok || tok.length > 256) return false;   // unset admin password => fail closed
+  const p = tok.split(".");
+  if (p.length !== 2 && p.length !== 4) return false;
+  const exp = Number(p[p.length - 2]);
   if (!Number.isFinite(exp) || exp < Date.now()) return false;
-  const a = Buffer.from(tok), b = Buffer.from(signAdminView(exp));
+  let want;
+  if (p.length === 4) {
+    const u = ACCOUNTS.getUser(p[0]);
+    if (!u || !u.isAdmin || u.disabledAt || String(u.epoch) !== p[1]) return false;
+    want = signAdminView(exp, p[0], p[1]);
+  } else want = signAdminView(exp);
+  const a = Buffer.from(tok), b = Buffer.from(want);
   return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+// Who an admin cookie speaks for: the account uid for the bound form, null for break-glass.
+function adminViewUid(tok) {
+  if (!adminViewOk(tok)) return null;
+  const p = String(tok).split(".");
+  return p.length === 4 ? p[0] : null;
 }
 function setAdminCookies(reply, req, maxAgeSec, token) {
   reply.header("set-cookie", [
@@ -348,8 +401,12 @@ function adminPwOk(pw) {
 // element, which the edge proxy in front of this service appends itself — taking the first
 // element (the old behavior) let any caller mint a fresh key per request and walk straight
 // past every damper below.
+// Behind Railway's edge the forwarded headers are trustworthy and the socket peer is the proxy;
+// exposed directly they are whatever the client typed. TRUST_PROXY=0 switches both the client-IP
+// damper key and the Secure-cookie decision to the socket's own view.
+const TRUST_PROXY = process.env.TRUST_PROXY !== "0";
 function clientIp(req) {
-  const xff = String(req.headers["x-forwarded-for"] || "").split(",").pop().trim();
+  const xff = TRUST_PROXY ? String(req.headers["x-forwarded-for"] || "").split(",").pop().trim() : "";
   return xff || String(req.ip || "");
 }
 // Brute-force damper for /login: 8 wrong passwords from one IP = 15 min lockout. In-memory —
@@ -448,7 +505,7 @@ function authPage(o) {
     ? '<a class="alt" href="/login">Back to sign in</a>' : "") +
 '</div>' +
 '<script>' + AUTH_JS + '</script>' +
-'<script>window.__AUTH=' + JSON.stringify({ action, mode }) + ';authInit();</script>' +
+'<script>window.__AUTH=' + JSON.stringify({ action, mode, next: o.next || null }) + ';authInit();</script>' +
 '</body></html>';
 }
 function newAccountFoot(o) {
@@ -484,7 +541,7 @@ const AUTH_JS =
 "function submit(){if(go.disabled)return;go.disabled=true;err.textContent='';" +
 "if(h)h.classList.remove('bad');if(p)p.classList.remove('bad');" +
 "var body={};if(h)body.handle=h.value;if(p)body.password=p.value;" +
-"if(c)body.code=c.value;" +
+"if(c)body.code=c.value;if(A.next)body.next=A.next;" +
 "fetch(A.action,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)})" +
 ".then(function(r){return r.json().catch(function(){return {};}).then(function(d){return {r:r,d:d};});})" +
 ".then(function(x){if(x.r.ok&&x.d.ok){location.replace(x.d.next||'/');return;}" +
@@ -497,7 +554,18 @@ const AUTH_JS =
 "[h,p,c].forEach(function(e){if(e)e.addEventListener('keydown',function(ev){if(ev.key==='Enter')submit();});});}";
 const LOGIN_HTML = authPage({ mode: "signin" });
 
-async function main() {
+// buildServer() wires the poller and every route and returns the Fastify instance WITHOUT
+// listening or starting the poller. main() is the process entry; the test suite requires this
+// file as a module and drives buildServer() through fastify.inject(), which is the only way the
+// auth gate, cookies and admin lease can be tested as behaviour rather than as source text.
+async function buildServer() {
+  {
+    const t0 = Date.now();
+    const n = await store.preloadOI();
+    log(`OI log streamed in: ${n} sample(s) in ${Date.now() - t0}ms`);
+  }
+  poller = createPoller({ dex: DEX, store, log, version: VERSION, crypto: CRYPTO });
+  log(`Crypto (Hyperliquid main dex): ${CRYPTO ? "ENABLED — top-60 perps, 31d hourly / 90d daily retention" : "disabled via CRYPTO=0"}`);
   const fastify = Fastify({ logger: false });
 
   // True when a request carries a valid session cookie or correct HTTP Basic creds. Shared by the
@@ -510,6 +578,10 @@ async function main() {
   const reqAuthed = (req) => {
     if (meOf(req)) return true;
     if (LEGACY_DOOR && sessionOk(getCookie(req, "xyzsess"))) return true;
+    // Break-glass: the ADMIN_PASSWORD login mints a legacy token beside its admin lease, and that
+    // lease is ADMIN_PASSWORD-derived (fail-closed when unset) — so it authenticates even with the
+    // legacy door shut.
+    if (adminViewOk(getCookie(req, "xyzadm"))) return true;
     const hdr = req.headers.authorization || "";
     const [scheme, enc] = hdr.split(" ");
     if (scheme === "Basic" && enc) {
@@ -602,7 +674,7 @@ async function main() {
           } finally { clearTimeout(t2); }
         } catch (_) { /* no picture, still a card */ }
       }
-      if (tweetCache.size > TWEET_CACHE_MAX) tweetCache.clear();
+      if (tweetCache.size > TWEET_CACHE_MAX) tweetCache.delete(tweetCache.keys().next().value);   // oldest out, not everything out: clear() refetched every good card at once
       tweetCache.set(id, pub ? { ok: true, at: Date.now(), pub } : { ok: false, at: Date.now() });
     } catch (_) { tweetCache.set(id, { ok: false, at: Date.now() }); }
     finally { tweetInflight.delete(id); }
@@ -680,7 +752,7 @@ async function main() {
         if (!meOf(req) && ACCOUNTS.countUsers() > 0 && !adminViewOk(getCookie(req, "xyzadm"))) {
           if (u.startsWith("/api/")) return reply.code(401).header("cache-control", "no-store")
             .send({ error: "claim-account", detail: "this terminal now has accounts — visit /claim" });
-          return reply.redirect(302, "/claim");
+          return reply.redirect("/claim", 302);
         }
         return;
       }
@@ -762,15 +834,22 @@ async function main() {
     setSessionCookies(reply, req, SESSION_DAYS * 86400, token);
     // An account-flagged admin gets the view lease too, so the Admin tab paints on the first frame
     // instead of after a round trip. It is a mirror of the flag, never the source of it.
-    if (user && user.isAdmin) setAdminCookies(reply, req, ADMIN_DAYS * 86400, signAdminView(Date.now() + ADMIN_DAYS * 864e5));
+    if (user && user.isAdmin) {
+      const row = ACCOUNTS.getUser(user.uid) || {};
+      setAdminCookies(reply, req, ADMIN_DAYS * 86400, signAdminView(Date.now() + ADMIN_DAYS * 864e5, user.uid, row.epoch));
+    }
   };
   const inviteCookie = (reply, req, code) =>
     reply.header("set-cookie", "xyzinv=" + encodeURIComponent(code) + cookieAttrs(req, code ? 900 : 0) + "; HttpOnly");
   const htmlNoStore = (reply) => reply.header("cache-control", "no-store").type("text/html; charset=utf-8");
 
+  // ?next= carries the tab and ticker a session-expired banner was sitting on. Same-origin paths
+  // only — never a scheme, never a protocol-relative //host.
+  const safeNext = (v) => { v = String(v == null ? "" : v); return /^\/(?![\/\\])[^\s]{0,200}$/.test(v) ? v : null; };
   fastify.get("/login", (req, reply) => {
-    if (meOf(req)) return reply.redirect(302, "/");
-    return htmlNoStore(reply).send(authPage({ mode: "signin" }));
+    const next = safeNext(req.query && req.query.next);
+    if (meOf(req)) return reply.redirect(next || "/", 302);
+    return htmlNoStore(reply).send(authPage({ mode: "signin", next }));
   });
 
   // One prompt, four outcomes, checked in this order:
@@ -793,7 +872,7 @@ async function main() {
         loginFails.delete(ip);
         signIn(reply, req, r.user, r.token);
         log(`sign-in: ${r.user.handle}${r.user.isAdmin ? " (admin)" : ""}`);
-        return { ok: true, next: "/" };
+        return { ok: true, next: safeNext(b.next) || "/" };
       }
       // Fall through to the password-only doors below rather than failing here: an operator typing
       // ADMIN_PASSWORD into a form that also has a handle box should still get in.
@@ -829,12 +908,13 @@ async function main() {
     const r = ACCOUNTS.readInvite(raw);
     if (!r.ok) {
       inviteCookie(reply, req, "");
-      log(`invite: rejected a ${r.state} code`);
+      loginFail(clientIp(req));   // a rejected code counts like a wrong password: 60-bit codes make guessing impractical, the damper makes it pointless
+      log(`invite: rejected a ${r.state || "unknown"} code`);
       return htmlNoStore(reply).code(410).send(deadInvitePage(r.state));
     }
     log("invite: opened (code redacted)");
     inviteCookie(reply, req, r.invite.code);
-    return reply.redirect(302, "/join");
+    return reply.redirect("/join", 302);
   });
 
   const deadInvitePage = (state) => authPage({ mode: "dead",
@@ -898,12 +978,23 @@ async function main() {
     reply.header("set-cookie", "xyzotp=" + encodeURIComponent(handle || "") + cookieAttrs(req, handle ? 900 : 0) + "; HttpOnly");
 
   fastify.get("/reset", (req, reply) => {
-    if (meOf(req)) return reply.redirect(302, "/");
+    if (meOf(req)) return reply.redirect("/", 302);
     return htmlNoStore(reply).send(authPage({ mode: "forgot" }));
   });
+  // /reset is its own lever: every post forces a Telegram send past quiet hours, so it gets a
+  // per-IP allowance of its own (the login damper only counted wrong passwords, never resets).
+  const resetHits = new Map();
+  const RESET_PER_HOUR = 5;
+  const resetAllowed = (ip) => {
+    const now = Date.now(), a = (resetHits.get(ip) || []).filter((t) => now - t < 3600e3);
+    if (a.length >= RESET_PER_HOUR) { resetHits.set(ip, a); return false; }
+    a.push(now); resetHits.set(ip, a);
+    if (resetHits.size > 5000) resetHits.delete(resetHits.keys().next().value);
+    return true;
+  };
   fastify.post("/reset", { bodyLimit: 4 * 1024 }, async (req, reply) => {
     const ip = clientIp(req);
-    if (loginLockedFor(ip)) { reply.code(429); return { ok: false, error: "too many attempts — try again shortly" }; }
+    if (loginLockedFor(ip) || !resetAllowed(ip)) { reply.code(429); return { ok: false, error: "too many attempts — try again shortly" }; }
     const handle = String((req.body || {}).handle || "").trim();
     const r = ACCOUNTS.otpRequest(handle);
     // The SAME answer whether the handle exists, has no Telegram linked, or is over its send cap.
@@ -922,8 +1013,8 @@ async function main() {
     return { ok: true, next: "/reset/code" };
   });
   fastify.get("/reset/code", (req, reply) => {
-    if (meOf(req)) return reply.redirect(302, "/");
-    if (!getCookie(req, "xyzotp")) return reply.redirect(302, "/reset");
+    if (meOf(req)) return reply.redirect("/", 302);
+    if (!getCookie(req, "xyzotp")) return reply.redirect("/reset", 302);
     return htmlNoStore(reply).send(authPage({ mode: "otp" }));
   });
   fastify.post("/reset/code", { bodyLimit: 8 * 1024 }, async (req, reply) => {
@@ -950,8 +1041,8 @@ async function main() {
   // An existing member arriving on a shared-password session. Same account creation as an invite
   // redemption, no invite required, and only while the operator leaves the legacy door open.
   fastify.get("/claim", (req, reply) => {
-    if (meOf(req)) return reply.redirect(302, "/");
-    if (!LEGACY_DOOR || !sessionOk(getCookie(req, "xyzsess"))) return reply.redirect(302, "/login");
+    if (meOf(req)) return reply.redirect("/", 302);
+    if (!LEGACY_DOOR || !sessionOk(getCookie(req, "xyzsess"))) return reply.redirect("/login", 302);
     return htmlNoStore(reply).send(authPage({ mode: "claim" }));
   });
   fastify.post("/claim", { bodyLimit: 8 * 1024 }, async (req, reply) => {
@@ -969,8 +1060,8 @@ async function main() {
   // Account #1, created by whoever holds ADMIN_PASSWORD, because there is nobody yet who could have
   // issued an invite. Closes for good the moment any account exists.
   fastify.get("/bootstrap", (req, reply) => {
-    if (ACCOUNTS.countUsers() > 0) return reply.redirect(302, "/login");
-    if (!adminViewOk(getCookie(req, "xyzadm"))) return reply.redirect(302, "/login");
+    if (ACCOUNTS.countUsers() > 0) return reply.redirect("/login", 302);
+    if (!adminViewOk(getCookie(req, "xyzadm"))) return reply.redirect("/login", 302);
     return htmlNoStore(reply).send(authPage({ mode: "bootstrap" }));
   });
   fastify.post("/bootstrap", { bodyLimit: 8 * 1024 }, async (req, reply) => {
@@ -1019,7 +1110,7 @@ async function main() {
     reply.header("cache-control", "no-store");
     if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "forbidden" });
     const me = meOf(req);
-    const by = me ? me.uid : "legacy-admin";
+    const by = me ? me.uid : (adminViewUid(getCookie(req, "xyzadm")) || "legacy-admin");
     const b = req.body || {};
     const op = String(b.op || "");
     const uid = String(b.uid || "");
@@ -1305,7 +1396,7 @@ async function main() {
         // The thread is gone, so dmPoke (which resolves members) has nobody to resolve — wake the
         // collected members directly with a `gone` hint so their rails drop it now, not at the
         // next full load.
-        const frame = "data: " + JSON.stringify({ dm: { seq: ACCOUNTS.stats().messages, gone: r.deleted } }) + "\n\n";
+        const frame = "data: " + JSON.stringify({ dm: { seq: ACCOUNTS.msgSeq(), gone: r.deleted } }) + "\n\n";
         for (const uid of r.peers || []) { const set = sseByUid.get(uid); if (set) for (const e2 of set) sseWrite(e2, frame); }
       }
     }
@@ -1340,7 +1431,7 @@ async function main() {
     reply.code(403).header("cache-control", "no-store").send({ ok: false, error: "forbidden" });
     return false;
   };
-  const adminUid = (req) => { const me = meOf(req); return me ? me.uid : "legacy-admin"; };
+  const adminUid = (req) => { const me = meOf(req); return me ? me.uid : (adminViewUid(getCookie(req, "xyzadm")) || "legacy-admin"); };
 
   fastify.get("/api/access/dm", (req, reply) => {
     reply.header("cache-control", "no-store");
@@ -1441,6 +1532,7 @@ async function main() {
     reply.header("x-content-type-options", "nosniff");
     reply.header("x-frame-options", "DENY");
     reply.header("referrer-policy", "same-origin");
+    if (((TRUST_PROXY && req.headers["x-forwarded-proto"]) || req.protocol) === "https") reply.header("strict-transport-security", "max-age=15552000");
     // Two-tier asset caching. Requests carrying the CURRENT build stamp (?v=<VERSION>) may
     // cache forever: the shell rewrites those URLs every deploy, so the URL itself is the
     // cache-buster and a new build is a new URL — immutable is safe by construction and saves
@@ -1460,6 +1552,7 @@ async function main() {
     root: path.join(__dirname, "public"),
     prefix: "/",
     index: false,   // index.html is served by the explicit routes below, version-stamped
+    dotfiles: "deny",   // the plugin's default is allow: a stray .env copied into public/ would be served
     // Force revalidation by default; the stamped-asset immutable tier is applied in the onSend
     // hook below, which sees the request URL — setHeaders here only sees the raw response, and
     // the query string needed to verify the stamp is not reliably reachable from it.
@@ -1757,7 +1850,8 @@ async function main() {
     const r = await poller.earnHistBackfillNow({ days: +b.days || undefined });
     return reply.code(r.ok ? 200 : 400).send(r);
   });
-  fastify.post("/api/earnings/void", (req, reply) => {
+  fastify.post("/api/earnings/void", { bodyLimit: 4 * 1024 }, (req, reply) => {
+    if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "forbidden" });   // gate and authz are different axes: a flag flip must not open ledger tombstoning
     const b = req.body || {};
     const r = poller.voidEarnPrint(b.t, b.d);
     return reply.code(r.ok ? 200 : 400).send(r);
@@ -1899,7 +1993,8 @@ async function main() {
   // POST = replace the list (validated server-side, persisted to the volume, applied within
   // seconds). Small and mutable — served uncached.
   fastify.get("/api/news/channels", (req, reply) => reply.header("cache-control", "no-store").send(poller.getTgChannels()));
-  fastify.post("/api/news/channels", (req, reply) => {
+  fastify.post("/api/news/channels", { bodyLimit: 8 * 1024 }, (req, reply) => {
+    if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "forbidden" });   // same: the outbound fetch list is an operator's to set
     const r = poller.setTgChannels(req.body && req.body.channels);
     return reply.code(r.ok ? 200 : 400).send(r);
   });
@@ -1922,6 +2017,8 @@ async function main() {
   // response is instead the EXACT per-rung series the trend ladder consumes (Trend-tab chart
   // modal) — [t,o,h,l,c] bars plus the live mark, so the client's plotted EMAs reproduce the
   // board's to the last bit. Unknown tf values fall through to the legacy hourly shape.
+  const grid5m = (v, up) => (v != null && v !== "" && Number.isFinite(+v) ? (up ? Math.ceil(+v / 300000) : Math.floor(+v / 300000)) * 300000 : "");
+  const intOr = (v) => (v != null && v !== "" && Number.isFinite(+v) ? Math.trunc(+v) : "");
   fastify.get("/api/candles", (req, reply) => {
     const coin = (req.query && req.query.coin) || "";
     const days = req.query && req.query.days;
@@ -1936,8 +2033,9 @@ async function main() {
     // and chart, zero live fetches on modal open, and the pre-open/overnight bars come free
     // because the perps trade (and the capture lane records) around the clock.
     if (req.query && (req.query.res === "5m" || req.query.res === "5")) {
-      const from = req.query.from, to = req.query.to, max = req.query.max;
-      const key = "candles5m|" + coin + "|" + (from || "") + "|" + (to || "") + "|" + (max || "") + "|" + (poller.getM5Stamp ? poller.getM5Stamp(coin) : 0);
+      // from/to snapped to the 5m grid BEFORE the key (a 1ms change used to mint a fresh entry).
+      const from = grid5m(req.query.from, false), to = grid5m(req.query.to, true), max = intOr(req.query.max);
+      const key = "candles5m|" + coin + "|" + from + "|" + to + "|" + max + "|" + (poller.getM5Stamp ? poller.getM5Stamp(coin) : 0);
       return serveKeyed(req, reply, key, () => poller.getCandles5m(coin, from, to, max), { coin, res: "5m", enabled: false, candles: [], coverage: { enabled: false } });
     }
     // res=4h / res=12h / res=1d serve the deep-history archive (12h/1d since -01, 4h since -03) —
@@ -2283,7 +2381,7 @@ async function main() {
   function sseHelloFrame(me) {
     const s = poller.getSnapshot();
     return "data: " + JSON.stringify({ dataTs: s ? s.dataTs : 0, alertVer: s ? s.alertVer : 0,
-      v: VERSION, dm: me ? { seq: ACCOUNTS.stats().messages } : undefined }) + "\n\n";
+      v: VERSION, dm: me ? { seq: ACCOUNTS.msgSeq() } : undefined }) + "\n\n";
   }
   const sseWrite = (entry, frame) => { try { entry.res.write(frame); } catch (_) {} };
   let sseLastTs = -1, sseLastAlert = -1;
@@ -2309,7 +2407,7 @@ async function main() {
   function dmPoke(threadId, extra) {
     const peers = ACCOUNTS.threadPeers(threadId);
     if (!peers.length) return;
-    const frame = "data: " + JSON.stringify({ dm: Object.assign({ seq: ACCOUNTS.stats().messages }, extra || {}) }) + "\n\n";
+    const frame = "data: " + JSON.stringify({ dm: Object.assign({ seq: ACCOUNTS.msgSeq() }, extra || {}) }) + "\n\n";
     for (const uid of peers) {
       const set = sseByUid.get(uid);
       if (set) for (const e of set) sseWrite(e, frame);
@@ -2391,19 +2489,41 @@ async function main() {
   const tgEsc = (x) => String(x == null ? "" : x)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-  fastify.get("/api/health", () => ({ ok: true, version: VERSION, volume: { boots: HEARTBEAT.boots, firstBoot: HEARTBEAT.firstBoot, dataDir: DATA_DIR },
-    // Live histogram read (current, still-open window) + the closed-window ring + worst-ever. The
-    // live sample makes a stall visible within seconds of happening; the ring is the 7d evidence
-    // trail the worker-thread decision gate reads. ~30 small numbers — negligible on the wire.
-    loop: { ...loopSample(), sinceMs: Date.now() - loopResetAt, windowMs: LOOP_WINDOW, maxEver: loopMaxEver, hist: loopRing },
-    ...poller.stats(), ts: Date.now() }));
+  // `stale` says the poller has not landed a universe poll in five minutes. Still a 200: a 503 would
+  // make Railway restart-loop a process whose only problem is upstream. Alert on the flag instead.
+  const STALE_MS = 5 * 60 * 1000;
+  fastify.get("/api/health", (req) => {
+    const full = { ok: true, version: VERSION,
+      stale: poller.lastPollAt() > 0 && Date.now() - poller.lastPollAt() > STALE_MS, lastPollAgoMs: poller.lastPollAt() > 0 ? Date.now() - poller.lastPollAt() : null,
+      volume: { boots: HEARTBEAT.boots, firstBoot: HEARTBEAT.firstBoot, dataDir: DATA_DIR },
+      loop: { ...loopSample(), sinceMs: Date.now() - loopResetAt, windowMs: LOOP_WINDOW, maxEver: loopMaxEver, hist: loopRing },
+      ...poller.stats(), ts: Date.now() };
+    // Railway's healthcheck needs {ok} and nothing else; the volume path, the loop histogram
+    // (live sample + closed-window ring + worst-ever) and the poller internals are for a signed-in
+    // caller. The route stays open, the detail does not.
+    return reqAuthed(req) || isAdmin(req) ? full : { ok: full.ok, version: full.version, stale: full.stale, ts: full.ts };
+  });
 
+  return fastify;
+}
+
+async function main() {
+  const fastify = await buildServer();
   await fastify.listen({ port: PORT, host: HOST });
   log(`Listening on ${HOST}:${PORT} (dex=${DEX}, data=${DATA_DIR}, build=${VERSION})`);
+  // accounts.db backup: shortly after boot (a deploy is the moment a bad migration would show),
+  // then daily. Seven rotated copies beside the database, or in ACCOUNTS_BACKUP_DIR.
+  const accountsBackup = () => {
+    const r = ACCOUNTS.backup(process.env.ACCOUNTS_BACKUP_DIR || null, 7);
+    log(r.ok ? `accounts backup: ${r.file} (${(r.bytes / 1024).toFixed(0)} KB, ${r.kept} kept)` : `accounts backup FAILED: ${r.error}`);
+  };
+  setTimeout(accountsBackup, 5 * 60 * 1000).unref();
+  setInterval(accountsBackup, 24 * 3600 * 1000).unref();
   poller.start().catch((e) => log("poller start error: " + (e && e.message)));
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+module.exports = { buildServer, VERSION };
+if (require.main === module) main().catch((e) => { console.error(e); process.exit(1); });
 
 // Graceful stop: flush EVERYTHING that persists on a timer, not just features + ledger — the
 // hourly spine (10-min cadence), trigger dedupe state, and push recipients were previously left
@@ -2423,12 +2543,12 @@ async function shutdown() {
   try { rollLoopWindow(); } catch (_) {}
   // Close every SSE stream: their EventSource auto-reconnects to the NEW build and receives the
   // fresh `v` in the initial frame — the push channel doubles as the fastest deploy notice.
-  try { for (const res of sseClients) { try { res.end(); } catch (_) {} } sseClients.clear(); } catch (_) {}
+  try { for (const e of sseClients) { try { e.res.end(); } catch (_) {} } sseClients.clear(); } catch (_) {}   // entries are {res, uid}: res.end() on the entry was a swallowed TypeError
   try { store.close(); } catch (_) {}
+  try { ACCOUNTS.close(); } catch (_) {}   // checkpoints the WAL so a redeploy never leaves -wal/-shm behind
   process.exit(0);
 }
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
+if (require.main === module) { process.on("SIGTERM", shutdown); process.on("SIGINT", shutdown); }
 
 // Crash containment: Node >= 15 hard-crashes the process on ANY unhandled rejection, and with
 // timer-cadence persistence a bare crash can drop up to 10 min of spine plus the buffered deriv
@@ -2446,7 +2566,11 @@ function crashFlush(kind, err) {
   try { poller.persistPush(); } catch (_) {}
   try { persistLoopSync(); } catch (_) {}
   try { store.close(); } catch (_) {}
+  try { ACCOUNTS.close(); } catch (_) {}
   process.exit(1);
 }
-process.on("unhandledRejection", (e) => crashFlush("unhandledRejection", e));
-process.on("uncaughtException", (e) => crashFlush("uncaughtException", e));
+// Only as the process entry: under the test runner these would exit the runner itself.
+if (require.main === module) {
+  process.on("unhandledRejection", (e) => crashFlush("unhandledRejection", e));
+  process.on("uncaughtException", (e) => crashFlush("uncaughtException", e));
+}

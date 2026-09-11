@@ -662,6 +662,16 @@ function intrabarCross(closes, level, dir, now) {
 }
 // trailing-30 daily sigma ending just before index i (unit for R-normalized outcomes)
 function sdAt(rets, i) { return retStd(rets.slice(Math.max(0, i - 30), i), 15); }
+// Daily closes with the FORMING UTC-day bar dropped. The raw 1d candleSnapshot runs through now, so
+// its last element is today's in-progress bar; a study or detector that reads it as a close fires
+// "close-confirmed" setups at 00:10 UTC and reports a forward return that changes on every rebuild.
+// closes: [[t, c, ...], ...] ascending, t = the bar's open.
+function closedDailyCloses(closes, now) {
+  if (!Array.isArray(closes) || !closes.length) return closes;
+  const last = closes[closes.length - 1];
+  return last && Number.isFinite(+last[0]) && +last[0] + DAY > (now == null ? Date.now() : now) ? closes.slice(0, -1) : closes;
+}
+// Trailing 30-return σ at bar i of a studyBars array (bars carry .c). Null with fewer than 15.
 function fwdRet(closes, i, k) {
   if (i + k >= closes.length) return null;
   const a = closes[i][1], b = closes[i + k][1];
@@ -2001,6 +2011,10 @@ function emaCrossOutcomes(bars, sdTf, opts) {
     else { e = c * k2 + e * (1 - k2); ema[i] = e; }
   }
   const side = (i) => (closes[i] >= ema[i] ? 1 : -1);
+  // Trailing σ per fire (see levelOutcomes): the buffer threshold and the R-unit read the σ the
+  // tape had AT the cross, with today's sdTf only as the short-prefix fallback.
+  const rets = closes.map((c, i) => (i > 0 && closes[i - 1] > 0 ? (c / closes[i - 1] - 1) * 100 : NaN));
+  const sdI = (i) => { const v = opts && opts.trailingSd === false ? null : sdAt(rets, i); return v != null && v > 0 ? v : sdTf; };
   const VRS = ["raw", "buf", "2cl"];
   // Per (direction, variant) stream state. armed=false blocks fires; `opp` counts the
   // consecutive far-side closes working toward the re-arm.
@@ -2015,7 +2029,7 @@ function emaCrossOutcomes(bars, sdTf, opts) {
     S.armed = false; S.opp = 0;
     const p0 = closes[fi];
     if (!(p0 > 0)) return;
-    const fwd = +((d * (closes[fi + horizon] / p0 - 1) * 100) / sdTf).toFixed(3);
+    const fwd = +((d * (closes[fi + horizon] / p0 - 1) * 100) / sdI(fi)).toFixed(3);
     let whip = false;
     for (let j = fi + 1; j <= Math.min(fi + 5, b.length - 1); j++) if (side(j) === -d) { whip = true; break; }
     // Deterministic permutation control (no PRNG — reproducible, testable): same horizon, same
@@ -2042,7 +2056,7 @@ function emaCrossOutcomes(bars, sdTf, opts) {
     if (s1 === s0) continue;                            // no close-cross on this bar
     const d = s1;                                       // +1 breakout, -1 breakdown
     fire(d, "raw", i);
-    if (Math.abs(closes[i] / ema[i] - 1) * 100 >= bufSd * sdTf) fire(d, "buf", i);
+    if (Math.abs(closes[i] / ema[i] - 1) * 100 >= bufSd * sdI(i)) fire(d, "buf", i);
     // 2-close: the event IS the confirmation bar — its close is the entry the outcome measures
     // from, so nothing here reads the future relative to its own firing point.
     if (i + 1 < b.length && side(i + 1) === d) fire(d, "2cl", i + 1);
@@ -2251,13 +2265,20 @@ function levelOutcomes(daily, sd30, opts) {
   // tauPct } or null — and it sees the PREFIX ONLY, same as detectLevels always has.
   const detect = typeof o.detect === "function" ? o.detect
     : (pb, px2, sd2) => detectLevels(pb, px2, sd2, dOpts);
+  // σ is TRAILING per prefix, like the bars: the cluster tolerance, the distance buckets and the
+  // R-unit all used today's sd30 across the whole 370-bar walk, so a name whose σ doubled had its
+  // old pivots clustered at today's tolerance and its old outcomes scored at half their true R.
+  // Today's value is only the fallback where the prefix is too short to measure.
+  const rets = b.map((k, i) => (i > 0 && b[i - 1].c > 0 ? (k.c / b[i - 1].c - 1) * 100 : NaN));
+  const sdI = (i) => { const v = o.trailingSd === false ? null : sdAt(rets, i); return v != null && v > 0 ? v : sd30; };   // rets[i] is the return INTO bar i: excluded, like every other study's sdAt(rets, i-1)
   const events = [];
   for (let i = minBars; i < b.length - horizon; i += stride) {
     const px = b[i].c;
     if (!(px > 0)) continue;
+    const sdHere = sdI(i);
     // Detector sees the prefix ONLY. Rebuilding the slice each stride is the honest cost of not
     // letting a single future bar leak into the levels being scored.
-    const lv = detect(b.slice(0, i + 1), px, sd30);
+    const lv = detect(b.slice(0, i + 1), px, sdHere);
     if (!lv || !lv.items.length) continue;
     const tau = Math.max(lv.tauPct, 0.1) / 100;
     for (const it of lv.items) {
@@ -2266,7 +2287,7 @@ function levelOutcomes(daily, sd30, opts) {
       const rel = L / px - 1;
       if (Math.abs(rel) <= tau) continue;                 // already at the level: no distance to travel, nothing to measure
       const above = rel > 0;
-      const distSd = +(Math.abs(rel) * 100 / sd30).toFixed(3);
+      const distSd = +(Math.abs(rel) * 100 / sdHere).toFixed(3);
       const ev = { t: b[i].t, v: L, side: it.side, nTouch: it.n, ageD: it.ageD,
         above, distSd, touched: false, bars: null, held: null, beyondSd: null,
         plTouch: null, plHeld: null };
@@ -2283,7 +2304,7 @@ function levelOutcomes(daily, sd30, opts) {
           const past = above ? b[m].h - L : L - b[m].l;
           if (past > beyond) beyond = past;
         }
-        ev.beyondSd = +(beyond / L * 100 / sd30).toFixed(3);
+        ev.beyondSd = +(beyond / L * 100 / sdHere).toFixed(3);
         break;
       }
       // ---- permutation control -------------------------------------------------------------
@@ -3039,15 +3060,21 @@ function shouldPromote(inc, ch) {
 }
 
 // ---- hold math over the hourly spines ----
-// Price "as of" t: close of the latest candle at or before t, within tol (hourly resolution snaps to
-// the hour, so a 09:30 boundary uses the ~09:00 candle — an acknowledged approximation).
-function priceAsOf(prices, t, tol) {
+// Price "as of" t: the close of the latest candle that had CLOSED by t, within tol. A row's t is the
+// bar's OPEN time and its close is the print at t+width, so "latest row with t_bar <= t" — the old
+// rule — returned the print an HOUR AFTER the anchor: a 16:00 ET cash close read the 17:00 print,
+// a 09:30 open read the 10:00 print, and every "held close→open" hold quietly contained the open
+// auction — the highest-variance half hour of the day. The hourly snap is still an approximation
+// (a 09:30 boundary reads the 09:00 print), but it now errs BEFORE the anchor, never inside the
+// session it is meant to exclude.
+function priceAsOf(prices, t, tol, width) {
   tol = tol || 3 * HOUR;
+  width = width || HOUR;
   let lo = 0, hi = prices.length - 1, idx = -1;
-  while (lo <= hi) { const m = (lo + hi) >> 1; if (prices[m][0] <= t) { idx = m; lo = m + 1; } else hi = m - 1; }
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (prices[m][0] + width <= t) { idx = m; lo = m + 1; } else hi = m - 1; }
   if (idx < 0) return null;
   const row = prices[idx];
-  if (t - row[0] > tol) return null;
+  if (t - (row[0] + width) > tol) return null;
   const c = row[4];
   return Number.isFinite(c) && c > 0 ? c : null;
 }
@@ -3876,7 +3903,7 @@ module.exports = {
   // EMA trend ladder (Trend tab)
   emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS,
   closedBars, closedLadder, trendWhen,
-  priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats,
+  priceAsOf, closedDailyCloses, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats,
   // structural-level outcome study (build 2026.07.24-10): does detectLevels output actually hold?
   normCdf, touchBaseline, studyBars, levelOutcomes, levelStudy, LVL_EDGES, PLACEBO_K,
   // session anatomy (build 2026.07.24-11): excursion / open-quartile / Monday range / naked opens
@@ -4347,7 +4374,7 @@ function mergeEarnPrints(prev, incoming, nowMs, maxAgeDays) {
 // AMC = the NEXT candle. Candles may be warm-cache [{t,c}] without opens — the gap metrics
 // (open vs prior close, held-to-close) compute only where opens exist and report their own n.
 // Expansion = |reaction| / mean |daily move| over the 20 candles before the print (>=8 required).
-function earnReactionsFor(prints, daily) {
+function earnReactionsFor(prints, daily, now) {
   if (!Array.isArray(prints) || !prints.length || !Array.isArray(daily) || daily.length < 3) return null;
   const dayOf = (t) => { const x = new Date(t); return x.getUTCFullYear() + "-" + String(x.getUTCMonth() + 1).padStart(2, "0") + "-" + String(x.getUTCDate()).padStart(2, "0"); };
   const idxByDay = new Map();
@@ -4358,6 +4385,7 @@ function earnReactionsFor(prints, daily) {
     if (pi == null) continue;                                    // print predates the retained daily window
     const ri = p.s === "AMC" ? pi + 1 : pi;
     if (ri <= 0 || ri >= daily.length) continue;
+    if (Number.isFinite(+daily[ri].t) && +daily[ri].t + DAY > (now == null ? Date.now() : now)) continue;   // the reaction candle is still forming: not a reaction yet
     const c1 = daily[ri].c, c0 = daily[ri - 1].c;
     if (!Number.isFinite(c1) || !Number.isFinite(c0) || c0 <= 0) continue;
     const mv = (c1 - c0) / c0 * 100;

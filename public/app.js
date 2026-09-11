@@ -15,7 +15,7 @@ const LKEY = 'xyzmon.layouts.v1';   // named table layouts: columns, sort, windo
 
 const COLS=[
   {key:'ticker', label:'Ticker', type:'str', def:'asc', hideable:false,
-    td:r=>`<td class="tkc">${railHtml(r)}<span class="star${state.watch.has(r.coin)?' on':''}" data-star="${esc(r.coin)}" title="add to watchlist">${state.watch.has(r.coin)?'★':'☆'}</span><span class="tk" title="${esc(r.nm?r.nm+' \u00b7 '+r.coin:r.coin)}">${esc(r.ticker)}</span>${earnBadge(r)}${noteBadge(r)}${cdsHtml(r)}</td>`},
+    td:r=>`<td class="tkc">${railHtml(r)}<span class="star${state.watch.has(r.coin)?' on':''}" data-star="${esc(r.coin)}" role="button" tabindex="0" title="${state.watch.has(r.coin)?'remove from watchlist':'add to watchlist'}">${state.watch.has(r.coin)?'★':'☆'}</span><span class="tk" title="${esc(r.nm?r.nm+' \u00b7 '+r.coin:r.coin)}">${esc(r.ticker)}</span>${earnBadge(r)}${noteBadge(r)}${cdsHtml(r)}</td>`},
   {key:'sess', label:'Sess', type:'str', def:'asc', tip:'Home market of the reference line under the perp \u2014 KR (KRX), JP (TSE), HK (HKEX) for foreign listings with no US symbol; US for everything else. Lit dot = that exchange is OPEN right now (server-computed, holiday-aware). US\u00b7TW etc. on ADRs = US-listed line (full ET machinery applies) with the home line leading it overnight \u2014 context, never anchoring. Stocks scope only.',
     td:r=>sessCell(r)},
   {key:'px', label:'Price', type:'num',
@@ -123,7 +123,7 @@ function liq24Cell(r){ if(r.uni!=='main') return '<td><span class="na">\u2014</s
   return `<td class="${sk||'sec'}" title="24h forced liquidations ${fmtUsd(tot)} \u00b7 longs ${fmtUsd(L)} (${lp}%) / shorts ${fmtUsd(S)} (${100-lp}%)${lp>=67?' \u2014 long-side flush':(lp<=33?' \u2014 short-side squeeze':'')} \u00b7 aggregated CEX (Coinalyze), USD source-converted \u2014 context, not HL-native">${fmtUsd(tot)}</td>`; }
 const COL_BY_KEY={}; COLS.forEach(c=>COL_BY_KEY[c.key]=c);
 // Default table layout (order + which columns show). Hidden by default: beta, Vol(ann), ΔOI, Squeeze, Carry, OI.
-const DEFAULT_ORDER=['ticker','sess','px','m5','m15','h1','h4','d1','dopen','hopen','h4open','h12open','d7','d30','gap','rs','vstape','momp','vol','funding','rvol','adr','turn','vwap','prem','trend','dvb','dcap','hitr','mom','dd','ddy','yopen','mopen','beta','vol30','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
+const DEFAULT_ORDER=['ticker','sess','px','m5','m15','h1','h4','d1','dopen','hopen','h4open','h12open','d7','d30','gap','rs','vstape','momp','vol','funding','rvol','adr','turn','vwap','prem','trend','dvb','dcap','hitr','mom','dd','swr','ddy','yopen','mopen','beta','vol30','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
 const DEFAULT_HIDDEN=['m5','m15','hopen','h4open','h12open','prem','trend','dvb','dcap','hitr','beta','mom','vol30','dd','swr','ddy','yopen','mopen','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
 const LAYOUT_V=5; // bump to force a one-time reset of saved layouts to the new default (v5: sess home-market chip column after ticker)
 
@@ -177,6 +177,12 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
 
 function el(id){ return document.getElementById(id); }
 function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+// Smooth scrolling honours the OS motion preference (the CSS query cannot reach a JS scrollIntoView).
+const SCROLL_B=(typeof matchMedia==='function'&&matchMedia('(prefers-reduced-motion: reduce)').matches)?'auto':'smooth';
+// new Date(null-ish).toISOString() throws RangeError and aborts the renderer that called it.
+function isoUtc(ts,a,b){ return Number.isFinite(+ts)?new Date(+ts).toISOString().slice(a,b).replace('T',' '):'—'; }
+// href values are escaped everywhere, but esc() cannot refuse a javascript: scheme. One gate.
+function safeHref(u){ u=String(u==null?'':u); return /^https?:\/\//i.test(u)?u:''; }
 function num(s){ if(s==null)return null; const v=typeof s==='number'?s:parseFloat(s); return isFinite(v)?v:null; }
 function clamp(x,a,b){ return Math.min(Math.max(x,a),b); }
 function parseAmount(str){ if(str==null) return null; const s=String(str).trim().replace(/[$,\s]/g,'');
@@ -200,7 +206,10 @@ function fmtPrice(x){ if(x==null||!isFinite(x))return '—'; const a=Math.abs(x)
   if(a>=100)d=2; else if(a>=10)d=3; else if(a>=1)d=4; else if(a>=0.1)d=4; else if(a>=0.01)d=5; else d=6; return nf(x,d); }
 function fmtPct(x){ if(x==null||!isFinite(x))return {t:'—',c:'na'}; return {t:(x>0?'+':'')+x.toFixed(2)+'%', c:x>0?'pos':(x<0?'neg':'sec')}; }
 function fmtFunding(f){ if(f==null||!isFinite(f))return {t:'—',c:'na',title:''}; const apr=f*24*365*100;
-  return {t:(apr>0?'+':'')+apr.toFixed(2)+'%', c:f>0?'pos':(f<0?'neg':'sec'), title:`${(f*100).toFixed(4)}% / hour · annualized ×24×365. Positive = longs pay shorts.`}; }
+  // One convention across the table, the sessions clock and the Funding heatmap: positive = longs
+  // PAY (crowded long, carry is a cost) = red; negative = longs receive = green. The table used to
+  // paint the same number the other way round.
+  return {t:(apr>0?'+':'')+apr.toFixed(2)+'%', c:f>0?'neg':(f<0?'pos':'sec'), title:`${(f*100).toFixed(4)}% / hour · annualized ×24×365. Positive = longs pay shorts (red, crowded long); negative = longs receive (green).`}; }
 function fmtUsd(x){ if(x==null||!isFinite(x))return '—'; const a=Math.abs(x);
   if(a>=1e9)return '$'+nf(x/1e9,2)+'B'; if(a>=1e6)return '$'+nf(x/1e6,2)+'M'; if(a>=1e3)return '$'+nf(x/1e3,1)+'K'; return '$'+nf(x,0); }
 function lerp(a,b,t){ return Math.round(a+(b-a)*t); }
@@ -370,10 +379,22 @@ function detectBenchmark(){
   return null; }
 
 // ===== data ingestion (server snapshots) =====
+// The session expired mid-use (the app polls for days). A reload lost whatever was being typed and,
+// when the reload was blocked (a PWA in the background), left every later fetch failing behind a
+// misleading "couldn't reach the server". A persistent banner with a link that brings you back to
+// the same tab and ticker instead; /login honours ?next=.
+function sessionExpired(){
+  if(window.__reauth) return; window.__reauth=1;
+  const next=encodeURIComponent(location.pathname+location.hash);
+  const w=el('toastwrap'); if(!w) return;
+  const t=document.createElement('div'); t.className='toast toast-sticky';
+  t.innerHTML='Your session expired — <a href="/login?next='+next+'">sign in again</a> to pick up where you were.';
+  w.appendChild(t);
+}
 async function fetchJSON(url){ const r=await fetch(url,{headers:{accept:'application/json'}});
   // Session expired mid-use (the app polls for days): reload once — the unauthenticated
   // navigation lands on the server's login page instead of a silently dead dashboard.
-  if(r.status===401){ if(!window.__reauth){ window.__reauth=1; location.reload(); } throw new Error('HTTP 401'); }
+  if(r.status===401){ sessionExpired(); throw new Error('HTTP 401'); }
   if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); }
 async function loadSnapshot(){
   try{ const s=await fetchJSON('/api/snapshot'); applySnapshot(s); setStatus(true); }
@@ -567,7 +588,7 @@ function renderAdmLoop(h){ const box=el('admLoop'); if(!box) return;
   const L=h.loop, ring=Array.isArray(L.hist)?L.hist:[];
   const chip=(v,lab,tip)=>{ const cls=v>=50?'bad':(v>=20?'warn':'ok');
     return `<span class="alp-chip ${cls}" data-tip="${esc(tip)}">${esc(lab)} ${v}ms</span>`; };
-  const me=L.maxEver?`<span class="alp-chip dim" data-tip="worst single stall ever observed on this data dir — kept separately so one boot spike stays attributable without polluting the rolling read">maxEver ${L.maxEver.v}ms · ${new Date(L.maxEver.t).toISOString().slice(5,16).replace('T',' ')}</span>`:'';
+  const me=L.maxEver?`<span class="alp-chip dim" data-tip="worst single stall ever observed on this data dir — kept separately so one boot spike stays attributable without polluting the rolling read">maxEver ${L.maxEver.v}ms · ${isoUtc(L.maxEver.t,5,16)}</span>`:'';
   const winH=Math.round((L.windowMs||0)/3600e3), liveMin=Math.round((L.sinceMs||0)/60e3);
   let spark='<div class="alp-none">no closed windows yet — first ring point lands at the '+winH+'h mark (or on the next deploy, which folds the open window in)</div>';
   if(ring.length){
@@ -860,7 +881,10 @@ function sortedRows(){ let rows=activeRows(); const f=state.filter.trim().toUppe
   const k=state.sortKey, dir=state.sortDir==='asc'?1:-1, col=COLS.find(c=>c.key===k);
   rows.sort((a,b)=>{ let av=a[k],bv=b[k]; if(col.type==='str')return dir*String(av).localeCompare(String(bv));
     const an=(av==null||!isFinite(av)),bn=(bv==null||!isFinite(bv)); if(an&&bn)return 0; if(an)return 1; if(bn)return -1; return dir*(av-bv); });
-  if(state.watch.size){ const star=rows.filter(r=>state.watch.has(r.coin)), rest=rows.filter(r=>!state.watch.has(r.coin)); rows=[...star,...rest]; }
+  for(const r of rows) r._wlsep=false;
+  if(state.watch.size&&!state.watchOnly){ const star=rows.filter(r=>state.watch.has(r.coin)), rest=rows.filter(r=>!state.watch.has(r.coin));
+    if(star.length&&rest.length) rest[0]._wlsep=true;   // the boundary between the pinned block and the sorted tape is drawn, not implied
+    rows=[...star,...rest]; }
   return rows; }
 function pctInner(v){ if(v===undefined)return '<span class="ph">·</span>'; const p=fmtPct(v); return `<span class="${p.c}">${p.t}</span>`; }
 // ===== home sessions (build 2026.08.14-01) ==================================================
@@ -1083,7 +1107,7 @@ function rowHtml(r, vc, bScope){
   const dim = state.dimOff && r.hm && !sessOpenNow(r.hm);   // variant A: only foreign-home rows, only while their exchange sleeps
   const cc = (r.coin===bScope?'benchrow':'')+(dim?(r.coin===bScope?' ':'')+'dimoff':'');
   const cls = cc?` class="${cc}"`:'';
-  let row=`<tr data-coin="${esc(r.coin)}"${cls}>`; for(const c of vc) row+=c.td(r); row+='</tr>';
+  let row=`<tr data-coin="${esc(r.coin)}"${cls} tabindex="0"${r._wlsep?' data-wlsep="1"':''}>`; for(const c of vc) row+=c.td(r); row+='</tr>';   // Tab reaches every row; Enter opens it (see the [role=button] dispatcher)
   r.flash=null;   // consumed into this string exactly as the rebuild path always did — the NEXT
                   // render produces a flash-free string, so the patcher clears the class then
   return row;
@@ -1517,6 +1541,8 @@ function render(){
   if(mktGrp()!=='names'){ renderGroupBoard(); return; }   // the markets #body always mirrors the active lens, whichever tab is on top
   const body=el('body'), rows=sortedRows(), vc=visibleCols();
   const fc=el('fcount'); if(fc){ const tot=activeRows().length; fc.textContent=(rows.length!==tot)?`showing ${rows.length} of ${tot}`:''; }
+  { const c2=el('fcount2'); if(c2){ const tot=activeRows().length; const on=[state.watchOnly&&'\u2605 only',state.noteOnly&&'\u25e2 noted'].filter(Boolean).join(' \u00b7 ');
+      c2.hidden=rows.length===tot&&!on; c2.textContent=(rows.length!==tot?`${rows.length} of ${tot}`:'')+(on?(rows.length!==tot?' \u00b7 ':'')+on:''); } }
   if(!rows.length){ body.innerHTML=`<tr><td colspan="${vc.length}"><div class="msg"><span class="big">No matches</span>Clear the filters to see all markets.</div></td></tr>`; _rowCache=null; return; }
   const bScope=scopeBench();
   const out=[], coins=[];
@@ -1908,7 +1934,7 @@ function rollStability(roll){ const v=roll.filter(x=>x!=null&&isFinite(x)); if(v
   return 'moderately variable over the window'; }
 function openPair(i,j){ const rows=CORR._rows; if(!rows||i==null||j==null||i===j||i>=rows.length||j>=rows.length) return;
   state.corr.pair=[i,j]; state.corr.selected=null; renderCorrPanel(); renderPairPanel();
-  el('pairpanel').scrollIntoView({behavior:'smooth',block:'nearest'}); }
+  el('pairpanel').scrollIntoView({behavior:SCROLL_B,block:'nearest'}); }
 // A pair-view leg's display name: a basket leg shows its clean label (industry) or token; a ticker
 // shows its symbol. The ratio/candles handoff still uses .ticker (the key) — display only.
 function pairLegName(R){ return R._basket ? (R._basket.label||R._basket.name) : String(R.ticker||'').toUpperCase(); }
@@ -2279,7 +2305,7 @@ async function loadRatio(){
   catch(e){ RATIO.data={ok:false,error:e.message||'network error'}; }
   RATIO.inflight=false;
   renderRatio();
-  p.scrollIntoView({behavior:'smooth',block:'nearest'});
+  p.scrollIntoView({behavior:SCROLL_B,block:'nearest'});
 }
 // Pure SVG builder — no DOM, no globals beyond esc — so the suite can EXECUTE it against a fixture
 // payload and assert real candle markup emerges (the -84 lesson: existence pins don't prove wiring).
@@ -2591,7 +2617,7 @@ function openCompg(tickers){
   COMPG.win = cr ? (state.corr.ctf||'1d') : +state.corr.tf;
   COMPG.anchorTs = cr ? (CORR._times.length?CORR._times[0]:null)
                       : (Math.floor(Date.now()/DAY)-(+state.corr.tf))*DAY;   // rebase from the window start
-  const p=el('compg'); if(p){ p.hidden=false; renderCompg(); p.scrollIntoView({behavior:'smooth',block:'nearest'}); }
+  const p=el('compg'); if(p){ p.hidden=false; renderCompg(); p.scrollIntoView({behavior:SCROLL_B,block:'nearest'}); }
 }
 // One chip template for both COMP/G branches. Basket anatomy — dashed border + ⬒ glyph + the
 // disclosure tooltip — exists so a synthetic series can never be mistaken for a listed name.
@@ -2763,25 +2789,15 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
     : '';
   el('drawer').innerHTML=`
     <div class="dhead">${esc(r.ticker)}
-      <span class="star${starred?' on':''}" id="dstar" style="font-size:16px;cursor:pointer">${starred?'★':'☆'}</span>
+      <span class="star${starred?' on':''}" id="dstar" role="button" tabindex="0" style="font-size:16px;cursor:pointer" title="${starred?'remove from watchlist':'add to watchlist'}">${starred?'★':'☆'}</span>
       <button class="dclose" id="dclose" title="close">✕</button></div>
     ${r.nm?`<div class="dname" data-tip="the instrument behind the ticker — static server-side map; a name that isn\u2019t seeded shows no line rather than a guess">${esc(r.nm)}</div>`:''}
     <div class="dsub">${esc(r.coin)} · ${fmtPrice(r.px)}${r.coin===state.benchCoin?' · S&amp;P benchmark':''}${r.coin===state.benchMain?' · BTC — crypto benchmark':''}${r.uni==='main'?' · 24/7 · 90d dailies':''} · <span id="dai" style="color:var(--blue);cursor:pointer;text-decoration:underline;text-underline-offset:2px" data-tip="jump to the Report tab — everything this server holds on this name, synthesized into a plain-language read with scenarios and R/R">AI report →</span></div>
-    ${sessDrawerHtml(r)}
-    ${earnDrawerHtml(r)}
-    ${noteDrawerHtml(r)}
-    ${closes.length>2?`<div class="dsec">90-day price</div>${sparkline(closes,{color: closes[closes.length-1]>=closes[0]?'var(--up)':'var(--down)'})}`:''}
-    <div id="dcandles"></div>
-    ${splitHtml}
-    <div id="dseries"></div>
-    ${r.uni==='main'?'<div id="dderivs"></div>':''}
-    ${r.uni==='xyz'?'<div id="dfund"></div>':''}
-    <div id="dledger"></div>
-    <div id="dnews"></div>
+    <div class="dact"><button class="btn" id="drep" title="compile everything the server holds on this name into one analyst read">AI report \u2192</button><button class="btn" id="dalert" title="arm a price alert at a level of your choosing — opens the rule form pre-filled with this name and its mark">\u2691 alert</button></div>
     <div class="dsec">Metrics</div>
     <div class="dgrid">
       ${st('Funding (APR)',`<span class="${fu.c}">${fu.t}</span>`)}
-      ${st('Momentum',momTxt)}
+      ${st('Momentum',momTxt)} ${st('MOM+', (r.momp!=null&&isFinite(r.momp))?`<span class="${r.momp>0?'pos':(r.momp<0?'neg':'sec')}">${r.momp>0?'+':''}${Math.round(r.momp)}</span>`:'·')}
       ${st('1h',pct(r.h1))} ${st('4h',pct(r.h4))}
       ${st('1d',pct(r.d1))} ${st('7d',pct(r.d7))}
       ${st('30d',pct(r.d30))} ${st('vs S&amp;P ('+state.tf+')', r.rs==null?'<span class="na">—</span>':pct(r.rs))}
@@ -2794,12 +2810,28 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
       ${st('ΔOI ('+state.tf+')', r.doi!=null?`<span class="${r.doi>=0?'pos':'neg'}">${r.doi>=0?'+':''}${r.doi.toFixed(2)}%</span>`:'<span class="na">—</span>')}
       ${st('24h Vol',fmtUsd(r.vol))} ${st('Open Interest',fmtUsd(r.oi))}
     </div>
+    ${sessDrawerHtml(r)}
+    ${earnDrawerHtml(r)}
+    ${noteDrawerHtml(r)}
+    ${closes.length>2?`<div class="dsec">90-day price</div>${sparkline(closes,{color: closes[closes.length-1]>=closes[0]?'var(--up)':'var(--down)'})}`:''}
+    <div id="dcandles"></div>
+    ${splitHtml}
+    <div id="dseries"></div>
+    ${r.uni==='main'?'<div id="dderivs"></div>':''}
+    ${r.uni==='xyz'?'<div id="dfund"></div>':''}
+    <div id="dledger"></div>
+    <div id="dnews"></div>
     ${r.regime?`<div class="sec" style="font-size:11.5px;margin:2px 0 12px;line-height:1.55">${regimeReadout(r)}</div>`:''}
     <div class="dsec">Top co-movers (90d)</div>${pos.length?pos.map(x=>li(x[0],x[1])).join(''):'<div class="sec" style="font-size:12px">daily history still loading…</div>'}
     <div class="dsec">Top hedges — inverse (90d)</div>${neg.length?neg.map(x=>li(x[0],x[1])).join(''):'<div class="sec" style="font-size:12px">no negative correlations</div>'}`;
   el('drawer').classList.add('show'); el('drawerbg').classList.add('show'); el('drawer').setAttribute('aria-hidden','false');
+  if(!state._drawerFrom) state._drawerFrom=document.activeElement;   // return focus here on close
   el('dclose').onclick=closeDetail;
-  el('dstar').onclick=()=>{ toggleWatch(coin); openDetail(coin); };
+  try{ el('dclose').focus({preventScroll:true}); }catch(_){}
+  { const b=el('drep'); if(b) b.onclick=()=>{ showView('report'); if(typeof reportOpenFor==='function') reportOpenFor(coin); };
+    const a=el('dalert'); if(a) a.onclick=()=>openRuleFor(r); }
+  el('dstar').onclick=()=>{ toggleWatch(coin);   // renders the table; the drawer (and a half-typed note) stays put
+    const on=state.watch.has(coin), st=el('dstar'); if(st){ st.textContent=on?'\u2605':'\u2606'; st.classList.toggle('on',on); } };
   wireDrawerNotes(coin);
   if(!state.notes) loadNotes().then(()=>{ if(state.detail===coin) renderDrawerNotes(coin); });
   setHash('t='+encodeURIComponent(coin));
@@ -3311,8 +3343,13 @@ function fireAlert(rule,r,v,m){ const A=state.alerts;
   A.unseen++; updateBell(); pushToast(text);
   if(A.notify && typeof Notification!=='undefined' && Notification.permission==='granted'){ try{ new Notification('Milst Screener alert',{body:text}); }catch(_){} }
   if(!el('alertpop').hidden) buildAlertsPanel(); }
-function pushToast(text){ const w=el('toastwrap'); const t=document.createElement('div'); t.className='toast'; t.textContent=text; w.appendChild(t);
-  setTimeout(()=>{ t.style.transition='opacity .3s'; t.style.opacity='0'; setTimeout(()=>t.remove(),300); }, 6500); }
+// An error stays until dismissed: a 6.5s timeout on "Could not save …" was gone before it was read.
+function pushToast(text, opts){ const w=el('toastwrap'); const t=document.createElement('div'); t.className='toast';
+  const sticky=(opts&&opts.sticky)||/^(\u26a0|Could not|could not|Failed|failed|Your session)/.test(String(text));
+  if(sticky){ t.classList.add('toast-sticky'); const x=document.createElement('span'); x.className='ax'; x.title='dismiss'; x.textContent='\u2715'; x.onclick=()=>t.remove(); t.appendChild(document.createTextNode(text)); t.appendChild(x); }
+  else t.textContent=text;
+  w.appendChild(t);
+  if(!sticky) setTimeout(()=>{ t.style.transition='opacity .3s'; t.style.opacity='0'; setTimeout(()=>t.remove(),300); }, 6500); }
 // A redeploy used to announce itself only as a silently changing build stamp in the statusline —
 // a tab left open kept running the old bundle indefinitely. The moment any snapshot (plain poll
 // and push-triggered pull alike, since both land here) carries a build other than the one this
@@ -3482,7 +3519,7 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
         <button class="btn full" id="ar-add" style="justify-content:center">Add alert</button>
        </div>${srvHtml}${otherRules>0?`<div class="sec" style="font-size:11px;padding:2px 4px">${otherRules} rule(s) written by other people \u2014 not shown</div>`:''}
        ${A.rules.length?`<div class="cphead" style="margin-top:8px">This browser only (${A.rules.length}) <span class="sec" style="text-transform:none;letter-spacing:0" data-tip="squeeze, momentum and beta are derived in your browser against the analysis window you have selected, so there is no single server-side value to alert on. These fire only while this tab is open and never reach telegram.">\u00b7 why?</span></div>${rulesHtml}`:''}`)
-    + sec('deliv','Delivery','your own telegram \u00b7 DMs sent with no tab open', buildPushSection())
+    + sec('deliv','Delivery','your own telegram \u00b7 DMs sent with no tab open', alertMatrixHtml()+buildPushSection())
     + sec('recent','Recent','server-held \u2014 survives a closed tab', logHtml,
         `<span class="asec-x" data-aclear="1" data-tip="hides everything currently listed, for this browser only. The server\u2019s ring is the record and is never edited from here \u2014 other devices and the telegram history are untouched.">clear</span>`)
     + `<label class="copt" style="margin-top:8px"><input type="checkbox" id="ar-notify" ${A.notify?'checked':''} ${navail?'':'disabled'}/> Browser notifications${navail?'':' (unavailable here)'}</label>
@@ -3496,9 +3533,9 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
     A.clearedSeq=hi; A.log=[]; A.unseen=0; if((A.seenSeq||0)<hi) A.seenSeq=hi;
     saveAlerts(); updateBell(); buildAlertsPanel(); });
   const addBtn=el('ar-add'); if(addBtn) addBtn.onclick=addAlertRule;
-  pop.querySelectorAll('[data-sdel]').forEach(x=>x.addEventListener('click',()=>ruleAct({del:+x.dataset.sdel})));
+  pop.querySelectorAll('[data-sdel]').forEach(x=>x.addEventListener('click',()=>{ if(confirm('Remove this rule? It fires from the server, with no tab open.')) ruleAct({del:+x.dataset.sdel}); }));
   const valIn=el('ar-val'); if(valIn) valIn.addEventListener('keydown',e=>{ if(e.key==='Enter') addAlertRule(); });
-  pop.querySelectorAll('[data-del]').forEach(x=>x.addEventListener('click',()=>deleteAlertRule(+x.dataset.del)));
+  pop.querySelectorAll('[data-del]').forEach(x=>x.addEventListener('click',()=>{ if(confirm('Remove this rule?')) deleteAlertRule(+x.dataset.del); }));
   el('ar-notify').addEventListener('change',e=>toggleNotify(e.target.checked));
   // The server's ring is the record; a client cannot and should not delete from it. "Read" is the
   // only state a browser owns here, so that is the only thing this button changes.
@@ -3619,7 +3656,9 @@ function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch
   if(Number.isFinite(d.clearedSeq)) state.alerts.clearedSeq=d.clearedSeq;
   if(d.open&&typeof d.open==='object') state.alerts.open=Object.assign(state.alerts.open,d.open); }
 
-function setHash(h){ try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} }
+window.addEventListener('hashchange',()=>{ if(!_hashSelf) applyHash(); });   // a pasted #t=… into an open tab now works
+let _hashSelf=false;
+function setHash(h){ _hashSelf=true; try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} setTimeout(()=>{ _hashSelf=false; },0); }
 const HASH_VIEWS=new Set(['markets','focus','funds','trend','charts','sectors','corr','funding','sessions','signals','earnings','news','backtest','report','actionable','admin','housing','liquidity','notes','congress','insiders','dm']);
 // ===== admin panel: feature visibility switchboard =============================================
 // Reads /api/features (manifest + raw states + BOTH resolved audiences). Writes one key per call and
@@ -3823,10 +3862,13 @@ function renderAdmFloors(){
     const at=ev=>{ const r=sv.getBoundingClientRect(); if(!r.width) return;
       const f=Math.max(0,Math.min(1,((ev.touches?ev.touches[0].clientX:ev.clientX)-r.left)/r.width));
       commit(sv.dataset.flk,Math.pow(10,LO+f*(HI-LO))); };
-    sv.addEventListener('mousedown',e=>{ e.preventDefault(); sv._d=1; at(e); });
-    sv.addEventListener('mousemove',e=>{ if(sv._d) at(e); });
-    sv.addEventListener('mouseup',()=>{ sv._d=0; });
-    sv.addEventListener('mouseleave',()=>{ sv._d=0; });
+    // commit() re-renders the box, which replaces this SVG mid-drag — so the drag only tracks the
+    // pointer and commits ONCE on release (a click is mousedown+mouseup at the same spot).
+    sv.addEventListener('mousedown',e=>{ e.preventDefault(); sv._d=1; sv._last=e; });
+    sv.addEventListener('mousemove',e=>{ if(sv._d) sv._last=e; });
+    const release=()=>{ if(sv._d&&sv._last){ const e=sv._last; sv._d=0; sv._last=null; at(e); } sv._d=0; };
+    sv.addEventListener('mouseup',release);
+    sv.addEventListener('mouseleave',release);
   });
   const sb=el('admFlSave'); if(sb) sb.addEventListener('click',saveAdmFloors);
   const rb=el('admFlReset'); if(rb) rb.addEventListener('click',()=>{ _admFlV=hard.vol; _admFlO=hard.oi;
@@ -4193,7 +4235,7 @@ function featureOn(key){ return FLAGS_VIEW ? !!FLAGS_VIEW[key] : true; }
 // drifted apart once; it lives here now and both callers read it.
 // funding joins the crypto set: the heatmap is built per universe and the 24/7 book is where
 // carry is most worth watching — nothing on the board is an equities-only concept.
-const CRYPTO_VIEWS=new Set(['markets','trend','charts','report','corr','backtest','sessions','funding','signals','actionable']);
+const CRYPTO_VIEWS=new Set(['markets','trend','charts','report','corr','backtest','sessions','funding','signals','actionable','dm','notes']);   // dm/notes: not universe-specific — pruning them made the chat dock land on Markets
 // NOT named inScope: that name was already taken at the top of this file by the predicate that
 // decides whether a market ROW belongs to the active universe. Function declarations hoist, so the
 // later definition silently won, activeRows() started asking "is this row object one of the six
@@ -4211,7 +4253,10 @@ function tabVisible(v){ if(v==='admin') return IS_ADMIN; return viewInScope(v) &
 // assignment. Both sets come from the server; nothing here recomputes a visibility.
 let FLAGS_VIEW = FLAGS;
 function applyHash(){ let h; try{ h=decodeURIComponent(location.hash.replace(/^#/,'')); }catch(_){ h=''; }
-  if(h.indexOf('t=')===0){ const coin=h.slice(2); showView('markets'); if(state.rows.has(coin)) openDetail(coin); return; }
+  if(h.indexOf('t=')===0){ const want=h.slice(2); showView('markets');
+    // #t= takes the coin id OR the ticker people actually type (#t=HOOD).
+    const coin=state.rows.has(want)?want:(typeof termFind==='function'&&termFind(want)?termFind(want).coin:null);
+    if(coin&&coin!==state.detail) openDetail(coin); return; }
   // Every view name is routable, not a hand-kept subset. The old whitelist silently omitted
   // actionable, signals and news — which made #actionable a no-op, i.e. a hidden tab would have
   // been unreachable by the very URL that is supposed to reach it.
@@ -4249,6 +4294,9 @@ function sessDate(t){ try{ return new Date(t).toLocaleDateString('en-US',{month:
 let _hoverReg={}, _hoverSeq=0;
 function hoverChart(svgInner, o){
   const id='lc'+(++_hoverSeq);
+  // Entries used to be pruned only inside drawSessions, so every housing / report / trend render
+  // leaked its rows until the user happened to visit Sessions. Sweep on registration instead.
+  if((_hoverSeq&15)===0) for(const k in _hoverReg) if(!document.getElementById(k)) delete _hoverReg[k];
   _hoverReg[id]={ xs:o.xs, rows:o.rows };
   return `<div class="lwrap"><svg id="${id}" class="lchart" viewBox="0 0 ${o.w} ${o.h}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`+
     svgInner+
@@ -5322,7 +5370,7 @@ function wireSessGroups(host){
     h.addEventListener('click',go);
     h.addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); go(); } }); });
   host.querySelectorAll('.jchip').forEach(b=>b.addEventListener('click',()=>{
-    const id=b.dataset.j, s=sgOpenSet(), jump=()=>{ const t=el('sg-'+id); if(t) t.scrollIntoView({behavior:'smooth',block:'start'}); };
+    const id=b.dataset.j, s=sgOpenSet(), jump=()=>{ const t=el('sg-'+id); if(t) t.scrollIntoView({behavior:SCROLL_B,block:'start'}); };
     if(!s.has(id)){ s.add(id); store.set(SG_KEY,JSON.stringify([...s])); drawSessions(); requestAnimationFrame(jump); }
     else jump(); }));
   if(!window._sgScrollWired){ window._sgScrollWired=true;
@@ -6252,7 +6300,7 @@ function drawBacktest(){ const host=el('backtest-body'); if(!host) return; host.
 async function renderBacktest_load(){ drawBacktest(); if(![...state.rows.values()].some(r=>r.daily)){ await loadDaily(); if(state.view==='backtest') drawBacktest(); } }
 
 function updateBenchNote(){ const bn=el('benchnote'); if(!bn) return;
-  const bc=scopeBench(); bn.textContent=(bc&&state.rows.get(bc))?state.rows.get(bc).ticker:'not found'; }
+  const bc=scopeBench(); bn.textContent=(bc&&state.rows.get(bc))?state.rows.get(bc).ticker:(state.rows.size?'not found':'\u2014'); }
 function setScope(v){
   if(v!=='stocks'&&v!=='crypto') return;
   if(state.scope===v) return;
@@ -6295,14 +6343,28 @@ function applyScope(){
   buildHead(); render(); updateAggregates(); updateMovers(); updateBenchNote();
   renderRegimeStrip();   // stocks: correlation regime; crypto: the crypto tape strip
 }
+// The strip scrolls on phones with its scrollbar hidden: a right-edge fade says so, and the active
+// tab is kept in view. Re-checked whenever the ribbon or the viewport changes shape.
+function syncTabScroll(){ const nav=document.querySelector('nav.tabs'); if(!nav) return;
+  nav.classList.toggle('can-scroll', nav.scrollWidth>nav.clientWidth+4);
+  const at=nav.querySelector('.tab.active'); if(at&&at.scrollIntoView) try{ at.scrollIntoView({block:'nearest',inline:'nearest'}); }catch(_){} }
+window.addEventListener('resize',()=>syncTabScroll());
+window.addEventListener('load',()=>setTimeout(syncTabScroll,50));
 function showView(v){
+  try{ document.body.dataset.view=v; }catch(_){}
   // Falls through to Markets when the target is out of scope OR gated. markets is PINNED public in
   // the manifest precisely so this fallback can never itself be gated — otherwise a public user
   // could be bounced into a view they cannot see and end up with no rendered tab at all.
-  if(!tabVisible(v)) v='markets';
+  if(!tabVisible(v)){
+    // Say so instead of silently substituting the home tab: a hidden view reached from a link or
+    // the dock used to just... show Markets.
+    const tb=document.querySelector('.tab[data-view="'+v+'"]'); const lbl=tb?tb.textContent.trim().replace(/\s*\d+\s*$/,''):v;
+    if(v!=='markets'&&tb) pushToast(lbl+' is not available in '+(state.scope==='crypto'?'Crypto':'this')+' scope');
+    v='markets'; }
   { const hm=el('helpmodal'); if(hm&&!hm.hidden) closeHelp(); }   // help is per-tab — never leave a stale explainer open across a switch
   state.view=v;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
+  syncTabScroll();
   if(typeof syncTabGroups==='function') syncTabGroups(v);            // underline the group that owns it
   if(typeof closeTabMenus==='function') closeTabMenus();             // navigating always dismisses the menu
   const setHidden=(id,hidden)=>{ const e=el(id); if(e) e.hidden=hidden; };   // null-safe: a stale index.html missing a section can't break navigation
@@ -6915,10 +6977,19 @@ async function loadTriggers(){
       if(!A.seenSeq){ A.seenSeq=d.seq||0; saveAlerts(); }
       updateBell(); if(!el('alertpop').hidden) buildAlertsPanel(); return; }
     for(const ev of d.events){
-      const k=ev.kind||'setup';
-      if(k==='ops'){ fireOps(ev); continue; }
-      if(k==='ledger'){ fireLedger(ev); continue; }
-      if(A.trig.on && trigEligibleClient(ev,A.trig)) fireTrigger(ev);
+      // Per event: one malformed row used to throw out of the loop, skip trigSeqSet, and replay
+      // the whole window (repeat toasts) on every alertVer bump.
+      try{
+        const k=ev.kind||'setup';
+        if(k==='ops'){ fireOps(ev); continue; }
+        if(k==='ledger'){ fireLedger(ev); continue; }
+        // Kind -> channel. Only setup events used to toast; a member's own `NVDA px > 120` rule
+        // crossing while they watched produced nothing but a bell count. ALERT_CHANNELS is also
+        // what the Delivery fold renders, so the matrix on screen is the one the code runs.
+        if(ALERT_CHANNELS[k]&&ALERT_CHANNELS[k].toast){ fireGeneric(ev); continue; }
+        if(k!=='setup'){ updateBell(); if(!el('alertpop').hidden) buildAlertsPanel(); continue; }
+        if(A.trig.on && trigEligibleClient(ev,A.trig)) fireTrigger(ev);
+      }catch(_){ /* this event is broken, the batch is not */ }
     }
     if(d.seq!=null) trigSeqSet(d.seq);
   }catch(_){ /* cursor unadvanced — the next poll retries the same window, nothing is lost */ }
@@ -6926,6 +6997,49 @@ async function loadTriggers(){
 // INTERRUPT only. The event is already in A.feed (server truth) by the time this runs, so nothing
 // here writes to a log — a second copy is exactly how the badge, the panel and the toast used to
 // be able to disagree about what had happened.
+// Which client channels each server event kind reaches. Telegram/push are per-recipient class
+// choices made in the Delivery fold; this is the in-tab half of the same matrix.
+const ALERT_CHANNELS={
+  setup:{toast:true,bell:true,tg:true,push:true,note:'subject to your trigger thresholds'},
+  rule:{toast:true,bell:true,tg:true,push:true,note:'your own metric rules'},
+  trend:{toast:true,bell:true,tg:true,push:false},
+  ma200:{toast:true,bell:true,tg:true,push:false},
+  ledger:{toast:true,bell:true,tg:true,push:false,note:'toast on a void hit only'},
+  ops:{toast:false,bell:true,tg:true,push:false,note:'toast on a warning only'},
+  filing:{toast:false,bell:true,tg:true,push:false},
+  earnings:{toast:false,bell:true,tg:true,push:false},
+  macro:{toast:false,bell:true,tg:true,push:false},
+  ai:{toast:false,bell:true,tg:true,push:false},
+  regime:{toast:false,bell:true,tg:true,push:false},
+  coverage:{toast:false,bell:true,tg:false,push:false},
+};
+function alertMatrixHtml(){
+  const y='<span class="pos">●</span>', n='<span class="faint">·</span>';
+  return `<table class="amx"><thead><tr><th>event</th><th>toast</th><th>bell</th><th>telegram</th><th>push</th></tr></thead><tbody>`
+    +Object.keys(ALERT_CHANNELS).map(k=>{ const c=ALERT_CHANNELS[k];
+      return `<tr><td>${esc(k)}${c.note?` <span class="sec">${esc(c.note)}</span>`:''}</td><td>${c.toast?y:n}</td><td>${c.bell?y:n}</td><td>${c.tg?y:n}</td><td>${c.push?y:n}</td></tr>`; }).join('')
+    +`</tbody></table>`;
+}
+// Rule / trend / MA200 events: a card with the event text and one action — open the name.
+function fireGeneric(ev){
+  const A=state.alerts;
+  updateBell();
+  const w=el('toastwrap');
+  if(w){
+    const t=document.createElement('div'); t.className='toast toast-trig';
+    const lbl=(ev.kind||'alert').toUpperCase();
+    t.innerHTML=`<div class="tt-h"><span class="tt-lbl">${esc(lbl)}</span><span class="ax" data-x="1" title="dismiss">✕</span></div>`
+      +`<div class="tt-n">${esc(alertText(ev))}</div>`
+      +(ev.coin&&state.rows.has(ev.coin)?`<div class="tt-a"><button class="btn" data-open="1">Open ${esc(ev.t||tickerOf(ev.coin))} →</button></div>`:'');
+    t.querySelector('[data-x]').addEventListener('click',()=>t.remove());
+    const o=t.querySelector('[data-open]'); if(o) o.addEventListener('click',()=>{ t.remove(); showView('markets'); openDetail(ev.coin); });
+    w.appendChild(t);
+    setTimeout(()=>{ if(!t.isConnected) return; t.style.transition='opacity .3s'; t.style.opacity='0'; setTimeout(()=>t.remove(),300); }, 15000);
+  }
+  if(A.notify && typeof Notification!=='undefined' && Notification.permission==='granted'){
+    try{ new Notification('Milst Screener — '+(ev.kind||'alert'),{body:alertText(ev)}); }catch(_){} }
+  if(!el('alertpop').hidden) buildAlertsPanel();
+}
 function fireTrigger(ev){
   const A=state.alerts;
   updateBell(); pushTrigToast(ev);
@@ -6942,7 +7056,7 @@ function pushTrigToast(ev){
   const late=ev.late==null?'—':((ev.late>=0?'+':'')+ev.late.toFixed(2)+'R');
   const lateCls=ev.late==null?'sec':(ev.late<=0?'pos':(ev.late>0.5?'warn':'sec'));
   t.innerHTML=`<div class="tt-h"><span class="tt-lbl">NEW TRIGGER</span><span class="ax" data-x="1" title="dismiss">✕</span></div>`
-    +`<div class="tt-n"><b class="${sideCls}">${esc(ev.t)}</b> <span class="${sideCls}">${esc(ev.side.toUpperCase())}</span> <span class="sec">${esc(ev.label)}</span></div>`
+    +`<div class="tt-n"><b class="${sideCls}">${esc(ev.t)}</b> <span class="${sideCls}">${esc(String(ev.side||'').toUpperCase())}</span> <span class="sec">${esc(ev.label)}</span></div>`
     +`<div class="tt-g">fired ${fmtPrice(ev.fired)} · void ${fmtPrice(ev.void)} · target ${fmtPrice(ev.target)}</div>`
     +`<div class="tt-g">R:R ${ev.rr&&ev.rr.gross!=null?(+ev.rr.gross).toFixed(2):'—'} at fire · EV ${ev.evR!=null?((ev.evR>=0?'+':'')+(+ev.evR).toFixed(2)+'R'):'no record'} · late <span class="${lateCls}">${late}</span></div>`
     +(ev.earn?`<div class="tt-w">⚠ earnings ${ev.earn.days}d out — inside the ${ev.horizonD}d horizon</div>`:'')
@@ -7243,7 +7357,7 @@ function actEpDetail(e){
   const risk=Math.abs(e.fired-e.void), riskPct=e.fired?(risk/e.fired*100):null;
   const opx=e.kind==='target'?e.target:e.kind==='void'?e.void:e.exitPx;
   return `<div class="act-set-det">`
-    +`<span>first shown <b>${new Date(e.tShow).toISOString().slice(0,16).replace('T',' ')}</b> at mark <b>${fmtPrice(e.markShow)}</b>${e.tFire?` \u00b7 claim fired <b>${actAgo(e.tShow-e.tFire)}</b> earlier`:''}</span>`
+    +`<span>first shown <b>${isoUtc(e.tShow,0,16)}</b> at mark <b>${fmtPrice(e.markShow)}</b>${e.tFire?` \u00b7 claim fired <b>${actAgo(e.tShow-e.tFire)}</b> earlier`:''}</span>`
     +(e.bt?`<span class="sec">\u27f2 boot-stamped \u2014 the first-shown stamp is the record's own first scan; the row may have been visible earlier, so this episode's lateness is a lower bound and it is excluded from the headline lateness number</span>`:'')
     +((e.tBld!=null&&e.tFire!=null&&e.tShow!=null&&!e.bt&&!e.be)?`<span>fire\u2192shown: <b>${actAgo(e.tBld-e.tFire)}</b> to first evaluating build \u00b7 <b>${actAgo(e.tShow-e.tBld)}</b> held at the gates</span>`
       :(e.be?`<span class="sec">\u27f2 build-stamped \u2014 the first-evaluated stamp was minted on a fresh process's first build (a lower bound, not a measurement); excluded from the fire\u2192shown split</span>`:''))
@@ -7332,7 +7446,7 @@ function actDetail(r){
   g.push(['taking it now',`${fmtPrice(r.entry)} \u2014 ${r.late==null?'lateness unavailable':(r.late<0?`${actLate(-r.late)}R of the claim's risk already spent against you`:`${actLate(r.late)}R of the move already made`)}`]);
   g.push(['fired',`${actAgo(Date.now()-r.t0)} ago \u00b7 ${r.bars==null?'\u2014':r.bars} ${r.tf} bar(s) in trigger`]);
   g.push(['lateness',r.late==null?'unavailable':`${actLate(r.late)}R ${r.late<0?'\u2014 price moved AGAINST the claim: better entry price, but that much less room to the void than the record\u2019s fires had':'of the claim\u2019s move already made before entry'}`]);
-  let h=`<div class="act-det"><div class="ad-h"><b class="${r.side==='long'?'pos':'neg'}">${esc(r.t)} ${esc(r.side.toUpperCase())}</b> \u00b7 ${esc(r.label)} on the ${esc(r.tf)} rung \u00b7 ${r.horizonD}d horizon`
+  let h=`<div class="act-det"><div class="ad-h"><b class="${r.side==='long'?'pos':'neg'}">${esc(r.t)} ${esc(String(r.side||'').toUpperCase())}</b> \u00b7 ${esc(r.label)} on the ${esc(r.tf)} rung \u00b7 ${r.horizonD}d horizon`
     +(r.prime===true?' <span class="ad-badge" title="This setup was prime at fire time by the signals engine\u2019s heuristic: hit \u2265 60%, positive average, clean structure, no earnings. Shown, not enforced \u2014 a lower-hit setup at high R:R is still worth taking.">prime at fire</span>':'')
     +(r.also&&r.also.length?` \u00b7 <span class="sec">corroborated by ${esc(r.also.map(a=>a.label).join(', '))}</span>`:'')+`</div><div class="ad-g">`;
   for(const [k,v] of g) h+=`<div class="ad-k">${k}</div><div class="ad-v">${v}</div>`;
@@ -7493,7 +7607,7 @@ function earnDiffC(dateStr){ if(!/^\d{4}-\d{2}-\d{2}$/.test(dateStr||'')) return
 function earnFilingHtml(e){
   if(!e||!e.filing) return '';
   const f=e.filing;
-  return `<a class="earn-fl${/^8-K/.test(f.form)?' mat':''}" href="${esc(f.url)}" target="_blank" rel="noopener noreferrer" data-tip="${esc('the actual filing on EDGAR \u2014 '+f.form+(/^8-K/.test(f.form)?' (the earnings release itself)':' (the report)')+' \u00b7 filed '+fmtAge(Date.now()-f.pub)+' ago')}">${esc(f.form)} \u2197</a>`;
+  return `<a class="earn-fl${/^8-K/.test(f.form)?' mat':''}" href="${esc(safeHref(f.url))}" target="_blank" rel="noopener noreferrer" data-tip="${esc('the actual filing on EDGAR \u2014 '+f.form+(/^8-K/.test(f.form)?' (the earnings release itself)':' (the report)')+' \u00b7 filed '+fmtAge(Date.now()-f.pub)+' ago')}">${esc(f.form)} \u2197</a>`;
 }
 function earnSessLbl(s){ return s==='BMO'?'pre-market (BMO)':s==='AMC'?'after close (AMC)':s==='DMH'?'during market hours':'time TBD'; }
 async function loadEarnings(){
@@ -7741,7 +7855,8 @@ function ntOpenCompose(coin, id){
   _ntEditing = id||null;
   const box=el('ntBox'), cmp=el('ntCompose'); if(!box||!cmp) return;
   const n = id?(state.notes||[]).find(x=>x.id===id):null;
-  cmp.hidden=false; box.value=n?n.body:'';
+  let draft=''; if(!n){ try{ draft=sessionStorage.getItem(ntDraftKey(coin))||''; }catch(_){} }   // a half-typed note survives the drawer closing
+  cmp.hidden=false; box.value=n?n.body:draft;
   el('ntSave').disabled=!box.value.trim();
   el('ntSave').textContent=n?'save edit':'save note';
   el('ntStamp').textContent=ntStampTxt(coin);
@@ -7751,7 +7866,11 @@ function ntOpenCompose(coin, id){
   const err=el('ntErr'); if(err){ err.hidden=true; err.textContent=''; }
   box.focus();
 }
-function ntCloseCompose(){ _ntEditing=null; const c=el('ntCompose'); if(c){ c.hidden=true; el('ntBox').value=''; } }
+// Closing with text in the box asks first — Escape is a habit here and it used to wipe a note.
+function ntCloseCompose(force){ const b=el('ntBox');
+  if(!force&&b&&b.value.trim()&&!confirm('Discard this note? The text will be lost.')) return;
+  _ntEditing=null; const c=el('ntCompose'); if(c){ c.hidden=true; if(b) b.value=''; } }
+const ntDraftKey=(coin)=>'nt.draft|'+coin;
 async function ntWrite(body, coin){
   const save=el('ntSave'), err=el('ntErr');
   if(save) save.disabled=true;
@@ -7766,7 +7885,8 @@ async function ntWrite(body, coin){
       if(save) save.disabled=false;
       return false;
     }
-    ntCloseCompose();
+    try{ sessionStorage.removeItem(ntDraftKey(coin)); }catch(_){}
+    ntCloseCompose(true);
     await loadNotes(true);
     renderDrawerNotes(coin);
     render();                      // repaint the markers off the refreshed book
@@ -7787,6 +7907,7 @@ function wireDrawerNotes(coin){
   const box=el('ntBox');
   if(box){
     box.oninput=()=>{ el('ntSave').disabled=!box.value.trim(); };
+    box.addEventListener('input',()=>{ try{ if(!_ntEditing) sessionStorage.setItem(ntDraftKey(coin), box.value); }catch(_){} });
     box.onkeydown=e=>{ if(e.key==='Escape'){ e.stopPropagation(); ntCloseCompose(); }
       if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){ e.preventDefault(); const s=el('ntSave'); if(s&&!s.disabled) s.click(); } };
   }
@@ -8001,6 +8122,7 @@ function hsgWindowStart(win){
   return '1900-01-01';
 }
 function hsgSlice(ser,win){ const from=hsgWindowStart(win); return (ser&&ser.obs||[]).filter(o=>o[0]>=from); }
+function hsgNum(v,d){ return (v==null||!isFinite(v))?'—':(+v).toFixed(d); }   // a FRED "." observation lands as null; one unguarded toFixed blanked the whole tab
 function hsgFmt(v,ser){ if(v==null||!isFinite(v)) return '—';
   if(ser.unit==='$B') return liqB(v);
   if(ser.unit==='$k') return '$'+v.toFixed(0)+'k';
@@ -8101,7 +8223,7 @@ function renderHousing(){
   let starts='';
   if(g('sf')&&g('mf')){ const sf=g('sf'), mf=g('mf');
     starts=`<div class="s-card hsg-card hsg-wide"><div class="hsg-head"><span class="hsg-title">Housing starts — single-family vs multifamily</span>${hsgChip(sf)}<span class="src-chip direct" title="${esc(mf.src)}"><i></i>Direct · ${esc(mf.sid)}</span></div>`+
-      `<div class="hsg-kpis"><span class="hsg-v">${sf.last.v.toFixed(2)}M</span><span class="sec hsg-d">single-family · ${hsgDate(sf.last.d)}</span>${hsgDelta(sf)}<span class="sec" style="margin:0 6px">|</span><span class="hsg-v" style="font-size:15px">${mf.last.v.toFixed(2)}M</span><span class="sec hsg-d">multifamily</span>${hsgDelta(mf)}</div>`+
+      `<div class="hsg-kpis"><span class="hsg-v">${hsgNum(sf.last.v,2)}M</span><span class="sec hsg-d">single-family · ${hsgDate(sf.last.d)}</span>${hsgDelta(sf)}<span class="sec" style="margin:0 6px">|</span><span class="hsg-v" style="font-size:15px">${hsgNum(mf.last.v,2)}M</span><span class="sec hsg-d">multifamily</span>${hsgDelta(mf)}</div>`+
       sLeg([{color:'var(--blue)',label:'Single-family'},{color:'var(--muted)',label:'Multifamily (5+ units)'}])+
       hsgStackSvg(sf,mf,sl('sf'),sl('mf'))+`</div>`; }
   const missing=(d.missing&&d.missing.length)?`<div class="s-cap" style="margin-top:10px">Absent this pass (not shown stale): ${d.missing.map(esc).join(', ')}</div>`:'';
@@ -8757,7 +8879,7 @@ function newsRow(a,now,inDrawer){
       +`<span class="nage" data-tip="${esc(new Date(a.pub).toLocaleString())}">${age}</span>`
       +`<span class="nform${a.mat?' mat':''}" data-form="${esc(a.form)}" data-tip="${esc((a.mat?'material form':'routine form')+' \u00b7 click to filter to '+a.form+' filings')}">${esc(a.form)}</span>`
       +badge
-      +`<span class="nhl">${a.url?`<a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer" data-tip="${esc(a.h)}">${esc(a.h)}</a>`:esc(a.h)}</span>`
+      +`<span class="nhl">${a.url?`<a href="${esc(safeHref(a.url))}" target="_blank" rel="noopener noreferrer" data-tip="${esc(a.h)}">${esc(a.h)}</a>`:esc(a.h)}</span>`
       +`<span class="nsrc">EDGAR \u2197</span>`
       +`</div>`;
   }
@@ -8771,7 +8893,7 @@ function newsRow(a,now,inDrawer){
     +`<span class="nage" data-tip="${esc(new Date(a.pub).toLocaleString())}">${age}</span>`
     +badge
     +sec
-    +`<span class="nhl">${a.url?`<a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer" data-tip="${esc(a.h)}">${esc(a.h)}</a>`:esc(a.h)}</span>`
+    +`<span class="nhl">${a.url?`<a href="${esc(safeHref(a.url))}" target="_blank" rel="noopener noreferrer" data-tip="${esc(a.h)}">${esc(a.h)}</a>`:esc(a.h)}</span>`
     +(a.src?`<span class="nsrc">${esc(a.src)} \u2197</span>`:'')
     +`</div>`;
 }
@@ -8857,7 +8979,7 @@ function renderNews(){
 }
 function bindNews(box){
   const nf=box.querySelector('#nfilter');
-  if(nf){ nf.oninput=()=>{ newsFilter=nf.value; renderNews(); const el2=document.getElementById('nfilter'); if(el2){ el2.focus(); el2.setSelectionRange(el2.value.length,el2.value.length); } }; }
+  if(nf){ let nfT=null; nf.oninput=()=>{ newsFilter=nf.value; clearTimeout(nfT); nfT=setTimeout(()=>{ renderNews(); const el2=document.getElementById('nfilter'); if(el2){ el2.focus(); el2.setSelectionRange(el2.value.length,el2.value.length); } },120); }; }
   box.querySelectorAll('[data-nm]').forEach(b=>b.onclick=()=>{ newsMode=b.dataset.nm; renderNews(); });
   box.querySelectorAll('[data-nv]').forEach(b=>b.onclick=()=>{ newsView=b.dataset.nv; renderNews(); });
   { const g=box.querySelector('#ntg-gear'); if(g) g.onclick=()=>{ newsTgOpen=!newsTgOpen; if(newsTgOpen) loadTgChannels(); renderNews(); }; }
@@ -9605,7 +9727,7 @@ function leadersRankHtml(data){
   return `<div class="cp-sub" style="margin:16px 2px 8px">${sectGrpActive()?'Industry groups':'Sectors'} ranked vs the S&amp;P (${leadersDays()}d) <span class="sec" style="text-transform:none;letter-spacing:0">· ▲ trajectory improving · ▼ deteriorating · arrow color = quadrant (hover it — what "improving" means depends on which side of the S&amp;P the group sits) · click a row to drill in</span></div>`+
     sorted.map(li).join('');
 }
-function attachLeadersHandlers(){ el('sect-map').querySelectorAll('.lead, .lrow').forEach(g=>g.addEventListener('click',()=>{ state.sect.sel=g.dataset.sect; renderSectorDetail(); el('sect-detail').scrollIntoView({behavior:'smooth',block:'nearest'}); })); }
+function attachLeadersHandlers(){ el('sect-map').querySelectorAll('.lead, .lrow').forEach(g=>g.addEventListener('click',()=>{ state.sect.sel=g.dataset.sect; renderSectorDetail(); el('sect-detail').scrollIntoView({behavior:SCROLL_B,block:'nearest'}); })); }
 function renderSectorMap(list){
   const W=760,H=380, px0=52,px1=W-18, py0=H-30, py1=20;
   const plot=list.filter(g=>g.direction!=null&&g.name!=='Unclassified');
@@ -9636,7 +9758,7 @@ function renderSectorMap(list){
   s+='</svg>';
   return s;
 }
-function attachMapHandlers(){ el('sect-map').querySelectorAll('.bub').forEach(b=>b.addEventListener('click',()=>{ state.sect.sel=b.dataset.sect; renderSectorDetail(); el('sect-detail').scrollIntoView({behavior:'smooth',block:'nearest'}); })); }
+function attachMapHandlers(){ el('sect-map').querySelectorAll('.bub').forEach(b=>b.addEventListener('click',()=>{ state.sect.sel=b.dataset.sect; renderSectorDetail(); el('sect-detail').scrollIntoView({behavior:SCROLL_B,block:'nearest'}); })); }
 function heatBar(h){ const c=h>=66?'var(--accent)':h>=33?'var(--blue)':'var(--faint)'; return `<span style="display:inline-block;vertical-align:middle;width:46px;height:7px;border-radius:3px;background:var(--grid)"><span style="display:block;height:7px;border-radius:3px;width:${clamp(h,0,100)}%;background:${c}"></span></span>`; }
 function rotCell(d){ if(d==null)return '<span class="na">—</span>'; const s=d>0?'+':''; return `<span style="color:${momColor(d)};font-weight:600">${s}${Math.round(d)}</span>`; }
 function renderSectorBoard(list){
@@ -9670,7 +9792,7 @@ function renderSectorBoard(list){
   const head='<thead><tr><th>'+(byInd?'Industry':'Sector')+'</th>'+(byInd?'<th style="text-align:left" title="parent GICS sector(s)">GICS</th>':'')+'<th style="text-align:left">Type</th><th>#</th><th title="capital direction: price + OI conviction, ranked across '+(byInd?'industries':'sectors')+'">Rotation</th><th>Heat</th><th>Return</th><th title="avg open-interest change over the window">ΔOI</th><th title="% of members up">Breadth</th><th>24h Vol</th><th>OI</th><th title="avg internal correlation">Cohesion</th></tr></thead>';
   el('sect-board').innerHTML=`<div class="cp-head" style="margin-bottom:10px">${byInd?'Industry':'Sector'} rotation board <span class="sec" style="font-weight:400">— ${state.tf} window · ${state.sect.wt==='eq'?'equal-weighted':'volume-weighted'}${byInd?' · finer groups, thinner samples — «thin» rows carry noisier stats':''} · click a row or bubble for detail</span></div>`+
     `<div style="overflow-x:auto"><table class="ptbl" style="min-width:${byInd?820:760}px">${head}<tbody>${rows}</tbody></table></div>`;
-  el('sect-board').querySelectorAll('tbody tr[data-sect]').forEach(tr=>tr.addEventListener('click',()=>{ state.sect.sel=tr.dataset.sect; renderSectorDetail(); el('sect-detail').scrollIntoView({behavior:'smooth',block:'nearest'}); }));
+  el('sect-board').querySelectorAll('tbody tr[data-sect]').forEach(tr=>tr.addEventListener('click',()=>{ state.sect.sel=tr.dataset.sect; renderSectorDetail(); el('sect-detail').scrollIntoView({behavior:SCROLL_B,block:'nearest'}); }));
 }
 function renderSectorDetail(){
   const p=el('sect-detail'), list=SECT._rows, name=state.sect.sel;
@@ -9774,11 +9896,18 @@ function warmCount(){
 // proxy can wedge a stream half-open without erroring); any stream error snaps the cadence back
 // instantly and EventSource handles its own reconnect. No EventSource support = the poll exactly
 // as it always was.
-let _sseOk=false, _sseSrc=null;
+let _sseOk=false, _sseSrc=null, _sseBackoff=2000, _sseRetryT=null;
 function startEvents(){ if(typeof EventSource==='undefined'||_sseSrc) return;
   try{ _sseSrc=new EventSource('/api/events'); }catch(_){ return; }
-  _sseSrc.onopen=()=>{ _sseOk=true; startCycle(); };
-  _sseSrc.onerror=()=>{ if(_sseOk){ _sseOk=false; startCycle(); } };   // reconnects itself; we just restore the fast poll
+  _sseSrc.onopen=()=>{ _sseOk=true; _sseBackoff=2000; startCycle(); };
+  _sseSrc.onerror=()=>{
+    if(_sseOk){ _sseOk=false; startCycle(); }   // a transient drop: the browser reconnects itself; we just restore the fast poll
+    // A non-retryable answer (a 5xx mid-redeploy, a 401 after the session expired, a proxy 502)
+    // leaves the source CLOSED for good and the browser never retries — and dmSync only ever ran
+    // off this stream, so the unread pip and read receipts went dark for the rest of the session.
+    if(_sseSrc&&_sseSrc.readyState===2){ try{ _sseSrc.close(); }catch(_){} _sseSrc=null;
+      clearTimeout(_sseRetryT); _sseRetryT=setTimeout(startEvents,_sseBackoff); _sseBackoff=Math.min(_sseBackoff*2,60000); }
+  };
   _sseSrc.onmessage=(ev)=>{ let d; try{ d=JSON.parse(ev.data); }catch(_){ return; }
     // A pushed dataTs we already hold is a no-op (the initial sync frame, typically). A new one —
     // including the new `v` a redeploy pushes via the reconnect's first frame — pulls immediately;
@@ -9831,7 +9960,12 @@ el('watchOnly').classList.toggle('on', state.watchOnly);
 { const nb=el('noteOnly'); if(nb) nb.classList.toggle('on', state.noteOnly); }
 updateLayoutBtn();
 el('refresh').addEventListener('click', forceRefresh);
-el('filter').addEventListener('input', e=>{ state.filter=e.target.value; render(); savePrefs(); });
+// Foregrounding the tab: reopen a dead stream and pull messages once, whatever tab is showing.
+document.addEventListener('visibilitychange',()=>{ if(document.hidden) return;
+  if(!_sseSrc) startEvents();
+  if(typeof dmSync==='function'&&dmState&&dmState.me){ try{ dmSync(); }catch(_){} } });
+// Search-as-you-type re-rendered the whole table synchronously per keystroke; one frame is plenty.
+el('filter').addEventListener('input', e=>{ state.filter=e.target.value; scheduleRender(); savePrefs(); });
 el('body').addEventListener('click', e=>{ const star=e.target.closest('.star');
   if(star){ e.stopPropagation(); toggleWatch(star.dataset.star); return; }
   const pit=e.target.closest('.pit[data-pit]');
@@ -9852,10 +9986,22 @@ el('watchOnly').addEventListener('click',()=>{ state.watchOnly=!state.watchOnly;
       render(); }); } }
 el('drawerbg').addEventListener('click', closeDetail);
 document.addEventListener('keydown', e=>{ if(e.key==='Escape' && state.detail) closeDetail(); });
+// Unread is marked on CLOSE, not open: marking on open zeroed the count before the panel painted,
+// so the five new rows looked exactly like the forty old ones and `.aunread` never rendered.
+// "I'm looking at HOOD, alert me at 113": open the bell with the rule form already carrying the name and its mark.
+function openRuleFor(r){
+  const pop=el('alertpop'); if(pop.hidden) el('bellBtn').click();
+  const t=el('ar-ticker'), v=el('ar-val'), m=el('ar-metric');
+  if(t) t.value=r.ticker||''; if(v&&r.px!=null) v.value=String(+(+r.px).toPrecision(6));
+  if(m){ const o=[...m.options].find(o=>/^(px|price)$/i.test(o.value)||/price/i.test(o.textContent)); if(o) m.value=o.value; }
+  const sec=el('sec-rules'); if(sec&&sec.hidden) { const h=pop.querySelector('[data-sec="rules"]'); if(h) h.click(); }
+  if(v) v.focus();
+}
+function closeAlertPop(){ const pop=el('alertpop'); if(pop.hidden) return; pop.hidden=true; el('bellBtn').setAttribute('aria-expanded','false'); alertMarkRead(); updateBell(); }
 el('bellBtn').addEventListener('click',e=>{ e.stopPropagation(); const pop=el('alertpop');
-  if(pop.hidden){ loadPush(); loadRules(); alertMarkRead(); }   // delivery state is server-truth; read it fresh every open (a link code expires in 10 min)
-  if(pop.hidden){ buildAlertsPanel(); pop.hidden=false; el('bellBtn').setAttribute('aria-expanded','true'); updateBell(); }
-  else { pop.hidden=true; el('bellBtn').setAttribute('aria-expanded','false'); } });
+  if(pop.hidden){ loadPush(); loadRules(); }   // delivery state is server-truth; read it fresh every open (a link code expires in 10 min)
+  if(pop.hidden){ buildAlertsPanel(); pop.hidden=false; el('bellBtn').setAttribute('aria-expanded','true'); }
+  else closeAlertPop(); });
 // A control that rebuilds its own popover destroys the element that was clicked. By the time the
 // click bubbles to document, e.target is DETACHED — and a detached node is contained by nothing, so
 // the "did they click outside?" test says yes and the popover closes under the user's finger. Every
@@ -9867,11 +10013,11 @@ function clickedOutside(pop, btn, e){
   return !pop.contains(e.target) && (!btn || !btn.contains(e.target));
 }
 document.addEventListener('click',e=>{ const pop=el('alertpop');
-  if(clickedOutside(pop, el('bellBtn'), e)){ pop.hidden=true; el('bellBtn').setAttribute('aria-expanded','false'); } });
+  if(clickedOutside(pop, el('bellBtn'), e)) closeAlertPop(); });
 function applyNumFilters(){
   for(const id of ['volMin','volMax','oiMin','oiMax']){ const inp=el(id), v=parseAmount(inp.value);
     if(Number.isNaN(v)) inp.classList.add('bad'); else { inp.classList.remove('bad'); state.filters[id]=v; } }
-  updateFilterChip(); render(); savePrefs();
+  updateFilterChip(); scheduleRender(); savePrefs();
 }
 ['volMin','volMax','oiMin','oiMax'].forEach(id=>el(id).addEventListener('input', applyNumFilters));
 applyNumFilters();
@@ -10077,6 +10223,7 @@ function buildTabGroups(){
     if(!tabGroupOf(v)) nav.insertBefore(t,anchor); });
   if(byView['admin']) nav.insertBefore(byView['admin'],anchor);   // admin sits last, next to the controls
   syncTabGroups(state.view);
+  setTimeout(syncTabScroll,0);
 }
 // A group shows only if it has a visible member, and its count reflects what the viewer can
 // actually reach — crypto scope and the feature flags both prune members, so an admin on stocks
@@ -10131,16 +10278,25 @@ function kmoveSel(dir){ const rows=sortedRows(); if(!rows.length) return;
   i = i<0 ? (dir>0?0:rows.length-1) : Math.min(rows.length-1, Math.max(0, i+dir));
   state.ksel=rows[i].coin; applyKsel();
   const tr=el('body').querySelector('tr.krow'); if(tr) tr.scrollIntoView({block:'nearest'}); }
+// Enter / Space on a custom control acts like a click, and Enter on a focused market row opens it —
+// the rows, the star, conversation rows and the terminal chips were mouse-only before.
+document.addEventListener('keydown',e=>{
+  if(e.key!=='Enter'&&e.key!==' ') return;
+  const t=e.target; if(!t||t.tagName==='BUTTON'||t.tagName==='A'||t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.tagName==='SELECT') return;
+  if(t.matches&&(t.matches('[role="button"]')||(t.matches('tr[data-coin]')&&e.key==='Enter'))){ e.preventDefault(); t.click(); }
+});
 document.addEventListener('keydown',e=>{
   if(e.ctrlKey||e.metaKey||e.altKey) return;
   const t=e.target, tag=t&&t.tagName;
   if(tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT'||(t&&t.isContentEditable)) return;
+  if(e.key==='?'){ e.preventDefault(); openHelp(); return; }
   if(e.key==='/'){ e.preventDefault();
     // focus the current tab's primary search; tabs without one fall back to the markets filter
-    const map={markets:'filter',corr:'corrsearch',report:'ai-q',dm:'dm-q'};
-    let id=map[state.view];
-    if(!id){ showView('markets'); id='filter'; }
-    const inp=el(id); if(inp){ inp.focus(); inp.select&&inp.select(); } return; }
+    const map={markets:'filter',corr:'corrsearch',report:'ai-q',dm:'dm-q',signals:'sighist-q',news:'nfilter',insiders:'ins-q'};
+    let inp=el(map[state.view]||'');
+    if(!inp){ const sec=el('view-'+state.view); inp=sec&&sec.querySelector('input[type="search"],input[type="text"],input:not([type]),textarea'); }   // any tab with a box keeps you on it
+    if(!inp){ showView('markets'); inp=el('filter'); }
+    if(inp){ inp.focus(); inp.select&&inp.select(); } return; }
   if(state.view==='dm'){ dmKeys(e); return; }                            // j/k walk the conversation rail, Escape backs out a level
   if(state.view!=='markets'||state.detail||mktGrp()!=='names') return;   // j/k/Enter drive the markets NAMES table only — never under an open drawer or a group lens
   if(e.key==='j'){ e.preventDefault(); kmoveSel(1); return; }
@@ -10364,13 +10520,37 @@ news:`
 <div class="hlp-h">Honest caveats</div>
 <p>This is a <b>tape, not a verdict</b>: it surfaces what was said and filed, not whether it matters. Relevance verification trims obvious mismatches, but a headline's presence is never a signal — the ledger and the board are where a story becomes a measurable condition. A warm cache serves the last good pull across redeploys so the tab comes back populated instead of blank while the rotation catches up.</p>`,
 };
+// Short entries for the tabs that had none: pressing ? on Messages used to open the Markets text
+// under the title "How to read: dm".
+Object.assign(HELP,{
+  dm:`<div class="hlp-h">What it is</div><p>Direct messages and topic boards between account holders. Type <b>$TICKER</b> and the message carries the mark it was sent at — read later it says "sent at 113.90 · +4.0%". <b>short / sell / fade</b> before the ticker (or <b>short / puts</b> after) makes it a short; everything else is a long. Editing rewrites the words, never the stamp.</p><div class="hlp-h">Calls</div><p><b>calls ↗</b> in the rail is every stamped message in one place, scored live and at fixed 1d / 7d horizons, with a per-person record. Deleting a call removes the words, never the score.</p><div class="hlp-h">Who can read this</div><p>The operator of this terminal can read every message, including conversations they are not in; every read is logged in Admin.</p>`,
+  notes:`<div class="hlp-h">What it is</div><p>Your written notes, per ticker, written in the ticker drawer. Each note is stamped with the mark it was written at, so every later read carries the move since. <b>#tags</b> in the body filter the tab.</p><div class="hlp-h">Markers on Markets</div><p>A post-it in the ticker cell means a note exists: solid within 7 days, dimmed to 30, hollow after. Hover for the first line; click to open.</p>`,
+  charts:`<div class="hlp-h">What it is</div><p>Up to eight names side by side on the same timeframe. Pick tickers in the bar above; each chart shares the ladder the drawer uses.</p>`,
+  treemap:`<div class="hlp-h">What it is</div><p>The universe by sector, tile area = the size measure you pick, colour = the move over the window. Click a tile to open the name.</p>`,
+  funds:`<div class="hlp-h">What it is</div><p>Fund and ETF holdings from SEC filings (N-PORT, 13F) for the names in the universe — who holds what, and how that changed quarter over quarter. Filings are quarterly and lag by up to 45 days; the tab says when each was filed.</p>`,
+  congress:`<div class="hlp-h">What it is</div><p>Congressional trading disclosures (PTRs) that name a ticker in the universe, parsed from the House and Senate filings. A disclosure lands up to 45 days after the trade; the filing date is shown next to the trade date.</p>`,
+  insiders:`<div class="hlp-h">What it is</div><p>SEC Form 4 insider transactions for the equity names, rotated through EDGAR two names a minute. Open-market buys and sells are the signal; option exercises and 10b5-1 plans are labelled so you can discount them.</p>`,
+  admin:`<div class="hlp-h">What it is</div><p>Operator surface: accounts and invites, feature visibility ("Everyone / Operators / Hidden"), the alert delivery state for every member, the read-through audit log, and the boot/loop diagnostics.</p>`,
+});
+const HELP_KEYS=`<div class="hlp-h">Keyboard</div><table class="hlp-keys">
+<tr><td><kbd>/</kbd></td><td>focus this tab's search</td></tr>
+<tr><td><kbd>j</kbd> <kbd>k</kbd> <kbd>Enter</kbd></td><td>walk the markets table (or the conversation rail) and open the highlighted row</td></tr>
+<tr><td><kbd>Esc</kbd></td><td>close the drawer, a menu, or back out a level</td></tr>
+<tr><td><kbd>Ctrl</kbd>+<kbd>K</kbd> / <kbd>⌘</kbd>+<kbd>K</kbd></td><td>command palette — a ticker or a tab; <kbd>⇧</kbd>+<kbd>Enter</kbd> runs an AI report</td></tr>
+<tr><td><kbd>~</kbd></td><td>the terminal (<code>help</code> lists its verbs)</td></tr>
+<tr><td><kbd>?</kbd></td><td>this help</td></tr>
+</table>`;
 function openHelp(){
   const bg=el('helpbg'), m=el('helpmodal'); if(!bg||!m) return;
-  const v=state.scope==='crypto'?'markets':state.view;
-  const TITLES={markets:'Markets',focus:'Focus',sectors:'Sectors',corr:'Correlation',sessions:'Sessions',signals:'Signals',earnings:'Earnings',backtest:'Backtest',housing:'Housing',liquidity:'Liquidity'};
-  m.innerHTML=`<div class="hlp-head">How to read: ${TITLES[v]||v}<button class="btn xtiny" id="helpclose" title="close">\u2715</button></div>`
+  const v=(state.scope==='crypto'&&!HELP[state.view])?'markets':state.view;
+  // The title comes from the tab itself, so a renamed tab never says "How to read: dm".
+  const tb=document.querySelector('.tab[data-view="'+v+'"]');
+  const TAB_TITLES={markets:'Markets',focus:'Focus',sectors:'Sectors',corr:'Correlation',sessions:'Sessions',signals:'Signals',earnings:'Calendar',backtest:'Backtest',housing:'Housing',liquidity:'Liquidity',treemap:'Treemap'};   // fallback for a view with no ribbon tab (the runtime treemap)
+  const title=tb?tb.textContent.trim().replace(/\s*\d+\s*$/,''):(TAB_TITLES[v]||v);
+  m.innerHTML=`<div class="hlp-head">How to read: ${esc(title)}<button class="btn xtiny" id="helpclose" title="close">\u2715</button></div>`
     +`<div class="hlp-sub">What each element means and \u2014 more importantly \u2014 how to interpret it. Every number in the app also explains itself on hover; this is the map. Nothing here is investment advice.</div>`
-    +(HELP[v]||HELP.markets);
+    +(HELP[v]||`<div class="hlp-h">${esc(title)}</div><p>${esc((tb&&tb.title)||'')||'No explainer written for this tab yet.'}</p>`)
+    +HELP_KEYS;
   bg.hidden=false; m.hidden=false; m.scrollTop=0;
   const cb=el('helpclose'); if(cb) cb.onclick=closeHelp;
 }
@@ -10389,6 +10569,15 @@ const CMDK_TABS=[
   {v:'earnings',label:'Earnings'},{v:'news',label:'News'},{v:'report',label:'AI Report'},
   {v:'actionable',label:'Actionable'},{v:'backtest',label:'Backtest'},{v:'housing',label:'Housing'},{v:'liquidity',label:'Liquidity'},
   {v:'congress',label:'Congress'},{v:'insiders',label:'Insiders'},{v:'admin',label:'Admin'}];
+// The ribbon is the source of truth at run time: every tab under the name it actually shows (the
+// literal above omitted Messages, Notes and Treemap and called Calendar "Earnings"), with the
+// literal's labels kept as aliases so "earnings" still finds Calendar.
+function cmdkTabs(){
+  const out=[], seen=new Set();
+  document.querySelectorAll('nav.tabs .tab[data-view]').forEach(t=>{ const v=t.dataset.view, label=t.textContent.trim().replace(/\s*\d+\s*$/,''); if(v&&label&&!seen.has(v)){ seen.add(v); const alias=(CMDK_TABS.find(x=>x.v===v)||{}).label; out.push({v,label,alias:alias&&alias!==label?alias:undefined}); } });
+  for(const t of CMDK_TABS) if(!seen.has(t.v)){ seen.add(t.v); out.push(t); }
+  return out;
+}
 let _cmdkSel=0, _cmdkRows=[];
 function openCmdk(){ const bg=el('cmdkbg'), m=el('cmdk'), q=el('cmdk-q'); if(!bg||!m||!q) return;
   bg.hidden=false; m.hidden=false; q.value=''; cmdkRender(''); q.focus();
@@ -10399,18 +10588,18 @@ function cmdkRender(qs){ const list=el('cmdk-list'); if(!list) return;
   qs=(qs||'').trim();
   // Cmd+K is a THIRD way into a view, independent of the nav strip. Filtering here is not cosmetic:
   // without it a gated tab stays reachable by name even with its button gone.
-  const tabHits=qs?CMDK_TABS.filter(t=>tabVisible(t.v)&&(t.label.toLowerCase().includes(qs.toLowerCase())||t.v.includes(qs.toLowerCase()))):CMDK_TABS.slice(0,0);
+  const tabHits=qs?cmdkTabs().filter(t=>tabVisible(t.v)&&(t.label.toLowerCase().includes(qs.toLowerCase())||(t.alias||'').toLowerCase().includes(qs.toLowerCase())||t.v.includes(qs.toLowerCase()))):cmdkTabs().filter(t=>tabVisible(t.v));
   const mk=aiMatches(qs).slice(0,8);
   _cmdkRows=[];
   let html='';
   if(tabHits.length){ html+='<div class="cmdk-sec">Tabs</div>';
     tabHits.forEach(t=>{ _cmdkRows.push({kind:'tab',v:t.v});
-      html+=`<div class="cmdk-row" data-i="${_cmdkRows.length-1}"><span class="ic">▸</span><span class="nm">${esc(t.label)}</span></div>`; }); }
+      html+=`<div role="button" tabindex="0" class="cmdk-row" data-i="${_cmdkRows.length-1}"><span class="ic">▸</span><span class="nm">${esc(t.label)}</span></div>`; }); }
   if(mk.length){ html+='<div class="cmdk-sec">Tickers</div>';
     mk.forEach(({r})=>{ _cmdkRows.push({kind:'ticker',coin:r.coin});
       const uni=r.uni==='main'?'crypto':'stocks';
       const px=r.px!=null&&isFinite(r.px)?fmtPrice(r.px):'';
-      html+=`<div class="cmdk-row" data-i="${_cmdkRows.length-1}"><span class="ic">◎</span><span class="tk">${esc(r.ticker||r.coin)}</span><span class="u">${uni}</span>${px?`<span class="px">${px}</span>`:''}</div>`; }); }
+      html+=`<div role="button" tabindex="0" class="cmdk-row" data-i="${_cmdkRows.length-1}"><span class="ic">◎</span><span class="tk">${esc(r.ticker||r.coin)}</span><span class="u">${uni}</span>${px?`<span class="px">${px}</span>`:''}</div>`; }); }
   if(!_cmdkRows.length) html=`<div class="cmdk-none">${qs?'No ticker or tab matches':'Type a ticker symbol, or a tab name'}</div>`;
   list.innerHTML=html;
   _cmdkSel=0; cmdkPaint();
@@ -10534,7 +10723,7 @@ function termCard(r){ const apr=termAprOf(r), fp=r.fundPct;
     `<span class="tp-k">oi</span> ${fmtUsd(r.oi)}${r.doi!=null?` · Δ ${tpct(r.doi)}`:''}`,
     (r.sqz!=null||r.mom!=null)?`<span class="tp-k">squeeze</span> <span class="${r.sqz>=50?'amber':'sec'}">${r.sqz!=null?Math.round(r.sqz):'—'}</span>  momentum ${tint(r.mom)}`:'',
     (r.vstape!=null||r.beta!=null)?`<span class="tp-k">vs tape</span> ${tpct(r.vstape)}${r.beta!=null&&isFinite(r.beta)?` · β ${r.beta.toFixed(2)}`:''}`:'',
-    `<span class="tp-k">views</span> <span class="tp-deep" data-tcmd="report ${r.ticker}">report ▸</span>  <span class="tp-deep" data-topen="${tesc(r.coin)}">drawer ▸</span>` ].filter(Boolean);
+    `<span class="tp-k">views</span> <span role="button" tabindex="0" class="tp-deep" data-tcmd="report ${tesc(r.ticker)}">report ▸</span>  <span role="button" tabindex="0" class="tp-deep" data-topen="${tesc(r.coin)}">drawer ▸</span>` ].filter(Boolean);
   termOut(lines.join('\n')); }
 function termFieldCmd(r,fname){
   if((fname||'').toLowerCase().replace(/[^a-z]/g,'')==='sector'){ termHi(r.coin);
@@ -10550,7 +10739,7 @@ function termTop(metric,n,asc){ n=n||8; const m=metricOf(metric)||tfield(metric)
   let list=termActive().map(r=>({r,v:F.g(r)})).filter(x=>x.v!=null&&isFinite(x.v));
   list.sort((a,b)=>asc?a.v-b.v:b.v-a.v); list=list.slice(0,n);
   if(!list.length) return termOut(`<span class="sec">no data for ${tesc(label)} in this scope yet</span>`);
-  const rows=list.map((x,i)=>`${tpad(i+1,2)} <span class="tp-deep" data-tcmd="${x.r.ticker}">${tpad(x.r.ticker,8)}</span> ${tpad(F.f(x.v),10,true)}  <span class="tp-trans">${tpad(fmtUsd(x.r.vol),8,true)} vol</span>`).join('\n');
+  const rows=list.map((x,i)=>`${tpad(i+1,2)} <span role="button" tabindex="0" class="tp-deep" data-tcmd="${tesc(x.r.ticker)}">${tesc(tpad(x.r.ticker,8))}</span> ${tpad(F.f(x.v),10,true)}  <span class="tp-trans">${tpad(fmtUsd(x.r.vol),8,true)} vol</span>`).join('\n');
   termOut(`<span class="tp-hd">${asc&&m!=='losers'?'bottom':'top'} ${tesc(label)}</span> <span class="tp-trans">· ${state.scope}</span>\n<span class="tp-th">${tpad('#',2)} ${tpad('TICKER',8)} ${tpad((F.l||label).toUpperCase().slice(0,12),10,true)}</span>\n${rows}`); }
 // Earnings — reads the live earnings map the E-badges use; equities only, honest about coverage.
 function termEarnings(r){
@@ -10558,10 +10747,10 @@ function termEarnings(r){
   if(!state.earn) return termOut(`${termTkHdr(r)}\n<span class="sec">earnings calendar still loading…</span>`);
   const p=earnNext(r.ticker); const win=(state.earnPayload&&state.earnPayload.windowDays)||14;
   termHi(r.coin);
-  if(!p) return termOut(`${termTkHdr(r)}\n<span class="tp-k">earnings</span> <span class="sec">no report scheduled in the next ${win}d</span> <span class="tp-trans">(foreign listings without a US symbol aren't covered)</span>\n<span class="tp-deep" data-tview="earnings">open earnings tab ▸</span>`);
+  if(!p) return termOut(`${termTkHdr(r)}\n<span class="tp-k">earnings</span> <span class="sec">no report scheduled in the next ${win}d</span> <span class="tp-trans">(foreign listings without a US symbol aren't covered)</span>\n<span role="button" tabindex="0" class="tp-deep" data-tview="earnings">open earnings tab ▸</span>`);
   const when=p.diff===0?'<b class="amber">today</b>':p.diff===1?'<b>tomorrow</b>':`<b>in ${p.diff}d</b> (${tesc(p.e.d)})`;
   const rep=p.diff===0&&p.e.epsA!=null?` · reported EPS ${epsFmt(p.e.epsA)}`:'';
-  termOut(`${termTkHdr(r)}\n<span class="tp-k">earnings</span> ${when} · ${tesc(earnSessLbl(p.e.s))}${rep}\n<span class="tp-deep" data-tview="earnings">open earnings tab ▸</span>`); }
+  termOut(`${termTkHdr(r)}\n<span class="tp-k">earnings</span> ${when} · ${tesc(earnSessLbl(p.e.s))}${rep}\n<span role="button" tabindex="0" class="tp-deep" data-tview="earnings">open earnings tab ▸</span>`); }
 function termScreen(expr){ const cls=(expr||'').split('&').map(c=>c.trim()).filter(Boolean); if(!cls.length) return termErr('screen needs an expression, e.g. funding>20 & squeeze>50');
   const preds=[]; let sortF=null;
   for(const c of cls){ const m=c.match(/^([a-z ]+?)\s*(>=|<=|>|<|=)\s*(-?[\d.]+[kmbt]?)$/i);
@@ -10573,7 +10762,7 @@ function termScreen(expr){ const cls=(expr||'').split('&').map(c=>c.trim()).filt
     return p.op==='>'?x>p.v:p.op==='<'?x<p.v:p.op==='>='?x>=p.v:p.op==='<='?x<=p.v:x===p.v; });
   let hits=termActive().filter(pass); hits.sort((a,b)=>(sortF.g(b)||0)-(sortF.g(a)||0));
   if(!hits.length) return termOut(`<span class="tp-hd">screen</span> <span class="sec">${tesc(expr)}</span>\n<span class="tp-trans">no matches in ${state.scope}</span>`);
-  const rows=hits.slice(0,14).map(r=>`<span class="tp-deep" data-tcmd="${r.ticker}">${tpad(r.ticker,8)}</span> ${tpad(fmtPrice(r.px),9,true)}  ${tpad((termAprOf(r)>=0?'+':'')+(termAprOf(r)!=null?termAprOf(r).toFixed(0):'—')+'%',7,true)} f  ${tpad(r.sqz!=null?Math.round(r.sqz):'—',3,true)} sqz  ${tpad(tint(r.mom).replace(/<[^>]+>/g,''),4,true)} mom`).join('\n');
+  const rows=hits.slice(0,14).map(r=>`<span role="button" tabindex="0" class="tp-deep" data-tcmd="${r.ticker}">${tpad(r.ticker,8)}</span> ${tpad(fmtPrice(r.px),9,true)}  ${tpad((termAprOf(r)>=0?'+':'')+(termAprOf(r)!=null?termAprOf(r).toFixed(0):'—')+'%',7,true)} f  ${tpad(r.sqz!=null?Math.round(r.sqz):'—',3,true)} sqz  ${tpad(tint(r.mom).replace(/<[^>]+>/g,''),4,true)} mom`).join('\n');
   termOut(`<span class="tp-hd">screen</span> <span class="sec">${tesc(expr)}</span> <span class="tp-trans">· ${hits.length} match${hits.length>1?'es':''} · ${state.scope}</span>\n${rows}`); }
 function termSignals(t){ const d=state.signals; let groups=(d&&Array.isArray(d.signals))?d.signals.slice():[];
   groups=groups.filter(g=>{ const r=state.rows.get(g.coin); return r&&!r.delisted&&inScope(r); });
@@ -10583,7 +10772,7 @@ function termSignals(t){ const d=state.signals; let groups=(d&&Array.isArray(d.s
     const sc=side==='long'?'<span class="tp-chip l">long</span>':side==='short'?'<span class="tp-chip s">short</span>':'<span class="tp-chip">watch</span>';
     const prime=(g.sigs||[]).some(x=>x.prime)?' <span class="tp-chip p">★prime</span>':'';
     const score=g.score!=null?g.score:(top.score!=null?top.score:null);
-    return `<span class="tp-deep" data-tcmd="${g.ticker}">${tpad(g.ticker,6)}</span> ${tpad(top.label||top.ev||'—',11)} ${score!=null?'<span class="amber">score '+Math.round(score)+'</span>':''}${prime} ${sc}`; }).join('\n');
+    return `<span role="button" tabindex="0" class="tp-deep" data-tcmd="${tesc(g.ticker)}">${tesc(tpad(g.ticker,6))}</span> ${tpad(top.label||top.ev||'—',11)} ${score!=null?'<span class="amber">score '+Math.round(score)+'</span>':''}${prime} ${sc}`; }).join('\n');
   termOut(`<span class="amber">⚡ ${groups.length} active signal${groups.length>1?'s':''}</span> <span class="tp-trans">· ledgered &amp; resolved out-of-sample</span>\n${rows}`); }
 function termReport(r){ termOut(`${termTkHdr(r)}\n<span class="tp-trans">opening the AI analyst report…</span>`); openAiReport(r.coin); }
 function termComp(tickers){ showView('corr');
@@ -10618,7 +10807,7 @@ function termBreadth(k){ k=TFIELD[k]?k:'d1'; const F=TFIELD[k];
   const cl=med>0.05?'pos':med<-0.05?'neg':'sec';
   termOut(`<span class="tp-hd">breadth</span> <span class="tp-trans">· ${state.scope} · ${TWIN_LBL[k]||k} · ${vals.length} names</span>\n`
     +`<span class="pos">${up} up</span> · <span class="neg">${dn} down</span> · median <b class="${cl}">${med>=0?'+':''}${med.toFixed(2)}%</b>\n`
-    +`<span class="tp-k">best</span> <span class="tp-deep" data-tcmd="${tesc(hi.r.ticker)}">${tesc(hi.r.ticker)}</span> ${tpct(hi.v)}   <span class="tp-k">worst</span> <span class="tp-deep" data-tcmd="${tesc(lo.r.ticker)}">${tesc(lo.r.ticker)}</span> ${tpct(lo.v)}`); }
+    +`<span class="tp-k">best</span> <span role="button" tabindex="0" class="tp-deep" data-tcmd="${tesc(hi.r.ticker)}">${tesc(hi.r.ticker)}</span> ${tpct(hi.v)}   <span class="tp-k">worst</span> <span role="button" tabindex="0" class="tp-deep" data-tcmd="${tesc(lo.r.ticker)}">${tesc(lo.r.ticker)}</span> ${tpct(lo.v)}`); }
 function termSectors(k){ k=TFIELD[k]?k:'d1'; const F=TFIELD[k]; const by=new Map();
   for(const r of termActive()){ const v=F.g(r); if(v==null||!isFinite(v)) continue;
     const sec=r.sector||'unclassified'; let a=by.get(sec); if(!a){a=[];by.set(sec,a);} a.push(v); }
@@ -10635,15 +10824,15 @@ async function termEarnCal(mode){
     const lines=rec.map(e=>{ const r=termFind(e.t);
       const eps=e.epsA!=null?(e.eps!=null?(([fa,fe])=>`EPS ${fa} vs ${fe} est (${e.epsA>e.eps?'<span class="pos">beat</span>':e.epsA<e.eps?'<span class="neg">miss</span>':'in line'})`)(epsPairFmt(e.epsA,e.eps)):`EPS ${epsFmt(e.epsA)}`):'<span class="sec">EPS pending</span>';
       const day=r&&r.d1!=null&&isFinite(r.d1)?` · day ${tpct(r.d1)}`:'';
-      return `<span class="tp-deep" data-tcmd="${tesc(e.t)}">${tpad(tesc(e.t),7)}</span> ${tesc(e.d)} ${tesc(earnSessLbl(e.s))} · ${eps}${day}`; }).join('\n');
-    return termOut(`<span class="tp-hd">recently reported</span>\n${lines}\n<span class="tp-deep" data-tview="earnings">open earnings tab ▸</span>`); }
+      return `<span role="button" tabindex="0" class="tp-deep" data-tcmd="${tesc(e.t)}">${tpad(tesc(e.t),7)}</span> ${tesc(e.d)} ${tesc(earnSessLbl(e.s))} · ${eps}${day}`; }).join('\n');
+    return termOut(`<span class="tp-hd">recently reported</span>\n${lines}\n<span role="button" tabindex="0" class="tp-deep" data-tview="earnings">open earnings tab ▸</span>`); }
   const max=mode==='today'?0:mode==='tomorrow'?1:(d.windowDays||14), min=mode==='tomorrow'?1:0;
   const ent=(d.entries||[]).map(e=>({e,diff:earnDiffC(e.d)})).filter(x=>x.diff!=null&&x.diff>=min&&x.diff<=max);
   if(!ent.length) return termOut(`<span class="tp-hd">earnings ${tesc(mode)}</span>\n<span class="sec">nothing scheduled${mode==='today'?' today':mode==='tomorrow'?' tomorrow':' in the next '+(d.windowDays||14)+'d'}</span> <span class="tp-trans">(universe names with a US listing — foreign-only listings aren't covered)</span>`);
   ent.sort((a,b)=>a.diff-b.diff);
   const lines=ent.slice(0,14).map(x=>{ const when=x.diff===0?'<b class="amber">today</b>':x.diff===1?'tomorrow':`in ${x.diff}d (${tesc(x.e.d)})`;
-    return `<span class="tp-deep" data-tcmd="${tesc(x.e.t)}">${tpad(tesc(x.e.t),7)}</span> ${when} · ${tesc(earnSessLbl(x.e.s))}${x.e.eps!=null?' · est '+x.e.eps:''}`; }).join('\n');
-  termOut(`<span class="tp-hd">earnings ${tesc(mode)}</span> <span class="tp-trans">· ${ent.length} name${ent.length>1?'s':''}</span>\n${lines}\n<span class="tp-deep" data-tview="earnings">open earnings tab ▸</span>`); }
+    return `<span role="button" tabindex="0" class="tp-deep" data-tcmd="${tesc(x.e.t)}">${tpad(tesc(x.e.t),7)}</span> ${when} · ${tesc(earnSessLbl(x.e.s))}${x.e.eps!=null?' · est '+x.e.eps:''}`; }).join('\n');
+  termOut(`<span class="tp-hd">earnings ${tesc(mode)}</span> <span class="tp-trans">· ${ent.length} name${ent.length>1?'s':''}</span>\n${lines}\n<span role="button" tabindex="0" class="tp-deep" data-tview="earnings">open earnings tab ▸</span>`); }
 function termAgo(ts){ const m=Math.max(0,Math.round((Date.now()-ts)/60000)); return m<60?m+'m':m<48*60?Math.round(m/60)+'h':Math.round(m/1440)+'d'; }
 async function termNewsCmd(tk,n){ n=n||8;
   if(!state.news){ try{ await loadNews(); }catch(_){} }
@@ -10652,13 +10841,13 @@ async function termNewsCmd(tk,n){ n=n||8;
   if(tk) items=items.filter(a=>(a.tk||'').toUpperCase()===tk); else items=items.filter(a=>!!a.tk);   // bare: verified attributions only
   items=items.slice().sort((a,b)=>(b.pub||0)-(a.pub||0)).slice(0,n);
   if(!items.length) return termOut(`<span class="sec">no ${tk?tesc(tk)+' ':''}headlines in the 72h window</span>${tk?' <span class="tp-trans">(per-name coverage rotates — thin names surface less often)</span>':''}`);
-  const lines=items.map(a=>`<span class="tp-trans">${termAgo(a.pub||Date.now())}</span> ${a.tk?`<span class="tp-deep" data-tcmd="${tesc(a.tk)}">${tpad(tesc(a.tk),6)}</span> `:''}${a.url?`<a href="${tesc(a.url)}" target="_blank" rel="noopener">${tesc(a.h||'')}</a>`:tesc(a.h||'')}`).join('\n');
-  termOut(`<span class="tp-hd">news${tk?' · '+tesc(tk):''}</span> <span class="tp-trans">· verified attributions · 72h window</span>\n${lines}\n<span class="tp-deep" data-tview="news">open news tab ▸</span>`); }
+  const lines=items.map(a=>`<span class="tp-trans">${termAgo(a.pub||Date.now())}</span> ${a.tk?`<span role="button" tabindex="0" class="tp-deep" data-tcmd="${tesc(a.tk)}">${tpad(tesc(a.tk),6)}</span> `:''}${a.url?`<a href="${tesc(a.url)}" target="_blank" rel="noopener">${tesc(a.h||'')}</a>`:tesc(a.h||'')}`).join('\n');
+  termOut(`<span class="tp-hd">news${tk?' · '+tesc(tk):''}</span> <span class="tp-trans">· verified attributions · 72h window</span>\n${lines}\n<span role="button" tabindex="0" class="tp-deep" data-tview="news">open news tab ▸</span>`); }
 async function termReports(){ let d=state.report.list;
   if(!d){ try{ d=await fetchJSON('/api/ai-reports'); state.report.list=d; }catch(_){} }
   const list=d&&Array.isArray(d.reports)?d.reports:[];
   if(!list.length) return termOut('<span class="sec">no AI reports generated yet</span> <span class="tp-trans">— try <span class="ex" data-tcmd="report NVDA">report NVDA</span></span>');
-  const lines=list.slice(0,8).map(x=>`<span class="tp-trans">${termAgo(x.ts)}</span> <span class="tp-deep" data-tcmd="report ${tesc(x.ticker)}">${tpad(tesc(x.ticker),7)}</span> <span class="tp-chip ${x.bias==='long'?'l':x.bias==='short'?'s':''}">${tesc(x.bias||'—')}</span> ${tesc((x.headline||'').slice(0,64))}`).join('\n');
+  const lines=list.slice(0,8).map(x=>`<span class="tp-trans">${termAgo(x.ts)}</span> <span role="button" tabindex="0" class="tp-deep" data-tcmd="report ${tesc(x.ticker)}">${tpad(tesc(x.ticker),7)}</span> <span class="tp-chip ${x.bias==='long'?'l':x.bias==='short'?'s':''}">${tesc(x.bias||'—')}</span> ${tesc((x.headline||'').slice(0,64))}`).join('\n');
   termOut(`<span class="tp-hd">recent AI reports</span> <span class="tp-trans">· shared across the group</span>\n${lines}`); }
 // ---- external fundamentals cards (SEC EDGAR) ----
 // Card builders are PURE string functions (fetch-free) so the test suite can execute them
@@ -10694,7 +10883,7 @@ function termCompare(a,b){ termHi(a.coin);
   const F=['price','d1','d7','funding','fundpct','squeeze','momentum','vstape','oi','vol','beta','dd'];
   const cell=(r,k)=>{ const f=TFIELD[k], v=f.g(r); return v==null||!isFinite(v)?'—':f.f(v); };
   const lines=F.map(k=>`<span class="tp-k">${tpad(TFIELD[k].l,12)}</span> ${tpad(cell(a,k),12,true)} ${tpad(cell(b,k),12,true)}`).join('\n');
-  termOut(`<span class="tp-hd">compare</span>\n<span class="tp-th">${tpad('',12)} <span class="tp-deep" data-tcmd="${tesc(a.ticker)}">${tpad(tesc(a.ticker),12,true)}</span> <span class="tp-deep" data-tcmd="${tesc(b.ticker)}">${tpad(tesc(b.ticker),12,true)}</span></span>\n${lines}\n<span class="tp-trans">every number is the live board's — same rows the table renders</span>`); }
+  termOut(`<span class="tp-hd">compare</span>\n<span class="tp-th">${tpad('',12)} <span role="button" tabindex="0" class="tp-deep" data-tcmd="${tesc(a.ticker)}">${tpad(tesc(a.ticker),12,true)}</span> <span role="button" tabindex="0" class="tp-deep" data-tcmd="${tesc(b.ticker)}">${tpad(tesc(b.ticker),12,true)}</span></span>\n${lines}\n<span class="tp-trans">every number is the live board's — same rows the table renders</span>`); }
 
 // ---- Tier 2: local NL → grammar (no AI). Returns null when it genuinely can't map the
 //      question, so termRun escalates to the AI instead of faking a degenerate answer.
@@ -10880,7 +11069,11 @@ function termExec(cmdStr){ const p=cmdStr.trim().split(/\s+/), h=p[0].toLowerCas
   if(h==='corr') return termCorr(p[1],p[2]);
   if(h==='diverge'){ const r=termFind(p[1]); return r?termDiverge(r):termErr('usage: diverge <ticker>'); }
   const r=termFind(T); if(r){ if(p[1]) return termFieldCmd(r,p[1]); return termCard(r); }
-  termErr(`unknown "${tesc(h)}" — type help`); }
+  const TERM_VERBS=['top','bottom','screen','breadth','sectors','earnings','news','vs','comp','basket','report','drawer','help','clear','history','watch','notes','ask','whale','admin'];
+  const lev=(a,b)=>{ a=a.toLowerCase(); b=b.toLowerCase(); const d=[]; for(let i=0;i<=a.length;i++){ d[i]=[i]; } for(let j=1;j<=b.length;j++) d[0][j]=j;
+    for(let i=1;i<=a.length;i++) for(let j=1;j<=b.length;j++) d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(a[i-1]===b[j-1]?0:1)); return d[a.length][b.length]; };
+  const w=String(h).split(/\s+/)[0]||''; const near=TERM_VERBS.filter(v=>w&&lev(w,v)<=2&&v!==w).sort((x,y)=>lev(w,x)-lev(w,y))[0];
+  termErr(`unknown "${tesc(h)}"`+(near?` — did you mean <span class="tp-deep" data-tcmd="${tesc(String(h).replace(w,near))}">${tesc(String(h).replace(w,near))}</span>?`:' — type help')); }
 // ---- basket / ratio verbs (build 2026.07.28-06) ----
 async function termBasket(args){
   const sub=(args[0]||'').toLowerCase();
@@ -11043,7 +11236,7 @@ function termEcho(c){ const d=document.createElement('div'); d.className='tp-blk
 function termErr(m){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<span class="tp-line tp-err">✗ ${tesc(m)}</span>`; termEl('termScroll').appendChild(d); termScrollDown(); }
 function termScrollDown(){ const s=termEl('termScroll'); s.scrollTop=s.scrollHeight; }
 function termHi(coin){ const r=state.rows.get(coin); if(!r) return; if(state.view!=='markets') return;
-  const tr=document.querySelector(`#body tr[data-coin="${coin}"]`); if(tr){ tr.classList.add('rowflash'); tr.scrollIntoView({block:'center',behavior:'smooth'}); setTimeout(()=>tr.classList.remove('rowflash'),1500); } }
+  const tr=document.querySelector(`#body tr[data-coin="${CSS.escape(coin)}"]`); if(tr){ tr.classList.add('rowflash'); tr.scrollIntoView({block:'center',behavior:SCROLL_B}); setTimeout(()=>tr.classList.remove('rowflash'),1500); } }
 function termHelp(){ termOut(`<span class="tp-hd">ask the board</span> <span class="tp-trans">· plain English or the grammar below · every board column is a lens</span>
 <span class="amber">${tpad('<ticker> [field]',20)}</span><span class="sec">card, or any column: funding·oi·squeeze·d7·rvol·gap·vsvwap·vsma200·ytd·sector·…</span>
 <span class="amber">${tpad('top|bottom <field> [n]',20)}</span><span class="sec">any field, plus gainers·losers — "top d7 5", "bottom funding"</span>
@@ -11711,7 +11904,7 @@ async function aiRegenerate(coin){
     else if(r.status===429&&d.error==='user-month-cap'){ pushToast('Your monthly report budget is spent ('+(d.userPerMonth||20)+'/month) — resets on the 1st (UTC)'); if(state.report.coin===coin) loadAiReport(coin,true); }
     else if(r.status===429&&d.error==='daily-cap'){ pushToast('The shared daily report pool is exhausted ('+(d.perDay||5)+'/day across all users) — resets at midnight UTC, or an admin can reset it in the terminal'); if(state.report.coin===coin) loadAiReport(coin,true); }
     else if(r.status===429){ pushToast('On cooldown — regenerate unlocks in '+aiFmtLeft(d.regenInMs)+' (or on material change)'); if(d.report&&state.report.coin===coin){ state.report.data=d.report; renderAiReport(d.report,coin); } }
-    else if(r.status===401&&d.error==='ai-locked'){ pushToast('AI is locked — open the terminal (~) and run: admin unlock <password>'); }
+    else if(r.status===401&&d.error==='ai-locked'){ pushToast(IS_ADMIN?'AI is locked — open the terminal (~) and run: admin unlock <password>':'AI generation is locked by the operator'); }
     else pushToast('Generation failed — '+(d.error||('HTTP '+r.status)));
   }catch(e){ pushToast('Generation failed — '+e.message); }
   state.report.gen=false; if(state.report.coin===coin) renderAiGenState(coin,false);
@@ -12635,6 +12828,7 @@ async function focChartOpen(ticker){
   if(!day||!p) return;
   focChartEnsureDom();
   FOCCH.p=p; FOCCH.day=day; FOCCH.base=null; FOCCH.agg=null; FOCCH.hover=null; FOCCH.tf=15;
+  const mySeq=(FOCCH.seq=(FOCCH.seq||0)+1);   // a slower earlier fetch must not paint over a newer name's chart
   const m=el('focmodal'); m.hidden=false;
   m.querySelectorAll('[data-foctf]').forEach(x=>x.classList.toggle('on',x.dataset.foctf==='15'));
   el('focch-t').textContent=ticker;
@@ -12645,6 +12839,7 @@ async function focChartOpen(ticker){
     // max=2000 keeps the archive route from coarsening (72h of 5m is 864 bars) — the client's
     // open-anchored aggregation needs true 5m, not server-side absolute-time buckets.
     const res=await fetchJSON('/api/candles?coin='+encodeURIComponent(p.coin)+'&res=5m&from='+from+'&to='+to+'&max=2000');
+    if(mySeq!==FOCCH.seq) return;   // superseded while in flight
     FOCCH.base=Array.isArray(res.candles)?res.candles:[];
     if(res.enabled===false){ el('focch-sub').textContent='5m archive disabled on this deploy — no chart source'; return; }
     FOCCH.baseFrom=from; FOCCH.baseTo=to;
@@ -13281,7 +13476,7 @@ function renderWhlFund(f,full){
     +`<td class="l">${esc(p.name)}${p.put?` <span class="whl-put ${p.put}">${esc(p.put.toUpperCase())}</span>`:''}${p.tk?` <span class="whl-tk" data-whltk="${esc(p.tk)}">${esc(p.tk)}</span>`:''}</td></tr>`).join('');
   const conc=f.positions.slice(0,10).map((p,i)=>`<span class="whl-cseg whlc${i%10}" style="width:${Math.max(0.4,p.pct||0)}%" data-tip="${esc((p.tk||p.name.slice(0,20))+' \u00b7 '+(p.pct!=null?p.pct.toFixed(1):'?')+'% of the 13F book')}"></span>`).join('')
     +(f.n>10?`<span class="whl-cseg rest" style="width:${Math.max(0,100-f.positions.slice(0,10).reduce((s,p)=>s+(p.pct||0),0)).toFixed(1)}%" data-tip="${esc('other '+(f.n-10)+' position(s)')}"></span>`:'');
-  el('whlbody').innerHTML=`<div class="whl-mhd"><span class="whl-hd">${esc(f.name)}</span><span class="sec">\u00b7 CIK ${esc(String(f.cik))} \u00b7 whale ${esc(f.key)}</span>${f.url?` <a class="whl-lnk" href="${esc(f.url)}" target="_blank" rel="noopener noreferrer">EDGAR \u2197</a>`:''}</div>`
+  el('whlbody').innerHTML=`<div class="whl-mhd"><span class="whl-hd">${esc(f.name)}</span><span class="sec">\u00b7 CIK ${esc(String(f.cik))} \u00b7 whale ${esc(f.key)}</span>${f.url?` <a class="whl-lnk" href="${esc(safeHref(f.url))}" target="_blank" rel="noopener noreferrer">EDGAR \u2197</a>`:''}</div>`
     +`<div class="whl-meta"><span class="sec">quarter</span> <b>${esc(f.q||'?')}</b> <span class="sec">(period ${esc(f.period||'?')} \u00b7 ${esc(f.form||'13F-HR')} filed ${esc(whlDateStr(f.filedAt))} \u00b7 ${f.ageDays!=null?f.ageDays+'d old at pull':''}${f.amended?' \u00b7 AMENDED':''})</span></div>`
     +`<div class="whl-meta"><span class="sec">13F book</span> <b>${whlMoney(f.total)}</b> <span class="sec">across ${f.n} position(s)${f.nRaw>f.n?' ('+f.nRaw+' filed rows aggregated on cusip)':''}${f.prevTotal!=null?' \u00b7 vs '+whlMoney(f.prevTotal)+' prior Q':''}${f.truncated?' \u00b7 stored book truncated at cap ('+f.truncated+' tail positions dropped, disclosed)':''}${f.scaled?' \u00b7 <span class="whl-sclnote" data-tip="the 2023 13F amendments moved values to whole dollars, but this filer still reports in thousands — EDGAR accepts both silently. Detection: median filed value \u00f7 shares across SH rows implied sub-$1 share prices (\u2265 3-row sample floor); options and principal-amount rows excluded. Corrected \u00d71000, flagged on the stored filing.">values \u00d71000 (thousands filer)</span>':''}</span></div>`
     +(f.hasPrev?`<div class="whl-dstrip" data-tip="$ flows on the ADDED/TRIMMED boxes are TRADED dollars (share change \u00d7 the filing's implied quarter-end price) where shares were comparable — mark drift no longer counts as flow; NEW and EXITED are position values at their quarter-end marks">${whlDeltaBox('NEW','new',f.lanes.opened,f.flows.opened)}${whlDeltaBox('ADDED','pos',f.lanes.added,f.flows.added)}${whlDeltaBox('TRIMMED','neg',f.lanes.trimmed,f.flows.trimmed)}${whlDeltaBox('EXITED','exitc',f.lanes.exited,f.flows.exited)}</div>`
@@ -13300,7 +13495,7 @@ function termWhaleList(){
   const think=termThinking();
   fetchJSON('/api/whale').then(d=>{ think.remove(); WHL.data=d;
     if(!d.watch.length) return termOut('<span class="sec">no funds watched yet'+(IS_ADMIN?' \u2014 <span class="ex" data-tcmd="whale add ">whale add &lt;name or CIK&gt;</span>':' \u2014 the operator curates the list')+'</span>');
-    const lines=d.watch.map(w=>`  <span class="tp-deep" data-tcmd="whale ${tesc(w.key)}">${tpad(tesc(w.key),12)}</span> ${tpad(tesc(w.name.slice(0,22)),24)} ${tpad(w.q?tesc(w.q):'\u2014',8)} ${tpad(w.total!=null?whlMoney(w.total):'\u2014',9,true)} ${tpad(w.dPct!=null?((w.dPct>0?'+':'')+w.dPct.toFixed(1)+'%'):'\u2014',8,true)}${w.unseen?' <span class="amber">\u25cf unseen</span>':''}${w.amended&&!w.unseen?' <span class="sec">HR/A</span>':''}`).join('\n');
+    const lines=d.watch.map(w=>`  <span role="button" tabindex="0" class="tp-deep" data-tcmd="whale ${tesc(w.key)}">${tpad(tesc(w.key),12)}</span> ${tpad(tesc(w.name.slice(0,22)),24)} ${tpad(w.q?tesc(w.q):'\u2014',8)} ${tpad(w.total!=null?whlMoney(w.total):'\u2014',9,true)} ${tpad(w.dPct!=null?((w.dPct>0?'+':'')+w.dPct.toFixed(1)+'%'):'\u2014',8,true)}${w.unseen?' <span class="amber">\u25cf unseen</span>':''}${w.amended&&!w.unseen?' <span class="sec">HR/A</span>':''}`).join('\n');
     const win=d.window&&d.window.cur?`${d.window.cur.q} window ${d.window.state} \u00b7 due ${new Date(d.window.cur.deadline).toLocaleDateString('en-US',{month:'short',day:'numeric'})}`:'';
     termOut(`<span class="tp-hd">tracked 13F funds</span> <span class="tp-trans">\u00b7 the FUNDS tab list, verbatim \u00b7 ${tesc(win)}</span>\n<span class="tp-th">  ${tpad('KEY',12)} ${tpad('NAME',24)} ${tpad('LAST',8)} ${tpad('BOOK',9,true)} ${tpad('\u0394QoQ',8,true)}</span>\n${lines}\n<span class="tp-trans">whale &lt;key&gt; opens the book \u00b7 whale season for the quarter summary \u00b7 quarter-end books filed up to 45d late</span>`);
   }).catch(()=>{ think.remove(); termErr('whale list fetch failed \u2014 try again in a moment'); });
@@ -13312,7 +13507,7 @@ function termWhaleFund(key,full){
     const dl=f.hasPrev?`\n<span class="tp-k">${tpad('QoQ',14)}</span> <span class="pos">${f.lanes.opened.length} new</span> \u00b7 <span class="pos">${f.lanes.added.length} added</span> \u00b7 <span class="neg">${f.lanes.trimmed.length} trimmed</span> \u00b7 <span class="sec">${f.lanes.exited.length} exited</span>`:'';
     const rows=f.positions.slice(0,full?f.positions.length:10).map((p,i)=>{
       const d=!p.d||p.d.cls==='na'?'\u2014':p.d.cls==='new'?'<span class="amber">NEW</span>':p.d.cls==='flat'?'\u2014':(p.d.dSh!=null?`<span class="${p.d.dSh>0?'pos':'neg'}">${whlSgnSh(p.d.dSh)}</span>`:`<span class="${p.d.dVal>0?'pos':'neg'}">${(p.d.dVal>0?'+':'\u2212')+whlMoney(Math.abs(p.d.dVal)).slice(1)}</span>`);
-      return `  <span class="tp-trans">${tpad(String(i+1),3)}</span> ${tpad(p.pct!=null?p.pct.toFixed(1)+'%':'\u2014',7,true)} ${tpad(whlMoney(p.value),8,true)} ${tpad(d,10,true)}  ${tesc(p.name.slice(0,26))}${p.put?' <span class="'+(p.put==='put'?'neg':'pos')+'">'+tesc(p.put.toUpperCase())+'</span>':''}${p.tk?' <span class="tp-deep" data-tcmd="'+tesc(p.tk)+'">'+tesc(p.tk)+'</span>':''}`; }).join('\n');
+      return `  <span class="tp-trans">${tpad(String(i+1),3)}</span> ${tpad(p.pct!=null?p.pct.toFixed(1)+'%':'\u2014',7,true)} ${tpad(whlMoney(p.value),8,true)} ${tpad(d,10,true)}  ${tesc(p.name.slice(0,26))}${p.put?' <span class="'+(p.put==='put'?'neg':'pos')+'">'+tesc(p.put.toUpperCase())+'</span>':''}${p.tk?' <span role="button" tabindex="0" class="tp-deep" data-tcmd="'+tesc(p.tk)+'">'+tesc(p.tk)+'</span>':''}`; }).join('\n');
     termOut(`<span class="tp-hd">${tesc(f.key)} 13F</span> <span class="tp-trans">\u00b7 ${tesc(f.name)} \u00b7 CIK ${tesc(String(f.cik))}</span>\n<span class="tp-k">${tpad('quarter',14)}</span> <b>${tesc(f.q||'?')}</b> <span class="tp-trans">(filed ${tesc(whlDateStr(f.filedAt))} \u00b7 ${f.ageDays!=null?f.ageDays+'d old':''}${f.amended?' \u00b7 AMENDED':''})</span>\n<span class="tp-k">${tpad('book',14)}</span> <b>${whlMoney(f.total)}</b> <span class="tp-trans">\u00b7 ${f.n} positions${f.prevTotal!=null?' \u00b7 vs '+whlMoney(f.prevTotal)+' prior Q':''}${f.scaled?' \u00b7 values \u00d71000 (thousands filer, corrected + disclosed)':''}</span>${dl}\n<span class="tp-th">  ${tpad('#',3)} ${tpad('%BOOK',7,true)} ${tpad('VALUE',8,true)} ${tpad('\u0394QoQ',10,true)}  NAME</span>\n${rows}\n<span class="tp-trans">${full?'':'top '+Math.min(10,f.positions.length)+' of '+f.n+' \u00b7 <span class="ex" data-tcmd="whale '+tesc(f.key)+' full">whale '+tesc(f.key)+' full</span> for all \u00b7 '}quarter-end snapshot filed up to 45d late \u00b7 long US book only \u00b7 full card on the FUNDS tab</span>`);
     whlPost({op:'seen',key:f.key});
   }).catch(()=>{ think.remove(); termErr('whale fetch failed \u2014 try again in a moment'); });
@@ -13694,7 +13889,7 @@ function insRender() {
     if (k === 'sec') return `<td class="l sec">${esc((x.sec || '—').slice(0, 24))}</td>`;
     if (k === 'issuer') return `<td class="l sec">${esc((x.issuer || '—').slice(0, 26))}</td>`;
     if (k === 'form') return `<td class="l sec">${esc(x.form || '—')}</td>`;
-    return `<td class="l">${x.url ? `<a class="cng-src" href="${esc(x.url)}" target="_blank" rel="noopener">form 4</a>` : ''}</td>`;
+    return `<td class="l">${x.url ? `<a class="cng-src" href="${esc(safeHref(x.url))}" target="_blank" rel="noopener">form 4</a>` : ''}</td>`;
   };
   const arrow = (k) => INS.sort.k === k ? `<span class="cng-arr">${INS.sort.dir > 0 ? '▲' : '▼'}</span>` : '';
   out.innerHTML = head
@@ -13725,7 +13920,7 @@ function insRender() {
     })()
     + `</tbody></table></div>`
     + insPager()
-    + `<div class="whl-foot">${INS.rows.length.toLocaleString()} shown of ${INS.total.toLocaleString()} matching transaction(s)${(INS.from || INS.to) ? ` · <b>${esc(insRangeLabel())}</b>` : ''} · source: SEC Form 4, filed under Section 16 · shares, price, strike and date are the filer’s own figures — no number in this table is derived, banded or estimated, which is the difference from the CONGRESS tab, where the form discloses a range and no price at all · both of the form’s tables are here: Table I share transactions and Table II derivatives, kept apart by the KIND column because an exercise price and a transaction price are different quantities — a strike never enters PRICE, and a derivative row has no dollar value because shares × strike is a number nobody paid · a blank price is a price the form did not carry, never a zero · scoped to the ${'${(sc.covered || 0).toLocaleString()}'} equities this board covers — a 10% holder&#39;s filings about companies it holds arrive here through the same feed and are counted, not shown · the one INFERRED thing on this tab is the cashless-exercise pairing, drawn over two rows that each remain individually true and marked wherever it appears</div>`;
+    + `<div class="whl-foot">${INS.rows.length.toLocaleString()} shown of ${INS.total.toLocaleString()} matching transaction(s)${(INS.from || INS.to) ? ` · <b>${esc(insRangeLabel())}</b>` : ''} · source: SEC Form 4, filed under Section 16 · shares, price, strike and date are the filer’s own figures — no number in this table is derived, banded or estimated, which is the difference from the CONGRESS tab, where the form discloses a range and no price at all · both of the form’s tables are here: Table I share transactions and Table II derivatives, kept apart by the KIND column because an exercise price and a transaction price are different quantities — a strike never enters PRICE, and a derivative row has no dollar value because shares × strike is a number nobody paid · a blank price is a price the form did not carry, never a zero · scoped to the ${(sc.covered || 0).toLocaleString()} equities this board covers — a 10% holder&#39;s filings about companies it holds arrive here through the same feed and are counted, not shown · the one INFERRED thing on this tab is the cashless-exercise pairing, drawn over two rows that each remain individually true and marked wherever it appears</div>`;
   insBind();
 }
 function insPager() {
@@ -13873,7 +14068,7 @@ async function termInsiders(args){
     else L.push(`  ${tpad('backfill',12)} ${bf.done?`<span class="pos">done</span> <span class="tp-trans">${tesc(new Date(+bf.done).toISOString().slice(0,10))}</span>`:'<span class="tp-trans">not run \u2014 the tab holds only what the EDGAR rotation has seen since deploy. Run: insiders backfill</span>'}`);
     if(s2.lastErr) L.push(`  ${tpad('last error',12)} <span class="neg">${tesc(s2.lastErr)}</span>`);
     if(s2.notes&&s2.notes.length) L.push(`  ${tpad('why',12)} ${s2.notes.map(n=>`${tesc(String(n.note||'').slice(0,40))} <b>\u00d7${n.n}</b>`).join('  ')}`);
-    return termOut(L.join('\n')+`\n<span class="tp-deep" data-tview="insiders">open insiders tab \u25b8</span>`);
+    return termOut(L.join('\n')+`\n<span role="button" tabindex="0" class="tp-deep" data-tview="insiders">open insiders tab \u25b8</span>`);
   }
   if(!IS_ADMIN) return termErr('insiders parse/requeue is admin-only');
   if(sub==='parse'){
@@ -14163,7 +14358,7 @@ function cngRender(){
     if(k==='act'){ const dir=/^buy/.test(x.act)?'p':/^sell/.test(x.act)?'s':'e'; return `<td class="l"><span class="cng-act ${dir}">${esc(x.act)}</span></td>`; }
     if(k==='band') return `<td class="r">${esc(x.hiAmt!=null?cngMoney(x.loAmt)+' \u2013 '+cngMoney(x.hiAmt):cngMoney(x.loAmt)+'+')}</td>`;
     if(k==='traded') return `<td class="l sec">${esc(x.txDate||'\u2014')}</td>`;
-    return `<td class="l">${x.url?`<a class="cng-src" href="${esc(x.url)}" target="_blank" rel="noopener">source</a>`:''}</td>`;
+    return `<td class="l">${x.url?`<a class="cng-src" href="${esc(safeHref(x.url))}" target="_blank" rel="noopener">source</a>`:''}</td>`;
   };
   const arrow=(k)=>CNG.sort.k===k?`<span class="cng-arr">${CNG.sort.dir>0?'\u25b2':'\u25bc'}</span>`:'';
   out.innerHTML=head+(CNG.q.trim()?filerNote():'')
@@ -14641,6 +14836,17 @@ async function dmUpload(threadId,file){
 // a refresh, a tab switch and a browser restart — the same localStorage the layouts use.
 const DM_DRAFT_KEY='xyz-dm-drafts';
 function dmDrafts(){ try{ return JSON.parse(localStorage.getItem(DM_DRAFT_KEY)||'{}')||{}; }catch(_){ return {}; } }
+// The stamp preview: the mark and the side a $TICKER will carry, read from the live board before
+// the message is sent — the direction rule used to be discoverable only from the sent card.
+function dmStampPreview(text){
+  const pv=el('dm-stamppv'); if(!pv) return;
+  const m=String(text||'').match(/\$([A-Za-z][A-Za-z0-9.\-]{0,9})/); const r=m&&typeof termFind==='function'?termFind(m[1]):null;
+  if(!r){ pv.hidden=true; return; }
+  const up=String(text).toUpperCase(), i=up.indexOf('$'+m[1].toUpperCase());
+  const before=up.slice(Math.max(0,i-24),i), after=up.slice(i+m[1].length+1,i+m[1].length+13);
+  const short=/\b(SHORT|SELL|FADE)\b/.test(before)||/\b(SHORT|PUTS)\b/.test(after);
+  pv.hidden=false; pv.innerHTML='will stamp <b>'+esc(r.ticker)+'</b> at <b>'+fmtPrice(r.px)+'</b> as <b class="'+(short?'neg':'pos')+'">'+(short?'short':'long')+'</b> <span class="sec">('+(short?'because of the word before it':'write short / sell / fade before the ticker for a short')+')</span>';
+}
 function dmDraftSave(id,text){
   if(!id) return;
   try{ const d=dmDrafts();
@@ -14713,7 +14919,7 @@ function dmMentionPick(handle){
   dmAutoGrow(ta);
   const caret=start+String(handle).length+1;
   ta.focus(); try{ ta.setSelectionRange(caret,caret); }catch(_){}
-  if(!dmState.editing) dmDraftSave(dmState.sel,ta.value);
+  if(!dmState.editing) dmDraftSave(dmState.sel,ta.value); dmStampPreview(ta.value);
 }
 
 // ---- browser push ------------------------------------------------------------------------------
@@ -14884,8 +15090,9 @@ async function dmRunSearch(){
   try{
     const scoped=dmState.searchScope==='thread'&&dmState.sel?'&thread='+encodeURIComponent(dmState.sel):'';
     const d=await fetchJSON('/api/dm/search?q='+encodeURIComponent(q)+scoped);
+    if(q!==dmState.q.trim()) return;   // the box moved on: "nv" must not land under the "nvda" header
     dmState.results=(d&&d.ok)?d.results:[];
-  }catch(_){ dmState.results=[]; }
+  }catch(_){ if(q!==dmState.q.trim()) return; dmState.results=[]; }
   dmState.searching=false; dmRender();
 }
 
@@ -14937,7 +15144,7 @@ function dmStamp(m){
   const sub=has?('sent at '+fmtPx(at)+(live?' \u00b7 now '+fmtPx(now):' \u00b7 no longer listed')):'no mark at send';
   // The card is a door, not just a label: clicking it opens the market drawer for the name \u2014
   // same in-place drawer the earnings rows and news badges use, so no tab switch.
-  return '<div class="dm-tk" data-coin="'+esc(m.ref)+'" title="open the '+esc(dmTkName(m.ref))+' drawer"><div><div class="dm-tk-s">'+esc(dmTkName(m.ref))+dirChip+'</div>'
+  return '<div role="button" tabindex="0" class="dm-tk" data-coin="'+esc(m.ref)+'" title="open the '+esc(dmTkName(m.ref))+' drawer"><div><div class="dm-tk-s">'+esc(dmTkName(m.ref))+dirChip+'</div>'
     +'<div class="dm-tk-m">'+esc(sub)+bell+'</div></div>'+right+'</div>';
 }
 // One tap on a stamp arms a "back to the level" alert: crossing DOWN through the stamp when the
@@ -14955,11 +15162,7 @@ async function dmArmCallAlert(coin, refPx){
     else pushToast('could not arm that alert'+(d&&d.error?' \u2014 '+d.error:''));
   }catch(_){ pushToast('could not arm that alert'); }
 }
-function fmtPx(v){
-  if(v==null||!isFinite(v)) return '—';
-  const a=Math.abs(v);
-  return a>=1000?v.toFixed(0):a>=1?v.toFixed(2):v.toFixed(4);
-}
+function fmtPx(v){ return fmtPrice(v); }   // one price formatter: HOOD read 45.123 in the drawer and 45.12 on the stamp
 function fmtBytes(n){
   if(!isFinite(n)) return '';
   if(n<1024) return n+' B';
@@ -15095,7 +15298,7 @@ function dmRailHtml(){
   const closedSec=closed.length
     ? '<div class="dm-sh" id="dm-closedhd" style="margin-top:10px;cursor:pointer">'
       +(dmState.showClosed?'▾':'▸')+' Closed — '+closed.length+'</div>'
-      +(dmState.showClosed?closed.map(t=>'<div class="dm-th" data-dmreopen="'+t.id+'">'
+      +(dmState.showClosed?closed.map(t=>'<div role="button" tabindex="0" class="dm-th" data-dmreopen="'+t.id+'">'
         +'<div class="dm-thn">'+(t.kind==='group'?'<span class="dm-grp">#</span> ':'')+esc(t.name)
         +'<span class="dm-join">reopen</span></div></div>').join(''):'')
     : '';
@@ -15174,7 +15377,7 @@ function dmPickerHtml(){
   if(!people.length) return '<div class="dm-pick"><div class="dm-empty">Nobody else has an account yet.</div></div>';
   return '<div class="dm-pick">'
     +'<div class="dm-sh">Message one person</div>'
-    +people.map(m=>'<div class="dm-th" data-dmnew="'+esc(m.uid)+'">'
+    +people.map(m=>'<div role="button" tabindex="0" class="dm-th" data-dmnew="'+esc(m.uid)+'">'
       +'<div class="dm-thn"><span class="'+(dmState.online.has(m.uid)?'dm-on':'dm-off')+'">●</span> '+esc(m.display)+'</div>'
       +'<div class="dm-thp">'+(dmState.online.has(m.uid)?'online now':(m.lastSeen?'last seen '+esc(dmWhen(m.lastSeen)):'—'))+'</div></div>').join('')
     +'<div class="dm-sh" style="margin-top:12px">Or start a group</div>'
@@ -15286,7 +15489,7 @@ function dmCallsHtml(){
     +'<span class="'+(x.upPct>=0.5?'pos':'neg')+'" title="fraction of calls whose direction-adjusted move is positive — at the fixed 1d horizon once it has printed, live until then">'+Math.round(x.upPct*100)+'% right</span>'
     +'<span class="'+(x.avg>=0?'pos':'neg')+'" title="average direction-adjusted move on the same yardstick">avg '+(x.avg>=0?'+':'')+(x.avg*100).toFixed(1)+'%</span></div>').join('');
   const hz=(v)=>v==null?'<span class="sec">—</span>':'<span class="'+(v>0?'pos':(v<0?'neg':'sec'))+'">'+((v>0?'+':'')+(v*100).toFixed(1)+'%')+'</span>';
-  const head='<div class="dm-callrow dm-callhead"><span></span><span></span><span></span>'
+  const head='<div class="dm-callrow dm-callhead"><span>call</span><span>message</span><span>who \u00b7 when</span>'
     +'<span class="dm-callpx">sent</span><span class="dm-callpx">now</span>'
     +'<span title="raw price move since sent — colored by whether the call is right">move</span>'
     +'<span class="dm-callhz" title="direction-adjusted move at the fixed 1-day horizon (the first daily close ≥ 24h after the call) — positive means the call was right">1d</span>'
@@ -15440,7 +15643,7 @@ function dmRender(){
     +'<textarea id="dm-input" rows="1" maxlength="'+dmState.maxLen+'" '
     +(canWrite?'':'disabled ')+'placeholder="'
     +(canWrite?'message '+esc((t&&t.name)||(pendingPeer&&pendingPeer.display)||'')+'…  (type $TICKER to attach the mark)':'pick a conversation first')
-    +'"></textarea>'
+    +'"></textarea><div class="dm-stamppv" id="dm-stamppv" hidden></div>'
     +'<button type="button" class="btn dm-send" id="dm-send"'+(canWrite?'':' disabled')+'>'
     +(dmState.sending?'…':(dmState.editing?'Save':'Send'))+'</button></div>'
     +attach
@@ -15474,7 +15677,7 @@ function dmRender(){
   const onNames=(dmState.members||[]).filter(m=>dmState.online.has(m.uid));
   const onlineStrip='<div class="dm-onrow">'
     +(onNames.length
-      ? onNames.map(m=>'<span class="dm-onchip" data-dmnew="'+esc(m.uid)+'" title="message '+esc(m.display)+'"><i></i>'+esc(m.display)+'</span>').join('')
+      ? onNames.map(m=>'<span role="button" tabindex="0" class="dm-onchip" data-dmnew="'+esc(m.uid)+'" title="message '+esc(m.display)+'"><i></i>'+esc(m.display)+'</span>').join('')
       : '<span class="dm-onnone">nobody else online</span>')
     +'</div>';
   host.innerHTML='<div class="dm-wrap">'
@@ -15484,7 +15687,7 @@ function dmRender(){
       +'<div class="dm-sh">Conversations'
         +'<button type="button" class="dm-tool dm-callsbtn" id="dm-callsbtn" title="Every price-stamped call, and how each has done since">calls \u2197</button></div>'
       +dmRailHtml()
-      +'<div class="dm-new" id="dm-newbtn">'+(dmState.picking?'× close':'+ new message')+'</div>'+dmPickerHtml()
+      +'<div role="button" tabindex="0" class="dm-new" id="dm-newbtn">'+(dmState.picking?'× close':'+ new message')+'</div>'+dmPickerHtml()
       +dmTopicsHtml()
       +dmTgHintHtml()
       +watchBox+'</div>'
@@ -15500,7 +15703,7 @@ function dmRender(){
       dmAutoGrow(ta);
       // An edit is not the thread's draft: saving it here destroyed whatever the member had
       // half-typed for that conversation before clicking "edit".
-      if(!dmState.editing) dmDraftSave(dmState.sel,ta.value);
+      if(!dmState.editing) dmDraftSave(dmState.sel,ta.value); dmStampPreview(ta.value);
       dmMentionPop(ta);
       dmTypingPing(); });
     ta.addEventListener('keydown',(e)=>{
@@ -15741,7 +15944,7 @@ else { const b=el('tab-dm'); if(b) b.hidden=true; }
 // Messages tab with that conversation open.
 function dmDockRows(){
   const rows=dmState.threads.filter(t=>!t.hidden).slice(0,8).map(t=>
-    '<div class="dm-th" data-dockth="'+t.id+'"><div class="dm-thn">'
+    '<div role="button" tabindex="0" class="dm-th" data-dockth="'+t.id+'"><div class="dm-thn">'
     +(t.kind==='dm'?'<span class="'+(dmState.online.has(t.peer)?'dm-on':'dm-off')+'">●</span> ':'<span class="dm-grp">#</span> ')
     +esc(t.name)
     +((t.unread&&!t.muted)?'<span class="dm-badge">'+(t.unread>99?'99+':t.unread)+'</span>':'')+'</div>'
@@ -15974,7 +16177,7 @@ function renderAdmDm(){
   else if(_admDmThread&&_admDmThread.search){
     panel='<div class="dm-sh" style="padding-left:0">'+(_admDmThread.results||[]).length+' hit(s) for “'+esc(_admDmQ)+'”</div>'
       +((_admDmThread.results||[]).map(r=>'<div class="acc-row" data-admdm="'+r.thread+'">'
-        +'<span class="grow">'+esc(r.body).slice(0,140)+'</span>'
+        +'<span class="grow">'+esc(String(r.body||'').slice(0,140))+'</span>'
         +'<span class="acc-mu">'+esc(r.sender)+' · '+esc(r.threadName)+' · '+admWhen(r.ts)+'</span></div>').join('')
         ||'<div class="acc-note">Nothing matches.</div>');
   } else if(_admDmThread&&_admDmThread.ok){
