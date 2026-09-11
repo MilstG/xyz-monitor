@@ -15597,6 +15597,7 @@ function renderAccess(){
       +'<span style="color:'+(u.disabled?'var(--faint)':'var(--up)')+'">●</span>'
       +'<span class="grow">'+esc(u.display)+(u.isAdmin?' <span class="acc-chip on">♛ operator</span>':'')+'</span>'
       +'<span class="acc-mu">joined '+accWhen(u.createdAt)+' · seen '+accWhen(u.lastSeen)+'</span>'+on
+      +'<button type="button" class="acc-chip" data-accrename="'+esc(u.uid)+'" data-cur="'+esc(u.display)+'" title="Rename this member — display name and sign-in handle change together; their sessions and history stay. @mentions in old messages keep the old spelling.">rename</button>'
       +'<button type="button" class="acc-chip" data-accreset="'+esc(u.uid)+'" title="Mint a one-day reset link for this member. They set a new password, which signs out every one of their devices.">reset link</button>'
       +'<button type="button" class="acc-chip" data-accsignout="'+esc(u.uid)+'" title="Bump their epoch — every outstanding session on this account stops verifying. Nobody else is affected.">sign out</button>'
       +'<button type="button" class="acc-chip'+(u.isAdmin?' on':'')+'" data-accadmin="'+esc(u.uid)+'" data-on="'+(u.isAdmin?'0':'1')+'" title="Operators can mint invites, disable accounts and see the admin tabs.">'+(u.isAdmin?'demote':'make operator')+'</button>'
@@ -15656,6 +15657,12 @@ function accWire(){
     const cp=e.target.closest('[data-acccopy]'); if(cp){ accCopy(cp.dataset.acccopy); return; }
     const rv=e.target.closest('[data-accrevoke]');
     if(rv){ if(confirm('Revoke this invite? The link stops working immediately.')) accPost({op:'revoke',code:rv.dataset.accrevoke}); return; }
+    const rn=e.target.closest('[data-accrename]');
+    if(rn){
+      const nn=(prompt('New name for this member — letters, numbers, dot, dash, underscore (2–24 characters). This changes their sign-in handle too; they stay signed in.',rn.dataset.cur||'')||'').trim();
+      if(!nn||nn===rn.dataset.cur) return;
+      await accPost({op:'rename',uid:rn.dataset.accrename,handle:nn});   // failures alert inside accPost
+      return; }
     const rs=e.target.closest('[data-accreset]');
     if(rs){ const r=await accPost({op:'reset-link',uid:rs.dataset.accreset});
       if(r.ok&&r.d&&r.d.invite){ _accMinted=r.d.invite.code; renderAccess(); accCopy(_accMinted,true); } return; }
