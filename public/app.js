@@ -15597,7 +15597,7 @@ function dmMessageHtml(m,t,p){
     // monospace block so the panel's padded columns line up. No stamp, no tweet, no quote —
     // it is the board's output under a name, not a message about anything.
     ? '<div class="dm-b dm-cmdb" title="'+esc(who+' \u00b7 '+dmWhen(m.ts))+'"><div class="dm-cmdhd"><span class="dm-cmdpr">\u25b8</span> '+esc(m.cmd)
-      +' <span class="tp-badge '+(m.cmdAi?'ai':'c')+'">'+(m.cmdAi?'AI':'computed')+'</span></div><pre class="dm-cmdout">'+esc(m.body)+'</pre>'+marks+'</div>'
+      +' <span class="tp-badge '+(m.cmdAi?'ai':'c')+'">'+(m.cmdAi?'AI':'computed')+'</span></div>'+dmFile(m)+'<pre class="dm-cmdout">'+esc(m.body)+'</pre>'+marks+'</div>'
     : '<div class="dm-b" title="'+esc(who+' \u00b7 '+dmWhen(m.ts))+'">'+quote
       +(m.body?dmMentionHtml(esc(m.body)).replace(/\n/g,'<br>'):'')+marks+dmFile(m)+dmStamp(m)+dmTweet(m)+'</div>';
   return '<div class="dm-msg'+(own?' out':'')+(head?' hd':'')+(m.cmd&&!m.deleted?' cmd':'')+'" data-mid="'+m.id+'">'+meta
