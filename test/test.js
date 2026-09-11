@@ -24147,3 +24147,83 @@ test("audit -67: bot command replies are throttled per chat, strangers share a b
   assert.equal(c3.filter((c) => /sendMessage/.test(c.url)).length, 1, "the pacing gap still holds between the two");
   delete process.env.TG_BOT_TOKEN;
 });
+
+// A 200 with an empty universe deleted every row AND its in-memory OI history (the main-dex branch
+// already refused a failed poll for exactly this reason).
+test("audit -67: an empty or badly shortened universe reply keeps the last good roster", async () => {
+  const { createPoller } = require("../src/poller");
+  const mk = (names) => async () => [{ universe: names.map((n) => ({ name: n })) }, names.map(() => ({ markPx: "10", funding: "0.0001", openInterest: "5" }))];
+  let reply = mk(["A", "B", "C", "D"]);
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, metaFetch: (...a) => reply(...a) });
+  await p.pollUniverseNow();
+  assert.deepEqual(p.orderNow(), ["A", "B", "C", "D"]);
+  reply = async () => [{}, []];
+  await p.pollUniverseNow();
+  assert.deepEqual(p.orderNow(), ["A", "B", "C", "D"], "an empty reply changes nothing");
+  reply = mk(["A"]);
+  await p.pollUniverseNow();
+  assert.deepEqual(p.orderNow(), ["A", "B", "C", "D"], "a reply under half the roster is refused too");
+  reply = mk(["A", "B", "C"]);
+  await p.pollUniverseNow();
+  assert.deepEqual(p.orderNow(), ["A", "B", "C"], "a plausible delisting is still applied");
+});
+
+// The OI writer always emits four tab-separated fields and a trailing newline; the reader accepted
+// three, so a crash mid-append loaded a truncated number as a real sample, and the prune re-emitted
+// it with a newline.
+test("audit -67: a torn last line in oi.log is never a sample, on load or through the prune", async () => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const { openStore } = require("../src/store");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-oi-"));
+  const now = Date.now();
+  fs.writeFileSync(path.join(dir, "oi.log"),
+    `xyz:AAPL\t${now - 3000}\t123456.7\t0.01\nxyz:AAPL\t${now - 2000}\t123500.2\t\nxyz:AAPL\t${now - 1000}\t12`);
+  const st = openStore(dir);
+  const m = st.loadAll(0);
+  assert.deepEqual(m.get("xyz:AAPL").map((r) => r[1]), [123456.7, 123500.2], "the torn tail is dropped; an empty funding field is still a row");
+  // A three-field row WITH a newline (already legitimised by an older prune) is dropped on load
+  // and removed by the prune rather than carried forward.
+  fs.writeFileSync(path.join(dir, "oi.log"), `xyz:AAPL\t${now - 3000}\t123456.7\t0.01\nxyz:AAPL\t${now - 2000}\t12\n`);
+  assert.equal(openStore(dir).loadAll(0).get("xyz:AAPL").length, 1);
+  await st.prune(0);
+  assert.equal(fs.readFileSync(path.join(dir, "oi.log"), "utf8").split("\n").filter(Boolean).length, 1, "the prune drops the torn row");
+  fs.writeFileSync(path.join(dir, "derivs.log"), `BTC\t${now - 1000}\t1\t2\t3\nBTC\t${now}\t1\t2`);
+  assert.equal(openStore(dir).loadDerivs(0).get("BTC").length, 1, "derivs: same rule");
+});
+
+// The limiter charged one weight for up to three sends, and a 429 paused only the caller that saw
+// it while everyone else kept firing at the 4% headroom.
+test("audit -67: every Hyperliquid attempt is charged, a 429 pauses every caller, hard 4xx never retries", async () => {
+  const { infoPost, limiter } = require("../src/hyperliquid");
+  const mk = (status, headers) => async () => ({ ok: status < 400, status, headers: { get: (k) => (headers || {})[k] || null }, json: async () => ({ ok: 1 }) });
+  const before = limiter.usage().used;
+  await assert.rejects(infoPost({ type: "x" }, 5, mk(400)), /HTTP 400/);
+  assert.equal(limiter.usage().used - before, 5, "one attempt, one charge — a 400 is the request's fault");
+  let calls = 0;
+  const flaky = async () => { calls++; return calls < 3 ? { ok: false, status: 429, headers: { get: () => "1" } } : { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ ok: 1 }) }; };
+  const t0 = Date.now();
+  const r = await infoPost({ type: "y" }, 7, flaky);
+  assert.deepEqual(r, { ok: 1 });
+  assert.equal(calls, 3);
+  assert.ok(limiter.usage().used - before >= 5 + 21, "each retry is charged (" + (limiter.usage().used - before) + ")");
+  assert.ok(Date.now() - t0 >= 1900, "Retry-After of 1s was honoured on each 429, for everyone (" + (Date.now() - t0) + "ms)");
+});
+
+test("audit -67: young listings stop re-pulling the wide candle window; feed ticks carry timeouts and busy guards; Finnhub keys travel in a header", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/r\.hourlyFull === true \|\| firstT <= now -/.test(pol), "a completed wide pull marks the spine full");
+  assert.ok(/r\.hourlyRaw = packHours\(wide\); r\.hourlyFull = r\.hourlyRaw\.length > 48;/.test(pol));
+  for (const fn of ["newsCompanyTick", "newsTapeTick", "tgTick", "edgarTick"]) {
+    const body = pol.slice(pol.indexOf("async function " + fn + "()"), pol.indexOf("async function " + fn + "Body()"));
+    assert.ok(/Busy\) return;/.test(body) && /finally \{ \w+Busy = false; \}/.test(body), fn + " skips itself while a run is in flight");
+  }
+  for (const fn of ["newsCompanyTickBody", "newsTapeTickBody", "tgTickBody", "edgarTickBody"]) {
+    const start = pol.indexOf("async function " + fn + "()");
+    const body = pol.slice(start, start + 2500);
+    assert.ok(/signal: AbortSignal\.timeout\(FEED_FETCH_MS\)/.test(body), fn + " fetches with a timeout");
+  }
+  assert.ok(!/finnhub\.io[^`"']*token=/.test(pol), "no Finnhub URL carries the key in its query string");
+  assert.ok((pol.match(/"X-Finnhub-Token": token/g) || []).length >= 6, "the key rides the header Finnhub documents");
+});

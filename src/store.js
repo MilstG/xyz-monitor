@@ -234,6 +234,7 @@ function openStore(dataDir) {
             if (!ln) return;
             const i1 = ln.indexOf("\t"), i2 = ln.indexOf("\t", i1 + 1);
             if (i1 < 0 || i2 < 0) return;
+            if (ln.indexOf("\t", i2 + 1) < 0) { removed++; return; }   // three fields: a torn row, never a sample
             const t = +ln.slice(i1 + 1, i2);
             if (!Number.isFinite(t)) { removed++; return; }
             const coin = ln.slice(0, i1);
@@ -268,11 +269,17 @@ function openStore(dataDir) {
       const m = new Map();
       try {
         if (!fs.existsSync(file)) return m;
-        const lines = fs.readFileSync(file, "utf8").split("\n");
+        const text = fs.readFileSync(file, "utf8");
+        // A crash mid-append leaves a torn final line ("coin\tts\t12" cut from "...\t123456.7\t0.01\n").
+        // The writer always emits four fields and ends every row with a newline, so anything after
+        // the last newline is not a sample — reading "12" as the OI would feed a fake -99.99% /
+        // +10^6% move into every squeeze and funding-flip base rate, and the next prune would
+        // re-emit it with a newline and make it permanent.
+        const lines = (text.endsWith("\n") ? text : text.slice(0, text.lastIndexOf("\n") + 1)).split("\n");
         for (const ln of lines) {
           if (!ln) continue;
           const parts = ln.split("\t");
-          if (parts.length < 3) continue;
+          if (parts.length !== 4) continue;
           const coin = parts[0], ts = +parts[1], oi = +parts[2];
           const f = parts.length >= 4 && parts[3] !== "" ? +parts[3] : null;
           if (!Number.isFinite(ts) || !Number.isFinite(oi) || ts < since) continue;
@@ -833,11 +840,12 @@ function openStore(dataDir) {
       const m = new Map();
       try {
         if (!fs.existsSync(derivFile)) return m;
-        const lines = fs.readFileSync(derivFile, "utf8").split("\n");
+        const text = fs.readFileSync(derivFile, "utf8");
+        const lines = (text.endsWith("\n") ? text : text.slice(0, text.lastIndexOf("\n") + 1)).split("\n");   // drop a torn tail (see loadAll)
         for (const ln of lines) {
           if (!ln) continue;
           const p = ln.split("\t");
-          if (p.length < 5) continue;
+          if (p.length !== 5) continue;
           const ts = +p[1];
           if (!Number.isFinite(ts) || ts < since) continue;
           const row = [ts, p[2] === "" ? null : +p[2], p[3] === "" ? null : +p[3], p[4] === "" ? null : +p[4]];

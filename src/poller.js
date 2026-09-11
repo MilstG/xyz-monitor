@@ -177,8 +177,9 @@ function rnd(x, dp) { return Number.isFinite(x) ? +x.toFixed(dp) : null; }
 function sig(x, n) { return Number.isFinite(x) ? (x === 0 ? 0 : +x.toPrecision(n)) : null; }
 const sigq = sig;   // alias for scopes that shadow `sig` locally (buildDaily declares its content-signature as `sig`)
 
-function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, pushFetch: pushFetchOpt, extFetch: extFetchOpt, t13fCap: t13fCapOpt, congressGap: congressGapOpt, congressConc: congressConcOpt }) {
+function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, pushFetch: pushFetchOpt, extFetch: extFetchOpt, metaFetch: metaFetchOpt, t13fCap: t13fCapOpt, congressGap: congressGapOpt, congressConc: congressConcOpt }) {
   const rows = new Map();          // coin -> row
+  const fetchMeta = metaFetchOpt || fetchMetaAndCtxs;   // harness: inject a universe reply without network
   const hist = store.loadAll(Date.now() - OI_RETENTION); // coin -> [[ts, oi], ...]
   let order = [];
   let benchCoin = null;
@@ -568,9 +569,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
 
   async function pollUniverse() {
     let data;
-    try { data = await fetchMetaAndCtxs(dex); }
+    try { data = await fetchMeta(dex); }
     catch (e) { log("universe poll failed: " + e.message); return; }
     const meta = data[0], ctxs = data[1], uni = (meta && meta.universe) || [];
+    // A 200 with an empty or badly shortened universe is a broken reply, not a delisting wave:
+    // acting on it deleted every row AND its in-memory OI history (the main-dex branch already
+    // refuses a failed poll for exactly this reason). Keep the last good roster and try again.
+    if (!Array.isArray(uni) || !uni.length || (order.length && uni.length < order.length / 2)) {
+      log(`universe poll: refusing a ${Array.isArray(uni) ? uni.length : "non-array"}-market reply against a ${order.length}-market roster`);
+      return;
+    }
     order = uni.map((u) => u.name);
     const seen = new Set();
     let newCount = 0;
@@ -610,7 +618,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // heavy data) and kept in `seen` so the removal sweep never deletes their warm state mid-day.
   async function pollMainUniverse(seen, hourNow, addNew) {
     let md = null;
-    try { md = await fetchMetaAndCtxs(MAIN_DEX); }
+    try { md = await fetchMeta(MAIN_DEX); }
     catch (e) { log("main-dex poll failed: " + e.message); }
     if (!md) { for (const k of rows.keys()) if (!k.includes(":")) seen.add(k); return; }   // failed poll must not delete crypto rows
     try {
@@ -714,10 +722,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const histDays = r.uni === "main" ? MAIN_SPINE_DAYS : HOURLY_HISTORY_DAYS;
     const spine = Array.isArray(r.hourlyRaw) ? r.hourlyRaw : null;   // packed [[t,o,h,l,c,v], ...]
     const firstT = spine && spine.length ? +spine[0][0] : Infinity;
-    const deep = spine && spine.length > 48 && firstT <= now - (histDays - (r.uni === "main" ? 14 : 30)) * DAY;
+    // "Deep" = the spine already covers everything a wide pull could return. The age test alone
+    // can never be true for a market listed less than histDays-30 ago, so every young listing
+    // re-pulled the 130-weight window on every refresh, forever — 6.5x the tail's budget for the
+    // one class of market a dex that auto-detects listings has most of. A completed wide pull
+    // stamps the spine as full; that stamp is cleared whenever the spine is rebuilt from scratch.
+    const deep = spine && spine.length > 48
+      && (r.hourlyFull === true || firstT <= now - (histDays - (r.uni === "main" ? 14 : 30)) * DAY);
     if (!deep) {
       const wide = await fetchCandles(coin, "1h", now - histDays * DAY, now, r.uni === "main" ? MAIN_HOURLY_WEIGHT : HOURLY_FETCH_WEIGHT);
-      if (Array.isArray(wide)) r.hourlyRaw = packHours(wide);
+      if (Array.isArray(wide)) { r.hourlyRaw = packHours(wide); r.hourlyFull = r.hourlyRaw.length > 48; }
       else if (!spine) r.hourlyRaw = null;           // keep a shallow spine over nothing if the wide pull fails
     } else {
       const lastT = spine.length ? +spine[spine.length - 1][0] : 0;
@@ -4523,7 +4537,18 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       ttlHours: 72, error: newsErr, count: items.length,
       flStat: { lastOk: edgarStat.lastOk, lastErr: edgarStat.lastErr, names: edgarStat.names, roster: earnEligible().size } };
   }
+  // The four feed ticks below run on setInterval with no in-flight guard and, until now, no
+  // fetch timeout: one hung socket meant a new run every minute, each mutating newsItems and
+  // rewriting news.json underneath the others. Every fetch now carries a signal and each tick
+  // skips itself while its previous run is still going.
+  let newsCompanyBusy = false, newsTapeBusy = false, tgBusy = false, edgarBusy = false;
+  const FEED_FETCH_MS = 20000;
   async function newsCompanyTick() {
+    if (newsCompanyBusy) return;
+    newsCompanyBusy = true;
+    try { await newsCompanyTickBody(); } finally { newsCompanyBusy = false; }
+  }
+  async function newsCompanyTickBody() {
     const token = process.env.FINNHUB_TOKEN || "";
     if (!token) { newsErr = "FINNHUB_TOKEN not set"; buildNewsPayload(); return; }
     const roster = [...earnEligible().values()];
@@ -4535,8 +4560,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     for (const m of batch) {
       newsTkAt.set(m.ticker, now);   // stamped before the call: a failing name must not wedge the rotation
       try {
-        const res = await fetch(`https://finnhub.io/api/v1/company-news?symbol=${encodeURIComponent(m.ticker)}&from=${iso(now - 3 * DAY)}&to=${iso(now)}&token=${encodeURIComponent(token)}`,
-          { headers: { accept: "application/json" } });
+        const res = await fetch(`https://finnhub.io/api/v1/company-news?symbol=${encodeURIComponent(m.ticker)}&from=${iso(now - 3 * DAY)}&to=${iso(now)}`,
+          { headers: { accept: "application/json", "X-Finnhub-Token": token }, signal: AbortSignal.timeout(FEED_FETCH_MS) });
         if (!res.ok) { if (res.status === 401 || res.status === 403) { newsErr = `Finnhub company-news: HTTP ${res.status} (entitlement)`; } continue; }
         got = got.concat(gateCompanyItems(newsParse(await res.json(), m.ticker)));
         newsErr = null;
@@ -4550,11 +4575,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
   }
   async function newsTapeTick() {
+    if (newsTapeBusy) return;
+    newsTapeBusy = true;
+    try { await newsTapeTickBody(); } finally { newsTapeBusy = false; }
+  }
+  async function newsTapeTickBody() {
     const token = process.env.FINNHUB_TOKEN || "";
     if (!token) { newsErr = "FINNHUB_TOKEN not set"; buildNewsPayload(); return; }
     try {
-      const res = await fetch(`https://finnhub.io/api/v1/news?category=general&token=${encodeURIComponent(token)}`,
-        { headers: { accept: "application/json" } });
+      const res = await fetch(`https://finnhub.io/api/v1/news?category=general`,
+        { headers: { accept: "application/json", "X-Finnhub-Token": token }, signal: AbortSignal.timeout(FEED_FETCH_MS) });
       if (!res.ok) { newsErr = `Finnhub news: HTTP ${res.status}`; buildNewsPayload(); return; }
       newsItems = mergeNews(newsItems, newsParse(await res.json(), null), Date.now());
       pruneSecTape();
@@ -4622,13 +4652,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     for (const { sym } of batch) {
       fundAt.set(sym, now);   // stamped BEFORE the calls: a failing/empty name must not wedge the rotation, and "tried but empty" is exactly the foreign-listing signal getFundamentals reads
       try {
-        const mres = await fetch(`https://finnhub.io/api/v1/stock/metric?symbol=${encodeURIComponent(sym)}&metric=all&token=${encodeURIComponent(token)}`,
-          { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) });
+        const mres = await fetch(`https://finnhub.io/api/v1/stock/metric?symbol=${encodeURIComponent(sym)}&metric=all`,
+          { headers: { accept: "application/json", "X-Finnhub-Token": token }, signal: AbortSignal.timeout(20000) });
         if (!mres.ok) { if (mres.status === 401 || mres.status === 403) fundErr = `Finnhub metric: HTTP ${mres.status} (entitlement)`; continue; }
         const mj = await mres.json();
         let pj = {};
-        const pres = await fetch(`https://finnhub.io/api/v1/stock/profile2?symbol=${encodeURIComponent(sym)}&token=${encodeURIComponent(token)}`,
-          { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) });
+        const pres = await fetch(`https://finnhub.io/api/v1/stock/profile2?symbol=${encodeURIComponent(sym)}`,
+          { headers: { accept: "application/json", "X-Finnhub-Token": token }, signal: AbortSignal.timeout(20000) });
         if (pres.ok) pj = await pres.json();
         const rec = parseFundamentals(mj, pj, now);
         if (rec) { fundData.set(sym, rec); changed = true; fundErr = null; }
@@ -4705,12 +4735,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     return m;
   }
   async function tgTick() {
-    if (!tgChannels.length) return;
+    if (!tgChannels.length || tgBusy) return;
+    tgBusy = true;
+    try { await tgTickBody(); } finally { tgBusy = false; }
+  }
+  async function tgTickBody() {
     const roster = tgRoster();
     let got = [];
     for (const ch of tgChannels) {
       try {
-        const res = await fetch(`https://t.me/s/${encodeURIComponent(ch)}`, { headers: { accept: "text/html" } });
+        const res = await fetch(`https://t.me/s/${encodeURIComponent(ch)}`, { headers: { accept: "text/html" }, signal: AbortSignal.timeout(FEED_FETCH_MS) });
         if (!res.ok) { tgStatus.set(ch, { lastOk: (tgStatus.get(ch) || {}).lastOk || null, error: "HTTP " + res.status, posts: 0 }); continue; }
         const { items, blocks } = parseTgPreview(await res.text(), ch, Date.now());
         if (!items.length && blocks > 0) {
@@ -4766,6 +4800,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   let edgarStat = { lastOk: null, lastErr: null, lastErrAt: null, ok: 0, http4: 0, http403: 0, fail: 0, names: 0, lastItems: 0 };
   let edgarLastLogged = "";
   async function edgarTick() {
+    if (edgarBusy) return;
+    edgarBusy = true;
+    try { await edgarTickBody(); } finally { edgarBusy = false; }
+  }
+  async function edgarTickBody() {
     const roster = [...earnEligible().values()];
     if (!roster.length) return;
     roster.sort((a, b) => (edgarTkAt.get(a.ticker) || 0) - (edgarTkAt.get(b.ticker) || 0));
@@ -4775,7 +4814,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       edgarTkAt.set(m.ticker, now);   // stamped before the call: a failing name must not wedge the rotation
       try {
         const res = await fetch(`https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${encodeURIComponent(m.ticker)}&type=&dateb=&owner=include&count=20&output=atom`,
-          { headers: { accept: "application/atom+xml", "user-agent": SEC_UA } });
+          { headers: { accept: "application/atom+xml", "user-agent": SEC_UA }, signal: AbortSignal.timeout(FEED_FETCH_MS) });
         if (!res.ok) {
           // 4xx on a foreign listing is expected; 403 across the board means the UA or the
           // egress IP is being rejected — the difference is exactly what the counters show
@@ -5064,10 +5103,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   const etfCache = new Map();      // SYMBOL -> { at, res }
   const extInflight = new Map();   // "fund:T" | "etf:S" -> Promise
   let cikMaps = null, cikMapsAt = 0;   // { co: SYM->{cik,name}, mf: SYM->{cik,seriesId,name} }
-  async function extGet(url, kind) {
+  async function extGet(url, kind, extraHeaders) {
     const ac = new AbortController(); const t = setTimeout(() => ac.abort(), EXT_TIMEOUT_MS);
     try {
-      const res = await extFetch(url, { headers: { "user-agent": SEC_UA, accept: kind === "xml" ? "application/xml" : "application/json" }, signal: ac.signal });
+      const res = await extFetch(url, { headers: Object.assign({ "user-agent": SEC_UA, accept: kind === "xml" ? "application/xml" : "application/json" }, extraHeaders || {}), signal: ac.signal });
       if (!res.ok) return { ok: false, error: "HTTP " + res.status };
       return { ok: true, body: kind === "xml" ? await res.text() : await res.json() };
     } catch (e) { return { ok: false, error: "fetch failed: " + (e && e.message) }; } finally { clearTimeout(t); }
@@ -7002,7 +7041,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     return ok !== false;
   }
   async function finnProfile(sym, token) {
-    const r = await extGet("https://finnhub.io/api/v1/stock/profile2?symbol=" + encodeURIComponent(sym) + "&token=" + encodeURIComponent(token), "json");
+    const r = await extGet("https://finnhub.io/api/v1/stock/profile2?symbol=" + encodeURIComponent(sym), "json", { "X-Finnhub-Token": token });
     if (!r.ok || !r.body || typeof r.body !== "object" || !r.body.name) return null;
     return { name: r.body.name || null, exchange: r.body.exchange || null, ipo: r.body.ipo || null,
       finnhubIndustry: r.body.finnhubIndustry || null };
@@ -7317,8 +7356,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // persisted print history.
   function earnCalFetchers(token, elig) {
     const getCal = async (f, t) => {
-      const res = await fetch(`https://finnhub.io/api/v1/calendar/earnings?from=${f}&to=${t}&token=${encodeURIComponent(token)}`,
-        { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) });
+      const res = await fetch(`https://finnhub.io/api/v1/calendar/earnings?from=${f}&to=${t}`,
+        { headers: { accept: "application/json", "X-Finnhub-Token": token }, signal: AbortSignal.timeout(20000) });
       if (!res.ok) throw new Error("HTTP " + res.status);
       return parseEarningsCalendar(await res.json(), elig);
     };
@@ -14409,6 +14448,8 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       if (!trendCache) trendCache = { ts: Date.now() };
       trendBuilt = Number.MAX_SAFE_INTEGER / 2;
     },
+    pollUniverseNow: pollUniverse,     // harness: one universe poll through the injected metaFetch
+    orderNow: () => order.slice(),     // harness: the live roster
     seedRowNow: (coin, fields) => {   // harness: seed a synthetic market so builds are testable without network; main-universe seeds join the main roster exactly as the refresh would place them
       const r = Object.assign(getRow(coin), fields);
       if (Array.isArray(r.hourlyRaw)) r.hourlyRaw = packHours(r.hourlyRaw);   // seed the packed spine exactly as refreshHourly/hydrate would (accepts object or packed input)
