@@ -23134,7 +23134,7 @@ test("server: the invite door strips the code from the URL before anything rende
   // The redirect is the security step: after it the code is not in the address bar, the history,
   // or any Referer a later request carries.
   assert.ok(/inviteCookie\(reply, req, r\.invite\.code\)/.test(join), "the code moves into a cookie");
-  assert.ok(/reply\.redirect\(302, "\/join"\)/.test(join), "and the URL is redirected to a bare /join");
+  assert.ok(/reply\.redirect\("\/join", 302\)/.test(join), "and the URL is redirected to a bare /join");
   assert.ok(!/authPage\(\{ mode: "join"/.test(join), "GET /join/:code must never render the claim page itself");
   assert.ok(/xyzinv=[\s\S]{0,120}HttpOnly/.test(srv), "the invite cookie is HttpOnly");
   assert.ok(/log\("invite: opened \(code redacted\)"\)/.test(srv), "the one log line that sees a code redacts it");
@@ -24351,4 +24351,19 @@ test("audit -67: accounts.db backs up as a consistent rotated copy and closes cl
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   assert.ok(/setInterval\(accountsBackup, 24 \* 3600 \* 1000\)/.test(srv), "scheduled daily");
   assert.ok((srv.match(/try \{ ACCOUNTS\.close\(\); \} catch \(_\) \{\}/g) || []).length === 2, "closed on shutdown and on crash");
+});
+
+// fastify 4.29 / @fastify/static 7 carried five high advisories (a static route-guard bypass via
+// path traversal, a Content-Type body-validation bypass among them). Pinned to the majors that
+// close them; reply.redirect takes (url, code) in v5.
+test("audit -67: fastify majors are past the advisories, redirects use the v5 argument order, dotfiles are denied", () => {
+  const fs = require("fs"), path = require("path");
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"));
+  const major = (r) => parseInt(String(r).replace(/^[^\d]*/, ""), 10);
+  assert.ok(major(pkg.dependencies.fastify) >= 5, "fastify >= 5");
+  assert.ok(major(pkg.dependencies["@fastify/static"]) >= 10, "@fastify/static >= 10");
+  assert.ok(major(pkg.dependencies["@fastify/compress"]) >= 8, "@fastify/compress for fastify 5");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.equal((srv.match(/reply\.redirect\(30\d,/g) || []).length, 0, "no redirect uses the removed (code, url) order");
+  assert.ok(/dotfiles: "deny"/.test(srv), "static never serves a dotfile");
 });

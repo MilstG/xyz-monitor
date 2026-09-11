@@ -732,7 +732,7 @@ async function main() {
         if (!meOf(req) && ACCOUNTS.countUsers() > 0 && !adminViewOk(getCookie(req, "xyzadm"))) {
           if (u.startsWith("/api/")) return reply.code(401).header("cache-control", "no-store")
             .send({ error: "claim-account", detail: "this terminal now has accounts — visit /claim" });
-          return reply.redirect(302, "/claim");
+          return reply.redirect("/claim", 302);
         }
         return;
       }
@@ -824,7 +824,7 @@ async function main() {
   const htmlNoStore = (reply) => reply.header("cache-control", "no-store").type("text/html; charset=utf-8");
 
   fastify.get("/login", (req, reply) => {
-    if (meOf(req)) return reply.redirect(302, "/");
+    if (meOf(req)) return reply.redirect("/", 302);
     return htmlNoStore(reply).send(authPage({ mode: "signin" }));
   });
 
@@ -889,7 +889,7 @@ async function main() {
     }
     log("invite: opened (code redacted)");
     inviteCookie(reply, req, r.invite.code);
-    return reply.redirect(302, "/join");
+    return reply.redirect("/join", 302);
   });
 
   const deadInvitePage = (state) => authPage({ mode: "dead",
@@ -953,7 +953,7 @@ async function main() {
     reply.header("set-cookie", "xyzotp=" + encodeURIComponent(handle || "") + cookieAttrs(req, handle ? 900 : 0) + "; HttpOnly");
 
   fastify.get("/reset", (req, reply) => {
-    if (meOf(req)) return reply.redirect(302, "/");
+    if (meOf(req)) return reply.redirect("/", 302);
     return htmlNoStore(reply).send(authPage({ mode: "forgot" }));
   });
   fastify.post("/reset", { bodyLimit: 4 * 1024 }, async (req, reply) => {
@@ -977,8 +977,8 @@ async function main() {
     return { ok: true, next: "/reset/code" };
   });
   fastify.get("/reset/code", (req, reply) => {
-    if (meOf(req)) return reply.redirect(302, "/");
-    if (!getCookie(req, "xyzotp")) return reply.redirect(302, "/reset");
+    if (meOf(req)) return reply.redirect("/", 302);
+    if (!getCookie(req, "xyzotp")) return reply.redirect("/reset", 302);
     return htmlNoStore(reply).send(authPage({ mode: "otp" }));
   });
   fastify.post("/reset/code", { bodyLimit: 8 * 1024 }, async (req, reply) => {
@@ -1005,8 +1005,8 @@ async function main() {
   // An existing member arriving on a shared-password session. Same account creation as an invite
   // redemption, no invite required, and only while the operator leaves the legacy door open.
   fastify.get("/claim", (req, reply) => {
-    if (meOf(req)) return reply.redirect(302, "/");
-    if (!LEGACY_DOOR || !sessionOk(getCookie(req, "xyzsess"))) return reply.redirect(302, "/login");
+    if (meOf(req)) return reply.redirect("/", 302);
+    if (!LEGACY_DOOR || !sessionOk(getCookie(req, "xyzsess"))) return reply.redirect("/login", 302);
     return htmlNoStore(reply).send(authPage({ mode: "claim" }));
   });
   fastify.post("/claim", { bodyLimit: 8 * 1024 }, async (req, reply) => {
@@ -1024,8 +1024,8 @@ async function main() {
   // Account #1, created by whoever holds ADMIN_PASSWORD, because there is nobody yet who could have
   // issued an invite. Closes for good the moment any account exists.
   fastify.get("/bootstrap", (req, reply) => {
-    if (ACCOUNTS.countUsers() > 0) return reply.redirect(302, "/login");
-    if (!adminViewOk(getCookie(req, "xyzadm"))) return reply.redirect(302, "/login");
+    if (ACCOUNTS.countUsers() > 0) return reply.redirect("/login", 302);
+    if (!adminViewOk(getCookie(req, "xyzadm"))) return reply.redirect("/login", 302);
     return htmlNoStore(reply).send(authPage({ mode: "bootstrap" }));
   });
   fastify.post("/bootstrap", { bodyLimit: 8 * 1024 }, async (req, reply) => {
@@ -1515,6 +1515,7 @@ async function main() {
     root: path.join(__dirname, "public"),
     prefix: "/",
     index: false,   // index.html is served by the explicit routes below, version-stamped
+    dotfiles: "deny",   // the plugin's default is allow: a stray .env copied into public/ would be served
     // Force revalidation by default; the stamped-asset immutable tier is applied in the onSend
     // hook below, which sees the request URL — setHeaders here only sees the raw response, and
     // the query string needed to verify the stamp is not reliably reachable from it.
