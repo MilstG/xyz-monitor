@@ -109,7 +109,8 @@ const AI_UNLOCK_MS = 24 * 3600 * 1000;   // hard ceiling on an unlock's life, ev
 const ADMIN_VIEW_SECRET = crypto.createHash("sha256").update(`xyzmon-admin-view|${ADMIN_PASSWORD}`).digest();
 const ADMIN_DAYS = Number(process.env.ADMIN_DAYS || 30);
 
-function log(msg) { console.log(new Date().toISOString() + " " + msg); }
+// XYZ_QUIET silences the boot narration when server.js is built by the test suite.
+function log(msg) { if (!process.env.XYZ_QUIET) console.log(new Date().toISOString() + " " + msg); }
 
 const store = openStore(DATA_DIR);
 // ---- accounts, invites and direct messages --------------------------------------------------
@@ -538,7 +539,11 @@ const AUTH_JS =
 "[h,p,c].forEach(function(e){if(e)e.addEventListener('keydown',function(ev){if(ev.key==='Enter')submit();});});}";
 const LOGIN_HTML = authPage({ mode: "signin" });
 
-async function main() {
+// buildServer() wires the poller and every route and returns the Fastify instance WITHOUT
+// listening or starting the poller. main() is the process entry; the test suite requires this
+// file as a module and drives buildServer() through fastify.inject(), which is the only way the
+// auth gate, cookies and admin lease can be tested as behaviour rather than as source text.
+async function buildServer() {
   {
     const t0 = Date.now();
     const n = await store.preloadOI();
@@ -2454,6 +2459,11 @@ async function main() {
     loop: { ...loopSample(), sinceMs: Date.now() - loopResetAt, windowMs: LOOP_WINDOW, maxEver: loopMaxEver, hist: loopRing },
     ...poller.stats(), ts: Date.now() }));
 
+  return fastify;
+}
+
+async function main() {
+  const fastify = await buildServer();
   await fastify.listen({ port: PORT, host: HOST });
   log(`Listening on ${HOST}:${PORT} (dex=${DEX}, data=${DATA_DIR}, build=${VERSION})`);
   // accounts.db backup: shortly after boot (a deploy is the moment a bad migration would show),
@@ -2467,7 +2477,8 @@ async function main() {
   poller.start().catch((e) => log("poller start error: " + (e && e.message)));
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+module.exports = { buildServer, VERSION };
+if (require.main === module) main().catch((e) => { console.error(e); process.exit(1); });
 
 // Graceful stop: flush EVERYTHING that persists on a timer, not just features + ledger — the
 // hourly spine (10-min cadence), trigger dedupe state, and push recipients were previously left
@@ -2492,8 +2503,7 @@ async function shutdown() {
   try { ACCOUNTS.close(); } catch (_) {}   // checkpoints the WAL so a redeploy never leaves -wal/-shm behind
   process.exit(0);
 }
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
+if (require.main === module) { process.on("SIGTERM", shutdown); process.on("SIGINT", shutdown); }
 
 // Crash containment: Node >= 15 hard-crashes the process on ANY unhandled rejection, and with
 // timer-cadence persistence a bare crash can drop up to 10 min of spine plus the buffered deriv
@@ -2514,5 +2524,8 @@ function crashFlush(kind, err) {
   try { ACCOUNTS.close(); } catch (_) {}
   process.exit(1);
 }
-process.on("unhandledRejection", (e) => crashFlush("unhandledRejection", e));
-process.on("uncaughtException", (e) => crashFlush("uncaughtException", e));
+// Only as the process entry: under the test runner these would exit the runner itself.
+if (require.main === module) {
+  process.on("unhandledRejection", (e) => crashFlush("unhandledRejection", e));
+  process.on("uncaughtException", (e) => crashFlush("uncaughtException", e));
+}
