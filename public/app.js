@@ -2488,7 +2488,9 @@ function compgColor(i){ return COMPG_PAL[i%COMPG_PAL.length]; }
 function compgRowFor(tk){ tk=String(tk||'').toUpperCase();
   const b=basketByName(tk);   // virtual row: the SERVER's daily synthesis verbatim — the client never re-derives it
   if(b) return basketVirtualRow(b);
-  for(const r of activeRows()){ if((r.ticker||'').toUpperCase()===tk||(r.coin||'').toUpperCase()===tk) return r; } return null; }
+  for(const r of activeRows()){ if((r.ticker||'').toUpperCase()===tk||(r.coin||'').toUpperCase()===tk) return r; }
+  if(tk==='BTC') return compgBtcRow();
+  return null; }
 // union-day alignment across N names; a name missing a day carries null (gaps stay visible)
 function alignedDailyN(rows, Ldays){
   const cutoff=Math.floor(Date.now()/DAY)-Ldays;
@@ -2583,9 +2585,14 @@ function compgLegend(S){
 // ===== COMP/G picker: universe-validated typeahead + fill shortcuts =====
 // The panel auto-opens on the Corr tab (no launcher button) and re-renders live on every
 // add/remove — selection is chips + typeahead, matrix clicks still work as before.
+// BTC is the one name allowed across the stocks/crypto wall (build 2026.09.11-75): in stocks
+// scope it joins the overlay universe on its daily closes, so "comp NVDA BTC" and "ratio NVDA/BTC"
+// answer. Nothing else crosses, and baskets never do.
+function compgBtcRow(){ if(state.scope==='crypto') return null; const r=state.rows.get('BTC'); return (r&&!r.delisted&&r.daily&&r.daily.length)?r:null; }
 function compgUniverse(){ const base = state.scope==='crypto'
   ? (CORR._bars ? [...CORR._bars.keys()].map(t=>String(t).toUpperCase()) : [])
   : activeRows().map(r=>(r.ticker||'').toUpperCase()).filter(Boolean);
+  if(compgBtcRow()&&!base.includes('BTC')) base.push('BTC');
   return base.concat(compgBasketNames()); }
 function compgDefaultSel(){ const cr=state.scope==='crypto';
   const rows=(CORR._rows&&CORR._rows.length?CORR._rows:corrScope());
@@ -14987,8 +14994,8 @@ const DM_CMD_GUIDE=[
     ['vs <a> <b>','side-by-side field compare','c'],
     ['corr <a> <b>','correlation and hedge \u03b2 over 90 days of daily returns','c'],
     ['diverge <ticker>','a name against its benchmark \u2014 is it decoupling','c'],
-    ['comp <a> <b> \u2026','overlay rebased to 100 (COMP/G) \u2014 opens the chart view','t'],
-    ['ratio <A>/<B> [1h|4h|12h|1d]','synthetic pair candles with EMA200 \u2014 in a chat the chart posts as an image \u00b7 /ratio MAG7/EWZ 4h','ca'],
+    ['comp <a> <b> \u2026','overlay rebased to 100 (COMP/G) \u2014 opens the chart view \u00b7 BTC may join a stock set','t'],
+    ['ratio <A>/<B> [1h|4h|12h|1d]','synthetic pair candles with EMA200 \u2014 in a chat the chart posts as an image \u00b7 /ratio MAG7/EWZ 4h \u00b7 BTC may face a stock: /ratio NVDA/BTC','ca'],
     ['basket create|list|drop','custom equal-weight baskets, usable in comp and ratio','ta']]},
   {h:'Filings & holders',rows:[
     ['fund <ticker> \u00b7 etf <symbol>','SEC-filed balance sheet \u00b7 fund composition (N-PORT)','c'],
@@ -15119,7 +15126,9 @@ function dmComps(text){
     c=extra.concat(c);
   }else{
     const h=p[0].toLowerCase();
-    if(h==='ratio'&&p.length===2) c=termActive().map(r=>r.ticker.toLowerCase()).filter(x=>x.startsWith(p[1].toLowerCase().replace(/\/.*$/,''))).map(x=>'ratio '+x+'/');
+    if(h==='ratio'&&p.length===2){ const q=p[1].toLowerCase(), legA=q.replace(/\/.*$/,''), after=q.includes('/')?q.slice(q.indexOf('/')+1):null;
+      const names=termActive().map(r=>r.ticker.toLowerCase()).concat(state.scope!=='crypto'&&state.rows.get('BTC')?['btc']:[]);
+      c=after==null?names.filter(x=>x.startsWith(legA)).map(x=>'ratio '+x+'/'):names.filter(x=>x.startsWith(after)&&x!==legA).map(x=>'ratio '+legA+'/'+x); }
     if(h==='ratio'&&p.length===3) c=['1h','4h','12h','1d'].filter(x=>x.startsWith(p[2].toLowerCase())).map(x=>p.slice(0,2).join(' ')+' '+x);
     if(h==='screen'&&p.length===2) c=Object.keys(TFIELD).filter(x=>x.startsWith(p[1].toLowerCase())).map(x=>'screen '+x+'>');
     if((h==='breadth'||h==='sectors')&&p.length===2) c=['d1','d7','d30','h1','h4'].filter(x=>x.startsWith(p[1].toLowerCase())).map(x=>h+' '+x);

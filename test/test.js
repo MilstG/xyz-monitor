@@ -13348,7 +13348,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.11-74"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.11-75"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -15129,6 +15129,13 @@ test("-06 end to end: create/list/drop against a live roster, ratio candles + EM
   assert.deepEqual(r2.numCov, { n: 3, N: 3 }, "leg coverage shipped for the legend");
   // walls at read time too
   assert.ok(!p.getRatio("AAA", "SOL", "4h").ok, "cross-universe ratio refused");
+  // -75: BTC is the one crossing. Seeded as a main-universe row on the same hourly spine.
+  p.seedRowNow("BTC", { px: 60000, hourlyRaw: Array.from({ length: 60 }, (_, i) => ({ t: now - (59 - i) * HOUR, c: 60000 + i * 10 })) });
+  const rb = p.getRatio("AAA", "BTC", "4h");
+  assert.ok(rb.ok, "stock ÷ BTC is allowed: " + (rb.error || ""));
+  assert.equal(rb.scope, "stocks", "a bridged pair reports the stock leg's universe");
+  assert.ok(p.getRatio("BTC", "AAA", "1h").ok && p.getRatio("MINE", "BTC", "4h").ok, "BTC on either side, and against a basket");
+  assert.ok(!p.getRatio("AAA", "SOL", "4h").ok && !p.getRatio("MINE", "SOL", "4h").ok, "no other coin crosses");
   assert.ok(!p.getRatio("AAA", "AAA", "4h").ok, "self-ratio refused");
   assert.ok(!p.getRatio("AAA", "BBB", "7h").ok, "unknown tf refused");
   // drop: custom goes, built-ins (none seeded here) can't, and the stamp moves for the ETag
@@ -24714,6 +24721,11 @@ test("chat terminal -69: a command result is a message with cmd, no stamp, no ed
   assert.ok(!/dmPost\(\{[^}]*rtLive/.test(app) && /Never sent — the posted picture is the record/.test(app), "a timeframe switch never posts");
   assert.ok(/\{ const rt=e\.target\.closest\('\[data-dmrtf\]'\); if\(rt\)\{ dmRatioSwitch\(\+rt\.dataset\.mid, rt\.dataset\.dmrtf\); return; \} \}/.test(app), "pills are wired through the tab's one delegated listener");
   for (const pin of [".dm-rtf{", ".dm-cmdb .dm-rtlive svg{"]) assert.ok(css.includes(pin), "css pin missing: " + pin);
+  // -75: BTC joins the stock overlay universe and resolves as a COMP/G row in stocks scope.
+  assert.ok(/function compgBtcRow\(\)\{ if\(state\.scope==='crypto'\) return null; const r=state\.rows\.get\('BTC'\); return \(r&&!r\.delisted&&r\.daily&&r\.daily\.length\)\?r:null; \}/.test(app), "BTC bridges only in stocks scope and only with a daily series");
+  assert.ok(/if\(compgBtcRow\(\)&&!base\.includes\('BTC'\)\) base\.push\('BTC'\);/.test(app) && /if\(tk==='BTC'\) return compgBtcRow\(\);/.test(app), "the universe and the row lookup agree");
+  const pj = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/const btcBridge = \(l\) => l\.scope === "crypto" && !l\.basket && l\.name === "BTC";/.test(pj) && /if \(A\.scope !== B\.scope && !\(btcBridge\(A\) \|\| btcBridge\(B\)\)\)/.test(pj), "the server wall has exactly one door, and it is BTC");
   assert.ok(/new File\(\[png\],`ratio-\$\{d\.num\}-\$\{d\.den\}-\$\{tf\}\.png`,\{type:'image\/png'\}\)/.test(app), "the chart is a PNG file — the only inline type the upload sniff admits for a drawing");
   assert.ok(/const res=await dmPost\(\{thread:t\.id,body:r\.body,cmd:line,fileId:up\.id\}\);/.test(app), "the chart posts as a command result WITH an attachment");
   assert.ok(!/ratio:'opens the ratio chart'/.test(app), "ratio is no longer refused from chat");
