@@ -10719,7 +10719,14 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const B = ratioLeg(String(den || "").toUpperCase().trim());
     if (!B) return { ok: false, error: `unknown \u201c${String(den || "").toUpperCase()}\u201d \u2014 not a listed name or a basket` };
     if (A.name === B.name) return { ok: false, error: "numerator and denominator are the same series" };
-    if (A.scope !== B.scope) return { ok: false, error: "legs live in different universes \u2014 ratios never cross the stocks/crypto separation" };
+    // The one crossing allowed (build 2026.09.11-75): BTC against the stock universe. BTC is the
+    // liquidity read the desk prices equities against, so "NVDA ÷ BTC" is a question people ask;
+    // the alignment below keeps it honest — only hours both legs traded survive, which for a
+    // stock leg is the session hours. Baskets still never mix, and no other coin crosses.
+    const btcBridge = (l) => l.scope === "crypto" && !l.basket && l.name === "BTC";
+    if (A.scope !== B.scope && !(btcBridge(A) || btcBridge(B)))
+      return { ok: false, error: "legs live in different universes \u2014 ratios never cross the stocks/crypto separation (BTC is the one exception)" };
+    const scope = A.scope === B.scope ? A.scope : (btcBridge(A) ? B.scope : A.scope);
     // Intersection alignment (division needs both legs), then compute.ratioCloses — one code path.
     const bm = new Map();
     for (let i = 0; i < B.times.length; i++) bm.set(B.times[i], B.closes[i]);
@@ -10735,7 +10742,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const cut = Math.max(0, all.length - RATIO_SHOW_MAX);
     const sig8 = (v) => +(+v).toPrecision(8);
     const candles = all.slice(cut).map((k) => ({ t: k.t, o: sig8(k.o), h: sig8(k.h), l: sig8(k.l), c: sig8(k.c) }));
-    return { ok: true, num: A.name, den: B.name, scope: A.scope, tf: tfk, tfHours: hours,
+    return { ok: true, num: A.name, den: B.name, scope, tf: tfk, tfHours: hours,
       candles, bars: all.length, shown: candles.length,
       ema200: ema ? ema.slice(cut).map((v) => (v == null ? null : sig8(v))) : null,
       emaSpan: RATIO_EMA_SPAN, emaMin: RATIO_EMA_MIN, emaReason: ema ? null : "insufficient_bars",

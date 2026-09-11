@@ -161,7 +161,10 @@ instant, and the per-IP rate limit stops being a per-user problem.
   enforces both on the post and on the ask, and `dm.ask` only ever narrows `ai.ask`. Verbs that open
   a view or change state (`comp`, `report`, `basket`, `whale add`, `admin …`) are refused with a
   pointer to the panel; a command result carries no price stamp (a screen dump that spells `$NVDA`
-  is nobody's call) and can't be edited — delete it and run it again. `/ratio A/B [tf]` is the one
+  is nobody's call) and can't be edited — delete it and run it again. **BTC is the one name allowed
+  across the stocks/crypto wall** for `comp` and `ratio` (`ratio NVDA/BTC`, `comp NVDA AMD BTC`):
+  the ratio aligns on the hours both legs traded, so a stock leg keeps it to session hours; baskets
+  still never mix and no other coin crosses. `/ratio A/B [tf]` is the one
   verb that posts a **picture**: the same SVG the Correlation tab draws is rasterised offscreen and
   rides the ordinary attachment path as a PNG. **Tab** completes verbs, fields and tickers in the
   composer, and the `?` beside it opens the full guide.
