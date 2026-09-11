@@ -10523,7 +10523,7 @@ news:`
 // Short entries for the tabs that had none: pressing ? on Messages used to open the Markets text
 // under the title "How to read: dm".
 Object.assign(HELP,{
-  dm:`<div class="hlp-h">What it is</div><p>Direct messages and topic boards between account holders. Type <b>$TICKER</b> and the message carries the mark it was sent at — read later it says "sent at 113.90 · +4.0%". <b>short / sell / fade</b> before the ticker (or <b>short / puts</b> after) makes it a short; everything else is a long. Editing rewrites the words, never the stamp.</p><div class="hlp-h">Commands</div><p>Type <b>/</b> and a terminal verb — <b>/top funding 5</b>, <b>/nvda</b>, <b>/screen rvol>2</b> — and the result posts into the conversation under your name, badged <b>computed</b>. <b>/help</b> lists what runs here (only you see it); the <b>?</b> beside the message box opens the full guide. A plain-English question after the slash goes to the AI only where the operator has opened that in Admin › Features; it is admin-only by default. <b>//</b> sends a message that really starts with a slash.</p><div class="hlp-h">Calls</div><p><b>calls ↗</b> in the rail is every stamped message in one place, scored live and at fixed 1d / 7d horizons, with a per-person record. Deleting a call removes the words, never the score.</p><div class="hlp-h">Who can read this</div><p>The operator of this terminal can read every message, including conversations they are not in; every read is logged in Admin.</p>`,
+  dm:`<div class="hlp-h">What it is</div><p>Direct messages and topic boards between account holders. Type <b>$TICKER</b> and the message carries the mark it was sent at — read later it says "sent at 113.90 · +4.0%". <b>short / sell / fade</b> before the ticker (or <b>short / puts</b> after) makes it a short; everything else is a long. Editing rewrites the words, never the stamp.</p><div class="hlp-h">Commands</div><p>Type <b>/</b> and a terminal verb — <b>/top funding 5</b>, <b>/nvda</b>, <b>/screen rvol>2</b> — and the result posts into the conversation under your name, badged <b>computed</b>. <b>/help</b> lists what runs here (only you see it); the <b>?</b> beside the message box opens the full guide, and <b>Tab</b> completes verbs, fields and tickers. <b>/ratio A/B</b> posts the pair chart as an image. A plain-English question after the slash goes to the AI only where the operator has opened that in Admin › Features; it is admin-only by default. <b>//</b> sends a message that really starts with a slash.</p><div class="hlp-h">Calls</div><p><b>calls ↗</b> in the rail is every stamped message in one place, scored live and at fixed 1d / 7d horizons, with a per-person record. Deleting a call removes the words, never the score.</p><div class="hlp-h">Who can read this</div><p>The operator of this terminal can read every message, including conversations they are not in; every read is logged in Admin.</p>`,
   notes:`<div class="hlp-h">What it is</div><p>Your written notes, per ticker, written in the ticker drawer. Each note is stamped with the mark it was written at, so every later read carries the move since. <b>#tags</b> in the body filter the tab.</p><div class="hlp-h">Markers on Markets</div><p>A post-it in the ticker cell means a note exists: solid within 7 days, dimmed to 30, hollow after. Hover for the first line; click to open.</p>`,
   charts:`<div class="hlp-h">What it is</div><p>Up to eight names side by side on the same timeframe. Pick tickers in the bar above; each chart shares the ladder the drawer uses.</p>`,
   treemap:`<div class="hlp-h">What it is</div><p>The universe by sector, tile area = the size measure you pick, colour = the move over the window. Click a tile to open the name.</p>`,
@@ -10753,9 +10753,11 @@ function termEarnings(r){
   termOut(`${termTkHdr(r)}\n<span class="tp-k">earnings</span> ${when} · ${tesc(earnSessLbl(p.e.s))}${rep}\n<span role="button" tabindex="0" class="tp-deep" data-tview="earnings">open earnings tab ▸</span>`); }
 function termScreen(expr){ const cls=(expr||'').split('&').map(c=>c.trim()).filter(Boolean); if(!cls.length) return termErr('screen needs an expression, e.g. funding>20 & squeeze>50');
   const preds=[]; let sortF=null;
-  for(const c of cls){ const m=c.match(/^([a-z ]+?)\s*(>=|<=|>|<|=)\s*(-?[\d.]+[kmbt]?)$/i);
-    if(!m) return termErr(`can't parse "${tesc(c)}" — form is  field>value`);
-    const fk=tfield(m[1].trim()); if(!fk) return termErr(`unknown field "${tesc(m[1].trim())}"`);
+  // The field class admits digits: vsma200, ma50, d7, vol30 are lenses too, and `[a-z ]` refused
+  // every one of them ("can't parse vsma200>0" — the phrasebook's own output for "above the 200dma").
+  for(const c of cls){ const m=c.match(/^([a-z][a-z0-9 ]*?)\s*(>=|<=|>|<|=)\s*(-?[\d.]+[kmbt]?)$/i);
+    if(!m) return termErr(`can't parse "${c}" — form is  field>value`);
+    const fk=tfield(m[1].trim()); if(!fk) return termErr(`unknown field "${m[1].trim()}"`);
     let v=parseFloat(m[3]); const suf=(m[3].slice(-1)||'').toLowerCase(); if('kmbt'.includes(suf)) v*={k:1e3,m:1e6,b:1e9,t:1e12}[suf];
     const F=TFIELD[fk]; if(!sortF) sortF=F; preds.push({F,op:m[2],v}); }
   const pass=r=>preds.every(p=>{ const x=p.F.g(r); if(x==null||!isFinite(x)) return false;
@@ -11033,7 +11035,10 @@ function termGrammarComplete(p){ const head=p[0].toLowerCase(), r=termFind(p[0])
   if(head==='whale'||head==='13f') return true;   // bare = watchlist; args validate server-side against the live list
   if(head==='congress') return true;   // bare = status; the verb itself validates admin server-side
   if(head==='insiders'||head==='form4') return true;   // bare = status; the verbs validate admin server-side
-  if(head==='holds'||head==='who') return !!p[1];
+  // `holds X` is always the holder query; bare `who X` only when X is a listed name, so the
+  // phrasebook still gets "who reports tomorrow" (it went to a 13F search for "reports tomorrow").
+  if(head==='holds') return !!p[1];
+  if(head==='who') return p.length===2&&!!termFind(p[1]);
   if(head==='basket') return ['create','list','drop'].includes((p[1]||'').toLowerCase());
   if(head==='ratio') return p.length>=2;
   return false; }
@@ -11159,9 +11164,14 @@ async function termAsk(text){
     const r=await fetch('/api/ask',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({q:text, ctx})});
     const d=await r.json().catch(()=>({})); think.remove();
     if(d&&d.askDayLeft!=null) renderAskBudget(d.askDayLeft, d.askPerDay);   // reflect the spend immediately
-    if(d&&d.disabled) return termOutAI(`the AI fallback isn't enabled on the server yet <span class="tp-trans">(no API key set)</span>. The local engine handles most questions — try a ticker, <span class="ex" data-tcmd="top funding">top funding</span>, or <span class="ex" data-tcmd="help">help</span>.`);
-    if(!d||!d.ok){ if(d&&d.error==='rate') return termOutAI(`busy — the shared AI limit is maxed for a moment <span class="tp-trans">(retry in ${Math.ceil((d.retryMs||3000)/1000)}s)</span>.`);
+    // Inside a chat capture these are NOTICES, not answers: an "AI isn't enabled" line posted
+    // under somebody's name with an AI badge is a message nobody sent. Private in chat.
+    if(d&&d.disabled) return _termSink?termErr("the AI fallback isn't enabled on the server (no API key set)")
+      :termOutAI(`the AI fallback isn't enabled on the server yet <span class="tp-trans">(no API key set)</span>. The local engine handles most questions — try a ticker, <span class="ex" data-tcmd="top funding">top funding</span>, or <span class="ex" data-tcmd="help">help</span>.`);
+    if(!d||!d.ok){ if(d&&d.error==='rate') return _termSink?termErr(`busy — the shared AI limit is maxed for a moment (retry in ${Math.ceil((d.retryMs||3000)/1000)}s)`)
+        :termOutAI(`busy — the shared AI limit is maxed for a moment <span class="tp-trans">(retry in ${Math.ceil((d.retryMs||3000)/1000)}s)</span>.`);
       if(d&&d.error==='feature-gated') return termErr(d.feature==='dm.ask'?'AI answers are admin-only in chat on this deployment':'the AI fallback is not enabled for this view');
+      if(_termSink&&(d&&(d.error==='ask-user-cap'||d.error==='ask-daily-cap'))) return termErr(d.error==='ask-user-cap'?`your daily AI limit is reached — ${d.askUserPerDay||5}/${d.askUserPerDay||5} of your ask calls used today, resets at midnight UTC`:`the shared daily AI pool is exhausted — resets at midnight UTC`);
       if(d&&d.error==='ask-user-cap') return termOutAI(`your daily AI limit is reached — <span class="tp-err">${d.askUserPerDay||5}/${d.askUserPerDay||5}</span> of your ask calls used today, resets at midnight UTC. Local commands still work: try a ticker, <span class="ex" data-tcmd="top funding">top funding</span>, or <span class="ex" data-tcmd="screen">screen</span>.`);
       if(d&&d.error==='ask-daily-cap') return termOutAI(`the shared daily AI pool is exhausted — <span class="tp-err">${d.askPerDay||0}/${d.askPerDay||0}</span> ask calls used across all users today, resets at midnight UTC. Local commands still work: try a ticker, <span class="ex" data-tcmd="top funding">top funding</span>, or <span class="ex" data-tcmd="screen">screen</span>.`);
       return termErr(`couldn't resolve that — ${tesc((d&&d.error)||'error')}`); }
@@ -14540,7 +14550,7 @@ const dmState = { me: null, threads: [], members: [], online: new Set(),
   callsBy: null, webPushOn: false, searchScope: 'all',
   // Chat terminal (build 2026.09.11-69): per-thread lines only this viewer sees (help, errors,
   // "running…"), never sent anywhere; and the one-at-a-time latch for a command in flight.
-  localOut: new Map(), cmdBusy: false, cmdLine: '' };
+  localOut: new Map(), cmdBusy: false, cmdLine: '', compIdx: 0 };
 
 function dmSignedIn(){ return !!(window.__ME && window.__ME.uid); }
 function dmUnreadTotal(){ return dmState.threads.reduce((a,t)=>a+((t.muted||t.hidden)?0:(t.unread||0)),0); }
@@ -14866,7 +14876,7 @@ async function dmSend(){
 // drawer), CHANGE STATE (basket, whale add/rm, backfills, admin …) or STEER THE PANEL (clear,
 // stocks/crypto) are refused with a pointer to the terminal — a table posted for a group is a
 // different act from navigating your own screen.
-const DM_CMD_BLOCKED={comp:'opens the chart view',ratio:'opens the ratio chart',report:'opens the AI report view',ai:'opens the AI report view',
+const DM_CMD_BLOCKED={comp:'opens the chart view',report:'opens the AI report view',ai:'opens the AI report view',
   basket:'edits the basket registry',admin:'admin verbs stay in the terminal',clear:'steers the panel',stocks:'switches your scope',crypto:'switches your scope',
   drawer:'opens the drawer',history:'is the panel\u2019s own scrollback',watch:'edits your watchlist',notes:'opens the notes book'};
 const DM_CMD_SUB_BLOCKED={earnings:['backfill'],earn:['backfill'],whale:['add','pick','rm','ingest13f','pull','mute','unmute'],'13f':['add','pick','rm','ingest13f','pull','mute','unmute'],
@@ -14917,7 +14927,8 @@ const DM_CMD_GUIDE=[
     ['corr <a> <b>','correlation and hedge \u03b2 over 90 days of daily returns','c'],
     ['diverge <ticker>','a name against its benchmark \u2014 is it decoupling','c'],
     ['comp <a> <b> \u2026','overlay rebased to 100 (COMP/G) \u2014 opens the chart view','t'],
-    ['basket create|list|drop \u00b7 ratio <A>/<B> [tf]','custom baskets and synthetic pair candles','ta']]},
+    ['ratio <A>/<B> [1h|4h|12h|1d]','synthetic pair candles with EMA200 \u2014 in a chat the chart posts as an image \u00b7 /ratio MAG7/EWZ 4h','ca'],
+    ['basket create|list|drop','custom equal-weight baskets, usable in comp and ratio','ta']]},
   {h:'Filings & holders',rows:[
     ['fund <ticker> \u00b7 etf <symbol>','SEC-filed balance sheet \u00b7 fund composition (N-PORT)','c'],
     ['whale [KEY [full] | season]','tracked 13F funds, one fund\u2019s book, the quarter summary','c'],
@@ -14973,14 +14984,14 @@ function dmHelpCmd(){
     if(r[2].includes('i')&&!ai){ h+=row(k,'AI answers are admin-only in chat on this deployment \u2014 ask in the terminal (~) instead'); continue; }
     h+=row(k,r[1]);
   }
-  h+='<span class="tp-trans">Results carry a computed or AI badge and can\u2019t be edited \u2014 delete and rerun. Not here: comp, basket, ratio, report, admin and every verb that changes state \u2014 those live in the terminal (~). </span><span role="button" tabindex="0" class="amber" data-dmguide="1">open the full guide \u25b8</span>';
+  h+='<span class="tp-trans">Tab completes verbs, fields and tickers. Results carry a computed or AI badge and can\u2019t be edited \u2014 delete and rerun. Not here: comp, basket, report, admin and every verb that changes state \u2014 those live in the terminal (~). </span><span role="button" tabindex="0" class="amber" data-dmguide="1">open the full guide \u25b8</span>';
   dmLocal(h,'help');
 }
 // Flatten the captured blocks to the text that becomes the message body. Badges are dropped (the
 // message carries its own), <br> becomes a newline, and error blocks are kept apart so a command
 // that produced nothing but an error is shown privately instead of posted.
 function dmCmdText(blocks){
-  const out=[], errs=[]; let ai=false;
+  const out=[], errs=[]; let ai=false, real=0;
   for(const b of blocks){
     if(b.querySelector('.tp-badge.ai')) ai=true;
     const c=b.cloneNode(true);
@@ -14990,9 +15001,90 @@ function dmCmdText(blocks){
     const line=c.querySelector('.tp-line')||c;
     const txt=String(line.textContent||'').replace(/[ \t]+$/gm,'').replace(/^\n+/,'').replace(/\s+$/,'');
     if(!txt) continue;
-    (isErr?errs:out).push(txt);
+    if(isErr) errs.push(txt); else { out.push(txt); if(c.querySelector('.tp-line')) real++; }
   }
-  return {text:out.join('\n'),errs:errs.join('\n'),ai:ai};
+  // The "→ screen vsma200>0" translation line is context for an answer, not an answer: with no
+  // real block behind it there is nothing to post, and the error shows privately instead.
+  return {text:real?out.join('\n'):'',errs:errs.join('\n'),ai:ai};
+}
+// /ratio in a chat posts the CHART, not a table: the same pure SVG builder the Correlation tab
+// draws (ratioSvg) is rasterised to a PNG offscreen and rides the ordinary attachment path, so the
+// message renders inline like any pasted screenshot. CSS variables don't resolve inside an <img>,
+// so the theme colours are read off the document and substituted before drawing.
+async function dmRatioChart(args){
+  let a=args[0]||'', b=args[1]||'', tf=args[2];
+  if(a.includes('/')){ const s=a.split('/'); a=s[0]; b=s[1]; tf=args[1]; }
+  if(!a||!b) return {error:'usage: /ratio <A>/<B> [1h|4h|12h|1d] \u2014 legs are listed names or baskets'};
+  tf=(tf||'4h').toLowerCase();
+  if(!['1h','4h','12h','1d'].includes(tf)) return {error:'tf must be 1h \u00b7 4h \u00b7 12h \u00b7 1d'};
+  if(!featureOn('baskets')&&!IS_ADMIN) return {error:'the ratio chart is not enabled for this view'};
+  let d; try{ d=await fetchJSON('/api/ratio?num='+encodeURIComponent(a.toUpperCase())+'&den='+encodeURIComponent(b.toUpperCase())+'&tf='+encodeURIComponent(tf)); }
+  catch(e){ return {error:'ratio fetch failed \u2014 '+(e&&e.message||'network error')}; }
+  if(!d||!d.ok) return {error:(d&&d.error)||'ratio unavailable'};
+  if(!d.candles||!d.candles.length) return {error:'no candles for that pair yet'};
+  const S=ratioSvg(d,{scale:'reb',ema:!!d.ema200});
+  const cs=getComputedStyle(document.documentElement), v=n=>(cs.getPropertyValue(n)||'').trim()||'#888';
+  const title=`${d.num} \u00f7 ${d.den} \u00b7 ${tf.toUpperCase()} \u00b7 rebased 100${d.ema200?' \u00b7 EMA '+(d.emaSpan||200):''} \u00b7 last ${d.shown||d.candles.length}/${d.bars||d.candles.length} bars`;
+  const inner=S.svg.replace(/^<svg[^>]*>/,'').replace(/<\/svg>$/,'')
+    .replace(/var\(--([a-z0-9-]+)\)/g,(m,n)=>v('--'+n));
+  const W=S.W, H=S.H+22;
+  const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><rect width="${W}" height="${H}" fill="${v('--bg')}"/>`
+    +`<text x="12" y="15" fill="${v('--accent')}" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="11" font-weight="600">RATIO</text>`
+    +`<text x="60" y="15" fill="${v('--muted')}" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="11">${esc(title)}</text>`
+    +`<g transform="translate(0,22)">${inner}</g></svg>`;
+  const png=await new Promise((res)=>{
+    const img=new Image(); const url=URL.createObjectURL(new Blob([svg],{type:'image/svg+xml;charset=utf-8'}));
+    img.onload=()=>{ try{ const c=document.createElement('canvas'); c.width=W*2; c.height=H*2; const g=c.getContext('2d'); g.scale(2,2); g.drawImage(img,0,0); c.toBlob(bl=>{ URL.revokeObjectURL(url); res(bl); },'image/png'); }catch(_){ URL.revokeObjectURL(url); res(null); } };
+    img.onerror=()=>{ URL.revokeObjectURL(url); res(null); };
+    img.src=url; });
+  if(!png) return {error:'could not render the chart image'};
+  const legs=[d.numBasket?'numerator is a basket (EW, synthesized hourly)':null, d.denBasket?'denominator is a basket (EW, synthesized hourly)':null].filter(Boolean);
+  const last=d.candles[d.candles.length-1], first=d.candles[0];
+  const chg=(first&&first.o>0&&last)?((last.c/first.o-1)*100):null;
+  const body=title+(chg!=null?`\nwindow ${chg>=0?'+':''}${chg.toFixed(2)}% \u00b7 last ${last.c.toFixed(Math.abs(last.c)>=100?2:4)}`:'')+(legs.length?'\n'+legs.join(' \u00b7 '):'')+'\nintrabar extremes finer than 1H not captured';
+  return {file:new File([png],`ratio-${d.num}-${d.den}-${tf}.png`,{type:'image/png'}), body:body};
+}
+// Tab completion in the composer (build 2026.09.11-72). The panel's own completion engine
+// (termComps) supplies verbs, fields and tickers; the chat filters out what it refuses to run and
+// shows the candidates in the same popup @mentions use. Tab applies the highlighted one and moves
+// the highlight; Enter still SENDS, because a command you finished typing should run, not complete.
+function dmComps(text){
+  const body=text.replace(/^\//,'');
+  const p=body.split(/\s+/), first=p.length===1;
+  // A finished argument is finished: with the caret after a trailing space, Tab must not swap
+  // "top funding " for "top vol " (the panel's completer rewrites the last token, and the last
+  // token here is empty).
+  if(!first&&p[p.length-1]==='') return [];
+  let c=termComps(body);
+  if(first){
+    c=c.filter(x=>!DM_CMD_BLOCKED[x.split(' ')[0]]);
+    const extra=['help','clear','ratio'].filter(x=>x.startsWith(p[0].toLowerCase())&&!c.includes(x));
+    c=extra.concat(c);
+  }else{
+    const h=p[0].toLowerCase();
+    if(h==='ratio'&&p.length===2) c=termActive().map(r=>r.ticker.toLowerCase()).filter(x=>x.startsWith(p[1].toLowerCase().replace(/\/.*$/,''))).map(x=>'ratio '+x+'/');
+    if(h==='ratio'&&p.length===3) c=['1h','4h','12h','1d'].filter(x=>x.startsWith(p[2].toLowerCase())).map(x=>p.slice(0,2).join(' ')+' '+x);
+    if(h==='screen'&&p.length===2) c=Object.keys(TFIELD).filter(x=>x.startsWith(p[1].toLowerCase())).map(x=>'screen '+x+'>');
+    if((h==='breadth'||h==='sectors')&&p.length===2) c=['d1','d7','d30','h1','h4'].filter(x=>x.startsWith(p[1].toLowerCase())).map(x=>h+' '+x);
+  }
+  return [...new Set(c)].slice(0,8);
+}
+function dmCmdPop(ta){
+  const box=el('dm-mpop'); if(!box) return false;
+  const v=ta.value;
+  if(!/^\/[^\/]/.test(v)&&v!=='/'){ return false; }
+  if(ta.selectionStart!=null&&ta.selectionStart!==v.length){ box.hidden=true; return true; }
+  const c=dmComps(v);
+  if(!c.length){ box.hidden=true; return true; }
+  if(dmState.compIdx>=c.length) dmState.compIdx=0;
+  box.innerHTML=c.map((x,i)=>'<div class="dm-mopt'+(i===dmState.compIdx?' sel':'')+'" data-dmcomp="'+esc(x)+'"><span class="amber" style="font-family:var(--mono)">/'+esc(x)+'</span></div>').join('');
+  box.hidden=false; return true;
+}
+function dmCompPick(x){
+  const ta=el('dm-input'), box=el('dm-mpop'); if(!ta) return;
+  ta.value='/'+x+(/[>\/]$/.test(x)?'':' '); ta.selectionStart=ta.selectionEnd=ta.value.length;
+  dmAutoGrow(ta); dmDraftSave(dmState.sel,ta.value);
+  if(box) box.hidden=true; dmState.compIdx=0; dmCmdPop(ta); ta.focus();
 }
 async function dmRunCmd(raw){
   const ta=el('dm-input');
@@ -15006,6 +15098,20 @@ async function dmRunCmd(raw){
   if(!line||/^(help|\?)$/i.test(line)) return dmHelpCmd();
   if(/^clear$/i.test(line)){ dmState.localOut.delete(dmState.sel); dmRender(); return; }
   if(dmState.cmdBusy||_termSink) return dmLocal('\u2717 still running the last command \u2014 a moment','err');
+  if(/^ratio\b/i.test(line)){
+    dmState.cmdBusy=true; dmState.cmdLine=line; dmRender(); dmScrollBottom();
+    let r; try{ r=await dmRatioChart(line.split(/\s+/).slice(1)); }catch(e){ r={error:'ratio failed \u2014 '+(e&&e.message||e)}; }
+    finally{ dmState.cmdBusy=false; dmState.cmdLine=''; }
+    if(r.error) return dmLocal('\u2717 '+esc(line)+' \u2014 '+esc(r.error),'err');
+    const up=await dmUpload(t.id,r.file);
+    if(!up.ok) return dmLocal('\u2717 '+esc(line)+' \u2014 '+esc(up.error||'could not attach the chart'),'err');
+    const res=await dmPost({thread:t.id,body:r.body,cmd:line,fileId:up.id});
+    if(!res.ok){ const e=res.d&&res.d.error; return dmLocal('\u2717 '+esc(line)+' \u2014 '+esc(e==='feature-gated'?'terminal commands are switched off in chat on this deployment':(e||'could not post the chart')),'err'); }
+    if(res.d.message) dmMerge([res.d.message]);
+    await dmLoad();
+    if(dmState.sel){ try{ const h=await fetchJSON('/api/dm/'+dmState.sel); if(h&&h.ok){ dmMerge(h.messages); if(h.info){ h.info.more=!!h.more; dmState.info.set(dmState.sel,h.info); } } }catch(_){ } }
+    dmRender(); dmScrollBottom(); return;
+  }
   // Resolve exactly as the panel does: complete grammar runs as typed, local NL maps to grammar,
   // anything else is a question for the AI. Blocked verbs are answered before anything runs.
   const p=line.split(/\s+/); let cmd=null, mapped='';
@@ -15678,7 +15784,9 @@ function dmCapture(){
     // thread and mode it was read at.
     editing: dmState.editing, sel: dmState.sel, mode: dmState.mode,
     logTop: log?log.scrollTop:0,
-    logAtBottom: log ? (log.scrollTop+log.clientHeight>=log.scrollHeight-40) : true };
+    // A hidden log (the tab was elsewhere) measures 0 tall and would read as "scrolled up", so a
+    // re-opened tab restored a stale offset instead of landing at the bottom. Hidden = at bottom.
+    logAtBottom: log ? (log.clientHeight===0 || log.scrollTop+log.clientHeight>=log.scrollHeight-40) : true };
 }
 // Composer autosize. scrollHeight is content+padding, but the box is border-box — the old bare
 // Math.min(scrollHeight,160) left the textarea exactly its 2px of borders shorter than its own
@@ -15937,17 +16045,28 @@ function dmRender(){
       // An edit is not the thread's draft: saving it here destroyed whatever the member had
       // half-typed for that conversation before clicking "edit".
       if(!dmState.editing) dmDraftSave(dmState.sel,ta.value); dmStampPreview(ta.value);
-      dmMentionPop(ta);
+      dmState.compIdx=0;
+      if(!dmCmdPop(ta)) dmMentionPop(ta);
       dmTypingPing(); });
     ta.addEventListener('keydown',(e)=>{
       // The @mention popup captures Enter/Tab while it is showing — completion, not send.
       const pop=el('dm-mpop');
-      if(pop&&!pop.hidden){
+      // Command completions: Tab applies the highlighted candidate and advances the highlight,
+      // arrows move it, Escape closes, and Enter falls through to SEND — a finished command runs.
+      if(pop&&!pop.hidden&&pop.querySelector('[data-dmcomp]')){
+        const opts=[...pop.querySelectorAll('[data-dmcomp]')];
+        if(e.key==='Tab'){ e.preventDefault(); const o=opts[dmState.compIdx%opts.length]; if(o){ dmCompPick(o.dataset.dmcomp); } return; }
+        if(e.key==='ArrowDown'||e.key==='ArrowUp'){ e.preventDefault(); dmState.compIdx=(dmState.compIdx+(e.key==='ArrowDown'?1:opts.length-1))%opts.length; opts.forEach((o,i)=>o.classList.toggle('sel',i===dmState.compIdx)); return; }
+        if(e.key==='Escape'){ pop.hidden=true; return; }
+        if(e.key==='Enter'&&!e.shiftKey){ pop.hidden=true; }
+      }
+      else if(pop&&!pop.hidden){
         if(e.key==='Enter'||e.key==='Tab'){ e.preventDefault();
           const first=pop.querySelector('[data-dmmention]');
           if(first) dmMentionPick(first.dataset.dmmention); return; }
         if(e.key==='Escape'){ pop.hidden=true; return; }
       }
+      else if(e.key==='Tab'&&/^\//.test(ta.value)){ e.preventDefault(); dmState.compIdx=0; if(dmCmdPop(ta)){ const o=el('dm-mpop').querySelector('[data-dmcomp]'); if(o) dmCompPick(o.dataset.dmcomp); } return; }
       // Enter sends, Shift+Enter is a newline. A chat box that needs a mouse to send is a form.
       if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); dmSend(); }
       if(e.key==='Escape'&&dmState.editing){ dmState.editing=null; ta.value=dmDraftGet(dmState.sel)||''; dmAutoGrow(ta); dmRender(); }
@@ -15999,6 +16118,17 @@ function dmRender(){
     }
     else if(sameView&&!keep.logAtBottom){ const log=el('dm-log'); if(log) log.scrollTop=keep.logTop; }
     else dmScrollBottom();
+  }
+  dmPinBottomOnImages();
+}
+// Images (attachments, ratio charts, tweet cards) finish loading after the paint and grow the log,
+// pushing the bottom away from a reader who was at it. Keep them pinned until every image has
+// landed; a reader who has since scrolled up is left alone.
+function dmPinBottomOnImages(){
+  const log=el('dm-log'); if(!log) return;
+  for(const img of log.querySelectorAll('img')){
+    if(img.complete||img._dmPinned) continue; img._dmPinned=1;
+    img.addEventListener('load',()=>{ const l=el('dm-log'); if(l&&l.scrollTop+l.clientHeight>=l.scrollHeight-img.clientHeight-40) dmScrollBottom(); },{once:true});
   }
 }
 
@@ -16103,6 +16233,7 @@ function dmWire(){
     if(e.target.closest('#dm-newbtn')){ dmState.picking=!dmState.picking; dmRender(); return; }
     if(e.target.closest('#dm-send')){ dmSend(); return; }
     if(e.target.closest('#dm-guide')||e.target.closest('[data-dmguide]')){ openDmGuide(); return; }
+    { const co=e.target.closest('[data-dmcomp]'); if(co){ dmCompPick(co.dataset.dmcomp); return; } }
     if(e.target.closest('#dm-mute')){ dmToggleMute(); return; }
     if(e.target.closest('#dm-bnotify')){ dmToggleBoardNotify(); return; }
     if(e.target.closest('#dm-mic')){ dmMicToggle(); return; }
@@ -16156,6 +16287,9 @@ async function openDM(){
   await dmSync();
   dmRender();
   if(dmState.sel) dmMarkRead(dmState.sel);
+  // The tab is visible only now: scroll once more after layout, so opening Messages never leaves
+  // the reader mid-history because the first paint happened while the section was hidden.
+  requestAnimationFrame(()=>{ if(state.view==='dm'&&!dmState.results&&dmState.mode!=='calls') dmScrollBottom(); });
 }
 
 // Messages boot with the app, not with the tab: the pip must be accurate on the first paint, and a
