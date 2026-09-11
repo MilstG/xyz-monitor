@@ -467,7 +467,7 @@ function applySnapshot(s){
   if(s.redBars) state.redBars=s.redBars;
   if(s.warm) state.warm=s.warm;
   maybePullSidecars();
-  if(s.v){ if(state.build&&state.build!==s.v) notifyNewBuild(s.v); state.build=s.v; const bv=el('ver'); if(bv) bv.textContent=s.v; }
+  if(s.v){ if(!state.bootBuild) state.bootBuild=s.v; if(state.build&&state.build!==s.v) notifyNewBuild(s.v); state.build=s.v; const bv=el('ver'); if(bv) bv.textContent=s.v; }
   // offHours now rides the snapshot (15s server rebuild), so the live-gap open↔closed flip
   // lands within one refresh instead of the old daily-path ~15 min. On a flip, pull /api/daily
   // immediately: the closed→open direction needs the freshly completed close→open gap, and
@@ -3327,7 +3327,7 @@ function notifyNewBuild(v){
   const t=document.createElement('div'); t.className='toast toast-trig';
   t.innerHTML=`<div class="tt-h"><span class="tt-lbl">NEW VERSION</span><span class="ax" data-x="1" title="dismiss">✕</span></div>`
     +`<div class="tt-n">A new version is live — please refresh</div>`
-    +`<div class="tt-g">server is on build ${esc(v)}; this tab is still running ${esc(state.build)}. Your layouts, watchlist and prefs survive the reload.</div>`
+    +`<div class="tt-g">server is on build ${esc(v)}; this tab is still running ${esc(state.bootBuild||state.build)}. Your layouts, watchlist and prefs survive the reload.</div>`
     +`<div class="tt-a"><button class="btn" data-re="1">Refresh now</button></div>`;
   t.querySelector('[data-x]').addEventListener('click',()=>t.remove());
   t.querySelector('[data-re]').addEventListener('click',()=>{ try{ location.reload(); }catch(_){} });
@@ -14324,7 +14324,26 @@ async function dmRefreshOpen(){
   if(!dmState.sel) return;
   try{
     const d=await fetchJSON('/api/dm/'+encodeURIComponent(dmState.sel));
-    if(d&&d.ok){ dmMerge(d.messages); if(d.info) dmState.info.set(dmState.sel,d.info); if(state.view==='dm') dmRender(); }
+    if(d&&d.ok){ dmMerge(d.messages); if(d.info){ d.info.more=!!d.more; dmState.info.set(dmState.sel,d.info); } if(state.view==='dm') dmRender(); }
+  }catch(_){ }
+}
+// Older history, one page at a time. The server has paged history (`before`/`limit`/`more`) but
+// the client never called it: anything past the newest 50 messages was unreachable in the UI
+// while still inside retention (and in the export). The pre-load top message stays anchored in
+// the viewport, so loading the past never teleports the reader.
+async function dmLoadOlder(){
+  const id=dmState.sel; if(!id) return;
+  const arr=dmMsgs(id); if(!arr.length) return;
+  const anchor=arr[0].id;
+  try{
+    const d=await fetchJSON('/api/dm/'+encodeURIComponent(id)+'?before='+encodeURIComponent(anchor)+'&limit=100');
+    if(d&&d.ok){
+      dmMerge(d.messages);
+      const info=dmState.info.get(id); if(info) info.more=!!d.more;
+      dmRender();
+      const elm=document.querySelector('.dm-msg[data-mid="'+anchor+'"]');
+      if(elm) elm.scrollIntoView({block:'start'});
+    }
   }catch(_){ }
 }
 
@@ -14397,7 +14416,10 @@ function dmMerge(list){
     const arr=dmMsgs(m.thread);
     const i=arr.findIndex(x=>x.id===m.id);
     if(i>=0) arr[i]=m; else arr.push(m);
-    if(m.id>dmState.cursor) dmState.cursor=m.id;
+    // The sync cursor is deliberately NOT advanced here. It is global across threads, and a
+    // single-thread history fetch advancing it meant opening thread A skipped every not-yet-
+    // synced lower-id message in thread B. Only dmSync, which sees all threads, moves it; a
+    // message merged twice is a no-op by the id-dedupe above.
   }
   for(const [,arr] of dmState.msgs) arr.sort((a,b)=>a.id-b.id);
 }
@@ -14440,9 +14462,12 @@ async function dmAdopt(chat){
 
 // The pull the SSE frame triggers. Runs whatever tab is showing — the unread pip has to be right
 // before you look at it, not after.
-let _dmSyncing=false;
+let _dmSyncing=false,_dmSyncQueued=false;
 async function dmSync(){
-  if(!dmSignedIn()||_dmSyncing) return;
+  if(!dmSignedIn()) return;
+  // A poke landing while a sync is in flight used to be dropped on the floor — the in-flight
+  // response predates the message that poked, and nothing retried. Queue it and run once more.
+  if(_dmSyncing){ _dmSyncQueued=true; return; }
   _dmSyncing=true;
   try{
     const prevCursor=dmState.cursor||0;
@@ -14451,6 +14476,7 @@ async function dmSync(){
       dmMerge(d.messages);
       if(d.threads) dmState.threads=d.threads;
       if(d.cursor>dmState.cursor) dmState.cursor=d.cursor;
+      if(d.more) _dmSyncQueued=true;   // the server truncated: come straight back for the rest
       dmUpdatePip();
       // A message landing while you are anywhere BUT the Messages tab surfaces as a toast — the
       // pip alone was easy to miss under a ribbon menu. Muted conversations stay quiet here too.
@@ -14474,7 +14500,7 @@ async function dmSync(){
       if(state.view==='dm') dmRender();
     }
   }catch(_){ /* the next frame or the next open retries; a failed sync is never fatal */ }
-  finally{ _dmSyncing=false; }
+  finally{ _dmSyncing=false; if(_dmSyncQueued){ _dmSyncQueued=false; dmSync(); } }
 }
 
 // The price stamp's "since sent" is computed live at READ on the server, but a fetched message
@@ -14488,7 +14514,7 @@ setInterval(async ()=>{
     if(dmState.mode==='calls'){ const d=await fetchJSON('/api/dm/calls?limit=500'); if(d&&d.ok) dmState.calls=d; }
     else if(dmState.sel&&!dmState.results){
       const d=await fetchJSON('/api/dm/'+encodeURIComponent(dmState.sel));
-      if(d&&d.ok){ dmMerge(d.messages); if(d.info) dmState.info.set(dmState.sel,d.info); }
+      if(d&&d.ok){ dmMerge(d.messages); if(d.info){ d.info.more=!!d.more; dmState.info.set(dmState.sel,d.info); } }
     }
     dmRender();
   }catch(_){ }
@@ -14521,10 +14547,10 @@ async function dmOpenThread(id){
     dmState.unreadMark=(th0&&th0.unread>0)?{thread:id,after:+th0.myRead||0}:null;
     dmState.scrollToNew=!!dmState.unreadMark; }
   dmRender();
-  { const ta=el('dm-input'); if(ta){ ta.value=dmDraftGet(id); } }
+  { const ta=el('dm-input'); if(ta){ ta.value=dmDraftGet(id); dmAutoGrow(ta); } }
   try{
     const d=await fetchJSON('/api/dm/'+encodeURIComponent(id));
-    if(d&&d.ok){ dmMerge(d.messages); if(d.info) dmState.info.set(id,d.info); dmRender(); }
+    if(d&&d.ok){ dmMerge(d.messages); if(d.info){ d.info.more=!!d.more; dmState.info.set(id,d.info); } dmRender(); }
   }catch(_){ }
   dmMarkRead(id);
 }
@@ -14552,7 +14578,7 @@ async function dmPost(body){
 async function dmSend(){
   const ta=el('dm-input'); if(!ta||dmState.sending) return;
   const text=ta.value.trim();
-  const file=dmState.pendingFile;
+  const file=dmState.editing?null:dmState.pendingFile;   // the edit verb has no fileId — never upload into it
   if(!text&&!file) return;
   const t=dmThread(dmState.sel), peer=dmState.pendingPeer;
   if(!t&&!peer) return;
@@ -14585,7 +14611,7 @@ async function dmSend(){
     if(res.d.message) dmMerge([res.d.message]);
     if(res.d.thread) dmState.sel=res.d.thread;
     await dmLoad();
-    if(dmState.sel) { try{ const h=await fetchJSON('/api/dm/'+dmState.sel); if(h&&h.ok){ dmMerge(h.messages); dmState.info.set(dmState.sel,h.info); } }catch(_){ } }
+    if(dmState.sel) { try{ const h=await fetchJSON('/api/dm/'+dmState.sel); if(h&&h.ok){ dmMerge(h.messages); if(h.info){ h.info.more=!!h.more; dmState.info.set(dmState.sel,h.info); } } }catch(_){ } }
     dmRender(); dmScrollBottom();
   }else{
     dmState.err=(res.d&&res.d.error)||'could not send — try again';
@@ -14683,9 +14709,10 @@ function dmMentionPick(handle){
   if(!m) return;
   const start=upto.length-m[2].length;
   ta.value=ta.value.slice(0,start)+handle+' '+ta.value.slice(pos);
+  dmAutoGrow(ta);
   const caret=start+String(handle).length+1;
   ta.focus(); try{ ta.setSelectionRange(caret,caret); }catch(_){}
-  dmDraftSave(dmState.sel,ta.value);
+  if(!dmState.editing) dmDraftSave(dmState.sel,ta.value);
 }
 
 // ---- voice notes -------------------------------------------------------------------------------
@@ -14750,7 +14777,7 @@ async function dmDrop(id){
 function dmEdit(id){
   const m=dmMsgs(dmState.sel).find(x=>x.id===id); if(!m) return;
   dmState.editing=id;
-  const ta=el('dm-input'); if(ta){ ta.value=m.body; ta.focus(); }
+  const ta=el('dm-input'); if(ta){ ta.value=m.body; dmAutoGrow(ta); ta.focus(); }
   dmRender();
 }
 async function dmWatch(coin,on){
@@ -14960,7 +14987,7 @@ function dmMessageHtml(m,t,p){
     +(m.edited?'<span class="dm-mk">edited</span>':''));
   // The quote a reply carries: one line of what it answers, clickable back to the original.
   const quote=(!m.deleted&&m.reply)
-    ? '<div class="dm-quote" data-dmq="'+m.replyTo+'" title="jump to the quoted message"><b style="color:'+dmNameColor(m.reply.sender)+'">'+esc(m.reply.sender||'\u2014')+'</b> '
+    ? '<div class="dm-quote" data-dmq="'+m.replyTo+'" title="jump to the quoted message"><b style="color:'+dmNameColor(m.reply.senderUid||m.reply.sender)+'">'+esc(m.reply.sender||'\u2014')+'</b> '
       +esc(m.reply.deleted?'message deleted':((m.reply.ref?'$'+dmTkName(m.reply.ref)+' \u00b7 ':'')+(m.reply.body||'attachment'))).replace(/\n/g,' ')+'</div>'
     : '';
   const body=m.deleted
@@ -15120,7 +15147,7 @@ async function dmDeleteGroup(){
 function dmResultsHtml(){
   const r=dmState.results;
   if(dmState.searching) return '<div class="dm-log" id="dm-log"><div class="dm-empty">searching…</div></div>';
-  if(!r.length) return '<div class="dm-log" id="dm-log"><div class="dm-empty">Nothing matches “'+esc(dmState.q)+'”.</div></div>';
+  if(!r||!r.length) return '<div class="dm-log" id="dm-log"><div class="dm-empty">Nothing matches “'+esc(dmState.q)+'”.</div></div>';
   return '<div class="dm-log" id="dm-log">'+r.map(m=>
     '<div class="dm-res" data-dmres="'+m.thread+'" data-mid="'+m.id+'">'
     +'<div class="dm-meta">'+esc(m.threadName)+' · '+esc(m.mine?'you':m.sender)+' · '+dmWhen(m.ts)+'</div>'
@@ -15133,10 +15160,16 @@ function dmResultsHtml(){
 // the rebuild and restored after, caret included. Without this, a message landing while you write
 // eats your draft, which is the worst thing a chat client can do.
 function dmCapture(){
-  const ta=el('dm-input'), q=el('dm-q');
+  const ta=el('dm-input'), q=el('dm-q'), log=el('dm-log');
   return { text: ta?ta.value:null, selA: ta?ta.selectionStart:0, selB: ta?ta.selectionEnd:0,
     focus: document.activeElement===ta?'input':(document.activeElement===q?'q':''),
-    qSelA: q?q.selectionStart:0, qSelB: q?q.selectionEnd:0 };
+    qSelA: q?q.selectionStart:0, qSelB: q?q.selectionEnd:0,
+    // Which state the capture belongs to, so restore never crosses contexts: the text is only
+    // put back into the SAME edit it was typed in, and the scroll position only into the same
+    // thread and mode it was read at.
+    editing: dmState.editing, sel: dmState.sel, mode: dmState.mode,
+    logTop: log?log.scrollTop:0,
+    logAtBottom: log ? (log.scrollTop+log.clientHeight>=log.scrollHeight-40) : true };
 }
 // Composer autosize. scrollHeight is content+padding, but the box is border-box — the old bare
 // Math.min(scrollHeight,160) left the textarea exactly its 2px of borders shorter than its own
@@ -15153,7 +15186,11 @@ function dmRestore(c){
   // text, so the clear has to win or the message reappears in the composer after sending.
   if(_dmClearOnNextRender){ _dmClearOnNextRender=false; const t0=el('dm-input'); if(t0) t0.value=''; return; }
   const ta=el('dm-input');
-  if(ta&&c.text!=null&&!dmState.editing){
+  // While editing, the capture holds the IN-PROGRESS rewording — skipping it (the old behavior)
+  // meant any unsolicited render (a typing frame, an arriving reaction, the 45s tick) reverted
+  // the box to the original body mid-edit. Restore applies whenever the capture belongs to the
+  // same edit; a capture from a different edit (or none) stays out of the box.
+  if(ta&&c.text!=null&&(!dmState.editing||c.editing===dmState.editing)){
     ta.value=c.text;
     dmAutoGrow(ta);
   }
@@ -15177,7 +15214,7 @@ function dmCallsHtml(){
     const mv=c.chg==null?'\u2014':((c.chg>0?'+':'')+(c.chg*100).toFixed(1)+'%');
     return '<div class="dm-callrow" data-dmjump-thread="'+c.thread+'" data-mid="'+c.id+'">'
       +'<span class="dm-callt" data-coin="'+esc(c.ref)+'" title="open the '+esc(dmTkName(c.ref))+' drawer — the rest of the row jumps to the conversation">'+esc(dmTkName(c.ref))+'</span>'
-      +'<span class="dm-callb">'+esc(c.body).slice(0,120)+'</span>'
+      +'<span class="dm-callb">'+esc(String(c.body||'').slice(0,120))+'</span>'
       +'<span class="acc-mu">'+esc(c.sender)+' \u00b7 '+esc(c.threadName)+' \u00b7 '+dmWhen(c.ts)+'</span>'
       +'<span class="dm-callpx" title="the mark when it was sent">'+(c.refPx!=null?fmtPx(c.refPx):'\u2014')+'</span>'
       +'<span class="dm-callpx dm-callnow" title="the current mark">'+(c.px!=null?fmtPx(c.px):'\u2014')+'</span>'
@@ -15217,7 +15254,7 @@ function dmRender(){
     main='<div class="dm-hd"><b>Calls</b>'
       +'<span class="sec" data-tip="a stamped call is exempt from the 30d/7d message retention — the row is kept permanently, and the record reads it for as long as it exists">every price-stamped message — sent price, current price, and the move · kept forever, never ages out</span>'
       +'<button type="button" class="btn dm-mutebtn" id="dm-backchat">back</button></div>'+dmCallsHtml();
-  }else if(dmState.results){
+  }else if(dmState.results||dmState.searching){   // `searching` alone covers the FIRST query, when no prior result set exists yet
     main='<div class="dm-hd"><b>Search</b><span class="sec">'+esc(dmState.q)+'</span>'
       +'<button type="button" class="btn dm-mutebtn" id="dm-clearsearch">clear</button></div>'+dmResultsHtml();
   }else if(pendingPeer){
@@ -15248,7 +15285,7 @@ function dmRender(){
     const stripPins=thesis?pinned.slice(1):pinned;
     const pinStrip=stripPins.length?('<div class="dm-pinstrip">'+stripPins.slice(0,3).map(x=>
       '<div class="dm-pinrow" data-dmjump="'+x.id+'"><span class="dm-pinicon">\u2691</span>'
-      +'<span class="dm-pintext">'+esc((x.ref?'$'+x.ref+' \u00b7 ':'')+(x.body||'attachment')).slice(0,120)+'</span>'
+      +'<span class="dm-pintext">'+esc(String((x.ref?'$'+x.ref+' \u00b7 ':'')+(x.body||'attachment')).slice(0,120))+'</span>'
       +'<button type="button" class="dm-tool" data-dmpin="'+x.id+'" data-on="0">unpin</button></div>').join('')+'</div>'):'';
     // Day dividers carry the date once, so per-message headers can be bare clock times; each
     // message also sees its predecessor, which is what chat-style grouping keys on.
@@ -15264,10 +15301,13 @@ function dmRender(){
         parts.push('<div class="dm-day dm-newmark"><span>new</span></div>'); newMarked=true; }
       parts.push(dmMessageHtml(m,t,p));
     }
-    const log=arr.length?parts.join('')+receipt:'<div class="dm-empty">No messages yet.</div>';
+    const older=(info&&info.more&&arr.length)
+      ?'<div class="dm-more"><button type="button" class="dm-tool" id="dm-older">↑ load older messages</button></div>':'';
+    const log=arr.length?older+parts.join('')+receipt:'<div class="dm-empty">No messages yet.</div>';
     const grp=t.kind==='group'||t.kind==='board';
+    const nMem=info?info.members.length:t.members?t.members.length:0;
     main='<div class="dm-hd">'+(grp?'<span class="dm-grp">#</span> ':'')+'<b>'+esc(t.name)+'</b>'
-      +(grp?'<span class="mk-chip">'+(info?info.members.length:t.members?t.members.length:0)+' members</span>'
+      +(grp?'<span class="mk-chip">'+nMem+' member'+(nMem===1?'':'s')+'</span>'
         :(function(){ const on=dmState.online.has(t.peer), pm=dmState.members.find(m=>m.uid===t.peer);
           // "away" answers the question this tab keeps raising: will they even know I wrote?
           return '<span class="mk-chip '+(on?'dm-chip-on':'')+'" title="'+(on?'connected right now'
@@ -15290,14 +15330,17 @@ function dmRender(){
       +'<div class="dm-log" id="dm-log">'+log+'</div>'+dmTypingLine(t.id);
   }
 
-  const canWrite=!!(t||pendingPeer)&&!dmState.results&&dmState.mode!=='calls';
+  const canWrite=!!(t||pendingPeer)&&!dmState.results&&!dmState.searching&&dmState.mode!=='calls';
   const attach=dmState.pendingFile
     ? '<div class="dm-pending">📎 '+esc(dmState.pendingFile.name)+' <button type="button" class="dm-tool" id="dm-unattach">remove</button></div>'
     : '';
+  // No attaching mid-edit: the edit verb carries no fileId, so an attachment picked here was
+  // uploaded, stored server-side, and silently discarded.
+  const canAttach=canWrite&&t&&!dmState.editing;
   const composer='<div class="dm-cmp">'
-    +'<label class="dm-clip'+(canWrite&&t?'':' off')+'" title="Attach an image or a .txt note (8 MB maximum) — or just paste a screenshot into the box">📎'
-    +'<input type="file" id="dm-file" accept=".png,.jpg,.jpeg,.gif,.webp,.txt,image/png,image/jpeg,image/gif,image/webp,text/plain"'+(canWrite&&t?'':' disabled')+'></label>'
-    +'<button type="button" class="dm-clip dm-mic'+(canWrite&&t?'':' off')+'" id="dm-mic" title="Record a voice note (3 MB max)"'+(canWrite&&t?'':' disabled')+'>🎙</button>'
+    +'<label class="dm-clip'+(canAttach?'':' off')+'" title="Attach an image or a .txt note (8 MB maximum) — or just paste a screenshot into the box">📎'
+    +'<input type="file" id="dm-file" accept=".png,.jpg,.jpeg,.gif,.webp,.txt,image/png,image/jpeg,image/gif,image/webp,text/plain"'+(canAttach?'':' disabled')+'></label>'
+    +'<button type="button" class="dm-clip dm-mic'+(canAttach?'':' off')+'" id="dm-mic" title="Record a voice note (3 MB max)"'+(canAttach?'':' disabled')+'>🎙</button>'
     +'<div class="dm-mpop" id="dm-mpop" hidden></div>'
     +'<textarea id="dm-input" rows="1" maxlength="'+dmState.maxLen+'" '
     +(canWrite?'':'disabled ')+'placeholder="'
@@ -15354,10 +15397,15 @@ function dmRender(){
 
   const ta=el('dm-input');
   if(ta){
-    if(dmState.editing){ const m=dmMsgs(dmState.sel).find(x=>x.id===dmState.editing); if(m) ta.value=m.body; }
+    // Seed the original body only when this render ENTERS the edit — a re-render mid-edit
+    // carries the rewording in `keep` and dmRestore puts it back below.
+    if(dmState.editing&&keep.editing!==dmState.editing){
+      const m=dmMsgs(dmState.sel).find(x=>x.id===dmState.editing); if(m){ ta.value=m.body; dmAutoGrow(ta); } }
     ta.addEventListener('input',()=>{
       dmAutoGrow(ta);
-      dmDraftSave(dmState.sel,ta.value);
+      // An edit is not the thread's draft: saving it here destroyed whatever the member had
+      // half-typed for that conversation before clicking "edit".
+      if(!dmState.editing) dmDraftSave(dmState.sel,ta.value);
       dmMentionPop(ta);
       dmTypingPing(); });
     ta.addEventListener('keydown',(e)=>{
@@ -15371,7 +15419,7 @@ function dmRender(){
       }
       // Enter sends, Shift+Enter is a newline. A chat box that needs a mouse to send is a form.
       if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); dmSend(); }
-      if(e.key==='Escape'&&dmState.editing){ dmState.editing=null; ta.value=''; dmRender(); }
+      if(e.key==='Escape'&&dmState.editing){ dmState.editing=null; ta.value=dmDraftGet(dmState.sel)||''; dmAutoGrow(ta); dmRender(); }
       else if(e.key==='Escape'&&dmState.replying){ dmState.replying=null; dmRender(); }
     });
     // A pasted screenshot is the desk's most common attachment — straight from the clipboard to
@@ -15380,6 +15428,7 @@ function dmRender(){
       const items=(e.clipboardData&&e.clipboardData.items)||[];
       for(const it of items){
         if(it.kind==='file'&&/^image\//.test(it.type)){
+          if(dmState.editing) return;   // edits carry no attachment — let the paste fall through as nothing
           const f=it.getAsFile(); if(!f) continue;
           e.preventDefault();
           const ext=(f.type.split('/')[1]||'png').replace(/[^a-z0-9]/gi,'');
@@ -15400,16 +15449,25 @@ function dmRender(){
   const f=el('dm-file');
   if(f) f.addEventListener('change',()=>{ if(f.files&&f.files[0]){ dmState.pendingFile=f.files[0]; dmState.err=''; dmRender(); } });
   dmRestore(keep);
-  if(!dmState.results){
-    // A thread opened with unread lands ON the "new" line, once; everything else keeps the
-    // stay-at-the-bottom behavior a chat expects.
+  // Scroll discipline. A re-render of the SAME view (same thread, same mode — the common case:
+  // a typing frame, a reaction, the 45s tick) preserves where the reader is: yanked-to-bottom
+  // every ~3s made backscroll unreadable while the other side typed. Only a reader already at
+  // the bottom rides new content down. A view CHANGE gets the entry behavior: chat opens at the
+  // bottom (or the "new" line), and Calls opens at the TOP — it is a newest-first list, and the
+  // old unconditional dmScrollBottom landed it on the oldest row.
+  const sameView=keep.sel===dmState.sel&&keep.mode===dmState.mode;
+  if(dmState.mode==='calls'){
+    const log=el('dm-log'); if(log) log.scrollTop=sameView?keep.logTop:0;
+  }else if(!dmState.results){
     if(dmState.scrollToNew){
       // The flag survives until the mark actually renders — the open paints once before the
       // history fetch lands, and consuming it on that first empty paint would scroll past "new".
       const nm=document.querySelector('.dm-newmark');
       if(nm){ dmState.scrollToNew=false; nm.scrollIntoView({block:'center'}); }
       else dmScrollBottom();
-    } else dmScrollBottom();
+    }
+    else if(sameView&&!keep.logAtBottom){ const log=el('dm-log'); if(log) log.scrollTop=keep.logTop; }
+    else dmScrollBottom();
   }
 }
 
@@ -15495,7 +15553,11 @@ function dmWire(){
     if(mn){ dmMentionPick(mn.dataset.dmmention); return; }
     if(e.target.closest('#dm-close')){ dmCloseThread(); return; }
     if(e.target.closest('#dm-clearhist')){ dmClearHistory(); return; }
-    if(e.target.closest('#dm-canceledit')){ dmState.editing=null; dmRender(); return; }
+    if(e.target.closest('#dm-older')){ dmLoadOlder(); return; }
+    if(e.target.closest('#dm-canceledit')){ dmState.editing=null;
+      // The thread's own draft comes back — the edit text must not linger as a phantom draft.
+      const ta0=el('dm-input'); if(ta0){ ta0.value=dmDraftGet(dmState.sel)||''; dmAutoGrow(ta0); }
+      dmRender(); return; }
     const ed=e.target.closest('[data-dmedit]'); if(ed){ dmEdit(+ed.dataset.dmedit); return; }
     const dl=e.target.closest('[data-dmdel]'); if(dl){ dmDrop(+dl.dataset.dmdel); return; }
   });
@@ -15515,7 +15577,9 @@ function dmKeys(e){
     return;
   }
   if(e.key==='j'||e.key==='k'){
-    const list=dmState.threads;
+    // Navigate what the rail SHOWS: closed (hidden) threads live in a folded section and boards
+    // are listed elsewhere — stepping through them made j/k jump to rows that aren't there.
+    const list=dmState.threads.filter(t=>!t.hidden);
     if(!list.length) return;
     const i=Math.max(0,list.findIndex(t=>t.id===dmState.sel));
     const next=e.key==='j'?Math.min(list.length-1,i+1):Math.max(0,i-1);

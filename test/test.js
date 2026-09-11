@@ -8815,8 +8815,10 @@ test("triggers -05: browser transport is a consumer only, and the toast surface 
   assert.ok(s.includes("A.trig") && s.includes("trig:state.alerts.trig"), "trigger config must persist alongside the alert rules");
   assert.ok(/state\.alerts\.trig=Object\.assign/.test(s), "trigger config must be restored on load");
   // Toast placement: bottom-LEFT, because bottom-right is the terminal's and the right edge is
-  // the drawer's. Above the drawer, below the modals.
-  assert.ok(/\.toast-wrap\{position:fixed;bottom:16px;left:16px;z-index:90/.test(css), "toast surface must sit bottom-left at z-90");
+  // the drawer's. Since the chat dock claimed the bottom-left corner (build -53), toasts clear
+  // its FAB at 64px and sit ABOVE the dock pair (z-118/119) — a toast may briefly cover an open
+  // dock panel, never hide behind it.
+  assert.ok(/\.toast-wrap\{position:fixed;bottom:64px;left:16px;z-index:130/.test(css), "toast surface must sit bottom-left, above the chat dock");
   assert.ok(!/\.toast-wrap\{[^}]*right:16px/.test(css), "toast must not sit in the terminal FAB's corner");
   for (const cls of ["toast-trig", "tt-h", "tt-g", "tt-a", "act-late-bad"])
     assert.ok(css.includes("." + cls), `missing CSS for trigger toast class: ${cls}`);
@@ -13336,7 +13338,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.11-64"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.11-65"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -23705,6 +23707,89 @@ test("retention: 30 days for a 1-to-1, 7 for groups and topics, pins and priced 
   A.sweepRetention(now + 120 * 86400e3);
   assert.ok(A.history(g.uid, GR).messages.some((x) => x.id === call.id), "at day 120 the call is still there");
   assert.ok(A.calls(g.uid, {}).calls.some((c) => c.id === call.id), "and still on the record");
+});
+
+// ===== messages -65: the double-check batch =====================================================
+// Defects found reviewing the module end to end: the sync cursor lied under truncation, cleared
+// history resurfaced through the calls record and reply quotes, an edit re-derived the stamp it
+// promises not to touch, the bridge stamped raw symbols as dead refs, tombstoned calls were
+// retained forever, and the calls by-filter ran after the LIMIT.
+test("messages -65: sync never advances past undelivered messages, and says when to come back", () => {
+  const { A, g, l } = seedDesk();
+  const dm = A.threadFor(g.uid, l.uid, true).id;
+  for (let i = 0; i < 31; i++) A.send(i % 2 ? l.uid : g.uid, null, "m" + i, null, { thread: dm });
+  let cursor = 0, got = 0, rounds = 0;
+  for (; rounds < 20; rounds++) {
+    const r = A.sync(l.uid, cursor, 5);
+    assert.ok(r.messages.every((m) => m.id > cursor), "no re-delivery below the cursor");
+    got += r.messages.length;
+    cursor = r.cursor;
+    if (!r.more) break;
+  }
+  assert.ok(got >= 31, "every message arrived through sync alone (got " + got + " in " + (rounds + 1) + " rounds)");
+});
+
+test("messages -65: cleared history stays cleared — calls record and reply quotes included", () => {
+  const marks = { "xyz:HOOD": 113.2 };
+  const { A, g, l } = seedDesk(marks);
+  const resolve = (s) => (marks["xyz:" + s] ? "xyz:" + s : null);
+  const dm = A.threadFor(g.uid, l.uid, true).id;
+  const call = A.send(g.uid, null, "long $HOOD 113.20", resolve, { thread: dm });
+  assert.equal(call.message.refPx, 113.2, "the call is priced");
+  A.clearHistory(l.uid, dm);
+  assert.equal(A.history(l.uid, dm).messages.length, 0, "history is gone for the clearer");
+  assert.ok(!A.calls(l.uid, {}).calls.some((c) => c.id === call.message.id),
+    "the calls record does not resurrect it for her");
+  assert.ok(A.calls(g.uid, {}).calls.some((c) => c.id === call.message.id), "the author keeps his record");
+  const rep = A.send(g.uid, null, "still watching this", null, { thread: dm, replyTo: call.message.id });
+  const hers = A.history(l.uid, dm).messages.find((m) => m.id === rep.message.id);
+  assert.ok(hers.reply && hers.reply.deleted && !hers.reply.body, "the quote is blanked for the clearer");
+  const his = A.history(g.uid, dm).messages.find((m) => m.id === rep.message.id);
+  assert.ok(his.reply.body.includes("long $HOOD"), "and intact for everyone else");
+});
+
+test("messages -65: the stamp is immutable under edit, and the bridge never stamps raw symbols", () => {
+  const marks = { "xyz:HOOD": 113.2 };
+  const { A, g, l } = seedDesk(marks);
+  const resolve = (s) => (marks["xyz:" + s] ? "xyz:" + s : null);
+  const dm = A.threadFor(g.uid, l.uid, true).id;
+  const call = A.send(g.uid, null, "long $HOOD here", resolve, { thread: dm });
+  A.edit(g.uid, call.message.id, "long here (ticker withdrawn)");
+  let read = A.history(g.uid, dm).messages.find((m) => m.id === call.message.id);
+  assert.equal(read.ref, "xyz:HOOD", "editing the ticker out does not remove the call");
+  assert.equal(read.refPx, 113.2, "refPx survives with it");
+  const plain = A.send(g.uid, null, "no ticker", null, { thread: dm });
+  A.edit(g.uid, plain.message.id, "now with $GARBAGE");
+  read = A.history(g.uid, dm).messages.find((m) => m.id === plain.message.id);
+  assert.equal(read.ref, null, "an edit cannot mint a ref");
+  const br = A.bridgeReply(l.uid, "@gus check $HOOD from my phone", 0);
+  assert.ok(br.ok, br.error);
+  assert.equal(br.message.ref, null, "the bridge has no resolver — a $WORD stays plain text, never a dead ref");
+});
+
+test("messages -65: a tombstoned call is not a call — deleted rows leave with the ordinary window", () => {
+  const marks = { "xyz:HOOD": 113.2 };
+  const { A, g, l } = seedDesk(marks);
+  const resolve = (s) => (marks["xyz:" + s] ? "xyz:" + s : null);
+  const dm = A.threadFor(g.uid, l.uid, true).id;
+  const call = A.send(g.uid, null, "long $HOOD", resolve, { thread: dm });
+  A.drop(g.uid, call.message.id);
+  A.sweepRetention(Date.now() + 31 * 86400e3);
+  assert.ok(A.history(g.uid, dm).messages.every((m) => m.id !== call.message.id),
+    "the tombstone ages out instead of being exempt forever");
+});
+
+test("messages -65: the calls by-filter runs in SQL, before the LIMIT", () => {
+  const marks = { "xyz:HOOD": 113.2 };
+  const { A, g, l } = seedDesk(marks);
+  const resolve = (s) => (marks["xyz:" + s] ? "xyz:" + s : null);
+  const dm = A.threadFor(g.uid, l.uid, true).id;
+  const hers = A.send(l.uid, null, "early $HOOD call", resolve, { thread: dm });
+  for (let i = 0; i < 12; i++) A.send(g.uid, null, "later $HOOD " + i, resolve, { thread: dm });
+  const r = A.calls(g.uid, { by: l.uid, limit: 10 });
+  assert.ok(r.calls.some((c) => c.id === hers.message.id),
+    "her call is found even though newer calls fill the window");
+  assert.ok(r.calls.every((c) => c.senderUid === l.uid), "and only hers");
 });
 
 test("boards are quiet on Telegram by default — digests are the opt-in, mentions always land", () => {
