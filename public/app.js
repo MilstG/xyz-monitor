@@ -14485,7 +14485,7 @@ setInterval(async ()=>{
   if(!dmSignedIn()||state.view!=='dm') return;
   try{
     await dmLoad();   // presence, thread list and the pip stay fresh while the tab sits open
-    if(dmState.mode==='calls'){ const d=await fetchJSON('/api/dm/calls'); if(d&&d.ok) dmState.calls=d; }
+    if(dmState.mode==='calls'){ const d=await fetchJSON('/api/dm/calls?limit=500'); if(d&&d.ok) dmState.calls=d; }
     else if(dmState.sel&&!dmState.results){
       const d=await fetchJSON('/api/dm/'+encodeURIComponent(dmState.sel));
       if(d&&d.ok){ dmMerge(d.messages); if(d.info) dmState.info.set(dmState.sel,d.info); }
@@ -14769,7 +14769,7 @@ async function dmToNote(id){
 }
 async function dmOpenCalls(){
   dmState.mode='calls'; dmState.results=null; dmRender();
-  try{ const d=await fetchJSON('/api/dm/calls'); if(d&&d.ok){ dmState.calls=d; dmRender(); } }
+  try{ const d=await fetchJSON('/api/dm/calls?limit=500'); if(d&&d.ok){ dmState.calls=d; dmRender(); } }
   catch(_){ dmState.calls={calls:[],summary:[]}; dmRender(); }
 }
 async function dmReact(id,emoji){
@@ -15215,7 +15215,7 @@ function dmRender(){
   let main;
   if(dmState.mode==='calls'){
     main='<div class="dm-hd"><b>Calls</b>'
-      +'<span class="sec">every price-stamped message — sent price, current price, and the move</span>'
+      +'<span class="sec" data-tip="a stamped call is exempt from the 30d/7d message retention — the row is kept permanently, and the record reads it for as long as it exists">every price-stamped message — sent price, current price, and the move · kept forever, never ages out</span>'
       +'<button type="button" class="btn dm-mutebtn" id="dm-backchat">back</button></div>'+dmCallsHtml();
   }else if(dmState.results){
     main='<div class="dm-hd"><b>Search</b><span class="sec">'+esc(dmState.q)+'</span>'
