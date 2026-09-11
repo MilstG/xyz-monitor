@@ -13348,7 +13348,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract â€
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.11-75"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.11-76"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -24739,7 +24739,9 @@ test("chat terminal -69: a command result is a message with cmd, no stamp, no ed
   // -72: opening Messages lands at the bottom. A hidden log measures 0 tall and must read as "at
   // bottom"; the open scrolls once more after layout; late-loading images keep the pin.
   assert.ok(/logAtBottom: log \? \(log\.clientHeight===0 \|\| log\.scrollTop\+log\.clientHeight>=log\.scrollHeight-40\) : true \};/.test(app), "a hidden log reads as at-bottom");
-  assert.ok(/requestAnimationFrame\(\(\)=>\{ if\(state\.view==='dm'&&!dmState\.results&&dmState\.mode!=='calls'\) dmScrollBottom\(\); \}\);/.test(app), "openDM scrolls to the bottom after layout");
+  assert.ok(/requestAnimationFrame\(\(\)=>\{ if\(state\.view==='dm'&&!dmState\.results&&dmState\.mode!=='calls'\)\{ dmScrollBottom\(\); dmPageToComposer\(\); \} \}\);/.test(app), "openDM scrolls the log AND the page to the composer after layout");
+  assert.ok(/function dmPageToComposer\(\)\{/.test(app) && /if\(r\.bottom>vh-8\) window\.scrollBy\(/.test(app), "the page scroll fires only when the composer is below the fold â€” a desktop layout that fits is never yanked");
+  assert.ok(/dmState\.sel===id&&!dmState\.results&&dmState\.mode!=='calls'\)\{ dmScrollBottom\(\); dmPageToComposer\(\); \}/.test(app), "opening a thread from the rail lands the same way");
   assert.ok(/function dmPinBottomOnImages\(\)\{/.test(app) && /\n  dmPinBottomOnImages\(\);\n\}/.test(app), "late images keep the reader pinned to the bottom");
   // -72: AI notices (not enabled, busy, capped) never post as AI answers from a chat; `who` yields
   // to the phrasebook unless the next word is a listed name.

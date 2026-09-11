@@ -14856,6 +14856,7 @@ async function dmOpenThread(id){
     const d=await fetchJSON('/api/dm/'+encodeURIComponent(id));
     if(d&&d.ok){ dmMerge(d.messages); if(d.info){ d.info.more=!!d.more; dmState.info.set(id,d.info); } dmRender(); }
   }catch(_){ }
+  requestAnimationFrame(()=>{ if(state.view==='dm'&&dmState.sel===id&&!dmState.results&&dmState.mode!=='calls'){ dmScrollBottom(); dmPageToComposer(); } });
   dmMarkRead(id);
 }
 
@@ -15530,6 +15531,15 @@ async function dmRunSearch(){
 }
 
 function dmScrollBottom(){ const l=el('dm-log'); if(l) l.scrollTop=l.scrollHeight; }
+// Entering the tab (build 2026.09.11-76): the log box scrolls to its bottom, but on a narrow screen
+// the panel is height:auto and the PAGE scrolls too — the composer sat below the fold with the
+// rail in view. Bring the composer into view, and only when it is out of view, so a desktop
+// layout that already fits is never yanked.
+function dmPageToComposer(){
+  const ta=el('dm-input'); if(!ta) return;
+  const r=ta.getBoundingClientRect(), vh=window.innerHeight||document.documentElement.clientHeight;
+  if(r.bottom>vh-8) window.scrollBy({top:r.bottom-vh+12,left:0,behavior:'auto'});
+}
 
 // ---- rendering ---------------------------------------------------------------------------------
 function dmWhen(ts){
@@ -16391,7 +16401,7 @@ async function openDM(){
   if(dmState.sel) dmMarkRead(dmState.sel);
   // The tab is visible only now: scroll once more after layout, so opening Messages never leaves
   // the reader mid-history because the first paint happened while the section was hidden.
-  requestAnimationFrame(()=>{ if(state.view==='dm'&&!dmState.results&&dmState.mode!=='calls') dmScrollBottom(); });
+  requestAnimationFrame(()=>{ if(state.view==='dm'&&!dmState.results&&dmState.mode!=='calls'){ dmScrollBottom(); dmPageToComposer(); } });
 }
 
 // Messages boot with the app, not with the tab: the pip must be accurate on the first paint, and a

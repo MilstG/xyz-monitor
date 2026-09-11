@@ -2190,7 +2190,10 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
   /* fill the viewport like a chat app: the log gets the height, the composer pins to the bottom */
   min-height:520px;height:calc(100vh - 210px)}
 @media (max-width:720px){ .dm-wrap{grid-template-columns:1fr;height:auto} .dm-side{border-right:none;
-  border-bottom:1px solid var(--border);max-height:150px;overflow-y:auto} .dm-log{max-height:56dvh;min-height:220px} }
+  border-bottom:1px solid var(--border);max-height:150px;overflow-y:auto} .dm-log{max-height:56dvh;min-height:220px}
+  /* the header's action buttons squeezed the thread name to one letter per line — the name stays on
+     one line (ellipsis when it must) and the buttons wrap under it */
+  .dm-hd{flex-wrap:wrap;row-gap:6px} .dm-hd>b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60vw} .dm-hdact{flex-wrap:wrap;justify-content:flex-end} }
 .dm-side{border-right:1px solid var(--border);padding:11px 0;background:var(--bg);overflow-y:auto;overflow-x:hidden;min-height:0}
 .dm-sh{font-size:9.5px;text-transform:uppercase;letter-spacing:.9px;color:var(--dim);padding:0 14px 9px}
 .dm-th{padding:8px 14px;border-left:2px solid transparent;cursor:pointer}
