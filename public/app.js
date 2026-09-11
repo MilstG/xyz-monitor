@@ -467,7 +467,7 @@ function applySnapshot(s){
   if(s.redBars) state.redBars=s.redBars;
   if(s.warm) state.warm=s.warm;
   maybePullSidecars();
-  if(s.v){ state.build=s.v; const bv=el('ver'); if(bv) bv.textContent=s.v; }
+  if(s.v){ if(state.build&&state.build!==s.v) notifyNewBuild(s.v); state.build=s.v; const bv=el('ver'); if(bv) bv.textContent=s.v; }
   // offHours now rides the snapshot (15s server rebuild), so the live-gap open↔closed flip
   // lands within one refresh instead of the old daily-path ~15 min. On a flip, pull /api/daily
   // immediately: the closed→open direction needs the freshly completed close→open gap, and
@@ -3313,6 +3313,26 @@ function fireAlert(rule,r,v,m){ const A=state.alerts;
   if(!el('alertpop').hidden) buildAlertsPanel(); }
 function pushToast(text){ const w=el('toastwrap'); const t=document.createElement('div'); t.className='toast'; t.textContent=text; w.appendChild(t);
   setTimeout(()=>{ t.style.transition='opacity .3s'; t.style.opacity='0'; setTimeout(()=>t.remove(),300); }, 6500); }
+// A redeploy used to announce itself only as a silently changing build stamp in the statusline —
+// a tab left open kept running the old bundle indefinitely. The moment any snapshot (plain poll
+// and push-triggered pull alike, since both land here) carries a build other than the one this
+// page is running, ONE persistent toast offers the reload. Called BEFORE state.build is
+// overwritten so the message can name the version this tab is still on; never fires on the first
+// snapshot (state.build unset = nothing to compare against), and a dismissed toast stays
+// dismissed for that version — the next deploy raises a fresh one.
+let _buildToastFor=null;
+function notifyNewBuild(v){
+  if(_buildToastFor===v) return; _buildToastFor=v;
+  const w=el('toastwrap'); if(!w) return;
+  const t=document.createElement('div'); t.className='toast toast-trig';
+  t.innerHTML=`<div class="tt-h"><span class="tt-lbl">NEW VERSION</span><span class="ax" data-x="1" title="dismiss">✕</span></div>`
+    +`<div class="tt-n">A new version is live — please refresh</div>`
+    +`<div class="tt-g">server is on build ${esc(v)}; this tab is still running ${esc(state.build)}. Your layouts, watchlist and prefs survive the reload.</div>`
+    +`<div class="tt-a"><button class="btn" data-re="1">Refresh now</button></div>`;
+  t.querySelector('[data-x]').addEventListener('click',()=>t.remove());
+  t.querySelector('[data-re]').addEventListener('click',()=>{ try{ location.reload(); }catch(_){} });
+  w.appendChild(t);
+}
 // Unread = server events past the persisted read watermark, PLUS local in-tab fires. The old
 // in-memory counter reset to zero on every refresh, so anything that fired while you were away
 // was invisible by the time you looked — the exact failure this slice exists to fix.
@@ -9764,6 +9784,10 @@ function startEvents(){ if(typeof EventSource==='undefined'||_sseSrc) return;
     // including the new `v` a redeploy pushes via the reconnect's first frame — pulls immediately;
     // applySnapshot's own short-circuit and alertVer handling then do exactly what they do on a poll.
     if(d&&d.dataTs&&d.dataTs!==state.dataTs){ loadSnapshot(); nextCycle=Date.now()+_cycleMs(); }
+    // The reconnect's first frame after a redeploy is the fastest new-build signal there is —
+    // dataTs is a restarted counter that can coincide with the one this tab already holds, so
+    // the version notice must not depend on that comparison triggering a pull.
+    if(d&&d.v&&state.build&&d.v!==state.build) notifyNewBuild(d.v);
     // The dm frame carries a sequence, never a message. Pull whatever tab is showing: the unread
     // pip has to be right before you look at it, not after you switch to the tab.
     if(d&&d.dm){
