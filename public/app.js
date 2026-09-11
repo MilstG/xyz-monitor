@@ -177,6 +177,10 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
 
 function el(id){ return document.getElementById(id); }
 function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+// new Date(null-ish).toISOString() throws RangeError and aborts the renderer that called it.
+function isoUtc(ts,a,b){ return Number.isFinite(+ts)?new Date(+ts).toISOString().slice(a,b).replace('T',' '):'—'; }
+// href values are escaped everywhere, but esc() cannot refuse a javascript: scheme. One gate.
+function safeHref(u){ u=String(u==null?'':u); return /^https?:\/\//i.test(u)?u:''; }
 function num(s){ if(s==null)return null; const v=typeof s==='number'?s:parseFloat(s); return isFinite(v)?v:null; }
 function clamp(x,a,b){ return Math.min(Math.max(x,a),b); }
 function parseAmount(str){ if(str==null) return null; const s=String(str).trim().replace(/[$,\s]/g,'');
@@ -567,7 +571,7 @@ function renderAdmLoop(h){ const box=el('admLoop'); if(!box) return;
   const L=h.loop, ring=Array.isArray(L.hist)?L.hist:[];
   const chip=(v,lab,tip)=>{ const cls=v>=50?'bad':(v>=20?'warn':'ok');
     return `<span class="alp-chip ${cls}" data-tip="${esc(tip)}">${esc(lab)} ${v}ms</span>`; };
-  const me=L.maxEver?`<span class="alp-chip dim" data-tip="worst single stall ever observed on this data dir — kept separately so one boot spike stays attributable without polluting the rolling read">maxEver ${L.maxEver.v}ms · ${new Date(L.maxEver.t).toISOString().slice(5,16).replace('T',' ')}</span>`:'';
+  const me=L.maxEver?`<span class="alp-chip dim" data-tip="worst single stall ever observed on this data dir — kept separately so one boot spike stays attributable without polluting the rolling read">maxEver ${L.maxEver.v}ms · ${isoUtc(L.maxEver.t,5,16)}</span>`:'';
   const winH=Math.round((L.windowMs||0)/3600e3), liveMin=Math.round((L.sinceMs||0)/60e3);
   let spark='<div class="alp-none">no closed windows yet — first ring point lands at the '+winH+'h mark (or on the next deploy, which folds the open window in)</div>';
   if(ring.length){
@@ -4253,6 +4257,9 @@ function sessDate(t){ try{ return new Date(t).toLocaleDateString('en-US',{month:
 let _hoverReg={}, _hoverSeq=0;
 function hoverChart(svgInner, o){
   const id='lc'+(++_hoverSeq);
+  // Entries used to be pruned only inside drawSessions, so every housing / report / trend render
+  // leaked its rows until the user happened to visit Sessions. Sweep on registration instead.
+  if((_hoverSeq&15)===0) for(const k in _hoverReg) if(!document.getElementById(k)) delete _hoverReg[k];
   _hoverReg[id]={ xs:o.xs, rows:o.rows };
   return `<div class="lwrap"><svg id="${id}" class="lchart" viewBox="0 0 ${o.w} ${o.h}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`+
     svgInner+
@@ -7251,7 +7258,7 @@ function actEpDetail(e){
   const risk=Math.abs(e.fired-e.void), riskPct=e.fired?(risk/e.fired*100):null;
   const opx=e.kind==='target'?e.target:e.kind==='void'?e.void:e.exitPx;
   return `<div class="act-set-det">`
-    +`<span>first shown <b>${new Date(e.tShow).toISOString().slice(0,16).replace('T',' ')}</b> at mark <b>${fmtPrice(e.markShow)}</b>${e.tFire?` \u00b7 claim fired <b>${actAgo(e.tShow-e.tFire)}</b> earlier`:''}</span>`
+    +`<span>first shown <b>${isoUtc(e.tShow,0,16)}</b> at mark <b>${fmtPrice(e.markShow)}</b>${e.tFire?` \u00b7 claim fired <b>${actAgo(e.tShow-e.tFire)}</b> earlier`:''}</span>`
     +(e.bt?`<span class="sec">\u27f2 boot-stamped \u2014 the first-shown stamp is the record's own first scan; the row may have been visible earlier, so this episode's lateness is a lower bound and it is excluded from the headline lateness number</span>`:'')
     +((e.tBld!=null&&e.tFire!=null&&e.tShow!=null&&!e.bt&&!e.be)?`<span>fire\u2192shown: <b>${actAgo(e.tBld-e.tFire)}</b> to first evaluating build \u00b7 <b>${actAgo(e.tShow-e.tBld)}</b> held at the gates</span>`
       :(e.be?`<span class="sec">\u27f2 build-stamped \u2014 the first-evaluated stamp was minted on a fresh process's first build (a lower bound, not a measurement); excluded from the fire\u2192shown split</span>`:''))
@@ -7501,7 +7508,7 @@ function earnDiffC(dateStr){ if(!/^\d{4}-\d{2}-\d{2}$/.test(dateStr||'')) return
 function earnFilingHtml(e){
   if(!e||!e.filing) return '';
   const f=e.filing;
-  return `<a class="earn-fl${/^8-K/.test(f.form)?' mat':''}" href="${esc(f.url)}" target="_blank" rel="noopener noreferrer" data-tip="${esc('the actual filing on EDGAR \u2014 '+f.form+(/^8-K/.test(f.form)?' (the earnings release itself)':' (the report)')+' \u00b7 filed '+fmtAge(Date.now()-f.pub)+' ago')}">${esc(f.form)} \u2197</a>`;
+  return `<a class="earn-fl${/^8-K/.test(f.form)?' mat':''}" href="${esc(safeHref(f.url))}" target="_blank" rel="noopener noreferrer" data-tip="${esc('the actual filing on EDGAR \u2014 '+f.form+(/^8-K/.test(f.form)?' (the earnings release itself)':' (the report)')+' \u00b7 filed '+fmtAge(Date.now()-f.pub)+' ago')}">${esc(f.form)} \u2197</a>`;
 }
 function earnSessLbl(s){ return s==='BMO'?'pre-market (BMO)':s==='AMC'?'after close (AMC)':s==='DMH'?'during market hours':'time TBD'; }
 async function loadEarnings(){
@@ -8009,6 +8016,7 @@ function hsgWindowStart(win){
   return '1900-01-01';
 }
 function hsgSlice(ser,win){ const from=hsgWindowStart(win); return (ser&&ser.obs||[]).filter(o=>o[0]>=from); }
+function hsgNum(v,d){ return (v==null||!isFinite(v))?'—':(+v).toFixed(d); }   // a FRED "." observation lands as null; one unguarded toFixed blanked the whole tab
 function hsgFmt(v,ser){ if(v==null||!isFinite(v)) return '—';
   if(ser.unit==='$B') return liqB(v);
   if(ser.unit==='$k') return '$'+v.toFixed(0)+'k';
@@ -8109,7 +8117,7 @@ function renderHousing(){
   let starts='';
   if(g('sf')&&g('mf')){ const sf=g('sf'), mf=g('mf');
     starts=`<div class="s-card hsg-card hsg-wide"><div class="hsg-head"><span class="hsg-title">Housing starts — single-family vs multifamily</span>${hsgChip(sf)}<span class="src-chip direct" title="${esc(mf.src)}"><i></i>Direct · ${esc(mf.sid)}</span></div>`+
-      `<div class="hsg-kpis"><span class="hsg-v">${sf.last.v.toFixed(2)}M</span><span class="sec hsg-d">single-family · ${hsgDate(sf.last.d)}</span>${hsgDelta(sf)}<span class="sec" style="margin:0 6px">|</span><span class="hsg-v" style="font-size:15px">${mf.last.v.toFixed(2)}M</span><span class="sec hsg-d">multifamily</span>${hsgDelta(mf)}</div>`+
+      `<div class="hsg-kpis"><span class="hsg-v">${hsgNum(sf.last.v,2)}M</span><span class="sec hsg-d">single-family · ${hsgDate(sf.last.d)}</span>${hsgDelta(sf)}<span class="sec" style="margin:0 6px">|</span><span class="hsg-v" style="font-size:15px">${hsgNum(mf.last.v,2)}M</span><span class="sec hsg-d">multifamily</span>${hsgDelta(mf)}</div>`+
       sLeg([{color:'var(--blue)',label:'Single-family'},{color:'var(--muted)',label:'Multifamily (5+ units)'}])+
       hsgStackSvg(sf,mf,sl('sf'),sl('mf'))+`</div>`; }
   const missing=(d.missing&&d.missing.length)?`<div class="s-cap" style="margin-top:10px">Absent this pass (not shown stale): ${d.missing.map(esc).join(', ')}</div>`:'';
@@ -8765,7 +8773,7 @@ function newsRow(a,now,inDrawer){
       +`<span class="nage" data-tip="${esc(new Date(a.pub).toLocaleString())}">${age}</span>`
       +`<span class="nform${a.mat?' mat':''}" data-form="${esc(a.form)}" data-tip="${esc((a.mat?'material form':'routine form')+' \u00b7 click to filter to '+a.form+' filings')}">${esc(a.form)}</span>`
       +badge
-      +`<span class="nhl">${a.url?`<a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer" data-tip="${esc(a.h)}">${esc(a.h)}</a>`:esc(a.h)}</span>`
+      +`<span class="nhl">${a.url?`<a href="${esc(safeHref(a.url))}" target="_blank" rel="noopener noreferrer" data-tip="${esc(a.h)}">${esc(a.h)}</a>`:esc(a.h)}</span>`
       +`<span class="nsrc">EDGAR \u2197</span>`
       +`</div>`;
   }
@@ -8779,7 +8787,7 @@ function newsRow(a,now,inDrawer){
     +`<span class="nage" data-tip="${esc(new Date(a.pub).toLocaleString())}">${age}</span>`
     +badge
     +sec
-    +`<span class="nhl">${a.url?`<a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer" data-tip="${esc(a.h)}">${esc(a.h)}</a>`:esc(a.h)}</span>`
+    +`<span class="nhl">${a.url?`<a href="${esc(safeHref(a.url))}" target="_blank" rel="noopener noreferrer" data-tip="${esc(a.h)}">${esc(a.h)}</a>`:esc(a.h)}</span>`
     +(a.src?`<span class="nsrc">${esc(a.src)} \u2197</span>`:'')
     +`</div>`;
 }
@@ -10554,7 +10562,7 @@ function termCard(r){ const apr=termAprOf(r), fp=r.fundPct;
     `<span class="tp-k">oi</span> ${fmtUsd(r.oi)}${r.doi!=null?` · Δ ${tpct(r.doi)}`:''}`,
     (r.sqz!=null||r.mom!=null)?`<span class="tp-k">squeeze</span> <span class="${r.sqz>=50?'amber':'sec'}">${r.sqz!=null?Math.round(r.sqz):'—'}</span>  momentum ${tint(r.mom)}`:'',
     (r.vstape!=null||r.beta!=null)?`<span class="tp-k">vs tape</span> ${tpct(r.vstape)}${r.beta!=null&&isFinite(r.beta)?` · β ${r.beta.toFixed(2)}`:''}`:'',
-    `<span class="tp-k">views</span> <span class="tp-deep" data-tcmd="report ${r.ticker}">report ▸</span>  <span class="tp-deep" data-topen="${tesc(r.coin)}">drawer ▸</span>` ].filter(Boolean);
+    `<span class="tp-k">views</span> <span class="tp-deep" data-tcmd="report ${tesc(r.ticker)}">report ▸</span>  <span class="tp-deep" data-topen="${tesc(r.coin)}">drawer ▸</span>` ].filter(Boolean);
   termOut(lines.join('\n')); }
 function termFieldCmd(r,fname){
   if((fname||'').toLowerCase().replace(/[^a-z]/g,'')==='sector'){ termHi(r.coin);
@@ -10570,7 +10578,7 @@ function termTop(metric,n,asc){ n=n||8; const m=metricOf(metric)||tfield(metric)
   let list=termActive().map(r=>({r,v:F.g(r)})).filter(x=>x.v!=null&&isFinite(x.v));
   list.sort((a,b)=>asc?a.v-b.v:b.v-a.v); list=list.slice(0,n);
   if(!list.length) return termOut(`<span class="sec">no data for ${tesc(label)} in this scope yet</span>`);
-  const rows=list.map((x,i)=>`${tpad(i+1,2)} <span class="tp-deep" data-tcmd="${x.r.ticker}">${tpad(x.r.ticker,8)}</span> ${tpad(F.f(x.v),10,true)}  <span class="tp-trans">${tpad(fmtUsd(x.r.vol),8,true)} vol</span>`).join('\n');
+  const rows=list.map((x,i)=>`${tpad(i+1,2)} <span class="tp-deep" data-tcmd="${tesc(x.r.ticker)}">${tesc(tpad(x.r.ticker,8))}</span> ${tpad(F.f(x.v),10,true)}  <span class="tp-trans">${tpad(fmtUsd(x.r.vol),8,true)} vol</span>`).join('\n');
   termOut(`<span class="tp-hd">${asc&&m!=='losers'?'bottom':'top'} ${tesc(label)}</span> <span class="tp-trans">· ${state.scope}</span>\n<span class="tp-th">${tpad('#',2)} ${tpad('TICKER',8)} ${tpad((F.l||label).toUpperCase().slice(0,12),10,true)}</span>\n${rows}`); }
 // Earnings — reads the live earnings map the E-badges use; equities only, honest about coverage.
 function termEarnings(r){
@@ -10603,7 +10611,7 @@ function termSignals(t){ const d=state.signals; let groups=(d&&Array.isArray(d.s
     const sc=side==='long'?'<span class="tp-chip l">long</span>':side==='short'?'<span class="tp-chip s">short</span>':'<span class="tp-chip">watch</span>';
     const prime=(g.sigs||[]).some(x=>x.prime)?' <span class="tp-chip p">★prime</span>':'';
     const score=g.score!=null?g.score:(top.score!=null?top.score:null);
-    return `<span class="tp-deep" data-tcmd="${g.ticker}">${tpad(g.ticker,6)}</span> ${tpad(top.label||top.ev||'—',11)} ${score!=null?'<span class="amber">score '+Math.round(score)+'</span>':''}${prime} ${sc}`; }).join('\n');
+    return `<span class="tp-deep" data-tcmd="${tesc(g.ticker)}">${tesc(tpad(g.ticker,6))}</span> ${tpad(top.label||top.ev||'—',11)} ${score!=null?'<span class="amber">score '+Math.round(score)+'</span>':''}${prime} ${sc}`; }).join('\n');
   termOut(`<span class="amber">⚡ ${groups.length} active signal${groups.length>1?'s':''}</span> <span class="tp-trans">· ledgered &amp; resolved out-of-sample</span>\n${rows}`); }
 function termReport(r){ termOut(`${termTkHdr(r)}\n<span class="tp-trans">opening the AI analyst report…</span>`); openAiReport(r.coin); }
 function termComp(tickers){ showView('corr');
@@ -11063,7 +11071,7 @@ function termEcho(c){ const d=document.createElement('div'); d.className='tp-blk
 function termErr(m){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<span class="tp-line tp-err">✗ ${tesc(m)}</span>`; termEl('termScroll').appendChild(d); termScrollDown(); }
 function termScrollDown(){ const s=termEl('termScroll'); s.scrollTop=s.scrollHeight; }
 function termHi(coin){ const r=state.rows.get(coin); if(!r) return; if(state.view!=='markets') return;
-  const tr=document.querySelector(`#body tr[data-coin="${coin}"]`); if(tr){ tr.classList.add('rowflash'); tr.scrollIntoView({block:'center',behavior:'smooth'}); setTimeout(()=>tr.classList.remove('rowflash'),1500); } }
+  const tr=document.querySelector(`#body tr[data-coin="${CSS.escape(coin)}"]`); if(tr){ tr.classList.add('rowflash'); tr.scrollIntoView({block:'center',behavior:'smooth'}); setTimeout(()=>tr.classList.remove('rowflash'),1500); } }
 function termHelp(){ termOut(`<span class="tp-hd">ask the board</span> <span class="tp-trans">· plain English or the grammar below · every board column is a lens</span>
 <span class="amber">${tpad('<ticker> [field]',20)}</span><span class="sec">card, or any column: funding·oi·squeeze·d7·rvol·gap·vsvwap·vsma200·ytd·sector·…</span>
 <span class="amber">${tpad('top|bottom <field> [n]',20)}</span><span class="sec">any field, plus gainers·losers — "top d7 5", "bottom funding"</span>
@@ -13303,7 +13311,7 @@ function renderWhlFund(f,full){
     +`<td class="l">${esc(p.name)}${p.put?` <span class="whl-put ${p.put}">${esc(p.put.toUpperCase())}</span>`:''}${p.tk?` <span class="whl-tk" data-whltk="${esc(p.tk)}">${esc(p.tk)}</span>`:''}</td></tr>`).join('');
   const conc=f.positions.slice(0,10).map((p,i)=>`<span class="whl-cseg whlc${i%10}" style="width:${Math.max(0.4,p.pct||0)}%" data-tip="${esc((p.tk||p.name.slice(0,20))+' \u00b7 '+(p.pct!=null?p.pct.toFixed(1):'?')+'% of the 13F book')}"></span>`).join('')
     +(f.n>10?`<span class="whl-cseg rest" style="width:${Math.max(0,100-f.positions.slice(0,10).reduce((s,p)=>s+(p.pct||0),0)).toFixed(1)}%" data-tip="${esc('other '+(f.n-10)+' position(s)')}"></span>`:'');
-  el('whlbody').innerHTML=`<div class="whl-mhd"><span class="whl-hd">${esc(f.name)}</span><span class="sec">\u00b7 CIK ${esc(String(f.cik))} \u00b7 whale ${esc(f.key)}</span>${f.url?` <a class="whl-lnk" href="${esc(f.url)}" target="_blank" rel="noopener noreferrer">EDGAR \u2197</a>`:''}</div>`
+  el('whlbody').innerHTML=`<div class="whl-mhd"><span class="whl-hd">${esc(f.name)}</span><span class="sec">\u00b7 CIK ${esc(String(f.cik))} \u00b7 whale ${esc(f.key)}</span>${f.url?` <a class="whl-lnk" href="${esc(safeHref(f.url))}" target="_blank" rel="noopener noreferrer">EDGAR \u2197</a>`:''}</div>`
     +`<div class="whl-meta"><span class="sec">quarter</span> <b>${esc(f.q||'?')}</b> <span class="sec">(period ${esc(f.period||'?')} \u00b7 ${esc(f.form||'13F-HR')} filed ${esc(whlDateStr(f.filedAt))} \u00b7 ${f.ageDays!=null?f.ageDays+'d old at pull':''}${f.amended?' \u00b7 AMENDED':''})</span></div>`
     +`<div class="whl-meta"><span class="sec">13F book</span> <b>${whlMoney(f.total)}</b> <span class="sec">across ${f.n} position(s)${f.nRaw>f.n?' ('+f.nRaw+' filed rows aggregated on cusip)':''}${f.prevTotal!=null?' \u00b7 vs '+whlMoney(f.prevTotal)+' prior Q':''}${f.truncated?' \u00b7 stored book truncated at cap ('+f.truncated+' tail positions dropped, disclosed)':''}${f.scaled?' \u00b7 <span class="whl-sclnote" data-tip="the 2023 13F amendments moved values to whole dollars, but this filer still reports in thousands — EDGAR accepts both silently. Detection: median filed value \u00f7 shares across SH rows implied sub-$1 share prices (\u2265 3-row sample floor); options and principal-amount rows excluded. Corrected \u00d71000, flagged on the stored filing.">values \u00d71000 (thousands filer)</span>':''}</span></div>`
     +(f.hasPrev?`<div class="whl-dstrip" data-tip="$ flows on the ADDED/TRIMMED boxes are TRADED dollars (share change \u00d7 the filing's implied quarter-end price) where shares were comparable — mark drift no longer counts as flow; NEW and EXITED are position values at their quarter-end marks">${whlDeltaBox('NEW','new',f.lanes.opened,f.flows.opened)}${whlDeltaBox('ADDED','pos',f.lanes.added,f.flows.added)}${whlDeltaBox('TRIMMED','neg',f.lanes.trimmed,f.flows.trimmed)}${whlDeltaBox('EXITED','exitc',f.lanes.exited,f.flows.exited)}</div>`
@@ -13716,7 +13724,7 @@ function insRender() {
     if (k === 'sec') return `<td class="l sec">${esc((x.sec || '—').slice(0, 24))}</td>`;
     if (k === 'issuer') return `<td class="l sec">${esc((x.issuer || '—').slice(0, 26))}</td>`;
     if (k === 'form') return `<td class="l sec">${esc(x.form || '—')}</td>`;
-    return `<td class="l">${x.url ? `<a class="cng-src" href="${esc(x.url)}" target="_blank" rel="noopener">form 4</a>` : ''}</td>`;
+    return `<td class="l">${x.url ? `<a class="cng-src" href="${esc(safeHref(x.url))}" target="_blank" rel="noopener">form 4</a>` : ''}</td>`;
   };
   const arrow = (k) => INS.sort.k === k ? `<span class="cng-arr">${INS.sort.dir > 0 ? '▲' : '▼'}</span>` : '';
   out.innerHTML = head
@@ -13747,7 +13755,7 @@ function insRender() {
     })()
     + `</tbody></table></div>`
     + insPager()
-    + `<div class="whl-foot">${INS.rows.length.toLocaleString()} shown of ${INS.total.toLocaleString()} matching transaction(s)${(INS.from || INS.to) ? ` · <b>${esc(insRangeLabel())}</b>` : ''} · source: SEC Form 4, filed under Section 16 · shares, price, strike and date are the filer’s own figures — no number in this table is derived, banded or estimated, which is the difference from the CONGRESS tab, where the form discloses a range and no price at all · both of the form’s tables are here: Table I share transactions and Table II derivatives, kept apart by the KIND column because an exercise price and a transaction price are different quantities — a strike never enters PRICE, and a derivative row has no dollar value because shares × strike is a number nobody paid · a blank price is a price the form did not carry, never a zero · scoped to the ${'${(sc.covered || 0).toLocaleString()}'} equities this board covers — a 10% holder&#39;s filings about companies it holds arrive here through the same feed and are counted, not shown · the one INFERRED thing on this tab is the cashless-exercise pairing, drawn over two rows that each remain individually true and marked wherever it appears</div>`;
+    + `<div class="whl-foot">${INS.rows.length.toLocaleString()} shown of ${INS.total.toLocaleString()} matching transaction(s)${(INS.from || INS.to) ? ` · <b>${esc(insRangeLabel())}</b>` : ''} · source: SEC Form 4, filed under Section 16 · shares, price, strike and date are the filer’s own figures — no number in this table is derived, banded or estimated, which is the difference from the CONGRESS tab, where the form discloses a range and no price at all · both of the form’s tables are here: Table I share transactions and Table II derivatives, kept apart by the KIND column because an exercise price and a transaction price are different quantities — a strike never enters PRICE, and a derivative row has no dollar value because shares × strike is a number nobody paid · a blank price is a price the form did not carry, never a zero · scoped to the ${(sc.covered || 0).toLocaleString()} equities this board covers — a 10% holder&#39;s filings about companies it holds arrive here through the same feed and are counted, not shown · the one INFERRED thing on this tab is the cashless-exercise pairing, drawn over two rows that each remain individually true and marked wherever it appears</div>`;
   insBind();
 }
 function insPager() {
@@ -14185,7 +14193,7 @@ function cngRender(){
     if(k==='act'){ const dir=/^buy/.test(x.act)?'p':/^sell/.test(x.act)?'s':'e'; return `<td class="l"><span class="cng-act ${dir}">${esc(x.act)}</span></td>`; }
     if(k==='band') return `<td class="r">${esc(x.hiAmt!=null?cngMoney(x.loAmt)+' \u2013 '+cngMoney(x.hiAmt):cngMoney(x.loAmt)+'+')}</td>`;
     if(k==='traded') return `<td class="l sec">${esc(x.txDate||'\u2014')}</td>`;
-    return `<td class="l">${x.url?`<a class="cng-src" href="${esc(x.url)}" target="_blank" rel="noopener">source</a>`:''}</td>`;
+    return `<td class="l">${x.url?`<a class="cng-src" href="${esc(safeHref(x.url))}" target="_blank" rel="noopener">source</a>`:''}</td>`;
   };
   const arrow=(k)=>CNG.sort.k===k?`<span class="cng-arr">${CNG.sort.dir>0?'\u25b2':'\u25bc'}</span>`:'';
   out.innerHTML=head+(CNG.q.trim()?filerNote():'')
@@ -15997,7 +16005,7 @@ function renderAdmDm(){
   else if(_admDmThread&&_admDmThread.search){
     panel='<div class="dm-sh" style="padding-left:0">'+(_admDmThread.results||[]).length+' hit(s) for “'+esc(_admDmQ)+'”</div>'
       +((_admDmThread.results||[]).map(r=>'<div class="acc-row" data-admdm="'+r.thread+'">'
-        +'<span class="grow">'+esc(r.body).slice(0,140)+'</span>'
+        +'<span class="grow">'+esc(String(r.body||'').slice(0,140))+'</span>'
         +'<span class="acc-mu">'+esc(r.sender)+' · '+esc(r.threadName)+' · '+admWhen(r.ts)+'</span></div>').join('')
         ||'<div class="acc-note">Nothing matches.</div>');
   } else if(_admDmThread&&_admDmThread.ok){

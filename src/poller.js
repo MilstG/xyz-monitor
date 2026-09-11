@@ -157,7 +157,7 @@ const EARN_ALIAS = { BRKB: "BRK.B" }; // xyz ticker -> US exchange symbol where 
 // the shared 60/min Finnhub budget (news + earnings + this).
 const FUND_ALIAS = EARN_ALIAS;
 const FUND_BATCH = 3;              // tickers per 60s tick (2 calls each: metric + profile2)
-const FUND_TTL = 22 * HOUR;        // a name is "due" only once its cache is this stale
+const FUND_DUE_TTL = 22 * HOUR;    // a name is "due" only once its cache is this stale (the SEC cache's own FUND_TTL is a different, inner constant)
 // Signals whose claim spans a session boundary (drift, gap, breakout follow-through): an earnings
 // print inside the horizon is a different return distribution than the study sample, so the
 // evidence contribution is capped — same mechanism and same cap as the no-live-edge guard.
@@ -1696,7 +1696,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     if (!d) return;
     if (Array.isArray(d.open)) for (const e of d.open) if (e && e.key) ledgerOpen.set(e.key, e);
     if (Array.isArray(d.closed)) {
-      if (d.closed.length > 4000 && store.archiveClosed) store.archiveClosed(d.closed.slice(0, d.closed.length - 4000));
+      if (d.closed.length > 4000 && store.archiveClosed) { store.archiveClosed(d.closed.slice(0, d.closed.length - 4000)); ledgerDirty = true; }   // dirty, or a deploy loop archives the same overflow again
       ledgerClosed = d.closed.slice(-4000);
     }
     // Settled-board record restore: episodes ride the same blob (see persistLedger). Shape-guarded
@@ -4651,7 +4651,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const now = Date.now();
     const due = roster
       .map((m) => ({ sym: fundSym(m.ticker) }))
-      .filter((x) => now - (fundAt.get(x.sym) || 0) >= FUND_TTL)
+      .filter((x) => now - (fundAt.get(x.sym) || 0) >= FUND_DUE_TTL)
       .sort((a, b) => (fundAt.get(a.sym) || 0) - (fundAt.get(b.sym) || 0));
     if (!due.length) return;
     const batch = due.slice(0, FUND_BATCH);
@@ -7966,6 +7966,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         if (d1) log(`1m opening-hour archive: ${d1} bar(s) evicted past ${M1_RETENTION_DAYS}d`);
       } catch (e) { log("1m evict failed: " + (e && e.message)); }
     }
+    try {   // the GC and coverage tail below ran bare: a throw here was an unhandled rejection off a setInterval (fatal under Node 22)
     // Heavy-data GC for markets delisted > 7d. They stay in Hyperliquid's meta forever (so the
     // row itself must survive to keep the universe index-aligned for the WS feed), but there's
     // no reason to keep holding their 60d hourly spine, funding map and OI history in memory.
@@ -7988,6 +7989,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     for (const r of rows.values()) if (r.fundH && r.fundH.size) { let d = false; for (const t of r.fundH.keys()) if (t < fcut) { r.fundH.delete(t); d = true; } if (d) r._fVer = (r._fVer || 0) + 1; }
     const fc = fundingCoverage();
     log(`Daily audit: ${total} active market(s), ${pending} awaiting history backfill; hourly spine: ${hc.coins} market(s), ${hc.candles} candle(s); funding[${fc.endpoint}]: ${fc.coins} market(s), ${fc.points} hour(s)`);
+    } catch (e) { log("maintenance tail failed: " + (e && e.message)); }
   }
 
   async function start() {
@@ -11597,6 +11599,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
 
   async function pushUpdatesTick() {
     if (!pushOn()) return;
+    const offsetBefore = pushOffset;
     const r = await tgApi("getUpdates", { offset: pushOffset || undefined, timeout: 0, allowed_updates: ["message"] });
     if (!r.ok) { pushLastErr = r.error; return; }
     pushLastErr = null;
@@ -11656,7 +11659,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       }
     }
     pushCmdPrune();
-    if (pushOffset) persistPush();
+    if (pushOffset && pushOffset !== offsetBefore) persistPush();   // every 20s poll used to rewrite push.json whether or not the cursor moved
   }
   // One reply per command, and only when the chat has budget left. `linkedOverride` lets /stop's
   // confirmation ride the linked allowance even though the chat was just unlinked.
@@ -12578,10 +12581,10 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
       const day = schedDueAt(res, now, tz);
       if (!day) continue;
       if (landSent.get(rec.chat) === day) continue;
-      landSent.set(rec.chat, day);
       let b = null;
       try { b = await generateLandscape(now); }
       catch (e) { log("landscape generate failed (isolated): " + (e && e.message)); continue; }
+      landSent.set(rec.chat, day);   // after generation, same as the brief: a throw leaves the day open to retry
       // force, like the brief: a scheduled send is not one of the day's alerts and must not be the
       // message the hourly cap happens to eat.
       pushEnqueue(rec.chat, b.message, true);
@@ -13326,9 +13329,9 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       const day = schedDueAt(res, now, tz);
       if (!day) continue;
       if (briefSent.get(rec.chat) === day) continue;
-      briefSent.set(rec.chat, day);
       let b = null;
       try { b = await generateBrief(now, tz); } catch (e) { log("brief generate failed (isolated): " + (e && e.message)); continue; }
+      briefSent.set(rec.chat, day);   // marked AFTER generation: a throw above must leave the day open to retry, not silently lost
       // force: a scheduled brief is not one of the day's alerts and must not be the message the
       // hourly cap happens to eat. Both parts ride force for the same reason — half a brief is worse
       // than none, and the cap must not be able to swallow the conclusions while delivering the data.

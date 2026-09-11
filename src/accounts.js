@@ -1196,7 +1196,10 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       fs.writeFileSync(tmp, buf);
       fs.renameSync(tmp, path.join(fileDir, id));
     } catch (_) { return { ok: false, error: "could not store that file" }; }
-    S.fileIns.run(id, +threadId, uid, fileNameClean(name), sniff.mime, buf.length, sniff.inline, Date.now());
+    // The row is what the sweeper sees: a throw here (a STRICT type error on an odd threadId) used
+    // to strand up to 8 MB on disk forever.
+    try { S.fileIns.run(id, Math.trunc(+threadId), uid, fileNameClean(name), sniff.mime, buf.length, sniff.inline, Date.now()); }
+    catch (_) { try { fs.unlinkSync(path.join(fileDir, id)); } catch (_) {} return { ok: false, error: "could not store that file" }; }
     return { ok: true, file: S.fileById.get(id) };
   }
   // ---- retention --------------------------------------------------------------------------------
@@ -1399,7 +1402,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const t = S.thrById.get(+threadId);
     if (!t || !isMember(t.id, uid)) return { ok: false, error: "no such conversation" };
     const b = Number.isFinite(+before) && +before > 0 ? +before : Number.MAX_SAFE_INTEGER;
-    const n = Math.min(Math.max(+limit || 50, 1), 200);
+    const n = Math.trunc(Math.min(Math.max(+limit || 50, 1), 200));
     const cf = (S.readGet.get(t.id, uid) || {}).clearedUpTo || 0;
     const rows = S.msgPage.all(t.id, b, cf, n).reverse().map((m) => wire(m, uid));
     return { ok: true, thread: t.id, info: threadInfo(t, uid), messages: rows,
@@ -1410,7 +1413,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   // message id is global rather than per-thread: a single `since` answers "what did I miss".
   function sync(uid, since, limit) {
     const s = Number.isFinite(+since) && +since >= 0 ? +since : 0;
-    const n = Math.min(Math.max(+limit || 200, 1), 500);
+    const n = Math.trunc(Math.min(Math.max(+limit || 200, 1), 500));
     const out = [];
     for (const t of S.thrMine.all(uid)) {
       const cf = (S.readGet.get(t.id, uid) || {}).clearedUpTo || 0;
@@ -1438,7 +1441,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const raw = String(q == null ? "" : q).trim();
     if (raw.length < 2) return { ok: true, q: raw, results: [] };
     const esc = raw.replace(/[\\%_]/g, (c) => "\\" + c);
-    const n = Math.min(Math.max(+limit || 50, 1), 100);
+    const n = Math.trunc(Math.min(Math.max(+limit || 50, 1), 100));
     // An optional thread scope: the JOIN already guarantees membership, so scoping is a WHERE
     // clause, never a second authorization path.
     const th = Number.isFinite(+threadId) && +threadId > 0 ? +threadId : null;
@@ -1549,7 +1552,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   // together, every call dies in the conversation it was made in.
   function calls(uid, opts) {
     const o = opts || {};
-    const n = Math.min(Math.max(+o.limit || 200, 1), 500);
+    const n = Math.trunc(Math.min(Math.max(+o.limit || 200, 1), 500));
     const by = o.by || null;
     const rows = o.all ? S.callsAll.all(by, by, n) : S.callsMine.all(uid, by, by, n);
     // The caller's own cleared floor holds here exactly as it does in history/sync/search: a
@@ -1634,7 +1637,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     try { S.auditAdd.run(uid, action, thread == null ? null : +thread, detail || null, Date.now()); } catch (_) {}
   }
   function adminThreads(limit) {
-    return S.thrAll.all(Math.min(Math.max(+limit || 200, 1), 500)).map((t) => {
+    return S.thrAll.all(Math.trunc(Math.min(Math.max(+limit || 200, 1), 500))).map((t) => {
       const mem = S.memAll.all(t.id);
       const last = S.msgLast.get(t.id);
       return { id: t.id, kind: t.kind, title: t.title || null, lastAt: t.lastAt,
@@ -1647,7 +1650,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const t = S.thrById.get(+threadId);
     if (!t) return { ok: false, error: "no such conversation" };
     const b = Number.isFinite(+before) && +before > 0 ? +before : Number.MAX_SAFE_INTEGER;
-    const n = Math.min(Math.max(+limit || 100, 1), 300);
+    const n = Math.trunc(Math.min(Math.max(+limit || 100, 1), 300));
     const rows = S.msgPage.all(t.id, b, 0, n).reverse();   // read-through: no per-viewer clear floor
     adminAudit(adminUid, "read-thread", t.id, "" + rows.length + " message(s)");
     return { ok: true, thread: t.id, kind: t.kind,
@@ -1664,7 +1667,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const raw = String(q == null ? "" : q).trim();
     if (raw.length < 2) return { ok: true, q: raw, results: [] };
     const esc = raw.replace(/[\\%_]/g, (c) => "\\" + c);
-    const n = Math.min(Math.max(+limit || 100, 1), 200);
+    const n = Math.trunc(Math.min(Math.max(+limit || 100, 1), 200));
     const rows = S.msgSearchAll.all("%" + esc + "%", n);
     adminAudit(adminUid, "search", null, raw.slice(0, 64) + " (" + rows.length + " hit(s))");
     return { ok: true, q: raw, results: rows.map((m) => {
@@ -1675,7 +1678,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
           : S.memAll.all(t.id).map((x) => (users.get(x.uid) || {}).display || x.uid).join(" ↔ ")) : "—" };
     }) };
   }
-  const adminAuditLog = (limit) => S.auditList.all(Math.min(Math.max(+limit || 100, 1), 500))
+  const adminAuditLog = (limit) => S.auditList.all(Math.trunc(Math.min(Math.max(+limit || 100, 1), 500)))
     .map((r) => ({ at: r.at, who: (users.get(r.uid) || {}).display || r.uid, action: r.action, thread: r.thread, detail: r.detail }));
 
   // ---- offline escalation ----------------------------------------------------------------------

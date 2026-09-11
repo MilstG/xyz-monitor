@@ -674,7 +674,7 @@ async function buildServer() {
           } finally { clearTimeout(t2); }
         } catch (_) { /* no picture, still a card */ }
       }
-      if (tweetCache.size > TWEET_CACHE_MAX) tweetCache.clear();
+      if (tweetCache.size > TWEET_CACHE_MAX) tweetCache.delete(tweetCache.keys().next().value);   // oldest out, not everything out: clear() refetched every good card at once
       tweetCache.set(id, pub ? { ok: true, at: Date.now(), pub } : { ok: false, at: Date.now() });
     } catch (_) { tweetCache.set(id, { ok: false, at: Date.now() }); }
     finally { tweetInflight.delete(id); }
@@ -904,7 +904,8 @@ async function buildServer() {
     const r = ACCOUNTS.readInvite(raw);
     if (!r.ok) {
       inviteCookie(reply, req, "");
-      log(`invite: rejected a ${r.state} code`);
+      loginFail(clientIp(req));   // a rejected code counts like a wrong password: 60-bit codes make guessing impractical, the damper makes it pointless
+      log(`invite: rejected a ${r.state || "unknown"} code`);
       return htmlNoStore(reply).code(410).send(deadInvitePage(r.state));
     }
     log("invite: opened (code redacted)");
@@ -1527,6 +1528,7 @@ async function buildServer() {
     reply.header("x-content-type-options", "nosniff");
     reply.header("x-frame-options", "DENY");
     reply.header("referrer-policy", "same-origin");
+    if (((TRUST_PROXY && req.headers["x-forwarded-proto"]) || req.protocol) === "https") reply.header("strict-transport-security", "max-age=15552000");
     // Two-tier asset caching. Requests carrying the CURRENT build stamp (?v=<VERSION>) may
     // cache forever: the shell rewrites those URLs every deploy, so the URL itself is the
     // cache-buster and a new build is a new URL — immutable is safe by construction and saves
@@ -1844,7 +1846,8 @@ async function buildServer() {
     const r = await poller.earnHistBackfillNow({ days: +b.days || undefined });
     return reply.code(r.ok ? 200 : 400).send(r);
   });
-  fastify.post("/api/earnings/void", (req, reply) => {
+  fastify.post("/api/earnings/void", { bodyLimit: 4 * 1024 }, (req, reply) => {
+    if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "forbidden" });   // gate and authz are different axes: a flag flip must not open ledger tombstoning
     const b = req.body || {};
     const r = poller.voidEarnPrint(b.t, b.d);
     return reply.code(r.ok ? 200 : 400).send(r);
@@ -1986,7 +1989,8 @@ async function buildServer() {
   // POST = replace the list (validated server-side, persisted to the volume, applied within
   // seconds). Small and mutable — served uncached.
   fastify.get("/api/news/channels", (req, reply) => reply.header("cache-control", "no-store").send(poller.getTgChannels()));
-  fastify.post("/api/news/channels", (req, reply) => {
+  fastify.post("/api/news/channels", { bodyLimit: 8 * 1024 }, (req, reply) => {
+    if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "forbidden" });   // same: the outbound fetch list is an operator's to set
     const r = poller.setTgChannels(req.body && req.body.channels);
     return reply.code(r.ok ? 200 : 400).send(r);
   });
@@ -2484,14 +2488,17 @@ async function buildServer() {
   // `stale` says the poller has not landed a universe poll in five minutes. Still a 200: a 503 would
   // make Railway restart-loop a process whose only problem is upstream. Alert on the flag instead.
   const STALE_MS = 5 * 60 * 1000;
-  fastify.get("/api/health", () => ({ ok: true, version: VERSION,
-    stale: poller.lastPollAt() > 0 && Date.now() - poller.lastPollAt() > STALE_MS, lastPollAgoMs: poller.lastPollAt() > 0 ? Date.now() - poller.lastPollAt() : null,
-    volume: { boots: HEARTBEAT.boots, firstBoot: HEARTBEAT.firstBoot, dataDir: DATA_DIR },
-    // Live histogram read (current, still-open window) + the closed-window ring + worst-ever. The
-    // live sample makes a stall visible within seconds of happening; the ring is the 7d evidence
-    // trail the worker-thread decision gate reads. ~30 small numbers — negligible on the wire.
-    loop: { ...loopSample(), sinceMs: Date.now() - loopResetAt, windowMs: LOOP_WINDOW, maxEver: loopMaxEver, hist: loopRing },
-    ...poller.stats(), ts: Date.now() }));
+  fastify.get("/api/health", (req) => {
+    const full = { ok: true, version: VERSION,
+      stale: poller.lastPollAt() > 0 && Date.now() - poller.lastPollAt() > STALE_MS, lastPollAgoMs: poller.lastPollAt() > 0 ? Date.now() - poller.lastPollAt() : null,
+      volume: { boots: HEARTBEAT.boots, firstBoot: HEARTBEAT.firstBoot, dataDir: DATA_DIR },
+      loop: { ...loopSample(), sinceMs: Date.now() - loopResetAt, windowMs: LOOP_WINDOW, maxEver: loopMaxEver, hist: loopRing },
+      ...poller.stats(), ts: Date.now() };
+    // Railway's healthcheck needs {ok} and nothing else; the volume path, the loop histogram
+    // (live sample + closed-window ring + worst-ever) and the poller internals are for a signed-in
+    // caller. The route stays open, the detail does not.
+    return reqAuthed(req) || isAdmin(req) ? full : { ok: full.ok, version: full.version, stale: full.stale, ts: full.ts };
+  });
 
   return fastify;
 }
@@ -2532,7 +2539,7 @@ async function shutdown() {
   try { rollLoopWindow(); } catch (_) {}
   // Close every SSE stream: their EventSource auto-reconnects to the NEW build and receives the
   // fresh `v` in the initial frame — the push channel doubles as the fastest deploy notice.
-  try { for (const res of sseClients) { try { res.end(); } catch (_) {} } sseClients.clear(); } catch (_) {}
+  try { for (const e of sseClients) { try { e.res.end(); } catch (_) {} } sseClients.clear(); } catch (_) {}   // entries are {res, uid}: res.end() on the entry was a swallowed TypeError
   try { store.close(); } catch (_) {}
   try { ACCOUNTS.close(); } catch (_) {}   // checkpoints the WAL so a redeploy never leaves -wal/-shm behind
   process.exit(0);

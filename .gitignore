@@ -3,3 +3,10 @@ data/
 *.log
 .env
 .DS_Store
+
+# SQLite side files and config backups if DATA_DIR ever points inside the tree
+*.db
+*.db-wal
+*.db-shm
+*.bak
+*.corrupt-*

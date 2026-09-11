@@ -6288,7 +6288,7 @@ test("fundamentals: poller module wired, gated on the earnings roster, price-tri
   // the ETag key folds a coarse px bucket so the live trio isn't frozen behind a cached body
   assert.ok(/Math\.round\(Math\.log\(r\.px\) \* 400\)/.test(pol), "fundamentalsKey must fold a coarse px bucket so the derived trio refreshes as the mark moves");
   // slow rotation + warm cache persistence
-  assert.ok(pol.includes("const FUND_TTL = 22 * HOUR"), "each name re-fetches at most ~daily (fundamentals are quarterly)");
+  assert.ok(pol.includes("const FUND_DUE_TTL = 22 * HOUR"), "each name re-fetches at most ~daily (fundamentals are quarterly)");
   assert.ok(pol.includes("hydrateFund()") && pol.includes("store.saveFund(") , "cache is persisted and restored across redeploys");
   assert.ok(sto.includes("saveFund(data)") && sto.includes("loadFund()"), "store must expose saveFund/loadFund");
   // server route via serveKeyed, exactly once, keyed off the poller
@@ -24496,4 +24496,38 @@ test("audit -67 client: stale responses cannot paint over newer state; one bad t
   assert.ok(/esc\(String\(ev\.side\|\|''\)\.toUpperCase\(\)\)/.test(app) && /esc\(String\(r\.side\|\|''\)\.toUpperCase\(\)\)/.test(app), "a missing side renders empty instead of throwing");
   assert.ok(/el\('dstar'\)\.onclick=\(\)=>\{ toggleWatch\(coin\);/.test(app) && !/toggleWatch\(coin\); openDetail\(coin\);/.test(app), "starring no longer rebuilds the drawer (and the note being typed in it)");
   assert.ok(/const release=\(\)=>\{ if\(sv\._d&&sv\._last\)\{ const e=sv\._last; sv\._d=0; sv\._last=null; at\(e\); \} sv\._d=0; \};/.test(app), "floor histogram drags commit once on release");
+});
+
+test("audit -67 lows: shutdown ends the right object, admin writes recheck authz, rejected invites count, the tweet cache evicts one, config timestamps never throw", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(/for \(const e of sseClients\) \{ try \{ e\.res\.end\(\); \}/.test(srv), "sseClients holds {res, uid}; shutdown ends the socket, not the entry");
+  for (const r of ['"/api/earnings/void"', '"/api/news/channels"']) {
+    const at = srv.indexOf("fastify.post(" + r);
+    assert.ok(/bodyLimit: \d+ \* 1024/.test(srv.slice(at, at + 120)) && /if \(!isAdmin\(req\)\) return reply\.code\(403\)/.test(srv.slice(at, at + 260)), r + " rechecks isAdmin inline and carries a body limit");
+  }
+  assert.ok(/loginFail\(clientIp\(req\)\);   \/\/ a rejected code counts/.test(srv), "GET /join/:code feeds the damper");
+  assert.ok(/tweetCache\.delete\(tweetCache\.keys\(\)\.next\(\)\.value\)/.test(srv) && !/tweetCache\.clear\(\)/.test(srv), "LRU-ish eviction, never a wipe");
+  assert.ok(/strict-transport-security/.test(srv), "HSTS behind TLS");
+  const acc = fs.readFileSync(path.join(__dirname, "..", "src", "accounts.js"), "utf8");
+  assert.equal((acc.match(/Math\.trunc\(Math\.min\(Math\.max\(\+(o\.)?limit \|\| \d+, 1\), \d+\)\)/g) || []).length, 8, "every limit clamp is an integer (LIMIT ? rejects a REAL)");
+  assert.ok(/catch \(_\) \{ try \{ fs\.unlinkSync\(path\.join\(fileDir, id\)\); \} catch \(_\) \{\} return \{ ok: false, error: "could not store that file" \}; \}/.test(acc), "a failed row insert removes the bytes it would have orphaned");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/const FUND_DUE_TTL = 22 \* HOUR;/.test(pol) && /const FUND_TTL = 24 \* HOUR, EXT_ERR_TTL/.test(pol) && !/>= FUND_TTL\)/.test(pol), "the two TTLs have two names and the outer one is used");
+  assert.ok(/store\.archiveClosed\(d\.closed\.slice\(0, d\.closed\.length - 4000\)\); ledgerDirty = true; \}/.test(pol), "archiving overflow at boot marks the ledger dirty");
+  assert.ok(/continue; \}\n\s*briefSent\.set\(rec\.chat, day\);/.test(pol) && /continue; \}\n\s*landSent\.set\(rec\.chat, day\);/.test(pol), "scheduled sends are marked after generation succeeds");
+  assert.ok(/if \(pushOffset && pushOffset !== offsetBefore\) persistPush\(\);/.test(pol), "push.json is rewritten only when the cursor moved");
+  assert.ok(/\} catch \(e\) \{ log\("maintenance tail failed: "/.test(pol), "the maintenance tail is caught");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(!/\$\{'\$\{\(sc\.covered/.test(app) && /scoped to the \$\{\(sc\.covered \|\| 0\)\.toLocaleString\(\)\}/.test(app), "the insiders footer renders the number, not the placeholder text");
+  assert.ok(/function hsgNum\(v,d\)/.test(app) && !/sf\.last\.v\.toFixed\(2\)/.test(app), "housing KPIs are null-safe");
+  assert.ok(/function isoUtc\(ts,a,b\)/.test(app) && !/new Date\(L\.maxEver\.t\)\.toISOString/.test(app) && !/new Date\(e\.tShow\)\.toISOString/.test(app), "server stamps format through a guard");
+  assert.ok(/function safeHref\(u\)/.test(app) && (app.match(/href="\$\{esc\(safeHref\(/g) || []).length >= 6, "href sinks refuse non-http(s) schemes");
+  assert.ok(/data-tcmd="\$\{tesc\(x\.r\.ticker\)\}"/.test(app) && /data-tcmd="report \$\{tesc\(r\.ticker\)\}"/.test(app) && /data-tcmd="\$\{tesc\(g\.ticker\)\}"/.test(app), "terminal tickers are escaped into the command attribute");
+  assert.ok(/esc\(String\(r\.body\|\|''\)\.slice\(0,140\)\)/.test(app), "truncate before escaping, never after");
+  assert.ok(/tr\[data-coin="\$\{CSS\.escape\(coin\)\}"\]/.test(app), "selector built with CSS.escape");
+  assert.ok(/if\(\(_hoverSeq&15\)===0\) for\(const k in _hoverReg\) if\(!document\.getElementById\(k\)\) delete _hoverReg\[k\];/.test(app), "hover registry sweeps itself");
+  assert.ok(!fs.existsSync(path.join(__dirname, "..", "xyz-monitor-features.html")) && fs.existsSync(path.join(__dirname, "..", "docs", "xyz-monitor-features.html")), "design docs live in docs/");
+  const gi = fs.readFileSync(path.join(__dirname, "..", ".gitignore"), "utf8");
+  assert.ok(/\*\.db-wal/.test(gi) && /\*\.bak/.test(gi));
 });

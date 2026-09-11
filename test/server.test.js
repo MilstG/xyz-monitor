@@ -147,3 +147,18 @@ test("health carries a stale flag; /reset has its own per-IP allowance", async (
   assert.equal(last, 429, "the sixth reset in an hour from one address is refused");
   assert.equal((await post("/reset", { handle: "gus" }, null, { "x-forwarded-for": "203.0.113.10" })).statusCode, 200, "another address is unaffected");
 });
+
+test("lows: health hides diagnostics from signed-out callers; operator-only writes answer 403 to members", async () => {
+  const anon = JSON.parse((await get("/api/health")).body);
+  assert.equal(anon.ok, true); assert.equal(anon.volume, undefined, "the volume path is not for the open internet");
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const rich = JSON.parse((await get("/api/health", gus)).body);
+  assert.ok(rich.volume && rich.loop, "a signed-in caller gets the diagnostics");
+  const bob = jar(); bob.absorb(await post("/login", { handle: "bob", password: "another-long-pw-12" }));
+  // bob was disabled by the admin-lease test; a disabled member is 401, an enabled non-admin would be 403 — either way, never 200.
+  const v = await post("/api/earnings/void", { t: "AAPL", d: "2026-01-01" }, bob);
+  assert.notEqual(v.statusCode, 200);
+  const c = await post("/api/news/channels", { channels: ["x"] }, bob);
+  assert.notEqual(c.statusCode, 200);
+  assert.equal((await get("/join/NOT-A-REAL-CODE-1")).statusCode, 410);
+});
