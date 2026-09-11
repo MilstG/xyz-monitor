@@ -13336,7 +13336,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.11-63"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.11-64"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -23698,6 +23698,13 @@ test("retention: 30 days for a 1-to-1, 7 for groups and topics, pins and priced 
   assert.ok(A.history(g.uid, GR).messages.some((x) => x.id === call.id),
     "and so does the priced call — a track record that self-destructs is not a track record");
   assert.ok(A.calls(g.uid, {}).calls.some((c) => c.id === call.id), "the calls record still counts it");
+
+  // The permanence guarantee, pinned well past the 90-day floor the desk asked for: a call is not
+  // "retained 90 days", it is exempt from retention entirely — a sweep four months on must not
+  // touch it, and the record must still score it.
+  A.sweepRetention(now + 120 * 86400e3);
+  assert.ok(A.history(g.uid, GR).messages.some((x) => x.id === call.id), "at day 120 the call is still there");
+  assert.ok(A.calls(g.uid, {}).calls.some((c) => c.id === call.id), "and still on the record");
 });
 
 test("boards are quiet on Telegram by default — digests are the opt-in, mentions always land", () => {
