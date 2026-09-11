@@ -10523,7 +10523,7 @@ news:`
 // Short entries for the tabs that had none: pressing ? on Messages used to open the Markets text
 // under the title "How to read: dm".
 Object.assign(HELP,{
-  dm:`<div class="hlp-h">What it is</div><p>Direct messages and topic boards between account holders. Type <b>$TICKER</b> and the message carries the mark it was sent at — read later it says "sent at 113.90 · +4.0%". <b>short / sell / fade</b> before the ticker (or <b>short / puts</b> after) makes it a short; everything else is a long. Editing rewrites the words, never the stamp.</p><div class="hlp-h">Commands</div><p>Type <b>/</b> and a terminal verb — <b>/top funding 5</b>, <b>/nvda</b>, <b>/screen rvol>2</b> — and the result posts into the conversation under your name, badged <b>computed</b>. <b>/help</b> lists what runs here (only you see it). A plain-English question after the slash goes to the AI only where the operator has opened that in Admin › Features; it is admin-only by default. <b>//</b> sends a message that really starts with a slash.</p><div class="hlp-h">Calls</div><p><b>calls ↗</b> in the rail is every stamped message in one place, scored live and at fixed 1d / 7d horizons, with a per-person record. Deleting a call removes the words, never the score.</p><div class="hlp-h">Who can read this</div><p>The operator of this terminal can read every message, including conversations they are not in; every read is logged in Admin.</p>`,
+  dm:`<div class="hlp-h">What it is</div><p>Direct messages and topic boards between account holders. Type <b>$TICKER</b> and the message carries the mark it was sent at — read later it says "sent at 113.90 · +4.0%". <b>short / sell / fade</b> before the ticker (or <b>short / puts</b> after) makes it a short; everything else is a long. Editing rewrites the words, never the stamp.</p><div class="hlp-h">Commands</div><p>Type <b>/</b> and a terminal verb — <b>/top funding 5</b>, <b>/nvda</b>, <b>/screen rvol>2</b> — and the result posts into the conversation under your name, badged <b>computed</b>. <b>/help</b> lists what runs here (only you see it); the <b>?</b> beside the message box opens the full guide. A plain-English question after the slash goes to the AI only where the operator has opened that in Admin › Features; it is admin-only by default. <b>//</b> sends a message that really starts with a slash.</p><div class="hlp-h">Calls</div><p><b>calls ↗</b> in the rail is every stamped message in one place, scored live and at fixed 1d / 7d horizons, with a per-person record. Deleting a call removes the words, never the score.</p><div class="hlp-h">Who can read this</div><p>The operator of this terminal can read every message, including conversations they are not in; every read is logged in Admin.</p>`,
   notes:`<div class="hlp-h">What it is</div><p>Your written notes, per ticker, written in the ticker drawer. Each note is stamped with the mark it was written at, so every later read carries the move since. <b>#tags</b> in the body filter the tab.</p><div class="hlp-h">Markers on Markets</div><p>A post-it in the ticker cell means a note exists: solid within 7 days, dimmed to 30, hollow after. Hover for the first line; click to open.</p>`,
   charts:`<div class="hlp-h">What it is</div><p>Up to eight names side by side on the same timeframe. Pick tickers in the bar above; each chart shares the ladder the drawer uses.</p>`,
   treemap:`<div class="hlp-h">What it is</div><p>The universe by sector, tile area = the size measure you pick, colour = the move over the window. Click a tile to open the name.</p>`,
@@ -14893,27 +14893,86 @@ function dmLocalHtml(threadId){
   if(dmState.cmdBusy) h+='<div class="dm-local run"><span class="dm-cmdpr">\u25b8</span> '+esc(dmState.cmdLine)+' <i>running\u2026</i></div>';
   return h;
 }
-// /help — what runs from a chat, honest about what does not and about who may ask the AI here.
-function dmHelpCmd(){
-  const row=(k,v)=>'<span class="amber">'+esc(tpad(k,27))+'</span>'+esc(v)+'\n';
+// One source for the chat's /help card and the full guide modal (build 2026.09.11-70): the rows
+// live here and render two ways, so the card can never list a verb the guide forgot. Tags:
+// c = runs from a chat · t = panel only (opens a view or changes state) · i = AI, spends budget ·
+// a = operator only.
+const DM_CMD_GUIDE=[
+  {h:'Lookups',rows:[
+    ['<ticker>','the card \u2014 price, day move, funding, OI, squeeze, momentum, vs tape \u00b7 /nvda \u00b7 /btc','c'],
+    ['<ticker> <field>','one column on one name: funding \u00b7 oi \u00b7 squeeze \u00b7 d7 \u00b7 rvol \u00b7 gap \u00b7 vsvwap \u00b7 vsma200 \u00b7 ytd \u00b7 sector \u00b7 any board column','c']]},
+  {h:'Rankings & screens',rows:[
+    ['top|bottom <field> [n]','any column, plus gainers \u00b7 losers \u00b7 trending \u2014 /top funding 5 \u00b7 /bottom d7','c'],
+    ['screen <expr>','fields joined with & \u2014 /screen funding>20 & squeeze>50 \u00b7 /screen rvol>2','c'],
+    ['breadth \u00b7 sectors [d7|d30]','tape health \u00b7 sector performance','c']]},
+  {h:'Signals \u00b7 earnings \u00b7 news',rows:[
+    ['signals [ticker]','active signals, ledgered and resolved out of sample','c'],
+    ['earnings [ticker|today|tomorrow|week|recent]','the calendar, or one name\u2019s next print','c'],
+    ['news [ticker] [n]','verified headlines, 72h window','c'],
+    ['reports','recent AI reports','c']]},
+  {h:'Compare',rows:[
+    ['vs <a> <b>','side-by-side field compare','c'],
+    ['corr <a> <b>','correlation and hedge \u03b2 over 90 days of daily returns','c'],
+    ['diverge <ticker>','a name against its benchmark \u2014 is it decoupling','c'],
+    ['comp <a> <b> \u2026','overlay rebased to 100 (COMP/G) \u2014 opens the chart view','t'],
+    ['basket create|list|drop \u00b7 ratio <A>/<B> [tf]','custom baskets and synthetic pair candles','ta']]},
+  {h:'Filings & holders',rows:[
+    ['fund <ticker> \u00b7 etf <symbol>','SEC-filed balance sheet \u00b7 fund composition (N-PORT)','c'],
+    ['whale [KEY [full] | season]','tracked 13F funds, one fund\u2019s book, the quarter summary','c'],
+    ['holds <ticker>','who holds a name, from the market-wide index','c'],
+    ['insiders \u00b7 congress','Form 4 and PTR lane status','c']]},
+  {h:'AI',rows:[
+    ['<plain english>','anything the grammar can\u2019t parse \u2014 the answer posts here, badged AI','ci'],
+    ['report <ticker> \u00b7 report sector <name> \u00b7 report basket <t> <t> \u2026','the AI analyst report \u2014 opens the report view','ti']]},
+  {h:'Chat only',rows:[
+    ['/help','the short card, privately \u2014 only you see it','c'],
+    ['/clear','forget your private lines; the conversation is untouched','c'],
+    ['//text','send a message that really starts with a slash','c']]},
+  {h:'Admin',rows:[
+    ['admin unlock <password> \u00b7 admin lock \u00b7 admin reset-reports <password>','AI unlock and the daily budget \u2014 the echo is redacted','ta'],
+    ['whale add|pick|rm|mute|unmute|pull|ingest13f','curate the 13F watchlist','ta'],
+    ['earnings backfill \u00b7 insiders parse|requeue|backfill \u00b7 congress ingest|parse|ocr','lane maintenance','ta']]},
+];
+const DM_CMD_EXAMPLES=[['most crowded shorts','top funding'],['who reports tomorrow','earnings tomorrow'],['best sector this week','sectors d7'],
+  ['whats above the 200dma','screen vsma200>0'],['nvda vs amd','vs NVDA AMD'],['hows the tape','breadth']];
+function dmGuideChips(tags){
   const ai=dmAskAllowed();
-  dmLocal('<span class="tp-hd">chat terminal</span> <span class="tp-trans">\u00b7 type / then a verb \u00b7 the result posts into this conversation under your name</span>\n'
-    +row('/<ticker> [field]','card, or one column \u2014 /nvda \u00b7 /nvda funding \u00b7 /btc vsma200')
-    +row('/top|bottom <field> [n]','any column, plus gainers \u00b7 losers \u2014 /top funding 5 \u00b7 /bottom d7')
-    +row('/screen <expr>','/screen funding>20 & squeeze>50 \u00b7 /screen rvol>2')
-    +row('/breadth \u00b7 /sectors','tape health \u00b7 sector performance (add d7 / d30 for a window)')
-    +row('/signals [ticker]','active signals, ledgered and resolved out of sample')
-    +row('/earnings [t|when]','/earnings today \u00b7 tomorrow \u00b7 week \u00b7 /earnings nvda')
-    +row('/news [ticker] [n]','verified headlines, 72h window')
-    +row('/vs <a> <b>','side-by-side compare \u00b7 /corr <a> <b> for correlation \u00b7 /diverge <t>')
-    +row('/fund <t> \u00b7 /etf <sym>','SEC-filed balance sheet \u00b7 fund composition')
-    +row('/whale [fund] \u00b7 /holds <t>','tracked 13F books \u00b7 who holds a name')
-    +row('/reports','recent AI reports')
-    +row('/<plain english>',ai?'anything the grammar can\u2019t parse goes to the AI; the answer posts here, badged AI'
-      :'AI answers are admin-only in chat on this deployment \u2014 ask in the terminal (~) instead')
-    +row('/clear','forget these private lines (the conversation is untouched)')
-    +row('//text','send a message that really starts with a slash')
-    +'<span class="tp-trans">Results carry a computed or AI badge and can\u2019t be edited \u2014 delete and rerun. Not here: comp, basket, ratio, report, admin and every verb that changes state \u2014 those live in the terminal (~), where <span class="amber">help</span> lists everything.</span>','help');
+  return (tags.includes('c')?'<span class="hlp-chip chat">chat'+(tags.includes('i')&&!ai?' \u00b7 admin here':'')+'</span>':'<span class="hlp-chip term">terminal</span>')
+    +(tags.includes('i')?'<span class="hlp-chip ai">AI</span>':'')+(tags.includes('a')?'<span class="hlp-chip adm">admin</span>':'');
+}
+// The full guide, in the app's own help modal: every verb with where it runs, the plain-English
+// phrasebook, and the keys. Opened from the ? beside the composer and from the /help card.
+function openDmGuide(){
+  const bg=el('helpbg'), m=el('helpmodal'); if(!bg||!m) return;
+  const ai=dmAskAllowed(), on=dmCmdAllowed();
+  let h=`<div class="hlp-head">Commands \u2014 what you can type here<button class="btn xtiny" id="helpclose" title="close">\u2715</button></div>`
+    +`<div class="hlp-sub">Type <b>/</b> and a verb in the message box and the result posts into the conversation under your name, badged <b>computed</b> or <b>AI</b>. The same verbs run bare in the terminal (<kbd>~</kbd>). `
+    +(on?'':'<b>Chat commands are switched off on this deployment</b> \u2014 the terminal still takes them. ')
+    +(ai?'Plain-English questions go to the AI and post here.':'Plain-English questions are <b>admin-only in chat</b> on this deployment \u2014 ask them in the terminal instead.')+'</div>';
+  for(const s of DM_CMD_GUIDE){
+    h+='<div class="hlp-h">'+esc(s.h)+'</div><table class="hlp-cmd">'
+      +s.rows.map(r=>'<tr><td class="c">'+esc(r[0])+'</td><td>'+esc(r[1])+'</td><td class="w">'+dmGuideChips(r[2])+'</td></tr>').join('')+'</table>';
+  }
+  h+='<div class="hlp-h">Plain English</div><div class="hlp-sub" style="margin-bottom:6px">Everyday phrasing maps onto the grammar locally first \u2014 free, and badged computed. What follows the arrow is what runs.</div><table class="hlp-cmd">'
+    +DM_CMD_EXAMPLES.map(x=>'<tr><td class="c">/'+esc(x[0])+'</td><td>\u2192 '+esc(x[1])+'</td><td class="w"><span class="hlp-chip chat">chat</span></td></tr>').join('')+'</table>'
+    +'<div class="hlp-sub" style="margin-top:8px">A result carries no price stamp and can\u2019t be edited \u2014 delete it and run it again. Errors and <b>/help</b> stay private to you.</div>'
+    +HELP_KEYS;
+  m.innerHTML=h; bg.hidden=false; m.hidden=false; m.scrollTop=0;
+  const cb=el('helpclose'); if(cb) cb.onclick=closeHelp;
+}
+// /help — the short card, derived from the guide's chat rows so the two can never disagree.
+function dmHelpCmd(){
+  const row=(k,v)=>'<span class="amber">'+esc(tpad(k,30))+'</span>'+esc(v)+'\n';
+  const ai=dmAskAllowed();
+  let h='<span class="tp-hd">chat terminal</span> <span class="tp-trans">\u00b7 type / then a verb \u00b7 the result posts into this conversation under your name</span>\n';
+  for(const s of DM_CMD_GUIDE) for(const r of s.rows){
+    if(!r[2].includes('c')) continue;
+    const k=r[0].startsWith('/')?r[0]:'/'+r[0];
+    if(r[2].includes('i')&&!ai){ h+=row(k,'AI answers are admin-only in chat on this deployment \u2014 ask in the terminal (~) instead'); continue; }
+    h+=row(k,r[1]);
+  }
+  h+='<span class="tp-trans">Results carry a computed or AI badge and can\u2019t be edited \u2014 delete and rerun. Not here: comp, basket, ratio, report, admin and every verb that changes state \u2014 those live in the terminal (~). </span><span role="button" tabindex="0" class="amber" data-dmguide="1">open the full guide \u25b8</span>';
+  dmLocal(h,'help');
 }
 // Flatten the captured blocks to the text that becomes the message body. Badges are dropped (the
 // message carries its own), <br> becomes a newline, and error blocks are kept apart so a command
@@ -15810,6 +15869,7 @@ function dmRender(){
     +'<label class="dm-clip'+(canAttach?'':' off')+'" title="Attach an image or a .txt note (8 MB maximum) — or just paste a screenshot into the box">📎'
     +'<input type="file" id="dm-file" accept=".png,.jpg,.jpeg,.gif,.webp,.txt,image/png,image/jpeg,image/gif,image/webp,text/plain"'+(canAttach?'':' disabled')+'></label>'
     +'<button type="button" class="dm-clip dm-mic'+(canAttach?'':' off')+'" id="dm-mic" title="Record a voice note (3 MB max)"'+(canAttach?'':' disabled')+'>🎙</button>'
+    +'<button type="button" class="dm-clip dm-guidebtn" id="dm-guide" title="Commands \u2014 everything you can type here, and what runs from a chat">?</button>'
     +'<div class="dm-mpop" id="dm-mpop" hidden></div>'
     +'<textarea id="dm-input" rows="1" maxlength="'+dmState.maxLen+'" '
     +(canWrite?'':'disabled ')+'placeholder="'
@@ -16040,6 +16100,7 @@ function dmWire(){
     if(e.target.closest('#dm-unattach')){ dmState.pendingFile=null; dmRender(); return; }
     if(e.target.closest('#dm-newbtn')){ dmState.picking=!dmState.picking; dmRender(); return; }
     if(e.target.closest('#dm-send')){ dmSend(); return; }
+    if(e.target.closest('#dm-guide')||e.target.closest('[data-dmguide]')){ openDmGuide(); return; }
     if(e.target.closest('#dm-mute')){ dmToggleMute(); return; }
     if(e.target.closest('#dm-bnotify')){ dmToggleBoardNotify(); return; }
     if(e.target.closest('#dm-mic')){ dmMicToggle(); return; }

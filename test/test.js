@@ -13348,7 +13348,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.11-69"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.11-70"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -24659,5 +24659,16 @@ test("chat terminal -69: a command result is a message with cmd, no stamp, no ed
   assert.ok(/<pre class="dm-cmdout">'\+esc\(m\.body\)\+'<\/pre>/.test(app), "the output renders escaped, in a monospace block");
   assert.ok(/\/help for commands\)/.test(app), "the composer placeholder points at /help");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
-  for (const pin of [".dm-b.dm-cmdb{", ".dm-cmdout{", ".dm-local{", ".dm-local.err{", ".dm-localmk{"]) assert.ok(css.includes(pin), "css pin missing: " + pin);
+  for (const pin of [".dm-b.dm-cmdb{", ".dm-cmdout{", ".dm-local{", ".dm-local.err{", ".dm-localmk{", ".dm-guidebtn{", ".hlp-cmd{", ".hlp-chip.chat{"]) assert.ok(css.includes(pin), "css pin missing: " + pin);
+  // -70: the guide. One data source renders the private card AND the modal, a ? beside the
+  // composer opens it, and every verb the chat runner blocks is tagged panel-only in the guide.
+  assert.ok(/const DM_CMD_GUIDE=\[/.test(app) && /function openDmGuide\(\)\{/.test(app), "the guide exists");
+  assert.ok(/for\(const s of DM_CMD_GUIDE\) for\(const r of s\.rows\)\{\n\s*if\(!r\[2\]\.includes\('c'\)\) continue;/.test(app), "the /help card is derived from the guide's chat rows");
+  assert.ok(/id="dm-guide" title="Commands/.test(app) && /e\.target\.closest\('#dm-guide'\)\|\|e\.target\.closest\('\[data-dmguide\]'\)\)\{ openDmGuide\(\); return; \}/.test(app), "the ? beside the composer and the card's link both open the guide");
+  assert.ok(/data-dmguide="1">open the full guide/.test(app), "the private card links to the full guide");
+  const guideSrc = app.slice(app.indexOf("const DM_CMD_GUIDE=["), app.indexOf("const DM_CMD_EXAMPLES="));
+  for (const v of ["comp", "basket", "report", "admin"]) {
+    const row = [...guideSrc.matchAll(/\['([^']*)','[^']*','([a-z]+)'\]/g)].find((m) => m[1].split(/[\s|·]/)[0] === v);
+    assert.ok(row && row[2].includes("t") && !row[2].includes("c"), "guide row for " + v + " must be tagged panel-only — the chat runner refuses it");
+  }
 });

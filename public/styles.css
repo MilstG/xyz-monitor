@@ -2403,6 +2403,15 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .dm-local.run{color:var(--accent);border-style:dotted}
 .dm-local.help{color:var(--text)}
 .dm-localmk{float:right;font-size:8.5px;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);margin-left:10px;margin-top:1px}
+.dm-local [data-dmguide]{cursor:pointer;text-decoration:underline dotted}
+/* the ? beside the composer, and the command guide it opens in the help modal (build 2026.09.11-70) */
+.dm-guidebtn{font-family:var(--mono);font-weight:600;font-size:14px;color:var(--accent)}
+.hlp-cmd{border-collapse:collapse;width:100%;font-size:12.5px;margin:2px 0 4px} .hlp-cmd td{padding:5px 8px 5px 0;vertical-align:top;border-top:1px solid var(--border);line-height:1.45}
+.hlp-cmd td.c{font-family:var(--mono);font-size:12px;color:var(--accent);white-space:pre-wrap;word-break:break-word;width:36%}
+.hlp-cmd td.w{white-space:nowrap;text-align:right;padding-right:0}
+.hlp-chip{font-family:var(--mono);font-size:9px;letter-spacing:.4px;text-transform:uppercase;border:1px solid var(--border);border-radius:4px;padding:1px 5px;color:var(--muted);margin-left:4px}
+.hlp-chip.chat{color:var(--up);border-color:#274b3b} .hlp-chip.term{color:var(--blue);border-color:#2e3f5c} .hlp-chip.ai{color:var(--accent);border-color:var(--accent-dim)} .hlp-chip.adm{color:var(--down);border-color:#5a2f2a}
+@media (max-width:640px){.hlp-cmd td.w{white-space:normal}}
 .dm-gform{padding:8px 13px 12px;display:flex;flex-direction:column;gap:6px}
 .dm-gform input[type=text],.dm-gform input#dm-gtitle{background:var(--bg);border:1px solid var(--border);
   border-radius:6px;color:var(--text);font-family:var(--mono);font-size:12px;padding:7px 9px;outline:none}
