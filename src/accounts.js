@@ -1734,9 +1734,44 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       messages: S.msgMaxId.get().m };
   }
 
+  // ---- backup + close --------------------------------------------------------------------------
+  // accounts.db is the one file on the volume with no other copy anywhere: users, password hashes,
+  // invites, every message and every attachment. VACUUM INTO writes a consistent, compacted copy
+  // while the database stays live (WAL readers keep reading, writers keep writing), into a rotated
+  // set beside the database — or into ACCOUNTS_BACKUP_DIR when the operator mounts a second
+  // volume, which is what turns "survives a bad migration" into "survives losing the volume".
+  // Deliberately NOT the GitHub ledger backup: this file carries PII.
+  let lastBackup = null;
+  function backup(dir, keep) {
+    const out = dir || path.join(dataDir, "backups");
+    const n = Number.isFinite(keep) && keep >= 1 ? Math.floor(keep) : 7;
+    try {
+      fs.mkdirSync(out, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+      const file = path.join(out, `accounts-${stamp}-${Date.now() % 100000}.db`);
+      const tmp = file + ".tmp";
+      try { fs.unlinkSync(tmp); } catch (_) {}
+      db.exec("VACUUM INTO '" + tmp.replace(/'/g, "''") + "'");
+      fs.renameSync(tmp, file);
+      const bytes = fs.statSync(file).size;
+      // Rotate: newest n stay, the rest go. Names sort chronologically by construction.
+      const old = fs.readdirSync(out).filter((f) => /^accounts-\d{8}-\d{6}-\d+\.db$/.test(f)).sort();
+      for (const f of old.slice(0, Math.max(0, old.length - n))) { try { fs.unlinkSync(path.join(out, f)); } catch (_) {} }
+      lastBackup = { at: Date.now(), file, bytes };
+      return { ok: true, file, bytes, kept: Math.min(n, old.length) };
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || String(e) };
+    }
+  }
+  function close() {
+    try { db.exec("PRAGMA wal_checkpoint(TRUNCATE);"); } catch (_) {}
+    try { db.close(); } catch (_) {}
+  }
+
   return {
     // identity
     signSession, sessionUser, tokenFor, countUsers, getUser, getUserByHandle, listUsers, pub, deriveKey,
+    backup, close, lastBackup: () => lastBackup,
     login, setPassword, signOutEverywhere, setDisabled, setAdmin, renameUser, touch, hydrate,
     // invites
     mintInvite, readInvite, revokeInvite, listInvites, redeem, bootstrap, claim, inviteState,

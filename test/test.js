@@ -24322,3 +24322,33 @@ test("audit -67: level and EMA outcome studies score history in the σ the tape 
   const cmp = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "compute.js"), "utf8");
   assert.equal((cmp.match(/sdAt\(rets, i\); return v != null && v > 0 \? v : sd(30|Tf); \}/g) || []).length, 2);
 });
+
+// accounts.db — users, password hashes, every message and attachment — had no backup path at all
+// (only the ledger is shipped). A VACUUM INTO copy is taken after boot and daily, rotated.
+test("audit -67: accounts.db backs up as a consistent rotated copy and closes cleanly", () => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const { openAccounts } = require("../src/accounts");
+  const { DatabaseSync } = require("node:sqlite");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-acc-bk-"));
+  const A = openAccounts(dir, { sessionDays: 1 });
+  const b = A.bootstrap("gus", "a-long-password-12");
+  assert.ok(b.ok, "fixture account");
+  const r1 = A.backup(null, 2);
+  assert.ok(r1.ok && r1.bytes > 0 && r1.file.startsWith(path.join(dir, "backups")), JSON.stringify(r1));
+  const copy = new DatabaseSync(r1.file, { readOnly: true });
+  assert.equal(copy.prepare("SELECT count(*) AS n FROM user").get().n, 1, "the copy carries the data");
+  copy.close();
+  const r2 = A.backup(null, 2), r3 = A.backup(null, 2);
+  assert.ok(r2.ok && r3.ok);
+  const left = fs.readdirSync(path.join(dir, "backups")).filter((f) => f.endsWith(".db"));
+  assert.equal(left.length, 2, "rotation keeps the newest two");
+  assert.ok(!left.includes(path.basename(r1.file)) && left.includes(path.basename(r3.file)));
+  assert.ok(A.lastBackup() && A.lastBackup().file === r3.file);
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-acc-bk2-"));
+  assert.ok(A.backup(other, 7).ok, "an operator-mounted directory works too");
+  A.close();
+  assert.ok(!fs.existsSync(path.join(dir, "accounts.db-wal")) || fs.statSync(path.join(dir, "accounts.db-wal")).size === 0, "the WAL is checkpointed on close");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(/setInterval\(accountsBackup, 24 \* 3600 \* 1000\)/.test(srv), "scheduled daily");
+  assert.ok((srv.match(/try \{ ACCOUNTS\.close\(\); \} catch \(_\) \{\}/g) || []).length === 2, "closed on shutdown and on crash");
+});

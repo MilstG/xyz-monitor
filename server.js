@@ -2455,6 +2455,14 @@ async function main() {
 
   await fastify.listen({ port: PORT, host: HOST });
   log(`Listening on ${HOST}:${PORT} (dex=${DEX}, data=${DATA_DIR}, build=${VERSION})`);
+  // accounts.db backup: shortly after boot (a deploy is the moment a bad migration would show),
+  // then daily. Seven rotated copies beside the database, or in ACCOUNTS_BACKUP_DIR.
+  const accountsBackup = () => {
+    const r = ACCOUNTS.backup(process.env.ACCOUNTS_BACKUP_DIR || null, 7);
+    log(r.ok ? `accounts backup: ${r.file} (${(r.bytes / 1024).toFixed(0)} KB, ${r.kept} kept)` : `accounts backup FAILED: ${r.error}`);
+  };
+  setTimeout(accountsBackup, 5 * 60 * 1000).unref();
+  setInterval(accountsBackup, 24 * 3600 * 1000).unref();
   poller.start().catch((e) => log("poller start error: " + (e && e.message)));
 }
 
@@ -2480,6 +2488,7 @@ async function shutdown() {
   // fresh `v` in the initial frame — the push channel doubles as the fastest deploy notice.
   try { for (const res of sseClients) { try { res.end(); } catch (_) {} } sseClients.clear(); } catch (_) {}
   try { store.close(); } catch (_) {}
+  try { ACCOUNTS.close(); } catch (_) {}   // checkpoints the WAL so a redeploy never leaves -wal/-shm behind
   process.exit(0);
 }
 process.on("SIGTERM", shutdown);
@@ -2501,6 +2510,7 @@ function crashFlush(kind, err) {
   try { poller.persistPush(); } catch (_) {}
   try { persistLoopSync(); } catch (_) {}
   try { store.close(); } catch (_) {}
+  try { ACCOUNTS.close(); } catch (_) {}
   process.exit(1);
 }
 process.on("unhandledRejection", (e) => crashFlush("unhandledRejection", e));
