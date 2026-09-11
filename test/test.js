@@ -13348,7 +13348,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.11-71"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.11-72"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -24679,4 +24679,36 @@ test("chat terminal -69: a command result is a message with cmd, no stamp, no ed
     assert.ok(false, "a terminal handler fires a fetch without returning or awaiting it at: " + termSrc.slice(m.index, m.index + 60));
   for (const fn of ["termWhaleList", "termWhaleFund", "termWhaleSeason"])
     assert.ok(new RegExp("function " + fn + "\\([^)]*\\)\\{[\\s\\S]{0,400}?return fetchJSON\\(").test(app), fn + " must return its promise so a chat capture can await it");
+  // -72: `screen` parses fields with digits in their names, and a translation-only capture posts nothing.
+  const screenRe = /^([a-z][a-z0-9 ]*?)\s*(>=|<=|>|<|=)\s*(-?[\d.]+[kmbt]?)$/i;
+  assert.ok(app.includes("c.match(/^([a-z][a-z0-9 ]*?)\\s*(>=|<=|>|<|=)\\s*(-?[\\d.]+[kmbt]?)$/i)"), "screen field class must admit digits");
+  for (const [c, f, op, v] of [["vsma200>0", "vsma200", ">", "0"], ["d7 >= 2.5", "d7", ">=", "2.5"], ["vol30<40", "vol30", "<", "40"], ["oi>50m", "oi", ">", "50m"], ["funding > 20", "funding", ">", "20"]]) {
+    const m = c.match(screenRe); assert.ok(m, "screen clause must parse: " + c);
+    assert.equal(m[1].trim(), f); assert.equal(m[2], op); assert.equal(m[3], v);
+  }
+  assert.ok(!app.includes("can't parse \"${tesc(c)}\""), "termErr escapes — a pre-escaped clause rendered as &gt; on screen");
+  assert.ok(/return \{text:real\?out\.join\('\\n'\):'',errs:errs\.join\('\\n'\),ai:ai\};/.test(app), "a capture with no real output block (translation line only) has nothing to post");
+  // -72: /ratio posts the chart as a PNG through the ordinary attachment path; Tab completes.
+  assert.ok(/async function dmRatioChart\(args\)\{/.test(app) && /ratioSvg\(d,\{scale:'reb',ema:!!d\.ema200\}\)/.test(app), "/ratio renders the same SVG the Correlation tab draws");
+  assert.ok(/\.replace\(\/var\\\(--\(\[a-z0-9-\]\+\)\\\)\/g,\(m,n\)=>v\('--'\+n\)\)/.test(app), "CSS variables are substituted before rasterising — they do not resolve inside an <img>");
+  assert.ok(/new File\(\[png\],`ratio-\$\{d\.num\}-\$\{d\.den\}-\$\{tf\}\.png`,\{type:'image\/png'\}\)/.test(app), "the chart is a PNG file — the only inline type the upload sniff admits for a drawing");
+  assert.ok(/const res=await dmPost\(\{thread:t\.id,body:r\.body,cmd:line,fileId:up\.id\}\);/.test(app), "the chart posts as a command result WITH an attachment");
+  assert.ok(!/ratio:'opens the ratio chart'/.test(app), "ratio is no longer refused from chat");
+  assert.ok(/function dmComps\(text\)\{/.test(app) && /function dmCmdPop\(ta\)\{/.test(app) && /function dmCompPick\(x\)\{/.test(app), "the completion engine exists");
+  assert.ok(/c=c\.filter\(x=>!DM_CMD_BLOCKED\[x\.split\(' '\)\[0\]\]\);\n\s*const extra=\['help','clear','ratio'\]/.test(app), "completions never offer a verb the chat refuses, and the chat's own verbs are added after the filter");
+  assert.ok(/if\(!first&&p\[p\.length-1\]===''\) return \[\];/.test(app), "Tab after a finished argument offers nothing rather than rewriting it");
+  assert.ok(/if\(e\.key==='Tab'\)\{ e\.preventDefault\(\); const o=opts\[dmState\.compIdx%opts\.length\]; if\(o\)\{ dmCompPick\(o\.dataset\.dmcomp\); \} return; \}/.test(app), "Tab applies the highlighted completion");
+  assert.ok(/if\(e\.key==='Enter'&&!e\.shiftKey\)\{ pop\.hidden=true; \}/.test(app), "Enter with completions showing still SENDS — a finished command runs, it does not complete");
+  const acc = fs.readFileSync(path.join(__dirname, "..", "src", "accounts.js"), "utf8");
+  assert.ok(/const file = o\.fileId \? S\.fileById\.get\(o\.fileId\) : null;/.test(acc), "a command result may carry an attachment (the ratio chart)");
+  // -72: opening Messages lands at the bottom. A hidden log measures 0 tall and must read as "at
+  // bottom"; the open scrolls once more after layout; late-loading images keep the pin.
+  assert.ok(/logAtBottom: log \? \(log\.clientHeight===0 \|\| log\.scrollTop\+log\.clientHeight>=log\.scrollHeight-40\) : true \};/.test(app), "a hidden log reads as at-bottom");
+  assert.ok(/requestAnimationFrame\(\(\)=>\{ if\(state\.view==='dm'&&!dmState\.results&&dmState\.mode!=='calls'\) dmScrollBottom\(\); \}\);/.test(app), "openDM scrolls to the bottom after layout");
+  assert.ok(/function dmPinBottomOnImages\(\)\{/.test(app) && /\n  dmPinBottomOnImages\(\);\n\}/.test(app), "late images keep the reader pinned to the bottom");
+  // -72: AI notices (not enabled, busy, capped) never post as AI answers from a chat; `who` yields
+  // to the phrasebook unless the next word is a listed name.
+  assert.ok(/if\(d&&d\.disabled\) return _termSink\?termErr\("the AI fallback isn't enabled on the server/.test(app), "'AI not enabled' is private in chat");
+  assert.ok(/if\(d&&d\.error==='rate'\) return _termSink\?termErr\(/.test(app) && /if\(_termSink&&\(d&&\(d\.error==='ask-user-cap'\|\|d\.error==='ask-daily-cap'\)\)\) return termErr\(/.test(app), "busy and capped are private in chat");
+  assert.ok(/if\(head==='holds'\) return !!p\[1\];\n\s*if\(head==='who'\) return p\.length===2&&!!termFind\(p\[1\]\);/.test(app), "'who reports tomorrow' reaches the phrasebook — the grammar claims `who` only for a listed name");
 });

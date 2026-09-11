@@ -161,7 +161,10 @@ instant, and the per-IP rate limit stops being a per-user problem.
   enforces both on the post and on the ask, and `dm.ask` only ever narrows `ai.ask`. Verbs that open
   a view or change state (`comp`, `report`, `basket`, `whale add`, `admin …`) are refused with a
   pointer to the panel; a command result carries no price stamp (a screen dump that spells `$NVDA`
-  is nobody's call) and can't be edited — delete it and run it again.
+  is nobody's call) and can't be edited — delete it and run it again. `/ratio A/B [tf]` is the one
+  verb that posts a **picture**: the same SVG the Correlation tab draws is rasterised offscreen and
+  rides the ordinary attachment path as a PNG. **Tab** completes verbs, fields and tickers in the
+  composer, and the `?` beside it opens the full guide.
 - **The calls record** (`/api/dm/calls`) — every price-stamped message in one place, with the move
   since it was sent and a per-person summary. This is what the stamp was FOR: without somewhere to
   read them together, each call died in the conversation it was made in. Calls carry a

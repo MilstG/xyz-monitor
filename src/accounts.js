@@ -1305,9 +1305,10 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     // it back out. Capped hard: it is a label, and a label that needs 4000 characters is a body.
     const cmd = o.cmd == null ? null : cleanBody(String(o.cmd)).replace(/\s+/g, " ").trim().slice(0, DM_CMD_MAX) || null;
     const cmdAi = cmd && o.cmdAi ? 1 : null;
-    // A command result carries no attachment and quotes nothing: it is the board's output under
-    // the sender's name, not a reply. Dropped rather than erred — the client never sends them.
-    const file = (o.fileId && !cmd) ? S.fileById.get(o.fileId) : null;
+    // A command result quotes nothing (it is the board's output under the sender's name, not a
+    // reply) but MAY carry an attachment: /ratio posts its chart as a PNG. replyTo is dropped
+    // rather than erred — the client never sends it.
+    const file = o.fileId ? S.fileById.get(o.fileId) : null;
     if (!text && !file) return { ok: false, error: "write something first" };
     if (file && (file.thread !== t.id || file.uid !== fromUid)) return { ok: false, error: "that attachment is not yours" };
     if (S.msgBurst.get(fromUid, Date.now() - DM_BURST_MS).n >= DM_BURST_N)
