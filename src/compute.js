@@ -5511,6 +5511,17 @@ const FEATURES = [
   { key: "notes",      kind: "tab", label: "Notes",       def: "admin",  routes: ["/api/notes"] },
   { key: "ai.generate",   kind: "act", label: "AI report generation", def: "admin",  routes: ["POST /api/ai-report"] },
   { key: "ai.ask",        kind: "act", label: "Terminal AI fallback", def: "admin",  routes: ["POST /api/ask"] },
+  // CHAT TERMINAL (build 2026.09.11-69): the ask terminal's verbs run from a chat composer
+  // ("/top funding 5") and post their output into the conversation. Two keys, because the two
+  // halves spend different things: dm.terminal covers the local grammar (client-computed, costs
+  // nothing) and ships public; dm.ask covers the AI fallback (a paid /api/ask call whose answer
+  // lands in a thread everyone reads) and ships admin. Neither owns a route — the posting rides
+  // POST /api/dm and the AI leg rides POST /api/ask, both claimed above — so the gate lives in the
+  // handlers (the cmd / cmdAi fields on the send verb, ctx.via on the ask route): the same two-lock
+  // posture as whale.write. dm.ask never widens ai.ask — a caller the route gate refuses stays
+  // refused; it can only narrow where an answer may be posted.
+  { key: "dm.terminal",   kind: "act", label: "Terminal commands in chat", def: "public", routes: [] },
+  { key: "dm.ask",        kind: "act", label: "AI answers in chat",        def: "admin",  routes: [] },
   { key: "ai.reset",      kind: "act", label: "AI budget reset",      def: "admin",  routes: ["POST /api/ai-reset"] },
   { key: "export.ledger", kind: "act", label: "Ledger CSV export",    def: "public", routes: ["/api/export/ledger"] },
   { key: "news.write",    kind: "act", label: "Edit news channels",   def: "admin",  routes: ["POST /api/news/channels"] },

@@ -90,6 +90,7 @@ function pwError(pw) {
 // ---- message bodies ----------------------------------------------------------------------------
 const DM_MAX_LEN = 4000;
 const DM_BURST_N = 20, DM_BURST_MS = 10000;   // 20 messages / 10s per sender
+const DM_CMD_MAX = 160;                       // a command label; the OUTPUT is the body and takes the body cap
 function cleanBody(raw) {
   // Control characters out, CRLF normalised, runs of blank lines collapsed. Deliberately NOT
   // HTML-escaped here: escaping belongs at render, and storing pre-escaped text means every other
@@ -211,7 +212,9 @@ CREATE TABLE IF NOT EXISTS dm_msg (
   via TEXT,                        -- 'telegram' when it came in over the bridge, else NULL
   pinnedAt INTEGER,                -- a desk channel wants the current levels at the top
   pinnedBy TEXT,
-  replyTo INTEGER                  -- quoted message id, same thread — threading without threads
+  replyTo INTEGER,                 -- quoted message id, same thread — threading without threads
+  cmd TEXT,                        -- the terminal command this body is the output of ("top funding 5"), else NULL
+  cmdAi INTEGER                    -- 1 when that output came back from the AI fallback rather than the local grammar; NULL/0 otherwise
 ) STRICT;
 
 -- Tickers a member wants to hear about even when they are not looking. A message carrying one of
@@ -297,7 +300,8 @@ CREATE TABLE IF NOT EXISTS dm_webpush (
   // what produced "table dm_msg has no column named sys" the first time round.
   const ADDED_COLUMNS = {
     dm_thread: [["kind", "TEXT NOT NULL DEFAULT 'dm'"], ["pairKey", "TEXT"], ["title", "TEXT"], ["createdBy", "TEXT"]],
-    dm_msg: [["sys", "TEXT"], ["fileId", "TEXT"], ["via", "TEXT"], ["pinnedAt", "INTEGER"], ["pinnedBy", "TEXT"], ["replyTo", "INTEGER"], ["side", "TEXT"]],
+    dm_msg: [["sys", "TEXT"], ["fileId", "TEXT"], ["via", "TEXT"], ["pinnedAt", "INTEGER"], ["pinnedBy", "TEXT"], ["replyTo", "INTEGER"], ["side", "TEXT"],
+      ["cmd", "TEXT"], ["cmdAi", "INTEGER"]],
     dm_read: [["hiddenUpTo", "INTEGER NOT NULL DEFAULT 0"], ["clearedUpTo", "INTEGER NOT NULL DEFAULT 0"],
       ["boardNotify", "INTEGER NOT NULL DEFAULT 0"]],
   };
@@ -380,7 +384,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     memAll: db.prepare("SELECT * FROM dm_member WHERE thread = ?"),
     memLeave: db.prepare("UPDATE dm_member SET leftAt = ? WHERE thread = ? AND uid = ? AND leftAt IS NULL"),
 
-    msgIns: db.prepare("INSERT INTO dm_msg (thread, sender, ts, body, ref, refPx, side, sys, fileId, via, replyTo) VALUES (?,?,?,?,?,?,?,?,?,?,?)"),
+    msgIns: db.prepare("INSERT INTO dm_msg (thread, sender, ts, body, ref, refPx, side, sys, fileId, via, replyTo, cmd, cmdAi) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"),
     msgById: db.prepare("SELECT * FROM dm_msg WHERE id = ?"),
     msgEdit: db.prepare("UPDATE dm_msg SET body = ?, ref = ?, editedAt = ? WHERE id = ? AND sender = ? AND deletedAt IS NULL"),
     msgDrop: db.prepare("UPDATE dm_msg SET deletedAt = ?, body = '', fileId = NULL WHERE id = ? AND sender = ?"),
@@ -1004,7 +1008,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
         joined, lastAt: t.lastAt,
         unread: joined ? S.msgUnread.get(t.id, rd.readMsgId, uid).n : 0,
         preview: last ? String(last.sys ? sysLine(last) : last.deletedAt ? "message deleted"
-          : (last.body || "attachment")).slice(0, 90) : "no posts yet" };
+          : last.cmd ? "▸ " + last.cmd : (last.body || "attachment")).slice(0, 90) : "no posts yet" };
     });
   }
 
@@ -1013,7 +1017,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   // way for the membership story to drift from the message history.
   function sysMessage(threadId, actor, kind, detail) {
     const now = Date.now();
-    const id = Number(S.msgIns.run(+threadId, actor || "", now, String(detail || ""), null, null, null, kind, null, null, null).lastInsertRowid);
+    const id = Number(S.msgIns.run(+threadId, actor || "", now, String(detail || ""), null, null, null, kind, null, null, null, null, null).lastInsertRowid);
     S.thrTouch.run(id, now, +threadId);
     return id;
   }
@@ -1253,7 +1257,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const gone = !!q.deletedAt || q.id <= cf;
     return { id: q.id, senderUid: q.sender || null,
       sender: q.sender ? ((users.get(q.sender) || {}).display || "—") : "",
-      body: gone ? "" : String(q.body || (q.fileId ? "sent a file" : "")).slice(0, 120),
+      body: gone ? "" : (q.cmd ? "▸ " + q.cmd : String(q.body || (q.fileId ? "sent a file" : ""))).slice(0, 120),
       ref: gone ? null : (q.ref || null), deleted: gone };
   }
   function wire(m, uid) {
@@ -1268,6 +1272,10 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       px: m.ref ? markFor(m.ref) : null,          // live mark, derived at read — never stored
       edited: !!m.editedAt, deleted: !!m.deletedAt,
       sys: m.sys || null, via: m.via || null, pinned: !!m.pinnedAt,
+      // A command result names the command it answers and which engine answered it. The client
+      // renders the pair as a monospace block under a "▸ cmd" header with a computed/AI badge —
+      // the same two badges the terminal panel wears, so a reader knows what to trust.
+      cmd: m.cmd || null, cmdAi: !!m.cmdAi,
       file: m.deletedAt ? null : fileWire(m.fileId),
       reactions: m.deletedAt ? null : reactionsOf(m.id, uid) };
   }
@@ -1291,13 +1299,24 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       if (!t) return { ok: false, error: "could not open that conversation" };
     }
     const text = cleanBody(body);
-    const file = o.fileId ? S.fileById.get(o.fileId) : null;
+    // A terminal command's output, posted into the conversation (build 2026.09.11-69). The command
+    // travels as its own short field rather than a "▸ top funding" first line of the body, so the
+    // renderer, the digest and an export can all tell a computed table from prose without parsing
+    // it back out. Capped hard: it is a label, and a label that needs 4000 characters is a body.
+    const cmd = o.cmd == null ? null : cleanBody(String(o.cmd)).replace(/\s+/g, " ").trim().slice(0, DM_CMD_MAX) || null;
+    const cmdAi = cmd && o.cmdAi ? 1 : null;
+    // A command result carries no attachment and quotes nothing: it is the board's output under
+    // the sender's name, not a reply. Dropped rather than erred — the client never sends them.
+    const file = (o.fileId && !cmd) ? S.fileById.get(o.fileId) : null;
     if (!text && !file) return { ok: false, error: "write something first" };
     if (file && (file.thread !== t.id || file.uid !== fromUid)) return { ok: false, error: "that attachment is not yours" };
     if (S.msgBurst.get(fromUid, Date.now() - DM_BURST_MS).n >= DM_BURST_N)
       return { ok: false, error: "slow down — too many messages at once", retry: true };
 
-    const sym = firstTickerRef(text);
+    // No price stamp on a command result. The stamp is a CALL — "I said this at 113.90" — and a
+    // screen dump or an AI paragraph that happens to spell $NVDA is nobody's call; stamping it
+    // would seed the calls record with rows nobody made.
+    const sym = cmd ? null : firstTickerRef(text);
     let ref = null, refPx = null, side = null;
     if (sym) {
       // No resolver (the Telegram bridge path) means NO stamp — falling back to the raw symbol
@@ -1310,12 +1329,12 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     // A quote binds only inside its own conversation: a replyTo naming another thread's message is
     // dropped, not erred — the message still says what it says without the quote.
     let replyTo = null;
-    if (o.replyTo != null) {
+    if (o.replyTo != null && !cmd) {
       const rm = S.msgById.get(+o.replyTo);
       if (rm && rm.thread === t.id && !rm.sys && !rm.deletedAt) replyTo = rm.id;
     }
     const now = Date.now();
-    const id = Number(S.msgIns.run(t.id, fromUid, now, text, ref, refPx, side, null, file ? file.id : null, o.via || null, replyTo).lastInsertRowid);
+    const id = Number(S.msgIns.run(t.id, fromUid, now, text, ref, refPx, side, null, file ? file.id : null, o.via || null, replyTo, cmd, cmdAi).lastInsertRowid);
     S.thrTouch.run(id, now, t.id);
     S.readUp.run(t.id, fromUid, id);            // your own message is read by definition
     return { ok: true, id, thread: t.id, message: wire(S.msgById.get(id), fromUid) };
@@ -1325,6 +1344,9 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const m = S.msgById.get(+id);
     if (!m || m.sender !== uid || m.sys) return { ok: false, error: "that isn't your message" };
     if (m.deletedAt) return { ok: false, error: "that message was deleted" };
+    // A command result is the board's output under your name, not your prose: rewording it would
+    // put a "computed" badge on words nobody computed. Delete it and run the command again.
+    if (m.cmd) return { ok: false, error: "a command result can't be edited — delete it and run the command again" };
     const text = cleanBody(body);
     if (!text) return { ok: false, error: "write something first" };
     // The stamp is immutable under an edit — exactly what the composer promises ("the original
@@ -1355,6 +1377,9 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     // A preview of text this viewer cleared would un-forget it in the rail.
     const preview = (last && last.id > (rd.clearedUpTo || 0))
       ? (last.sys ? sysLine(last) : last.deletedAt ? "message deleted"
+        // A command result previews as the command: "▸ top funding 5" says what happened; the
+        // first 90 characters of a padded table say nothing at rail width.
+        : last.cmd ? "▸ " + last.cmd
         : ((last.ref ? "$" + last.ref + " · " : "") + (last.body || (last.fileId ? "sent a file" : ""))))
       : "";
     return {
@@ -1643,7 +1668,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       return { id: t.id, kind: t.kind, title: t.title || null, lastAt: t.lastAt,
         members: mem.map((m) => ({ handle: (users.get(m.uid) || {}).display || m.uid, left: !!m.leftAt })),
         n: db.prepare("SELECT COUNT(*) AS n FROM dm_msg WHERE thread = ?").get(t.id).n,
-        preview: last ? String(last.sys ? sysLine(last) : last.deletedAt ? "message deleted" : last.body).slice(0, 90) : "" };
+        preview: last ? String(last.sys ? sysLine(last) : last.deletedAt ? "message deleted" : last.cmd ? "▸ " + last.cmd : last.body).slice(0, 90) : "" };
     });
   }
   function adminHistory(adminUid, threadId, before, limit) {
@@ -1721,7 +1746,9 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
             : ((users.get(rows[rows.length - 1].sender) || {}).display || "someone"),
           n: rows.length, upTo: rows[rows.length - 1].id, hot: hot.length > 0,
           lines: rows.slice(-3).map((m) => ((m.ref ? "$" + m.ref + " · " : "")
-            + (m.body || (m.fileId ? "sent a file" : ""))).slice(0, 90)) });
+            // A command result digests as the command, not its first 90 characters of table:
+            // "▸ top funding 5" says what was asked; a padded header row says nothing on a phone.
+            + (m.cmd ? "▸ " + m.cmd : (m.body || (m.fileId ? "sent a file" : "")))).slice(0, 90)) });
       }
     }
     return out;

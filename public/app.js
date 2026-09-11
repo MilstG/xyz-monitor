@@ -10523,7 +10523,7 @@ news:`
 // Short entries for the tabs that had none: pressing ? on Messages used to open the Markets text
 // under the title "How to read: dm".
 Object.assign(HELP,{
-  dm:`<div class="hlp-h">What it is</div><p>Direct messages and topic boards between account holders. Type <b>$TICKER</b> and the message carries the mark it was sent at — read later it says "sent at 113.90 · +4.0%". <b>short / sell / fade</b> before the ticker (or <b>short / puts</b> after) makes it a short; everything else is a long. Editing rewrites the words, never the stamp.</p><div class="hlp-h">Calls</div><p><b>calls ↗</b> in the rail is every stamped message in one place, scored live and at fixed 1d / 7d horizons, with a per-person record. Deleting a call removes the words, never the score.</p><div class="hlp-h">Who can read this</div><p>The operator of this terminal can read every message, including conversations they are not in; every read is logged in Admin.</p>`,
+  dm:`<div class="hlp-h">What it is</div><p>Direct messages and topic boards between account holders. Type <b>$TICKER</b> and the message carries the mark it was sent at — read later it says "sent at 113.90 · +4.0%". <b>short / sell / fade</b> before the ticker (or <b>short / puts</b> after) makes it a short; everything else is a long. Editing rewrites the words, never the stamp.</p><div class="hlp-h">Commands</div><p>Type <b>/</b> and a terminal verb — <b>/top funding 5</b>, <b>/nvda</b>, <b>/screen rvol>2</b> — and the result posts into the conversation under your name, badged <b>computed</b>. <b>/help</b> lists what runs here (only you see it); the <b>?</b> beside the message box opens the full guide. A plain-English question after the slash goes to the AI only where the operator has opened that in Admin › Features; it is admin-only by default. <b>//</b> sends a message that really starts with a slash.</p><div class="hlp-h">Calls</div><p><b>calls ↗</b> in the rail is every stamped message in one place, scored live and at fixed 1d / 7d horizons, with a per-person record. Deleting a call removes the words, never the score.</p><div class="hlp-h">Who can read this</div><p>The operator of this terminal can read every message, including conversations they are not in; every read is logged in Admin.</p>`,
   notes:`<div class="hlp-h">What it is</div><p>Your written notes, per ticker, written in the ticker drawer. Each note is stamped with the mark it was written at, so every later read carries the move since. <b>#tags</b> in the body filter the tab.</p><div class="hlp-h">Markers on Markets</div><p>A post-it in the ticker cell means a note exists: solid within 7 days, dimmed to 30, hollow after. Hover for the first line; click to open.</p>`,
   charts:`<div class="hlp-h">What it is</div><p>Up to eight names side by side on the same timeframe. Pick tickers in the bar above; each chart shares the ladder the drawer uses.</p>`,
   treemap:`<div class="hlp-h">What it is</div><p>The universe by sector, tile area = the size measure you pick, colour = the move over the window. Click a tile to open the name.</p>`,
@@ -10728,7 +10728,7 @@ function termCard(r){ const apr=termAprOf(r), fp=r.fundPct;
 function termFieldCmd(r,fname){
   if((fname||'').toLowerCase().replace(/[^a-z]/g,'')==='sector'){ termHi(r.coin);
     return termOut(`${termTkHdr(r)}\n<span class="tp-k">sector</span> <b>${r.sector?tesc(r.sector):'—'}</b>${r.secAuto?` <span class="auto-chip${r.secAuto==='grad'?' grad':''}" title="${r.secAuto==='grad'?'auto-graduated Pre-IPO \u2192 Equity by the weekly sector audit \u2014 evidence + revert in Admin \u00b7 Classification audit':'auto-classified by the weekly sector audit (Finnhub + EDGAR agreement) \u2014 evidence + revert in Admin \u00b7 Classification audit'}">auto${r.secAuto==='grad'?'\u00b7grad':''}</span>`:''}`); }
-  const fk=tfield(fname); if(!fk){ termAsk(r.ticker+' '+fname); return; }   // unknown lens -> let the AI try, don't fake a card
+  const fk=tfield(fname); if(!fk) return termAsk(r.ticker+' '+fname);   // unknown lens -> let the AI try, don't fake a card (returned: a chat capture awaits it)
   const F=TFIELD[fk], v=F.g(r); termHi(r.coin);
   termOut(`${termTkHdr(r)}\n<span class="tp-k">${F.l}</span> <b>${v==null||!isFinite(v)?'—':F.f(v)}</b>`); }
 function termTop(metric,n,asc){ n=n||8; const m=metricOf(metric)||tfield(metric);
@@ -11134,6 +11134,9 @@ function termCompactUniverse(){ const rnd=v=>(v==null||!isFinite(v))?null:+v.toF
     for(const k in o){ if(o[k]==null) delete o[k]; } return o; }); }
 function termThinking(){ const d=document.createElement('div'); d.className='tp-blk';
   d.innerHTML=`<span class="tp-badge ai">AI</span> <span class="tp-line"><span class="amber tp-think">thinking…</span></span>`;
+  // Under a chat sink the placeholder is never shown (the composer has its own "running…" line)
+  // and never collected: a detached node's .remove() is a no-op, so callers need no branch.
+  if(_termSink) return d;
   termEl('termScroll').appendChild(d); termScrollDown(); return d; }
 // Session transcript. Statelessness made the AI blind to its own conversation — "not what I
 // asked" arrived alone and the analyst could only shrug at four words. Every exchange (local OR
@@ -11144,18 +11147,30 @@ function termHistPush(q,a){ _termHist.push({q:String(q||'').slice(0,300), a:Stri
 function termCausal(text){ return /\bwhy\b|\bhow come\b|\bcaus(e|es|ed|ing)\b|\bexplain\b|\breasons?\b|\bdriving\b|\bwhat happened\b|\bgoing on\b|\bbehind (the|this|its)\b/i.test(text)
   || /^\s*(what if|what would|what happens|should i|do you think|is it|are they|which is better|compare|walk me)\b/i.test(text); }
 async function termAsk(text){
+  // Inside a chat capture the AI leg is a separate switch (dm.ask, admin by default): a verb that
+  // would escalate on its own — an unknown lens, a question the grammar can't parse — stops HERE
+  // with a plain answer rather than spending budget on a reply the composer may not post.
+  if(_termSink&&!_termSink.ai) return termErr('AI answers are admin-only in chat on this deployment — /help lists what runs here, or ask in the terminal (~)');
   const mode=termCausal(text)?'analyst':'planner';
   const uni=termCompactUniverse(); const think=termThinking();
   try{
-    const r=await fetch('/api/ask',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({q:text, ctx:{scope:state.scope, mode, universe:uni, hist:_termHist.slice(-6)}})});
+    const ctx={scope:state.scope, mode, universe:uni, hist:_termHist.slice(-6)};
+    if(_termSink) ctx.via='dm';   // the server applies dm.ask on top of ai.ask for an answer bound for a conversation
+    const r=await fetch('/api/ask',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({q:text, ctx})});
     const d=await r.json().catch(()=>({})); think.remove();
     if(d&&d.askDayLeft!=null) renderAskBudget(d.askDayLeft, d.askPerDay);   // reflect the spend immediately
     if(d&&d.disabled) return termOutAI(`the AI fallback isn't enabled on the server yet <span class="tp-trans">(no API key set)</span>. The local engine handles most questions — try a ticker, <span class="ex" data-tcmd="top funding">top funding</span>, or <span class="ex" data-tcmd="help">help</span>.`);
     if(!d||!d.ok){ if(d&&d.error==='rate') return termOutAI(`busy — the shared AI limit is maxed for a moment <span class="tp-trans">(retry in ${Math.ceil((d.retryMs||3000)/1000)}s)</span>.`);
+      if(d&&d.error==='feature-gated') return termErr(d.feature==='dm.ask'?'AI answers are admin-only in chat on this deployment':'the AI fallback is not enabled for this view');
       if(d&&d.error==='ask-user-cap') return termOutAI(`your daily AI limit is reached — <span class="tp-err">${d.askUserPerDay||5}/${d.askUserPerDay||5}</span> of your ask calls used today, resets at midnight UTC. Local commands still work: try a ticker, <span class="ex" data-tcmd="top funding">top funding</span>, or <span class="ex" data-tcmd="screen">screen</span>.`);
       if(d&&d.error==='ask-daily-cap') return termOutAI(`the shared daily AI pool is exhausted — <span class="tp-err">${d.askPerDay||0}/${d.askPerDay||0}</span> ask calls used across all users today, resets at midnight UTC. Local commands still work: try a ticker, <span class="ex" data-tcmd="top funding">top funding</span>, or <span class="ex" data-tcmd="screen">screen</span>.`);
       return termErr(`couldn't resolve that — ${tesc((d&&d.error)||'error')}`); }
-    if(d.mode==='planner'&&d.query){ termHistPush(text,'→ '+d.query); termOutAI(`<span class="tp-trans">planned → ${tesc(d.query)}</span>`); return termExec(d.query); }   // AI planned, client computes
+    if(d.mode==='planner'&&d.query){
+      // A chat capture's allowlist applies to what the AI PLANS too: "compare nvda and amd" could
+      // plan `comp NVDA AMD`, which opens the chart view — from the panel that is the answer, from
+      // a conversation it would navigate the sender away mid-chat. The sink says what may run.
+      if(_termSink&&_termSink.check){ const why=_termSink.check(d.query); if(why) return termErr('planned → '+d.query+' — '+why); }
+      termHistPush(text,'→ '+d.query); termOutAI(`<span class="tp-trans">planned → ${tesc(d.query)}</span>`); return termExec(d.query); }   // AI planned, client computes
     if(d.mode==='analyst'){ termHistPush(text,d.answer||'');
       const tail=d.admin?' · <span class="tp-trans">admin — unlimited</span>'
         :d.askUserDayLeft!=null?` · <span style="color:${d.askUserDayLeft<=1?'var(--accent)':'var(--faint)'}">${d.askUserDayLeft} of ${d.askUserPerDay} of your ask calls left today</span>`
@@ -11164,6 +11179,9 @@ async function termAsk(text){
   }catch(e){ think.remove(); termErr('ask failed — '+tesc(e.message)); }
 }
 function termRun(raw){ const line=raw.trim(); if(!line) return;
+  // One sink at a time: while a chat command is collecting output, a panel command would land in
+  // that conversation. Written straight to the panel — termErr itself would go to the sink.
+  if(_termSink){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML='<span class="tp-line tp-err">✗ a chat command is still running — try again in a moment</span>'; termEl('termScroll').appendChild(d); termScrollDown(); return; }
   // Admin command — intercepted BEFORE the echo (so the password renders redacted, never
   // sitting in scrollback) and before any tier can touch it: the password goes to
   // /api/ai-reset and nowhere else — it can never escalate to /api/ask.
@@ -11229,11 +11247,18 @@ async function termRefreshLock(){ try{ const d=await fetchJSON('/api/ai-status')
   if(b) b.hidden=!(d&&d.gated); termSetLock(!(d&&d.unlocked)); }catch(_){} }
 
 // ---- panel plumbing / rendering ----
-function termOut(html){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<span class="tp-badge c">computed</span> <span class="tp-line">${html}</span>`; termEl('termScroll').appendChild(d); termScrollDown(); }
-function termOutTrans(cmd){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<span class="tp-trans">→ ${tesc(cmd)}</span>`; termEl('termScroll').appendChild(d); }
-function termOutAI(html){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<span class="tp-badge ai">AI</span> <span class="tp-line">${html}</span>`; termEl('termScroll').appendChild(d); termScrollDown(); }
-function termEcho(c){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<div class="tp-line tp-echo"><span class="pr">▸</span> <span class="c">${tesc(c)}</span></div>`; termEl('termScroll').appendChild(d); termScrollDown(); }
-function termErr(m){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<span class="tp-line tp-err">✗ ${tesc(m)}</span>`; termEl('termScroll').appendChild(d); termScrollDown(); }
+// Every block the terminal draws goes through termEmit. Normally that is the panel's scrollback;
+// while a chat command runs (dmRunCmd, build 2026.09.11-69) a sink collects the blocks instead, so
+// the SAME verb handlers — one code path, the numbers the board renders — answer inside a
+// conversation without knowing they are not in the panel. `ai` on the sink says whether the AI
+// leg may fire for this capture; termAsk reads it.
+let _termSink=null;
+function termEmit(d){ if(_termSink){ _termSink.blocks.push(d); return; } termEl('termScroll').appendChild(d); termScrollDown(); }
+function termOut(html){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<span class="tp-badge c">computed</span> <span class="tp-line">${html}</span>`; termEmit(d); }
+function termOutTrans(cmd){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<span class="tp-trans">→ ${tesc(cmd)}</span>`; termEmit(d); }
+function termOutAI(html){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<span class="tp-badge ai">AI</span> <span class="tp-line">${html}</span>`; termEmit(d); }
+function termEcho(c){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<div class="tp-line tp-echo"><span class="pr">▸</span> <span class="c">${tesc(c)}</span></div>`; termEmit(d); }
+function termErr(m){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<span class="tp-line tp-err">✗ ${tesc(m)}</span>`; termEmit(d); }
 function termScrollDown(){ const s=termEl('termScroll'); s.scrollTop=s.scrollHeight; }
 function termHi(coin){ const r=state.rows.get(coin); if(!r) return; if(state.view!=='markets') return;
   const tr=document.querySelector(`#body tr[data-coin="${CSS.escape(coin)}"]`); if(tr){ tr.classList.add('rowflash'); tr.scrollIntoView({block:'center',behavior:SCROLL_B}); setTimeout(()=>tr.classList.remove('rowflash'),1500); } }
@@ -14510,7 +14535,10 @@ const dmState = { me: null, threads: [], members: [], online: new Set(),
   watching: [], admin: false, operatorReadsAll: false, calls: null, mode: 'chat', watchAdd: false,
   boards: [], meTg: false, adoptables: null,
   replying: null, unreadMark: null, scrollToNew: false, showClosed: false,
-  callsBy: null, webPushOn: false, searchScope: 'all' };
+  callsBy: null, webPushOn: false, searchScope: 'all',
+  // Chat terminal (build 2026.09.11-69): per-thread lines only this viewer sees (help, errors,
+  // "running…"), never sent anywhere; and the one-at-a-time latch for a command in flight.
+  localOut: new Map(), cmdBusy: false, cmdLine: '' };
 
 function dmSignedIn(){ return !!(window.__ME && window.__ME.uid); }
 function dmUnreadTotal(){ return dmState.threads.reduce((a,t)=>a+((t.muted||t.hidden)?0:(t.unread||0)),0); }
@@ -14773,7 +14801,12 @@ async function dmPost(body){
 // ---- sending -----------------------------------------------------------------------------------
 async function dmSend(){
   const ta=el('dm-input'); if(!ta||dmState.sending) return;
-  const text=ta.value.trim();
+  let text=ta.value.trim();
+  // "/verb …" is a terminal command, not a message (build 2026.09.11-69): it runs through the
+  // ask terminal's own handlers and its OUTPUT is what gets posted. "//…" sends a message that
+  // really starts with a slash. Editing never routes here — a rewording is prose by definition.
+  if(!dmState.editing&&/^\/[^\/\s]/.test(text)) return dmRunCmd(text);
+  if(!dmState.editing&&text.startsWith('//')) text=text.slice(1);
   const file=dmState.editing?null:dmState.pendingFile;   // the edit verb has no fileId — never upload into it
   if(!text&&!file) return;
   const t=dmThread(dmState.sel), peer=dmState.pendingPeer;
@@ -14812,6 +14845,197 @@ async function dmSend(){
   }else{
     dmState.err=(res.d&&res.d.error)||'could not send — try again';
     dmRender();
+  }
+}
+
+// ---- chat terminal ------------------------------------------------------------------------------
+// The ask terminal's verbs, run from the composer and posted into the conversation. One code path:
+// the SAME handlers the panel uses run against the SAME rows, with the panel's output sink swapped
+// for a collector (see termEmit); the collected blocks are flattened to text and sent as an
+// ordinary message carrying `cmd`, so everyone in the thread reads the same table under the
+// sender's name, badged computed or AI exactly as the panel badges it.
+//
+// Two switches, both the operator's (Admin › Features): dm.terminal for the local grammar (public
+// by default — it costs nothing), dm.ask for the AI leg (admin by default — it spends the shared
+// budget and the answer lands where the whole conversation reads it). The server enforces both on
+// the post and on the ask; the checks here only spare a member the round trip.
+//
+// Not everything the panel can do belongs in a chat. Verbs that OPEN A VIEW (comp, report, ratio,
+// drawer), CHANGE STATE (basket, whale add/rm, backfills, admin …) or STEER THE PANEL (clear,
+// stocks/crypto) are refused with a pointer to the terminal — a table posted for a group is a
+// different act from navigating your own screen.
+const DM_CMD_BLOCKED={comp:'opens the chart view',ratio:'opens the ratio chart',report:'opens the AI report view',ai:'opens the AI report view',
+  basket:'edits the basket registry',admin:'admin verbs stay in the terminal',clear:'steers the panel',stocks:'switches your scope',crypto:'switches your scope',
+  drawer:'opens the drawer',history:'is the panel\u2019s own scrollback',watch:'edits your watchlist',notes:'opens the notes book'};
+const DM_CMD_SUB_BLOCKED={earnings:['backfill'],earn:['backfill'],whale:['add','pick','rm','ingest13f','pull','mute','unmute'],'13f':['add','pick','rm','ingest13f','pull','mute','unmute'],
+  insiders:['parse','requeue','backfill'],form4:['parse','requeue','backfill'],congress:['ingest','parse','ocr']};
+// null = fine, else the reason a RESOLVED command may not run from a chat.
+function dmCmdCheck(cmd){
+  const p=cmd.trim().split(/\s+/), h=(p[0]||'').toLowerCase(), sub=(p[1]||'').toLowerCase();
+  if(/^report\s+(sector|basket)\b/i.test(cmd)) return '"report" opens the AI report view \u2014 use the terminal (~)';
+  if(DM_CMD_BLOCKED[h]) return '"'+h+'" '+DM_CMD_BLOCKED[h]+' \u2014 use the terminal (~)';
+  if(DM_CMD_SUB_BLOCKED[h]&&DM_CMD_SUB_BLOCKED[h].includes(sub)) return '"'+h+' '+sub+'" changes state \u2014 use the terminal (~)';
+  return null;
+}
+function dmCmdAllowed(){ return IS_ADMIN||featureOn('dm.terminal'); }
+function dmAskAllowed(){ return IS_ADMIN||featureOn('dm.ask'); }
+// A line only this viewer sees, in this thread, under the messages. Never persisted, never sent;
+// cleared by /clear, capped so a run of errors can't push the conversation off the screen.
+function dmLocal(html,cls){
+  const id=dmState.sel; if(id==null) return;
+  let arr=dmState.localOut.get(id); if(!arr){ arr=[]; dmState.localOut.set(id,arr); }
+  arr.push({html:html,cls:cls||'',ts:Date.now()}); while(arr.length>6) arr.shift();
+  dmRender(); dmScrollBottom();
+}
+function dmLocalHtml(threadId){
+  const arr=dmState.localOut.get(threadId)||[]; let h='';
+  for(const x of arr) h+='<div class="dm-local '+x.cls+'"><span class="dm-localmk">only you see this</span>'+x.html+'</div>';
+  if(dmState.cmdBusy) h+='<div class="dm-local run"><span class="dm-cmdpr">\u25b8</span> '+esc(dmState.cmdLine)+' <i>running\u2026</i></div>';
+  return h;
+}
+// One source for the chat's /help card and the full guide modal (build 2026.09.11-70): the rows
+// live here and render two ways, so the card can never list a verb the guide forgot. Tags:
+// c = runs from a chat · t = panel only (opens a view or changes state) · i = AI, spends budget ·
+// a = operator only.
+const DM_CMD_GUIDE=[
+  {h:'Lookups',rows:[
+    ['<ticker>','the card \u2014 price, day move, funding, OI, squeeze, momentum, vs tape \u00b7 /nvda \u00b7 /btc','c'],
+    ['<ticker> <field>','one column on one name: funding \u00b7 oi \u00b7 squeeze \u00b7 d7 \u00b7 rvol \u00b7 gap \u00b7 vsvwap \u00b7 vsma200 \u00b7 ytd \u00b7 sector \u00b7 any board column','c']]},
+  {h:'Rankings & screens',rows:[
+    ['top|bottom <field> [n]','any column, plus gainers \u00b7 losers \u00b7 trending \u2014 /top funding 5 \u00b7 /bottom d7','c'],
+    ['screen <expr>','fields joined with & \u2014 /screen funding>20 & squeeze>50 \u00b7 /screen rvol>2','c'],
+    ['breadth \u00b7 sectors [d7|d30]','tape health \u00b7 sector performance','c']]},
+  {h:'Signals \u00b7 earnings \u00b7 news',rows:[
+    ['signals [ticker]','active signals, ledgered and resolved out of sample','c'],
+    ['earnings [ticker|today|tomorrow|week|recent]','the calendar, or one name\u2019s next print','c'],
+    ['news [ticker] [n]','verified headlines, 72h window','c'],
+    ['reports','recent AI reports','c']]},
+  {h:'Compare',rows:[
+    ['vs <a> <b>','side-by-side field compare','c'],
+    ['corr <a> <b>','correlation and hedge \u03b2 over 90 days of daily returns','c'],
+    ['diverge <ticker>','a name against its benchmark \u2014 is it decoupling','c'],
+    ['comp <a> <b> \u2026','overlay rebased to 100 (COMP/G) \u2014 opens the chart view','t'],
+    ['basket create|list|drop \u00b7 ratio <A>/<B> [tf]','custom baskets and synthetic pair candles','ta']]},
+  {h:'Filings & holders',rows:[
+    ['fund <ticker> \u00b7 etf <symbol>','SEC-filed balance sheet \u00b7 fund composition (N-PORT)','c'],
+    ['whale [KEY [full] | season]','tracked 13F funds, one fund\u2019s book, the quarter summary','c'],
+    ['holds <ticker>','who holds a name, from the market-wide index','c'],
+    ['insiders \u00b7 congress','Form 4 and PTR lane status','c']]},
+  {h:'AI',rows:[
+    ['<plain english>','anything the grammar can\u2019t parse \u2014 the answer posts here, badged AI','ci'],
+    ['report <ticker> \u00b7 report sector <name> \u00b7 report basket <t> <t> \u2026','the AI analyst report \u2014 opens the report view','ti']]},
+  {h:'Chat only',rows:[
+    ['/help','the short card, privately \u2014 only you see it','c'],
+    ['/clear','forget your private lines; the conversation is untouched','c'],
+    ['//text','send a message that really starts with a slash','c']]},
+  {h:'Admin',rows:[
+    ['admin unlock <password> \u00b7 admin lock \u00b7 admin reset-reports <password>','AI unlock and the daily budget \u2014 the echo is redacted','ta'],
+    ['whale add|pick|rm|mute|unmute|pull|ingest13f','curate the 13F watchlist','ta'],
+    ['earnings backfill \u00b7 insiders parse|requeue|backfill \u00b7 congress ingest|parse|ocr','lane maintenance','ta']]},
+];
+const DM_CMD_EXAMPLES=[['most crowded shorts','top funding'],['who reports tomorrow','earnings tomorrow'],['best sector this week','sectors d7'],
+  ['whats above the 200dma','screen vsma200>0'],['nvda vs amd','vs NVDA AMD'],['hows the tape','breadth']];
+function dmGuideChips(tags){
+  const ai=dmAskAllowed();
+  return (tags.includes('c')?'<span class="hlp-chip chat">chat'+(tags.includes('i')&&!ai?' \u00b7 admin here':'')+'</span>':'<span class="hlp-chip term">terminal</span>')
+    +(tags.includes('i')?'<span class="hlp-chip ai">AI</span>':'')+(tags.includes('a')?'<span class="hlp-chip adm">admin</span>':'');
+}
+// The full guide, in the app's own help modal: every verb with where it runs, the plain-English
+// phrasebook, and the keys. Opened from the ? beside the composer and from the /help card.
+function openDmGuide(){
+  const bg=el('helpbg'), m=el('helpmodal'); if(!bg||!m) return;
+  const ai=dmAskAllowed(), on=dmCmdAllowed();
+  let h=`<div class="hlp-head">Commands \u2014 what you can type here<button class="btn xtiny" id="helpclose" title="close">\u2715</button></div>`
+    +`<div class="hlp-sub">Type <b>/</b> and a verb in the message box and the result posts into the conversation under your name, badged <b>computed</b> or <b>AI</b>. The same verbs run bare in the terminal (<kbd>~</kbd>). `
+    +(on?'':'<b>Chat commands are switched off on this deployment</b> \u2014 the terminal still takes them. ')
+    +(ai?'Plain-English questions go to the AI and post here.':'Plain-English questions are <b>admin-only in chat</b> on this deployment \u2014 ask them in the terminal instead.')+'</div>';
+  for(const s of DM_CMD_GUIDE){
+    h+='<div class="hlp-h">'+esc(s.h)+'</div><table class="hlp-cmd">'
+      +s.rows.map(r=>'<tr><td class="c">'+esc(r[0])+'</td><td>'+esc(r[1])+'</td><td class="w">'+dmGuideChips(r[2])+'</td></tr>').join('')+'</table>';
+  }
+  h+='<div class="hlp-h">Plain English</div><div class="hlp-sub" style="margin-bottom:6px">Everyday phrasing maps onto the grammar locally first \u2014 free, and badged computed. What follows the arrow is what runs.</div><table class="hlp-cmd">'
+    +DM_CMD_EXAMPLES.map(x=>'<tr><td class="c">/'+esc(x[0])+'</td><td>\u2192 '+esc(x[1])+'</td><td class="w"><span class="hlp-chip chat">chat</span></td></tr>').join('')+'</table>'
+    +'<div class="hlp-sub" style="margin-top:8px">A result carries no price stamp and can\u2019t be edited \u2014 delete it and run it again. Errors and <b>/help</b> stay private to you.</div>'
+    +HELP_KEYS;
+  m.innerHTML=h; bg.hidden=false; m.hidden=false; m.scrollTop=0;
+  const cb=el('helpclose'); if(cb) cb.onclick=closeHelp;
+}
+// /help — the short card, derived from the guide's chat rows so the two can never disagree.
+function dmHelpCmd(){
+  const row=(k,v)=>'<span class="amber">'+esc(tpad(k,30))+'</span>'+esc(v)+'\n';
+  const ai=dmAskAllowed();
+  let h='<span class="tp-hd">chat terminal</span> <span class="tp-trans">\u00b7 type / then a verb \u00b7 the result posts into this conversation under your name</span>\n';
+  for(const s of DM_CMD_GUIDE) for(const r of s.rows){
+    if(!r[2].includes('c')) continue;
+    const k=r[0].startsWith('/')?r[0]:'/'+r[0];
+    if(r[2].includes('i')&&!ai){ h+=row(k,'AI answers are admin-only in chat on this deployment \u2014 ask in the terminal (~) instead'); continue; }
+    h+=row(k,r[1]);
+  }
+  h+='<span class="tp-trans">Results carry a computed or AI badge and can\u2019t be edited \u2014 delete and rerun. Not here: comp, basket, ratio, report, admin and every verb that changes state \u2014 those live in the terminal (~). </span><span role="button" tabindex="0" class="amber" data-dmguide="1">open the full guide \u25b8</span>';
+  dmLocal(h,'help');
+}
+// Flatten the captured blocks to the text that becomes the message body. Badges are dropped (the
+// message carries its own), <br> becomes a newline, and error blocks are kept apart so a command
+// that produced nothing but an error is shown privately instead of posted.
+function dmCmdText(blocks){
+  const out=[], errs=[]; let ai=false;
+  for(const b of blocks){
+    if(b.querySelector('.tp-badge.ai')) ai=true;
+    const c=b.cloneNode(true);
+    c.querySelectorAll('.tp-badge').forEach(x=>x.remove());
+    c.querySelectorAll('br').forEach(x=>x.replaceWith('\n'));
+    const isErr=!!c.querySelector('.tp-err');
+    const line=c.querySelector('.tp-line')||c;
+    const txt=String(line.textContent||'').replace(/[ \t]+$/gm,'').replace(/^\n+/,'').replace(/\s+$/,'');
+    if(!txt) continue;
+    (isErr?errs:out).push(txt);
+  }
+  return {text:out.join('\n'),errs:errs.join('\n'),ai:ai};
+}
+async function dmRunCmd(raw){
+  const ta=el('dm-input');
+  const line=String(raw||'').replace(/^\//,'').trim();
+  const t=dmThread(dmState.sel);
+  if(!t){ dmState.err='say something first \u2014 commands run inside an existing conversation'; dmRender(); return; }
+  // The box empties the moment the command is accepted, like the panel's: an error line below
+  // repeats what was typed, so nothing is lost.
+  if(ta){ ta.value=''; dmAutoGrow(ta); } dmDraftSave(dmState.sel,'');
+  if(!dmCmdAllowed()) return dmLocal('terminal commands are switched off in chat on this deployment','err');
+  if(!line||/^(help|\?)$/i.test(line)) return dmHelpCmd();
+  if(/^clear$/i.test(line)){ dmState.localOut.delete(dmState.sel); dmRender(); return; }
+  if(dmState.cmdBusy||_termSink) return dmLocal('\u2717 still running the last command \u2014 a moment','err');
+  // Resolve exactly as the panel does: complete grammar runs as typed, local NL maps to grammar,
+  // anything else is a question for the AI. Blocked verbs are answered before anything runs.
+  const p=line.split(/\s+/); let cmd=null, mapped='';
+  if(/^admin\b/i.test(line)) cmd=line;
+  else if(termGrammarComplete(p)) cmd=line;
+  else { const nl=nlResolve(line); if(nl){ cmd=nl; mapped=nl; } }
+  // The panel redacts a password in its echo; the private error line here does the same — it is
+  // only the sender's screen, but a secret sitting in the DOM is a secret in a screenshot.
+  const shown=line.replace(/^(admin\s+(?:unlock|reset-reports))\s+\S+.*$/i,'$1 \u2022\u2022\u2022\u2022\u2022\u2022');
+  if(cmd){ const why=dmCmdCheck(cmd); if(why) return dmLocal('\u2717 '+esc(shown)+' \u2014 '+esc(why),'err'); }
+  else if(!dmAskAllowed()) return dmLocal('\u2717 '+esc(line)+' \u2014 the grammar didn\u2019t understand that, and AI answers are admin-only in chat on this deployment. /help lists what runs here; the terminal (~) takes questions.','err');
+  const ai=dmAskAllowed();
+  dmState.cmdBusy=true; dmState.cmdLine=line; dmRender(); dmScrollBottom();
+  const sink={blocks:[],ai:ai,via:'dm',check:dmCmdCheck}; _termSink=sink;
+  try{
+    if(cmd){ termHistPush(line,mapped?'\u2192 '+mapped+' (computed locally)':line); if(mapped) termOutTrans(mapped); await termExec(cmd); }
+    else await termAsk(line);
+  }catch(e){ termErr('failed \u2014 '+(e&&e.message||e)); }
+  finally{ _termSink=null; dmState.cmdBusy=false; dmState.cmdLine=''; }
+  const r=dmCmdText(sink.blocks);
+  if(!r.text){ dmLocal('\u2717 '+esc(line)+(r.errs?' \u2014 '+esc(r.errs.replace(/^\u2717\s*/gm,'')):' \u2014 nothing to post'),'err'); return; }
+  const body=r.text.length>dmState.maxLen?r.text.slice(0,dmState.maxLen-2)+'\u2026':r.text;
+  const res=await dmPost({thread:t.id,body:body,cmd:line,cmdAi:!cmd||r.ai});
+  if(res.ok){
+    if(res.d.message) dmMerge([res.d.message]);
+    await dmLoad();
+    if(dmState.sel){ try{ const h=await fetchJSON('/api/dm/'+dmState.sel); if(h&&h.ok){ dmMerge(h.messages); if(h.info){ h.info.more=!!h.more; dmState.info.set(dmState.sel,h.info); } } }catch(_){ } }
+    if(r.errs) dmLocal(esc(r.errs),'err');   // a partial answer posts; what failed stays private
+    dmRender(); dmScrollBottom();
+  }else{
+    const e=res.d&&res.d.error;
+    dmLocal('\u2717 '+esc(line)+' \u2014 '+esc(e==='feature-gated'?(res.d.feature==='dm.ask'?'AI answers are admin-only in chat on this deployment':'terminal commands are switched off in chat on this deployment'):(e||'could not post the result')),'err');
   }
 }
 
@@ -15246,7 +15470,7 @@ function dmMessageHtml(m,t,p){
     +'<button type="button" class="dm-tool" data-dmreply="'+m.id+'" title="Quote this message in your reply">reply</button>'
     +'<button type="button" class="dm-tool" data-dmpin="'+m.id+'" data-on="'+(m.pinned?'0':'1')+'" title="'+(m.pinned?'Unpin':'Pin this to the top of the conversation')+'">'+(m.pinned?'unpin':'pin')+'</button>'
     +((m.ref&&m.refPx!=null&&dmState.admin)?'<button type="button" class="dm-tool" data-dmnote="'+m.id+'" title="Write this into the notes book, keeping the price and time it was called at">\u2192 note</button>':'')
-    +(own?'<button type="button" class="dm-tool" data-dmedit="'+m.id+'" title="Edit \u2014 the price stamp stays at what it was sent at">edit</button>'
+    +(own?(m.cmd?'':'<button type="button" class="dm-tool" data-dmedit="'+m.id+'" title="Edit \u2014 the price stamp stays at what it was sent at">edit</button>')
       +'<button type="button" class="dm-tool" data-dmdel="'+m.id+'" title="Delete \u2014 this removes the attachment too">delete</button>':'')
     +'</span>';
   // Edited / via-telegram ride inside the bubble as a faint suffix: the header line is gone on
@@ -15260,9 +15484,15 @@ function dmMessageHtml(m,t,p){
     : '';
   const body=m.deleted
     ? '<div class="dm-b dm-del">message deleted</div>'
+    : m.cmd
+    // A command result: the command as a header with the engine's badge, the output as a
+    // monospace block so the panel's padded columns line up. No stamp, no tweet, no quote —
+    // it is the board's output under a name, not a message about anything.
+    ? '<div class="dm-b dm-cmdb" title="'+esc(who+' \u00b7 '+dmWhen(m.ts))+'"><div class="dm-cmdhd"><span class="dm-cmdpr">\u25b8</span> '+esc(m.cmd)
+      +' <span class="tp-badge '+(m.cmdAi?'ai':'c')+'">'+(m.cmdAi?'AI':'computed')+'</span></div><pre class="dm-cmdout">'+esc(m.body)+'</pre>'+marks+'</div>'
     : '<div class="dm-b" title="'+esc(who+' \u00b7 '+dmWhen(m.ts))+'">'+quote
       +(m.body?dmMentionHtml(esc(m.body)).replace(/\n/g,'<br>'):'')+marks+dmFile(m)+dmStamp(m)+dmTweet(m)+'</div>';
-  return '<div class="dm-msg'+(own?' out':'')+(head?' hd':'')+'" data-mid="'+m.id+'">'+meta
+  return '<div class="dm-msg'+(own?' out':'')+(head?' hd':'')+(m.cmd&&!m.deleted?' cmd':'')+'" data-mid="'+m.id+'">'+meta
     +body+act+(m.deleted?'':dmReactions(m))+'</div>';
 }
 // @handle rendered as a mention chip, YOURS in the loud style \u2014 the visual half of the escalation
@@ -15428,7 +15658,7 @@ function dmResultsHtml(){
   return '<div class="dm-log" id="dm-log">'+r.map(m=>
     '<div class="dm-res" data-dmres="'+m.thread+'" data-mid="'+m.id+'">'
     +'<div class="dm-meta">'+esc(m.threadName)+' · '+esc(m.mine?'you':m.sender)+' · '+dmWhen(m.ts)+'</div>'
-    +'<div class="dm-b">'+esc(m.body).replace(/\n/g,' ')+'</div></div>').join('')+'</div>';
+    +'<div class="dm-b">'+esc(m.cmd?'\u25b8 '+m.cmd+' \u00b7 ':'')+esc(m.body).replace(/\n/g,' ')+'</div></div>').join('')+'</div>';
 }
 
 // The panel is re-rendered wholesale, which means every render is a chance to destroy something
@@ -15583,7 +15813,7 @@ function dmRender(){
     const stripPins=thesis?pinned.slice(1):pinned;
     const pinStrip=stripPins.length?('<div class="dm-pinstrip">'+stripPins.slice(0,3).map(x=>
       '<div class="dm-pinrow" data-dmjump="'+x.id+'"><span class="dm-pinicon">\u2691</span>'
-      +'<span class="dm-pintext">'+esc(String((x.ref?'$'+x.ref+' \u00b7 ':'')+(x.body||'attachment')).slice(0,120))+'</span>'
+      +'<span class="dm-pintext">'+esc(String((x.ref?'$'+x.ref+' \u00b7 ':'')+(x.cmd?'\u25b8 '+x.cmd+' \u00b7 ':'')+(x.body||'attachment')).slice(0,120))+'</span>'
       +'<button type="button" class="dm-tool" data-dmpin="'+x.id+'" data-on="0">unpin</button></div>').join('')+'</div>'):'';
     // Day dividers carry the date once, so per-message headers can be bare clock times; each
     // message also sees its predecessor, which is what chat-style grouping keys on.
@@ -15601,7 +15831,7 @@ function dmRender(){
     }
     const older=(info&&info.more&&arr.length)
       ?'<div class="dm-more"><button type="button" class="dm-tool" id="dm-older">↑ load older messages</button></div>':'';
-    const log=arr.length?older+parts.join('')+receipt:'<div class="dm-empty">No messages yet.</div>';
+    const log=(arr.length?older+parts.join('')+receipt:'<div class="dm-empty">No messages yet.</div>')+dmLocalHtml(t.id);
     const grp=t.kind==='group'||t.kind==='board';
     const nMem=info?info.members.length:t.members?t.members.length:0;
     main='<div class="dm-hd">'+(grp?'<span class="dm-grp">#</span> ':'')+'<b>'+esc(t.name)+'</b>'
@@ -15639,10 +15869,11 @@ function dmRender(){
     +'<label class="dm-clip'+(canAttach?'':' off')+'" title="Attach an image or a .txt note (8 MB maximum) — or just paste a screenshot into the box">📎'
     +'<input type="file" id="dm-file" accept=".png,.jpg,.jpeg,.gif,.webp,.txt,image/png,image/jpeg,image/gif,image/webp,text/plain"'+(canAttach?'':' disabled')+'></label>'
     +'<button type="button" class="dm-clip dm-mic'+(canAttach?'':' off')+'" id="dm-mic" title="Record a voice note (3 MB max)"'+(canAttach?'':' disabled')+'>🎙</button>'
+    +'<button type="button" class="dm-clip dm-guidebtn" id="dm-guide" title="Commands \u2014 everything you can type here, and what runs from a chat">?</button>'
     +'<div class="dm-mpop" id="dm-mpop" hidden></div>'
     +'<textarea id="dm-input" rows="1" maxlength="'+dmState.maxLen+'" '
     +(canWrite?'':'disabled ')+'placeholder="'
-    +(canWrite?'message '+esc((t&&t.name)||(pendingPeer&&pendingPeer.display)||'')+'…  (type $TICKER to attach the mark)':'pick a conversation first')
+    +(canWrite?'message '+esc((t&&t.name)||(pendingPeer&&pendingPeer.display)||'')+'…  ($TICKER attaches the mark · /help for commands)':'pick a conversation first')
     +'"></textarea><div class="dm-stamppv" id="dm-stamppv" hidden></div>'
     +'<button type="button" class="btn dm-send" id="dm-send"'+(canWrite?'':' disabled')+'>'
     +(dmState.sending?'…':(dmState.editing?'Save':'Send'))+'</button></div>'
@@ -15869,6 +16100,7 @@ function dmWire(){
     if(e.target.closest('#dm-unattach')){ dmState.pendingFile=null; dmRender(); return; }
     if(e.target.closest('#dm-newbtn')){ dmState.picking=!dmState.picking; dmRender(); return; }
     if(e.target.closest('#dm-send')){ dmSend(); return; }
+    if(e.target.closest('#dm-guide')||e.target.closest('[data-dmguide]')){ openDmGuide(); return; }
     if(e.target.closest('#dm-mute')){ dmToggleMute(); return; }
     if(e.target.closest('#dm-bnotify')){ dmToggleBoardNotify(); return; }
     if(e.target.closest('#dm-mic')){ dmMicToggle(); return; }
