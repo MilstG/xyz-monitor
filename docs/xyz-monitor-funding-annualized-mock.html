@@ -1,0 +1,562 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Funding Heatmap, Annualized</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ── tokens lifted verbatim from public/styles.css: the mock has to read as the app, not as a deck.
+     The app is dark-first and single-theme, so the mock commits to the same one look. ── */
+:root{
+  --bg:#0E1116; --panel:#151A21; --panel2:#1B222B; --border:#262E39;
+  --text:#E8E3D7; --muted:#7E8794; --faint:#4C5662;
+  --accent:#E3A53C; --accent-dim:#8a6a28; --blue:#6f93c9;
+  --up:#46B97E; --down:#E5604D; --grid:#1A212A;
+  --mono:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;
+  --disp:'Space Grotesk',system-ui,sans-serif;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:var(--disp);
+  -webkit-font-smoothing:antialiased;font-feature-settings:"tnum" 1}
+body{padding-block:22px 70px;padding-inline:20px;max-width:1180px;margin:0 auto}
+.pos{color:var(--up)} .neg{color:var(--down)} .sec{color:var(--muted)} .na{color:var(--faint)}
+b{font-weight:600}
+
+/* ── mock frame (the only chrome that isn't the app) ── */
+.mockhd{border-bottom:1px solid var(--border);padding-bottom:16px;margin-bottom:22px}
+.eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin:0 0 8px}
+h1{font-size:27px;font-weight:700;letter-spacing:-.4px;margin:0 0 10px;text-wrap:balance}
+.lede{color:var(--muted);font-size:13.5px;line-height:1.62;max-width:70ch;margin:0}
+.lede b{color:var(--text);font-weight:500}
+.mockchip{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--blue);border:1px solid var(--blue);border-radius:3px;padding:2px 7px;opacity:.9}
+.frame{border:1px dashed var(--accent-dim);border-radius:12px;padding:16px 18px 20px;margin:0 0 8px;position:relative}
+.frame::before{content:"live prototype";position:absolute;top:-8px;left:16px;background:var(--bg);padding:0 7px;
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent-dim)}
+.frame.bad{border-color:var(--down)}
+.frame.bad::before{content:"the alternative, not proposed";color:var(--down)}
+.hint{font-family:var(--mono);font-size:11px;color:var(--faint);margin:0 0 14px;line-height:1.6}
+.hint kbd{border:1px solid var(--border);border-radius:3px;padding:0 5px;color:var(--muted)}
+
+/* ── app classes, copied from styles.css so the prototype is pixel-honest ── */
+.s-sec{margin:34px 0 12px;font-size:13px;line-height:1.4}
+.s-sec .t{color:var(--accent);font-weight:600;letter-spacing:.3px}
+.s-sec .d{color:var(--muted);font-weight:400;font-size:12px}
+.cp-head{font-size:15px;font-weight:600;margin:0 0 6px}
+.sg-status{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin:0 0 12px}
+.s-card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
+.s-cap{color:var(--muted);font-size:11.5px;margin-top:11px;line-height:1.62;max-width:84ch}
+.s-cap b{color:var(--text);font-weight:600}
+.s-cap code{font-family:var(--mono);font-size:10.5px;color:var(--blue)}
+.s-ctrls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.s-ctrls .lbl{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.6px}
+.s-ctrls .rt{margin-left:auto;color:var(--muted);font-size:11px;text-align:right}
+.s-leg{display:flex;gap:15px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+.s-leg .it{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:11px}
+.clocksel{background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:6px;
+  padding:5px 8px;font-family:var(--mono);font-size:12px;max-width:220px}
+.clockseg{display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden}
+.fhtf{background:var(--panel2);color:var(--muted);border:none;padding:5px 10px;font-family:var(--mono);font-size:11px;cursor:pointer}
+.fhtf:hover{color:var(--text)}
+.fhtf:focus-visible{outline:2px solid var(--blue);outline-offset:-2px}
+.fhtf.on{background:var(--accent);color:var(--bg)}
+.fhtf+.fhtf{border-left:1px solid var(--border)}
+.fheat text{font-family:var(--mono)}
+.fheat .fh-hd{font-size:9px;fill:var(--faint);letter-spacing:.5px;text-transform:uppercase}
+.fheat .fh-tk{font-size:10.5px;fill:var(--muted)}
+.fheat .fh-nv{font-size:10px;fill:var(--muted)}
+.fheat .fh-nv.pos{fill:var(--up)}
+.fheat .fh-nv.neg{fill:var(--down)}
+.fheat .fh-nv.sec{fill:var(--faint)}
+.fheat .lc-tick{font-size:10px;fill:var(--muted)}
+.fheat .lc-ax{font-size:10px;fill:var(--faint)}
+.fheat rect.cell:hover{stroke:var(--text);stroke-width:1.2}
+.s-leg .fh-gapsw{width:15px;height:10px;border-radius:2px;display:inline-block;background:var(--panel2);
+  background-image:repeating-linear-gradient(45deg,transparent,transparent 3px,rgba(124,135,148,.45) 3px,rgba(124,135,148,.45) 4px)}
+.s-leg .grad{width:150px;height:10px;border-radius:3px;display:inline-block;
+  background:linear-gradient(90deg,rgb(70,185,126),rgb(20,26,33),rgb(229,96,77))}
+
+/* ── the floating cell readout: the app uses a native <title>; the mock shows it always-on so the
+     interaction is visible in a screenshot as well as under a cursor ── */
+.fhwrap{position:relative;overflow-x:auto}
+.fhtip{position:absolute;z-index:9;pointer-events:none;background:var(--panel2);border:1px solid var(--border);
+  border-radius:8px;padding:8px 10px;font-family:var(--mono);font-size:11.5px;line-height:1.6;
+  box-shadow:0 8px 24px rgba(0,0,0,.55);white-space:nowrap;opacity:0;transition:opacity .08s}
+.fhtip.on{opacity:1}
+.fhtip .tk{color:var(--text);font-weight:600}
+.fhtip .mut{color:var(--muted)}
+
+/* ── side-by-side demonstrations ── */
+.row2{display:flex;gap:16px;flex-wrap:wrap;align-items:stretch}
+.row2>.half{flex:1 1 400px;min-width:0}
+.demohd{font-family:var(--mono);font-size:10px;letter-spacing:.7px;text-transform:uppercase;margin-bottom:9px}
+.demohd.ok{color:var(--up)} .demohd.no{color:var(--down)} .demohd.mid{color:var(--muted)}
+.arith{font-family:var(--mono);font-size:12px;color:var(--muted);line-height:2.1;margin:12px 0 0}
+.arith b{color:var(--text);font-weight:500}
+.arith .k{display:inline-block;min-width:80px;color:var(--accent)}
+.tblwrap{overflow-x:auto}
+table.tf{border-collapse:collapse;font-family:var(--mono);font-size:12px;margin-top:4px;width:100%}
+table.tf th{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--faint);font-weight:600;
+  text-align:right;padding:2px 10px 7px;border-bottom:1px solid var(--border);white-space:nowrap}
+table.tf th:first-child{text-align:left}
+table.tf td{padding:7px 10px;text-align:right;border-bottom:1px solid var(--grid);color:var(--muted);white-space:nowrap}
+table.tf td:first-child{text-align:left;color:var(--text)}
+table.tf tr:last-child td{border-bottom:none}
+table.tf td.hi{color:var(--text)}
+
+/* ── the closing prose blocks ── */
+.notegrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+.notecard{background:var(--panel);border:1px solid var(--border);border-radius:9px;padding:14px 16px}
+.notecard h3{font-size:12.5px;margin:0 0 8px;color:var(--text);font-weight:600;letter-spacing:.2px}
+.notecard p{margin:0;font-size:11.5px;line-height:1.65;color:var(--muted)}
+.notecard p+p{margin-top:8px}
+.notecard code{font-family:var(--mono);font-size:10.5px;color:var(--blue)}
+.notecard em{color:var(--text);font-style:normal;font-weight:500}
+.todo{border-left:2px solid var(--blue)}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+@media (max-width:520px){ body{padding-inline:16px} h1{font-size:22px} .frame{padding:14px 12px 16px} }
+</style>
+
+<div class="mockhd">
+  <p class="eyebrow">xyz-monitor · funding tab · market data menu · proposal for build 2026.09.16</p>
+  <h1>The same grid, read in the unit the rest of the app speaks</h1>
+  <p class="lede">The heatmap shows the funding a 1× long <b>paid per bucket</b> — an honest cost, but a unit nothing else on the site uses. The Markets table, the terminal, the carry column and the drawer all quote funding as an <b>annualized rate</b> (hourly × 24 × 365). So a row reading <code>+0.031%</code> per 24h has to be converted in your head before it means anything, and the three timeframes each print a different number for the same market. This adds a <b>read as</b> switch — <b>annualized</b> or <b>per bucket</b> — with annualized as the default. Same cells, same colour semantic, same server payload; the timeframe becomes a resolution rather than a quantity, and one market reads one number at every zoom.</p>
+  <p style="margin:14px 0 0"><span class="mockchip">◆ mock · synthetic funding, nothing is wired to live data</span></p>
+</div>
+
+<div class="s-sec"><span class="t">1 · The tab as proposed</span> &nbsp;<span class="d">the shipped renderer with the switch added — nothing else on the page moves</span></div>
+<p class="hint">Flip <kbd>annualized</kbd> / <kbd>per bucket</kbd> and watch the legend, the mean column and every tooltip change unit · switch <kbd>1h</kbd> / <kbd>8h</kbd> / <kbd>24h</kbd> under annualized and note the row means hold still · hover any cell — the tooltip carries both numbers.</p>
+
+<div class="frame">
+  <div class="cp-head">Funding heatmap <span class="sec" style="font-weight:400;font-size:12.5px">— every market's carry over calendar time, at 1h · 8h · 24h</span></div>
+  <div class="sg-status" id="statusMain"></div>
+  <div class="s-ctrls">
+    <span class="lbl">read as</span><span class="clockseg" id="segUnit"></span>
+    <span class="lbl" id="lblTf">resolution</span><span class="clockseg" id="segTf"></span>
+    <span class="lbl">sort</span><select class="clocksel" id="selSort" aria-label="sort"></select>
+    <select class="clocksel" id="selRows" aria-label="rows"></select>
+    <span class="rt" id="rtCount"></span></div>
+  <div class="s-leg" id="legMain"></div>
+  <div class="s-card"><div class="fhwrap" id="wrapMain"></div></div>
+  <p class="s-cap" id="capMain"></p>
+</div>
+
+<div class="s-sec"><span class="t">2 · One market, three resolutions, one number</span> &nbsp;<span class="d">what annualizing buys</span></div>
+<p class="hint">SMCI, the same day, read off all three grids. Per bucket the three rows disagree by design — 8×, then 3×. Annualized they agree, and the buttons become a smoothing choice.</p>
+
+<div class="frame">
+  <div class="row2">
+    <div class="half">
+      <div class="demohd mid">◆ per bucket — three quantities, three caps</div>
+      <div class="s-card"><div class="fhwrap" id="wrapTfBucket"></div></div>
+    </div>
+    <div class="half">
+      <div class="demohd ok">◆ annualized — one quantity, one cap</div>
+      <div class="s-card"><div class="fhwrap" id="wrapTfApr"></div></div>
+    </div>
+  </div>
+  <div class="s-card" style="margin-top:14px">
+    <div class="tblwrap"><table class="tf" id="tblTf"></table></div>
+    <p class="arith" id="arithTf"></p>
+  </div>
+</div>
+<p class="s-cap"><b>Annualizing is a multiplier, not a new measurement.</b> A cell is the mean hourly rate the spine saw in that bucket, scaled out to the bucket's width; annualized it is that same mean scaled out to <code>8 760</code> hours instead. So an 8h cell is multiplied by <code>1 095</code>, a 24h cell by <code>365</code>, a 1h cell by <code>8 760</code> — and a day that cost <code>+0.031%</code> to hold reads <code>+11.4%</code> at every resolution, because it is the same payments piled differently. This is exactly the convention the Markets table already prints in its funding column (<code>hourly × 24 × 365</code>), which means the newest 1h cell of a row and the table's number for that ticker are, for the first time, the same number.</p>
+
+<div class="s-sec"><span class="t">3 · One cap across resolutions</span> &nbsp;<span class="d">a zoom that repaints is not a zoom</span></div>
+<p class="hint">Eight rows at 24h, annualized, drawn two ways. Left: the proposal — every resolution shares the 8h grid's annualized cap. Right: each resolution keeps its own percentile, so the same day changes colour when you change the button.</p>
+
+<div class="frame">
+  <div class="s-ctrls"><span class="lbl">resolution</span><span class="clockseg" id="segCap"></span>
+    <span class="rt" id="rtCap"></span></div>
+  <div class="row2">
+    <div class="half">
+      <div class="demohd ok">◆ proposed — shared cap, colours hold across 1h / 8h / 24h</div>
+      <div class="s-card"><div class="fhwrap" id="wrapCapOk"></div></div>
+    </div>
+    <div class="half">
+      <div class="demohd no">◆ alternative — per-resolution cap, colours move with the button</div>
+      <div class="s-card"><div class="fhwrap" id="wrapCapBad"></div></div>
+    </div>
+  </div>
+  <p class="arith" id="capNote" style="line-height:1.7"></p>
+</div>
+<p class="s-cap"><b>Per bucket, each timeframe needs its own cap</b> — the shipped grid does that, because the 8h quantity is genuinely eight times the 1h one. <b>Annualized, they are one quantity</b>, and what differs between resolutions is only how it is sampled: the three grids cover different windows (2, 14 and 30 days) at different smoothing, so each one's own 98th percentile lands somewhere else. Keep three caps and a cell that reads <code>+40% APR</code> is faint on one button and saturated on the next — the same rate, two hues, chosen by a control that is supposed to be a zoom. So annualized mode uses <b>one cap for all three resolutions</b>: the default (8h) grid's own annualized percentile, shipped by the server as today and multiplied client-side. Hourly spikes saturate more often under it, which is what a cap is for; the colour of a rate never depends on how finely you sliced it.</p>
+
+<div class="s-sec"><span class="t">4 · The numbers at the precision an annual rate deserves</span></div>
+<div class="frame">
+  <div class="s-card">
+    <div class="tblwrap"><table class="tf" id="tblDp"></table></div>
+  </div>
+</div>
+<p class="s-cap"><b>The decimal count follows the unit, not the timeframe.</b> Per bucket, the mean column derives one shared decimal count from the grid's cap so a 1h grid is not forced into a 24h grid's decimals — three significant figures at the cap, which is what separates one row's carry from the next at <code>0.010%</code>. Annualized the cap sits near tens of percent, and the same rule would print <code>+11.412%</code> — false precision on a number whose inputs are hourly prints rounded to the basis point. So annualized prints <b>one decimal</b> when the cap is above 10% and two below it, capped at two. The <code>≈0%</code> rule carries over unchanged: a mean that rounds away at the grid's precision wears neither colour and claims no sign.</p>
+
+<div class="s-sec"><span class="t">5 · What this pins down</span></div>
+<div class="notegrid">
+  <div class="notecard">
+    <h3>Client-only — the payload does not change</h3>
+    <p><code>/api/funding</code> already ships per-bucket cells, one cap per timeframe and each axis's <code>bucketHours</code>. Annualized is <code>cell × 8760 / bucketHours</code> applied at render time, and the shared cap is <code>axis['8h'].cap × 1095</code>. No new field, no ETag change, no rebuild; the board's 60s TTL and 304 discipline are untouched.</p>
+    <p>The alternative — shipping an annualized grid beside the per-bucket one — doubles a ~60×120 payload to carry a multiplication.</p>
+  </div>
+  <div class="notecard">
+    <h3>Annualized is the default</h3>
+    <p>It is the unit every other funding readout on the site uses, so a reader arriving from the Markets table meets a familiar number. Per bucket stays one click away because it answers a different question — <em>what did the last day actually cost</em> — that a rate does not.</p>
+    <p>The choice is remembered per browser in <code>localStorage</code>, the same way the dim-off switch is; a bare <code>#funding</code> deep link opens whatever was chosen last, annualized on a fresh browser.</p>
+  </div>
+  <div class="notecard">
+    <h3>Every tooltip carries both</h3>
+    <p>Annualized, a cell reads <em>+41.2% APR — longs pay · +0.0376% over this 8h bucket</em>; per bucket, the same cell leads with the bucket cost and trails the APR. The rate says how crowded, the bucket says what it cost; a reader sizing a hold wants the second even while scanning by the first.</p>
+  </div>
+  <div class="notecard">
+    <h3>Sorts are unit-blind, colours are not</h3>
+    <p><em>Longs pay most</em>, <em>strongest carry</em> and the rest rank by the row mean, and a positive multiplier preserves every ranking — flipping the unit never reorders rows. Colours are re-derived, because the cap moves with the unit, but under annualized they are then stable across the three resolutions (§3).</p>
+  </div>
+  <div class="notecard">
+    <h3>The timeframe label changes with the unit</h3>
+    <p>Per bucket the control reads <code>funding per</code>, because that is what the buttons choose. Annualized it reads <code>resolution</code>, because that is now what they choose. The caption, the legend's trailing <code>per 8h</code> / <code>APR</code> tag and the axis footer follow the same rule; the tab title and status line do not move.</p>
+  </div>
+  <div class="notecard">
+    <h3>Coverage rules are unchanged</h3>
+    <p>A bucket under half coverage is still <code>null</code> and still hatched; multiplying an unknown by 1 095 does not make it a number. The newest column stays the last <em>complete</em> bucket for the same reason it does today.</p>
+  </div>
+</div>
+
+<div class="s-sec"><span class="t">6 · Still open</span></div>
+<div class="notegrid">
+  <div class="notecard todo">
+    <h3>Whether the unit belongs in the URL</h3>
+    <p>A <code>#funding</code> link that also carried the unit would make a screenshot reproducible for whoever it was sent to. Not in this proposal — the hash currently carries the tab and the ticker, and the unit is a preference, like the sort. Easy to add if it turns out people share annualized grids and get per-bucket ones back.</p>
+  </div>
+  <div class="notecard todo">
+    <h3>Whether the shared cap should be the 8h grid's</h3>
+    <p>The default resolution's percentile is the least surprising anchor: it is what the tab opens on. The 24h grid's would make daily reads fill the palette and hourly reads saturate hard; the 1h grid's would leave daily reads faint. Either is one constant away.</p>
+  </div>
+</div>
+
+<script>
+"use strict";
+const HOUR = 3600 * 1000, HOURS_PER_YEAR = 24 * 365;
+const clamp = (x, a, b) => Math.min(Math.max(x, a), b);
+const lerp  = (a, b, t) => Math.round(a + (b - a) * t);
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+// ── the bucketing, ported from src/compute.js so the prototype is honest ──────────────────────
+const FUNDHEAT_MIN_COV = 0.5;
+function fundingHeat(hist, o) {
+  const bucketHours = Math.max(1, Math.round(o.bucketHours || 8));
+  const buckets = Math.max(1, Math.round(o.buckets || 42));
+  const width = bucketHours * HOUR;
+  const minCov = o.minCov == null ? FUNDHEAT_MIN_COV : o.minCov;
+  const endTs = Number.isFinite(o.end) ? o.end : Date.now();
+  const lastStart = Math.floor(endTs / width) * width - width;
+  const t0 = lastStart - (buckets - 1) * width;
+  const cells = new Array(buckets).fill(null), n = new Array(buckets).fill(0);
+  for (const s of (hist || [])) {
+    const t = s[0], f = s[1];
+    if (!Number.isFinite(t) || !Number.isFinite(f)) continue;
+    if (t < t0 || t >= lastStart + width) continue;
+    const i = Math.floor((t - t0) / width);
+    if (i < 0 || i >= buckets) continue;
+    cells[i] = (cells[i] == null ? 0 : cells[i]) + f; n[i]++;
+  }
+  const need = Math.max(1, Math.ceil(bucketHours * minCov));
+  for (let i = 0; i < buckets; i++) {
+    if (cells[i] == null || n[i] < need) { cells[i] = null; continue; }
+    cells[i] = (cells[i] / n[i]) * bucketHours;
+  }
+  return { t0, width, bucketHours, buckets, cells, n };
+}
+
+// ── the synthetic book (deterministic, so a screenshot matches a browser) ─────────────────────
+let _seed = 20260916;
+const rnd = () => { _seed = (_seed * 1103515245 + 12345) & 0x7fffffff; return _seed / 0x7fffffff; };
+const NOW = Math.floor(Date.now() / HOUR) * HOUR;
+const SPINE_H = 34 * 24;
+// [base hourly rate, event window in hours-ago, event size]. 1e-5/h is 8.8% APR; the SMCI blowout
+// peaks near 9e-5/h, i.e. ~80% APR, which is what a genuinely crowded HIP-3 name prints.
+const BOOK = [
+  { t: "SMCI",  oi: 4.1e8, base:  1.0e-5, ev: [96, 40,  9.0e-5] },
+  { t: "MSTR",  oi: 3.6e8, base: -0.6e-5, ev: [230, 150, -7.5e-5] },
+  { t: "NVDA",  oi: 3.2e8, base:  0.9e-5, ev: null },
+  { t: "TSLA",  oi: 2.8e8, base:  1.4e-5, ev: [420, 300, -5.0e-5] },
+  { t: "COIN",  oi: 2.3e8, base:  1.6e-5, ev: null },
+  { t: "HOOD",  oi: 1.9e8, base: -1.1e-5, ev: null },
+  { t: "AAPL",  oi: 1.6e8, base: -0.4e-5, ev: null },
+  { t: "META",  oi: 1.4e8, base:  0.7e-5, ev: null },
+  { t: "PLTR",  oi: 1.2e8, base: -1.5e-5, ev: [140, 60, -3.0e-5] },
+  { t: "MSFT",  oi: 1.0e8, base:  0.3e-5, ev: null },
+  { t: "GLD",   oi: 8.6e7, base: -0.5e-5, ev: null, holes: [[300, 220], [120, 84]] },
+  { t: "AMD",   oi: 7.4e7, base:  1.1e-5, ev: null },
+  { t: "ARM",   oi: 6.1e7, base: -0.8e-5, ev: null },
+  { t: "SPX",   oi: 5.2e7, base:  0.1e-5, ev: null },
+  { t: "CRWD",  oi: 4.4e7, base:  1.3e-5, ev: null },
+  { t: "BABA",  oi: 3.7e7, base:  0.5e-5, ev: null },
+  { t: "SHOP",  oi: 3.0e7, base: -0.9e-5, ev: null },
+  { t: "XOM",   oi: 2.4e7, base:  0.2e-5, ev: null },
+];
+function spine(m) {
+  const out = [], ph = rnd() * 6.28, per = 40 + rnd() * 90;
+  let drift = 0;
+  for (let h = SPINE_H; h >= 1; h--) {
+    drift = drift * 0.992 + (rnd() - 0.5) * 1.1e-6;
+    if (m.holes && m.holes.some(([a, b]) => h <= a && h >= b)) continue;
+    let f = m.base + drift + 0.55e-5 * Math.sin(h / per + ph) + (rnd() - 0.5) * 0.7e-5;
+    if (m.ev && h <= m.ev[0] && h >= m.ev[1]) {
+      const [a, b, amp] = m.ev, mid = (a + b) / 2, half = (a - b) / 2;
+      f += amp * Math.cos(((h - mid) / half) * 1.5708);
+    }
+    out.push([NOW - h * HOUR, f]);
+  }
+  return out;
+}
+BOOK.forEach((m) => { m.hist = spine(m); });
+
+// ── the payload the server ships today — unchanged by this proposal ───────────────────────────
+const TF = { "1h": { bucketHours: 1, buckets: 48 }, "8h": { bucketHours: 8, buckets: 42 }, "24h": { bucketHours: 24, buckets: 30 } };
+const TFS = Object.keys(TF), CAP_PCTL = 0.98, CAP_FLOOR = 1e-5, TF_DEFAULT = "8h";
+function capOf(vals, bucketHours) {
+  const a = vals.filter(Number.isFinite).map(Math.abs).sort((x, y) => x - y);
+  const floor = CAP_FLOOR * bucketHours;
+  if (!a.length) return floor;
+  return Math.max(a[Math.min(a.length - 1, Math.floor(CAP_PCTL * (a.length - 1)))], floor);
+}
+function buildPayload(book) {
+  const rows = [], pool = {}; TFS.forEach((k) => (pool[k] = []));
+  for (const m of book) {
+    const tf = {};
+    for (const k of TFS) {
+      const g = fundingHeat(m.hist, Object.assign({ end: NOW + HOUR }, TF[k]));
+      tf[k] = g.cells; for (const v of g.cells) if (v != null) pool[k].push(v);
+    }
+    rows.push({ ticker: m.t, oi: m.oi, tf });
+  }
+  const axis = {};
+  for (const k of TFS) {
+    const g = fundingHeat([], Object.assign({ end: NOW + HOUR }, TF[k]));
+    axis[k] = { t0: g.t0, width: g.width, bucketHours: g.bucketHours, buckets: g.buckets, cap: capOf(pool[k], g.bucketHours) };
+  }
+  return { tz: "ET", tfs: TFS, tfDefault: TF_DEFAULT, axis, rows, count: rows.length, universe: book.length, book: 140,
+           capped: false, rowCap: 60, minCov: FUNDHEAT_MIN_COV, capPctl: CAP_PCTL };
+}
+const FH = buildPayload(BOOK);
+
+// ── the unit layer: everything this proposal adds to the client ───────────────────────────────
+// unit = 'apr' | 'bucket'. A cell is annualized by the bucket's own hours-per-year; the cap under
+// 'apr' is ONE number for all three resolutions (the default grid's, annualized) — see §3.
+const annOf = (fh, tf) => HOURS_PER_YEAR / fh.axis[tf].bucketHours;
+function unitCells(fh, r, tf, unit) { const c = r.tf[tf] || []; if (unit !== "apr") return c; const a = annOf(fh, tf); return c.map((v) => (v == null ? null : v * a)); }
+function unitCap(fh, tf, unit, perTf) {
+  if (unit !== "apr") return fh.axis[tf].cap;
+  const k = perTf ? tf : fh.tfDefault;
+  return fh.axis[k].cap * annOf(fh, k);
+}
+// Per bucket: three significant figures at the cap (the shipped rule). Annualized: one decimal
+// above a 10% cap, two below, never more than two.
+function fhDpBucket(cap) { return clamp(2 - Math.floor(Math.log10(Math.abs((cap || 0) * 100) || 1e-9)), 3, 6); }
+function fhDpApr(cap)    { return clamp(2 - Math.floor(Math.log10(Math.abs((cap || 0) * 100) || 1e-9)), 0, 2); }
+const fhDp = (cap, unit) => (unit === "apr" ? fhDpApr(cap) : fhDpBucket(cap));
+function fhPct(v, dp) {
+  if (v == null || !isFinite(v)) return "—";
+  const body = Math.abs(v * 100).toFixed(dp == null ? 4 : dp);
+  if (!parseFloat(body)) return "≈0%";
+  return (v > 0 ? "+" : "−") + body + "%";
+}
+const unitTag = (unit, tf) => (unit === "apr" ? "APR" : "per " + tf);
+
+// ── the renderer, ported from public/app.js, with the unit threaded through ───────────────────
+function fhColor(v, cap) {
+  if (v == null || !isFinite(v)) return null;
+  const k = Math.pow(clamp(Math.abs(v) / (cap > 0 ? cap : 1e-12), 0, 1), 0.7);
+  const mid = [20, 26, 33], tg = v > 0 ? [229, 96, 77] : [70, 185, 126];
+  return `rgb(${lerp(mid[0], tg[0], k)},${lerp(mid[1], tg[1], k)},${lerp(mid[2], tg[2], k)})`;
+}
+function meanOf(cells) { let s = 0, n = 0; for (const v of cells) if (Number.isFinite(v)) { s += v; n++; } return n ? s / n : null; }
+const FMT_D = new Intl.DateTimeFormat("en-GB", { timeZone: "America/New_York", month: "short", day: "numeric" });
+const FMT_H = new Intl.DateTimeFormat("en-GB", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit", hour12: false });
+function fhTicks(ax, nb, cw) {
+  const day = []; let prev = null;
+  for (let i = 0; i < nb; i++) { const d = FMT_D.format(ax.t0 + i * ax.width); if (d !== prev) { day.push(i); prev = d; } }
+  const isDay = new Set(day);
+  const cands = day.map((i) => ({ i, lab: FMT_D.format(ax.t0 + i * ax.width), day: true }));
+  if (ax.bucketHours < 24) { const hs = Math.max(1, Math.round(6 / ax.bucketHours));
+    for (let i = nb - 1; i >= 0; i -= hs) if (!isDay.has(i)) cands.push({ i, lab: FMT_H.format(ax.t0 + i * ax.width), day: false }); }
+  for (const c of cands) c.w = c.lab.length * 6 + 12;
+  cands.sort((a, b) => (b.day ? 1 : 0) - (a.day ? 1 : 0) || b.i - a.i);
+  const kept = [];
+  for (const c of cands) { const x = c.i * cw + cw / 2;
+    if (kept.every((k) => Math.abs((k.i * cw + cw / 2) - x) >= (k.w + c.w) / 2)) kept.push(c); }
+  return kept.sort((a, b) => a.i - b.i);
+}
+let _pid = 0;
+function heatSvg(fh, rows, tf, unit, opt) {
+  opt = opt || {};
+  const ax = fh.axis[tf], nb = ax.buckets, cap = opt.cap != null ? opt.cap : unitCap(fh, tf, unit, false);
+  const dp = fhDp(cap, unit), zero = 0.5 * Math.pow(10, -dp) / 100, ann = annOf(fh, tf);
+  let mtk = 0; for (const r of rows) if (r.ticker.length > mtk) mtk = r.ticker.length;
+  const lx = opt.bare ? 50 : clamp(Math.ceil(mtk * 5.7) + 9, 40, 86), rx = 64, pt = opt.bare ? 8 : 22, ch = opt.ch || 16, pb = 30, W = 780;
+  const cw = (W - lx - rx) / nb, H = pt + ch * rows.length + pb;
+  const pid = "fhg" + (++_pid);
+  let s = `<svg viewBox="0 0 ${W} ${H.toFixed(1)}" class="fheat" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block;min-width:520px">`
+        + `<defs><pattern id="${pid}" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">`
+        + `<rect width="4" height="4" fill="var(--panel2)"/><line x1="0" y1="0" x2="0" y2="4" stroke="var(--faint)" stroke-width="1" stroke-opacity=".45"/></pattern></defs>`;
+  if (!opt.bare) s += `<text x="${lx - 7}" y="13" text-anchor="end" class="fh-hd">market</text>`
+                    + `<text x="${W - 4}" y="13" text-anchor="end" class="fh-hd">${unit === "apr" ? "mean APR" : "mean / " + esc(tf)}</text>`;
+  rows.forEach((r, ri) => {
+    const y = pt + ri * ch, cells = unitCells(fh, r, tf, unit), mean = meanOf(cells);
+    s += `<text x="${lx - 7}" y="${(y + ch / 2 + 3.5).toFixed(1)}" text-anchor="end" class="fh-tk">${esc(opt.rowLabel ? opt.rowLabel(r) : r.ticker)}</text>`;
+    for (let i = 0; i < nb; i++) {
+      const x = lx + i * cw, v = cells[i], col = fhColor(v, cap);
+      const t0 = ax.t0 + i * ax.width;
+      const when = FMT_D.format(t0) + (ax.bucketHours >= 24 ? "" : " " + FMT_H.format(t0));
+      const side = v > 0 ? "longs pay" : (v < 0 ? "longs receive" : "flat");
+      let tip;
+      if (col == null) tip = `<span class="tk">${esc(r.ticker)}</span> <span class="mut">· ${esc(when)} ET · ${ax.bucketHours}h</span><br><span class="mut">no funding data for this bucket</span>`;
+      else if (unit === "apr") tip = `<span class="tk">${esc(r.ticker)}</span> <span class="mut">· ${esc(when)} ET · ${ax.bucketHours}h</span><br>`
+          + `<b class="${v > 0 ? "neg" : "pos"}">${esc(fhPct(v, dp + 1))} APR</b> <span class="mut">— ${side} · ${esc(fhPct(v / ann, fhDpBucket(fh.axis[tf].cap) + 1))} over this ${ax.bucketHours}h bucket</span>`;
+      else tip = `<span class="tk">${esc(r.ticker)}</span> <span class="mut">· ${esc(when)} ET · ${ax.bucketHours}h</span><br>`
+          + `<b class="${v > 0 ? "neg" : "pos"}">${esc(fhPct(v, dp + 1))}</b> <span class="mut">— ${side} · ${esc(fhPct(v * ann, fhDpApr(unitCap(fh, tf, "apr")) + 1))} APR</span>`;
+      s += `<rect class="cell" x="${x.toFixed(2)}" y="${y}" width="${Math.max(0.5, cw - 1).toFixed(2)}" height="${ch - 1}" `
+         + `fill="${col == null ? `url(#${pid})` : col}" data-tip="${esc(tip)}"/>`;
+    }
+    const flat = mean == null || Math.abs(mean) < zero;
+    s += `<text x="${W - 4}" y="${(y + ch / 2 + 3.5).toFixed(1)}" text-anchor="end" class="fh-nv ${flat ? "sec" : (mean > 0 ? "neg" : "pos")}">${esc(fhPct(mean, dp))}</text>`;
+  });
+  const ay = pt + ch * rows.length;
+  s += `<line x1="${lx}" y1="${(ay + 3).toFixed(1)}" x2="${(W - rx).toFixed(1)}" y2="${(ay + 3).toFixed(1)}" stroke="var(--grid)" stroke-width="1"/>`;
+  for (const t of fhTicks(ax, nb, cw)) { const x = lx + t.i * cw + cw / 2;
+    s += `<line x1="${x.toFixed(1)}" y1="${(ay + 3).toFixed(1)}" x2="${x.toFixed(1)}" y2="${(ay + 6).toFixed(1)}" stroke="var(--faint)" stroke-width="1"/>`
+       + `<text x="${x.toFixed(1)}" y="${(ay + 16).toFixed(1)}" text-anchor="middle" class="lc-tick">${esc(t.lab)}</text>`; }
+  s += `<text x="${((lx + W - rx) / 2).toFixed(1)}" y="${(ay + 26).toFixed(1)}" text-anchor="middle" class="lc-ax">ET · ${ax.bucketHours}h buckets · oldest left${unit === "apr" ? " · annualized" : ""}</text>`;
+  return s + "</svg>";
+}
+
+// ── the always-on cell readout (the app uses a native <title>) ────────────────────────────────
+function mountHeat(host, html) {
+  host.innerHTML = html + `<div class="fhtip"></div>`;
+  const tip = host.querySelector(".fhtip");
+  host.addEventListener("mousemove", (e) => {
+    const c = e.target.closest && e.target.closest("rect.cell");
+    if (!c) { tip.classList.remove("on"); return; }
+    tip.innerHTML = c.dataset.tip; tip.classList.add("on");
+    const hb = host.getBoundingClientRect();
+    const x = clamp(e.clientX - hb.left + 14, 0, Math.max(0, hb.width - tip.offsetWidth - 2));
+    tip.style.left = x + "px";
+    tip.style.top = clamp(e.clientY - hb.top - tip.offsetHeight - 12, 0, hb.height) + "px";
+  });
+  host.addEventListener("mouseleave", () => tip.classList.remove("on"));
+}
+const seg = (host, pairs, cur, onPick) => {
+  host.innerHTML = pairs.map(([v, l]) => `<button type="button" class="fhtf${cur === v ? " on" : ""}" data-v="${v}">${l}</button>`).join("");
+  host.onclick = (e) => { const b = e.target.closest("button"); if (b) onPick(b.dataset.v); };
+};
+
+// ── §1 the tab as proposed ────────────────────────────────────────────────────────────────────
+const SORTS = [["oi", "open interest"], ["pay", "longs pay most"], ["recv", "longs receive most"], ["abs", "strongest carry"], ["tkr", "ticker A–Z"]];
+const ROWOPTS = [["10", "top 10"], ["18", "all rows"]];
+const UNITS = [["apr", "annualized"], ["bucket", "per bucket"]];
+const S = { unit: "apr", tf: "8h", sort: "oi", rows: "18", capTf: "24h" };
+function sortRows(rows, tf, sort) {
+  const a = rows.slice();
+  if (sort === "tkr") a.sort((x, y) => (x.ticker < y.ticker ? -1 : 1));
+  else if (sort === "oi") a.sort((x, y) => y.oi - x.oi);
+  else { const key = (r) => { const m = meanOf(r.tf[tf]); return m == null ? null : (sort === "abs" ? Math.abs(m) : (sort === "recv" ? -m : m)); };
+    a.sort((x, y) => { const kx = key(x), ky = key(y);
+      if (kx == null) return 1; if (ky == null) return -1; return (ky - kx) || (x.ticker < y.ticker ? -1 : 1); }); }
+  return a;
+}
+function renderMain() {
+  const u = S.unit, tf = S.tf, apr = u === "apr";
+  seg($("segUnit"), UNITS, u, (v) => { S.unit = v; renderMain(); });
+  $("lblTf").textContent = apr ? "resolution" : "funding per";
+  seg($("segTf"), FH.tfs.map((k) => [k, k]), tf, (v) => { S.tf = v; renderMain(); });
+  $("selSort").innerHTML = SORTS.map(([v, l]) => `<option value="${v}"${S.sort === v ? " selected" : ""}>${l}</option>`).join("");
+  $("selRows").innerHTML = ROWOPTS.map(([v, l]) => `<option value="${v}"${S.rows === v ? " selected" : ""}>${l}</option>`).join("");
+  const shown = sortRows(FH.rows, tf, S.sort).slice(0, +S.rows);
+  $("rtCount").textContent = `${shown.length} of ${FH.count} markets`;
+  $("statusMain").textContent = `${FH.count} shown · ${FH.universe} with a funding spine · ${FH.book} in the xyz book · ${Math.round(FH.minCov * 100)}% bucket-coverage floor · ET · updated 12s ago`;
+  const ax = FH.axis[tf], cap = unitCap(FH, tf, u, false), capPct = fhPct(cap, fhDp(cap, u)).replace("+", "");
+  $("legMain").innerHTML =
+    `<span class="it">−${capPct}${apr ? " APR" : ""} · longs receive</span><span class="grad"></span>`
+    + `<span class="it">longs pay · +${capPct}${apr ? " APR" : ""}</span>`
+    + `<span class="it" style="margin-left:6px"><span class="fh-gapsw"></span>no data</span>`
+    + `<span class="it">${unitTag(u, tf)}</span>`;
+  mountHeat($("wrapMain"), heatSvg(FH, shown, tf, u));
+  $("capMain").innerHTML = apr
+    ? `One row per market, one column per ${ax.bucketHours}h bucket; a cell is that bucket's funding <b>annualized</b> — the mean hourly rate the spine saw, × 24 × 365, the same convention as the funding column on the Markets table — `
+      + `<b>red = longs pay</b> (crowded long, carry is a cost), <b>green = longs receive</b> (crowded short, carry pays you to be long). `
+      + `The resolution buttons change how finely the same rate is sliced, not the quantity: one market reads one number at 1h, 8h and 24h. `
+      + `The scale is capped at ±${capPct} APR — the 8h grid's own ${Math.round(FH.capPctl * 100)}th percentile, shared by all three resolutions so a zoom never repaints a cell; beyond it the cell just saturates. `
+      + `Hatched cells are gaps in the funding spine, not flat carry — a bucket needs ≥${Math.round(FH.minCov * 100)}% of its hours to print. `
+      + `The number on the right is that row's mean annualized rate over the window. <b>Hover</b> any cell for its rate and what it cost over the bucket.`
+    : `One row per market, one column per ${ax.bucketHours}h bucket; a cell is the funding a <b>1× long paid</b> over that bucket — `
+      + `<b>red = longs pay</b> (crowded long, carry is a cost), <b>green = longs receive</b> (crowded short, carry pays you to be long). `
+      + `The timeframe buttons change the quantity, not the zoom: the same market reads roughly 8× larger per 8h than per 1h. `
+      + `The scale is capped at the grid's own ${Math.round(FH.capPctl * 100)}th percentile (±${capPct} per ${tf}) so one blowout can't flatten everything else; beyond that the cell just saturates. `
+      + `Hatched cells are gaps in the funding spine, not flat carry — a bucket needs ≥${Math.round(FH.minCov * 100)}% of its hours to print. `
+      + `The number on the right is that row's mean per bucket over the window. <b>Hover</b> any cell for its exact rate, direction and annualized equivalent.`;
+}
+$("selSort").onchange = (e) => { S.sort = e.target.value; renderMain(); };
+$("selRows").onchange = (e) => { S.rows = e.target.value; renderMain(); };
+
+// ── §2 one market, three resolutions, one number ─────────────────────────────────────────────
+// The table refuses to compare the three grids' NEWEST cells (they end on different boundaries).
+// It takes ONE day — the newest complete 24h bucket — and reads that same day off all three grids.
+(function renderTfDemo() {
+  const m = FH.rows.find((r) => r.ticker === "SMCI");
+  let hb = "", ha = "";
+  for (const k of FH.tfs) {
+    hb += heatSvg(FH, [m], k, "bucket", { bare: true, rowLabel: () => k });
+    ha += heatSvg(FH, [m], k, "apr", { bare: true, rowLabel: () => k });
+  }
+  mountHeat($("wrapTfBucket"), hb); mountHeat($("wrapTfApr"), ha);
+
+  const a24 = FH.axis["24h"], i24 = a24.buckets - 1, T = a24.t0 + i24 * a24.width;
+  const slice = (k, n) => { const ax = FH.axis[k], i0 = Math.round((T - ax.t0) / ax.width); return m.tf[k].slice(i0, i0 + n); };
+  const legs = [["1h", 24], ["8h", 3], ["24h", 1]].map(([k, n]) => {
+    const c = slice(k, n), ok = c.length === n && c.every((v) => v != null);
+    const tot = ok ? c.reduce((s2, v) => s2 + v, 0) : null, mean = ok ? tot / n : null;
+    return { k, n, mean, tot, apr: mean == null ? null : mean * annOf(FH, k) };
+  });
+  const dpB = fhDpBucket(FH.axis["24h"].cap), dpA = 1;   // the day's cost prints at the daily grid's precision
+  $("tblTf").innerHTML =
+    `<tr><th>grid</th><th>mean cell, per bucket</th><th>× per year</th><th>mean cell, annualized</th><th>that day cost</th></tr>`
+    + legs.map((L) => `<tr><td>${L.k}</td><td>${fhPct(L.mean, fhDpBucket(FH.axis[L.k].cap) + 1)}</td>`
+        + `<td class="sec">× ${Math.round(annOf(FH, L.k)).toLocaleString("en-US")}</td><td class="hi">${fhPct(L.apr, dpA)}</td><td class="sec">${fhPct(L.tot, dpB)}</td></tr>`).join("");
+  const r81 = legs[1].mean / legs[0].mean, r248 = legs[2].mean / legs[1].mean;
+  $("arithTf").innerHTML =
+    `<span class="k">per bucket</span> 8h ÷ 1h = <b>${r81.toFixed(1)}×</b>, 24h ÷ 8h = <b>${r248.toFixed(1)}×</b> — the buttons change the number<br>`
+    + `<span class="k">annualized</span> 8h ÷ 1h = <b>${(legs[1].apr / legs[0].apr).toFixed(2)}×</b>, 24h ÷ 8h = <b>${(legs[2].apr / legs[1].apr).toFixed(2)}×</b> — the buttons change the smoothing<br>`
+    + `<span class="k">so</span> that day is <b>${fhPct(legs[2].apr, dpA)} APR</b> on every grid, and cost <b>${fhPct(legs[2].tot, dpB)}</b> to hold`;
+})();
+
+// ── §3 one cap across resolutions ────────────────────────────────────────────────────────────
+function renderCapDemo() {
+  const tf = S.capTf;
+  seg($("segCap"), FH.tfs.map((k) => [k, k]), tf, (v) => { S.capTf = v; renderCapDemo(); });
+  const rows = sortRows(FH.rows, "8h", "abs").slice(0, 8);
+  const shared = unitCap(FH, tf, "apr", false), own = unitCap(FH, tf, "apr", true);
+  mountHeat($("wrapCapOk"),  heatSvg(FH, rows, tf, "apr", { cap: shared, ch: 20 }));
+  mountHeat($("wrapCapBad"), heatSvg(FH, rows, tf, "apr", { cap: own, ch: 20 }));
+  const f = (c) => fhPct(c, 0).replace("+", "");
+  $("rtCap").textContent = `shared cap ±${f(shared)} APR · this grid's own 98th percentile ±${f(own)} APR`;
+  const caps = FH.tfs.map((k) => `${k} ±${f(unitCap(FH, k, "apr", true))}`).join(" · ");
+  $("capNote").innerHTML = `Each resolution's own annualized 98th percentile: <b>${caps}</b>. `
+    + `They differ because each grid covers a different window at a different smoothing, not because carry was any larger on one of them. `
+    + `Under the shared cap (left) the same day is the same hue on every button; under its own cap (right) a daily read fills the palette that an hourly read barely tints.`;
+}
+
+// ── §4 precision ─────────────────────────────────────────────────────────────────────────────
+(function renderDp() {
+  const rows = FH.tfs.map((k) => {
+    const cb = FH.axis[k].cap, ca = unitCap(FH, k, "apr", false);
+    const m = meanOf(FH.rows.find((r) => r.ticker === "SMCI").tf[k]);
+    return `<tr><td>${k}</td><td>${fhPct(cb, fhDpBucket(cb)).replace("+", "±")}</td><td class="sec">${fhDpBucket(cb)} dp</td><td class="hi">${fhPct(m, fhDpBucket(cb))}</td>`
+         + `<td>${fhPct(ca, fhDpApr(ca)).replace("+", "±")} APR</td><td class="sec">${fhDpApr(ca)} dp</td><td class="hi">${fhPct(m * annOf(FH, k), fhDpApr(ca))}</td></tr>`;
+  });
+  $("tblDp").innerHTML = `<tr><th>grid</th><th>cap, per bucket</th><th>prints at</th><th>SMCI mean</th><th>cap, annualized</th><th>prints at</th><th>SMCI mean</th></tr>` + rows.join("");
+})();
+
+renderMain();
+renderCapDemo();
+</script>
