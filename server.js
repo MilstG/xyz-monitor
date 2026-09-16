@@ -611,7 +611,11 @@ async function buildServer() {
     const n = await store.preloadOI();
     log(`OI log streamed in: ${n} sample(s) in ${Date.now() - t0}ms`);
   }
-  poller = createPoller({ dex: DEX, store, log, version: VERSION, crypto: CRYPTO });
+  // XYZ_NO_NET: the HTTP test suite builds this server without starting the poller, but a route can
+  // still kick an on-demand fetch (the positions lane). Under the switch that fetch fails fast and
+  // locally, so a test never reaches Hyperliquid and never waits on a timeout.
+  const noNet = process.env.XYZ_NO_NET ? () => Promise.reject(new Error("outbound network disabled (XYZ_NO_NET)")) : undefined;
+  poller = createPoller({ dex: DEX, store, log, version: VERSION, crypto: CRYPTO, posFetch: noNet });
   log(`Crypto (Hyperliquid main dex): ${CRYPTO ? "ENABLED — top-60 perps, 31d hourly / 90d daily retention" : "disabled via CRYPTO=0"}`);
   const fastify = Fastify({ logger: false });
 
@@ -2594,6 +2598,30 @@ async function buildServer() {
   // `stale` says the poller has not landed a universe poll in five minutes. Still a 200: a 503 would
   // make Railway restart-loop a process whose only problem is upstream. Alert on the flag instead.
   const STALE_MS = 5 * 60 * 1000;
+  // ---- positions overlay: the wallet on the account, the positions the lane read for it ---------
+  poller.setWalletSource(() => ACCOUNTS.walletsAll());
+  poller.setPosPoke((uid) => {
+    const set = sseByUid.get(uid);
+    if (!set) return;
+    const frame = "data: " + JSON.stringify({ pos: { ts: Date.now() } }) + "\n\n";
+    for (const e of set) sseWrite(e, frame);
+  });
+  fastify.get("/api/positions", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    const w = ACCOUNTS.walletGet(me.uid);
+    if (!w) return { ok: true, wallet: null, positions: [], summary: null, ts: 0, pending: false, err: null };
+    return Object.assign({ ok: true, wallet: { addr: w.addr, label: w.label || null } }, poller.getPositions(me.uid, w.addr));
+  });
+  fastify.post("/api/positions", { bodyLimit: 4 * 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    const b = req.body || {};
+    const r = b.remove ? ACCOUNTS.walletDrop(me.uid) : ACCOUNTS.walletSet(me.uid, b.addr, b.label);
+    if (!r.ok) return reply.code(400).send(r);
+    return r;
+  });
+
   // Browsers post violations as application/csp-report (report-uri) or application/reports+json
   // (Reporting API); Fastify 415s both unless told how to read them. No auth: the login page is
   // covered by the policy and its visitor has no session by definition. 8 KB is generous for a report.

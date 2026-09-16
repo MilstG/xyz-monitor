@@ -140,7 +140,11 @@
         <input class="fnum" id="volMin" aria-label="Minimum 24h volume" placeholder="min" autocomplete="off" spellcheck="false"/><span class="fdash">–</span><input class="fnum" id="volMax" aria-label="Maximum 24h volume" placeholder="max" autocomplete="off" spellcheck="false"/></div>
       <div class="fpg"><span class="flbl" title="In millions by default: 1 = 1M, 0.1 = 100K. Suffixes override: 500k, 2.5b">OI <span class="sec">(M)</span></span>
         <input class="fnum" id="oiMin" aria-label="Minimum open interest" placeholder="min" autocomplete="off" spellcheck="false"/><span class="fdash">–</span><input class="fnum" id="oiMax" aria-label="Maximum open interest" placeholder="max" autocomplete="off" spellcheck="false"/></div>
+      <div class="fpg fpg-pos"><span class="flbl" title="Overlay the open perps of one Hyperliquid wallet on the table: a ⬡ beside the ticker, a Position column, and a panel in the drawer. Public address only — the app reads the public clearinghouse state and can never sign anything. One wallet per account.">Positions <span class="sec">(wallet)</span></span>
+        <input class="fnum faddr" id="posAddr" aria-label="Hyperliquid wallet address" placeholder="0x… address" autocomplete="off" spellcheck="false" maxlength="42"/><button class="btn" id="posLink" title="Link this address to your account">Link</button><button class="btn" id="posUnlink" hidden title="Unlink the wallet">✕</button></div>
+      <div class="fpg fpg-pos2"><span class="sec" id="posStat"></span></div>
       <div class="fpg fpg-act">
+        <button class="btn" id="posOnly" title="Show only names the linked wallet holds a position in">⬡ held</button>
         <button class="btn" id="watchOnly" title="Show only watchlisted tickers">★ only</button>
         <button class="btn" id="noteOnly" title="Show only names you have written a note on">◢ noted</button>
         <button class="btn" id="dimOff" title="Dim foreign-home names (KRX / TSE / HKEX) while their home exchange is closed — the perp still trades, but the reference book under it is asleep. Visual only; per browser.">☾ dim</button>

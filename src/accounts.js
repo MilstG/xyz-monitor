@@ -293,6 +293,16 @@ CREATE TABLE IF NOT EXISTS user_pref (
   PRIMARY KEY (uid, key)
 ) STRICT;
 
+-- One Hyperliquid wallet per account, for the positions overlay. Read-only by construction: an
+-- address is public information and the API it feeds is the public /info endpoint — nothing here
+-- can sign, and nothing here is a secret worth more than the watchlist next to it.
+CREATE TABLE IF NOT EXISTS user_wallet (
+  uid TEXT PRIMARY KEY,
+  addr TEXT NOT NULL,
+  label TEXT,
+  addedAt INTEGER NOT NULL
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS dm_webpush (
   endpoint TEXT PRIMARY KEY,
   uid TEXT NOT NULL,
@@ -421,6 +431,11 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     wpDrop: db.prepare("DELETE FROM dm_webpush WHERE endpoint = ?"),
     wpDropMine: db.prepare("DELETE FROM dm_webpush WHERE endpoint = ? AND uid = ?"),
     wpFor: db.prepare("SELECT * FROM dm_webpush WHERE uid = ?"),
+
+    walletGet: db.prepare("SELECT addr, label, addedAt FROM user_wallet WHERE uid = ?"),
+    walletPut: db.prepare("INSERT INTO user_wallet (uid, addr, label, addedAt) VALUES (?,?,?,?) ON CONFLICT(uid) DO UPDATE SET addr = excluded.addr, label = excluded.label, addedAt = excluded.addedAt"),
+    walletDrop: db.prepare("DELETE FROM user_wallet WHERE uid = ?"),
+    walletAll: db.prepare("SELECT w.uid, w.addr FROM user_wallet w JOIN user u ON u.uid = w.uid WHERE u.disabledAt IS NULL"),
 
     prefAll: db.prepare("SELECT key, json, ts FROM user_pref WHERE uid = ?"),
     prefOne: db.prepare("SELECT ts FROM user_pref WHERE uid = ? AND key = ?"),
@@ -1606,6 +1621,18 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     return { ok: true, stored: true, ts: stamp };
   }
 
+  // ---- wallet (positions overlay) ------------------------------------------------------------------
+  const walletGet = (uid) => S.walletGet.get(uid) || null;
+  function walletSet(uid, addr, label) {
+    const a = String(addr || "").trim();
+    if (!/^0x[0-9a-fA-F]{40}$/.test(a)) return { ok: false, error: "that isn't an EVM address (0x + 40 hex)" };
+    const l = String(label || "").trim().slice(0, 24);
+    S.walletPut.run(uid, a.toLowerCase(), l || null, Date.now());
+    return { ok: true, wallet: walletGet(uid) };
+  }
+  function walletDrop(uid) { S.walletDrop.run(uid); return { ok: true, wallet: null }; }
+  const walletsAll = () => S.walletAll.all();   // a disabled account's wallet is not polled
+
   // ---- pins ----------------------------------------------------------------------------------------
   function pin(uid, id, on) {
     const m = S.msgById.get(+id);
@@ -1884,6 +1911,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     react, REACTIONS, putFile, readFile, removeFile, sweepFiles, sweepRetention, bridgeReply,
     watchList, setWatch, pin, pinsOf, calls, exportThread,
     prefsGet, prefsPut,
+    walletGet, walletSet, walletDrop, walletsAll,
     adminThreads, adminHistory, adminSearch, adminAuditLog,
     pendingEscalations, markEscalated,
     setPxHistory,

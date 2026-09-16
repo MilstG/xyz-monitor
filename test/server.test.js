@@ -14,6 +14,7 @@ process.env.SITE_PASSWORD = "shared-door-pw";
 process.env.SITE_USER = "friend";
 process.env.ADMIN_PASSWORD = "break-glass-pw-1";
 process.env.XYZ_QUIET = "1";
+process.env.XYZ_NO_NET = "1";
 delete process.env.TG_BOT_TOKEN; delete process.env.FINNHUB_TOKEN; delete process.env.FRED_KEY;
 const { buildServer } = require("../server.js");
 
@@ -259,4 +260,25 @@ test("prefs: /api/prefs is an account surface — 401 signed out, round-trips pe
   const bad = await post("/api/prefs", { key: "font", value: 3, ts: 1 }, gus);
   assert.equal(bad.statusCode, 400);
   assert.equal((await get("/api/prefs", gus)).headers["cache-control"], "no-store");
+});
+
+test("positions: the wallet is an account surface — validated, one per member, the read kicks the lane and never blocks on it", async () => {
+  assert.equal((await get("/api/positions")).statusCode, 401);
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  assert.deepEqual(JSON.parse((await get("/api/positions", gus)).body), { ok: true, wallet: null, positions: [], summary: null, ts: 0, pending: false, err: null });
+  const bad = await post("/api/positions", { addr: "0x1234" }, gus);
+  assert.equal(bad.statusCode, 400); assert.match(JSON.parse(bad.body).error, /EVM address/);
+  const addr = "0xABCDEF0123456789abcdef0123456789ABCDEF01";
+  const ok = JSON.parse((await post("/api/positions", { addr, label: "  main book  " }, gus)).body);
+  assert.equal(ok.ok, true); assert.equal(ok.wallet.addr, addr.toLowerCase(), "stored lowercase"); assert.equal(ok.wallet.label, "main book");
+  const first = JSON.parse((await get("/api/positions", gus)).body);
+  assert.equal(first.wallet.addr, addr.toLowerCase()); assert.equal(first.pending, true, "first read: the lane has nothing yet and is kicked");
+  await new Promise((r) => setTimeout(r, 30));
+  const second = JSON.parse((await get("/api/positions", gus)).body);
+  assert.equal(second.pending, false); assert.match(second.err, /XYZ_NO_NET/, "the kicked read failed fast and said why"); assert.deepEqual(second.positions, []);
+  // Another member sees nothing of it.
+  const cara = jar(); cara.absorb(await post("/login", { handle: "cara", password: "yet-another-long-pw" }));
+  assert.equal(JSON.parse((await get("/api/positions", cara)).body).wallet, null);
+  assert.deepEqual(JSON.parse((await post("/api/positions", { remove: true }, gus)).body), { ok: true, wallet: null });
+  assert.equal(JSON.parse((await get("/api/positions", gus)).body).wallet, null);
 });

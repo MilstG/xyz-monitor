@@ -6779,7 +6779,8 @@ test("build -07 manifest: pair math welded across compute.js and app.js; duel pl
     assert.ok(hid.has("mom"), "plain MOM hidden by default (the -10 default set)"); }
   // -04: the 5m/15m pair added two adjacency calls per merge site (m5 beside px, m15 beside m5);
   // 2026.08.10-01: the anchored-open trio (hopen/h4open/h12open beside dopen) added three more per site
-  assert.equal(app.split("colAdjacent(").length - 1, 13, "adjacency migration: one definition + (momp, m5, m15, hopen, h4open, h12open) on the prefs path + the same six on the layout path");
+  // 2026.09.16-79: the Position column (pos beside oi) added one more per site
+  assert.equal(app.split("colAdjacent(").length - 1, 15, "adjacency migration: one definition + (momp, m5, m15, hopen, h4open, h12open, pos) on the prefs path + the same seven on the layout path");
   assert.ok(app.includes("renderDuelSection()") && app.includes("loadDuelData()"), "duel panel wired into the backtest render");
   // -08: the hot dot rides BOTH momentum cells — it flags the name, not the incumbent score,
   // and must survive when only one of the two columns is visible.
@@ -24829,4 +24830,102 @@ test("prefs: the client's decision table — newer stamp wins, a stamp-less non-
   assert.ok(src.includes("prefsPullAll();  // account copy"), "boot pulls");
   assert.ok(src.includes("function prefsLocal(key){ return key==='watch' ? [...state.watch].sort() : { list: state.layouts.list }; }"), "only the list travels — never the active layout");
   assert.ok(src.includes("if(!p||p.from===TAB_ID) return;"), "a tab ignores its own poke");
+});
+
+// ===== build 2026.09.16-79: positions overlay ===================================================
+test("positions lane: polls only wanted wallets, pokes on structure not on P&L, backs off on failure, forgets an unlinked wallet", async () => {
+  const { openStore } = require("../src/store");
+  const { createPoller } = require("../src/poller");
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyzpos-"));
+  const settle = () => new Promise((r) => setTimeout(r, 5));
+  try {
+    const calls = [];
+    const book = (szi, upnl) => ({ marginSummary: { accountValue: "1000.5", totalNtlPos: "210", totalMarginUsed: "100" }, withdrawable: "800",
+      assetPositions: [
+        { type: "oneWay", position: { coin: "xyz:NVDA", szi, entryPx: "100", positionValue: "210", unrealizedPnl: upnl, returnOnEquity: "0.1", liquidationPx: "60", marginUsed: "100", leverage: { type: "cross", value: 2 }, cumFunding: { allTime: "1", sinceOpen: "0.5", sinceChange: "0.5" } } },
+        { type: "oneWay", position: { coin: "xyz:FLAT", szi: "0.0", entryPx: "1" } },   // closed: dropped
+        { type: "oneWay", position: null },                                              // junk: dropped
+      ] });
+    let reply = () => book("2.0", "10");
+    const posFetch = async (addr, dex) => { calls.push([addr, dex]); return reply(addr, dex); };
+    const p = createPoller({ dex: "xyz", store: openStore(dir), log: () => {}, version: "test", crypto: false, posFetch });
+    const wallets = [{ uid: "u1", addr: "0xabc" }, { uid: "u2", addr: "0xdef" }];
+    p.setWalletSource(() => wallets);
+    const pokes = []; p.setPosPoke((uid) => pokes.push(uid));
+    // Nobody has asked: a tick costs the rate budget nothing.
+    await p.positionsTickNow(); assert.equal(calls.length, 0);
+    // A read marks the wallet wanted and kicks the first refresh; the caller is told it is pending.
+    assert.equal(p.getPositions("u1", "0xabc").pending, true);
+    await settle();
+    const got = p.getPositions("u1", "0xabc");
+    assert.equal(got.pending, false); assert.deepEqual(calls, [["0xabc", "xyz"]], "the xyz book only — no crypto lane, no main-dex call");
+    assert.equal(got.positions.length, 1, "closed and junk rows are dropped");
+    assert.deepEqual(got.positions[0], { coin: "xyz:NVDA", side: "long", sz: 2, entry: 100, ntl: 210, upnl: 10, roe: 0.1, liq: 60, margin: 100, lev: 2, levType: "cross", fundOpen: 0.5 });
+    assert.equal(got.summary.equity, 1000.5); assert.equal(got.summary.parts.main, null); assert.ok(got.ts > 0);
+    assert.deepEqual(pokes, ["u1"], "the first read pokes");
+    // Marks move every tick; a P&L-only change is the client's to derive and does not poke.
+    reply = () => book("2.0", "50"); await p.positionsRefreshNow("u1", "0xabc");
+    assert.deepEqual(pokes, ["u1"]); assert.equal(p.getPositions("u1", "0xabc").positions[0].upnl, 50, "the cached read still refreshes");
+    // A fill changes the structure: poke.
+    reply = () => book("-3.0", "0"); await p.positionsRefreshNow("u1", "0xabc");
+    assert.deepEqual(pokes, ["u1", "u1"]); assert.equal(p.getPositions("u1", "0xabc").positions[0].side, "short");
+    // The tick honours the cadence (a fresh read is not re-read) and still ignores the unwanted wallet.
+    const n = calls.length; await p.positionsTickNow(); assert.equal(calls.length, n);
+    assert.ok(!calls.some((c) => c[0] === "0xdef"), "u2 never asked");
+    // Failure: backoff, the reason surfaced, the last good read kept.
+    reply = () => { throw new Error("HTTP 500"); }; await p.positionsRefreshNow("u1", "0xabc");
+    const st = p.positionsStateNow("u1");
+    assert.equal(st.err, "HTTP 500"); assert.ok(st.failUntil > Date.now()); assert.equal(st.positions.length, 1, "the last good read stands");
+    const r = p.getPositions("u1", "0xabc"); assert.equal(r.pending, false); assert.equal(r.err, "HTTP 500"); assert.equal(r.positions.length, 1);
+    await p.positionsTickNow(); assert.equal(calls.length, n + 1, "inside the backoff the tick does not retry");
+    // Recovery pokes once even with the same structure — the client's error banner has to clear.
+    reply = () => book("-3.0", "0"); await p.positionsRefreshNow("u1", "0xabc"); assert.deepEqual(pokes, ["u1", "u1", "u1"]);
+    // A new address on the account: the cached read belongs to the old one and is not served.
+    assert.equal(p.getPositions("u1", "0x999").pending, true);
+    // Unlinked: the next tick forgets the state.
+    wallets.length = 0; await p.positionsTickNow(); assert.equal(p.positionsStateNow("u1"), null);
+    // With the crypto lane on, the main-dex book is read too and its summary folds in.
+    const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), "xyzpos2-"));
+    const calls2 = [];
+    const p2 = createPoller({ dex: "xyz", store: openStore(dir2), log: () => {}, version: "test", crypto: true,
+      posFetch: async (addr, dex) => { calls2.push(dex); return dex ? book("1.0", "0") : { marginSummary: { accountValue: "20" }, assetPositions: [{ type: "oneWay", position: { coin: "BTC", szi: "-0.5", entryPx: "60000" } }] }; } });
+    p2.setWalletSource(() => [{ uid: "u9", addr: "0x1" }]);
+    await p2.positionsRefreshNow("u9", "0x1");
+    const g2 = p2.getPositions("u9", "0x1");
+    assert.deepEqual(calls2.sort(), ["", "xyz"]);
+    assert.deepEqual(g2.positions.map((x) => x.coin + ":" + x.side), ["xyz:NVDA:long", "BTC:short"]);
+    assert.equal(g2.summary.equity, 1020.5); assert.equal(g2.summary.parts.main.equity, 20);
+    fs.rmSync(dir2, { recursive: true, force: true });
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("positions client: P&L derives off the live mark, signed with the side; the overlay is wired into cell, badge, drawer, filter and stream", () => {
+  const fs = require("fs"), path = require("path");
+  const src = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const grab = (name) => { const i = src.indexOf("function " + name + "("); assert.ok(i >= 0, name + " missing");
+    let dep = 0; for (let k = src.indexOf("{", i); k < src.length; k++) { if (src[k] === "{") dep++; if (src[k] === "}") { dep--; if (!dep) return src.slice(i, k + 1); } } };
+  const state = { pos: new Map(), rows: new Map() };
+  const posCalc = new Function("state", grab("posCalc") + "; return posCalc;")(state);
+  state.pos.set("xyz:NVDA", { coin: "xyz:NVDA", side: "long", sz: 2, entry: 100, ntl: 210, upnl: 10, margin: 100, liq: 60 });
+  state.pos.set("BTC", { coin: "BTC", side: "short", sz: 0.5, entry: 60000, ntl: 30000, upnl: 0, margin: 6000, liq: 70000 });
+  const L = posCalc({ coin: "xyz:NVDA", px: 110 });
+  assert.equal(L.ntl, 220, "notional at the live mark, not the polled one");
+  assert.equal(L.upnl, 20); assert.equal(L.roe, 20); assert.ok(Math.abs(L.vsEntry - 10) < 1e-9);
+  assert.ok(Math.abs(L.liqDist - (60 / 110 - 1) * 100) < 1e-9, "a long's liquidation sits below the mark: negative distance");
+  const S = posCalc({ coin: "BTC", px: 57000 });
+  assert.equal(S.upnl, 1500, "a short whose price fell is winning"); assert.ok(S.vsEntry > 0, "signed with the side"); assert.ok(S.liqDist > 0);
+  assert.equal(posCalc({ coin: "xyz:AAPL", px: 1 }), null, "nothing held: nothing drawn");
+  const stale = posCalc({ coin: "xyz:NVDA", px: null });
+  assert.equal(stale.ntl, 210); assert.equal(stale.upnl, 10, "no live mark yet: the polled figures stand in");
+  // Wiring pins.
+  assert.ok(src.includes("${earnBadge(r)}${noteBadge(r)}${posBadge(r)}${cdsHtml(r)}</td>"), "the badge sits in the ticker cell, after the note post-it");
+  assert.equal((src.match(/if\(state\.posOnly\) rows=rows\.filter\(r=>state\.pos\.has\(r\.coin\)\);/g) || []).length, 2, "the ⬡ held filter applies in both table lenses");
+  assert.ok(src.includes("{key:'pos', label:'Position', type:'num'"), "a sortable column");
+  assert.ok(src.includes("colAdjacent(v,'pos','oi');") && src.includes("colAdjacent(ord,'pos','oi');"), "saved prefs and saved layouts both migrate the column in next to OI");
+  assert.ok(src.includes("if(d&&d.pos) loadPositions();"), "the stream poke reloads");
+  assert.ok(src.includes("renderDrawerPos(coin);") && src.includes('<div id="dpos"></div>'), "the drawer panel");
+  assert.ok(src.includes("computeDerived(); evaluateAlerts(); posDecorate();"), "the sort key is refreshed off the live mark every render");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  for (const id of ["posAddr", "posLink", "posUnlink", "posOnly", "posStat"]) assert.ok(html.includes('id="' + id + '"'), id + " in the filter popover");
 });

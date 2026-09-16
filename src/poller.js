@@ -177,7 +177,7 @@ function rnd(x, dp) { return Number.isFinite(x) ? +x.toFixed(dp) : null; }
 function sig(x, n) { return Number.isFinite(x) ? (x === 0 ? 0 : +x.toPrecision(n)) : null; }
 const sigq = sig;   // alias for scopes that shadow `sig` locally (buildDaily declares its content-signature as `sig`)
 
-function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, pushFetch: pushFetchOpt, extFetch: extFetchOpt, metaFetch: metaFetchOpt, t13fCap: t13fCapOpt, congressGap: congressGapOpt, congressConc: congressConcOpt }) {
+function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, pushFetch: pushFetchOpt, extFetch: extFetchOpt, metaFetch: metaFetchOpt, posFetch: posFetchOpt, t13fCap: t13fCapOpt, congressGap: congressGapOpt, congressConc: congressConcOpt }) {
   const rows = new Map();          // coin -> row
   const fetchMeta = metaFetchOpt || fetchMetaAndCtxs;   // harness: inject a universe reply without network
   const hist = store.loadAll(Date.now() - OI_RETENTION); // coin -> [[ts, oi], ...]
@@ -7992,6 +7992,88 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     } catch (e) { log("maintenance tail failed: " + (e && e.message)); }
   }
 
+  // ---- positions lane (build 2026.09.16-79) ------------------------------------------------------
+  // A member's own open perps, read from the public clearinghouseState for the wallet on their
+  // account, so the table and the drawer can say what is actually HELD next to what the board says.
+  // Two calls per wallet (the xyz book and, when the crypto lane runs, the main-dex book), weight
+  // 2 each, every 30s — but ONLY for wallets somebody is looking at: a GET marks the account wanted
+  // for ten minutes, and a wallet nobody has asked about costs the rate budget nothing. The server
+  // ships size / entry / leverage / liquidation / margin / funding-since-open; unrealized P&L is
+  // derived CLIENT-side off the live mark the table already holds (the same arithmetic Hyperliquid
+  // uses), so it moves with the tape between polls and the lane only pokes on a structural change.
+  const POS_MS = 30 * 1000, POS_WANT_MS = 10 * 60 * 1000, POS_FAIL_BACKOFF = 2 * 60 * 1000;
+  const posFetch = posFetchOpt || require("./hyperliquid").fetchClearinghouseState;
+  let walletSource = null, posPoke = null;
+  const posState = new Map();    // uid -> { addr, ts, positions, summary, err, sig, failUntil }
+  const posWanted = new Map();   // uid -> last client ask
+  const posInflight = new Set();
+  function posNormOne(p) {
+    const szi = num(p.szi);
+    if (!p.coin || !szi) return null;
+    return { coin: String(p.coin), side: szi > 0 ? "long" : "short", sz: Math.abs(szi),
+      entry: num(p.entryPx), ntl: num(p.positionValue), upnl: num(p.unrealizedPnl), roe: num(p.returnOnEquity),
+      liq: num(p.liquidationPx), margin: num(p.marginUsed),
+      lev: p.leverage ? num(p.leverage.value) : null, levType: p.leverage && p.leverage.type ? String(p.leverage.type) : null,
+      fundOpen: p.cumFunding ? num(p.cumFunding.sinceOpen) : null };
+  }
+  function posNorm(rep) {
+    const out = [];
+    const ap = rep && Array.isArray(rep.assetPositions) ? rep.assetPositions : [];
+    for (const a of ap) { const p = a && a.position; if (!p) continue; const n = posNormOne(p); if (n) out.push(n); }
+    return out;
+  }
+  function posSummaryOf(rep) {
+    const ms = (rep && rep.marginSummary) || {};
+    return { equity: num(ms.accountValue), ntl: num(ms.totalNtlPos), marginUsed: num(ms.totalMarginUsed), withdrawable: num(rep && rep.withdrawable) };
+  }
+  async function positionsRefresh(uid, addr) {
+    if (posInflight.has(uid)) return;
+    posInflight.add(uid);
+    const prev = posState.get(uid);
+    try {
+      const [xr, mr] = await Promise.all([posFetch(addr, dex), crypto ? posFetch(addr, "") : Promise.resolve(null)]);
+      const positions = posNorm(xr).concat(mr ? posNorm(mr) : []);
+      const parts = { xyz: posSummaryOf(xr), main: mr ? posSummaryOf(mr) : null };
+      const sum = (k) => { let t = 0, any = false; for (const p of [parts.xyz, parts.main]) if (p && p[k] != null) { t += p[k]; any = true; } return any ? +t.toFixed(2) : null; };
+      const summary = { equity: sum("equity"), ntl: sum("ntl"), marginUsed: sum("marginUsed"), withdrawable: sum("withdrawable"), parts };
+      // Structural signature: what a poke should announce. Marks move every tick and are the
+      // client's to apply; a poke per tick would be a second snapshot stream.
+      const sig = positions.map((p) => [p.coin, p.side, p.sz, p.entry, p.lev, p.margin].join(",")).sort().join("|");
+      const changed = !prev || prev.sig !== sig || !!prev.err;
+      posState.set(uid, { addr, ts: Date.now(), positions, summary, err: null, sig, failUntil: 0 });
+      if (changed && posPoke) { try { posPoke(uid); } catch (_) {} }
+    } catch (e) {
+      const msg = String((e && e.message) || e).slice(0, 120);
+      posState.set(uid, Object.assign({ addr, ts: 0, positions: [], summary: null, sig: "" }, prev && prev.addr === addr ? prev : {}, { err: msg, failUntil: Date.now() + POS_FAIL_BACKOFF }));
+    } finally { posInflight.delete(uid); }
+  }
+  async function positionsTick() {
+    const src = walletSource ? walletSource() : [];
+    const now = Date.now();
+    const live = new Set();
+    for (const w of Array.isArray(src) ? src : []) {
+      if (!w || !w.uid || !w.addr) continue;
+      live.add(w.uid);
+      if (now - (posWanted.get(w.uid) || 0) > POS_WANT_MS) continue;   // nobody is looking
+      const st = posState.get(w.uid);
+      if (st && st.addr === w.addr && (st.failUntil > now || now - st.ts < POS_MS - 2000)) continue;
+      await positionsRefresh(w.uid, w.addr);
+    }
+    for (const uid of posState.keys()) if (!live.has(uid)) posState.delete(uid);   // wallet unlinked or account disabled
+  }
+  // The route's read: marks the account wanted, serves what is cached, and kicks a refresh when the
+  // cache is missing or belongs to a previous address — the caller sees pending:true and the poke
+  // (or its own next pull) brings the rows.
+  function getPositions(uid, addr) {
+    posWanted.set(uid, Date.now());
+    const st = posState.get(uid);
+    if (!st || st.addr !== addr) {
+      if (!st || st.addr !== addr || st.failUntil <= Date.now()) positionsRefresh(uid, addr).catch(() => {});
+      return { pending: true, positions: [], summary: null, ts: 0, err: st && st.addr === addr ? st.err : null };
+    }
+    return { pending: false, positions: st.positions, summary: st.summary, ts: st.ts, err: st.err };
+  }
+
   async function start() {
     // Isolation helper, hoisted to the top of start() so the critical rebuild loops can be armed
     // before anything that might throw. Since 2026.07.29-08 it is also the instrumentation choke
@@ -8018,6 +8100,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // early: it must exist even if a later boot step throws, or the day's list would silently
     // never stamp. A boot after 09:30 stamps on the first tick with the disclosed `late` flag.
     setInterval(safeTick(() => focusTick(), "focusTick"), 30 * 1000);
+    setInterval(() => { positionsTick().catch((e) => log("positions tick failed (isolated): " + (e && e.message))); }, POS_MS);
     if (hydrateFocus()) log(`Restored FOCUS list${focusState ? `: ${focusState.rows.length} seat(s) for ${focusState.day}${focusState.filledAt ? " (+1h filled)" : ""}` : " (prior day only)"} — the day's stamp survives a redeploy`);
     // 13F whale lane: hydrate the watchlist + cached books, then a due-check tick. The tick is
     // isolated like the sector audit — a sec.gov outage must never take the poller loop with it —
@@ -14407,6 +14490,13 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     pushEnqueueNow: (chat, text, force) => pushEnqueue(chat, text, !!force, 0),
     // The inbound half of the same wire: server.js installs the handler that turns /r into a message.
     setDmBridge: (fn) => { dmBridge = typeof fn === "function" ? fn : null; },
+    // positions lane: the server hands in the wallet table and a per-uid SSE poke
+    setWalletSource: (fn) => { walletSource = typeof fn === "function" ? fn : null; },
+    setPosPoke: (fn) => { posPoke = typeof fn === "function" ? fn : null; },
+    getPositions,
+    positionsTickNow: positionsTick,                        // harness
+    positionsRefreshNow: positionsRefresh,                  // harness
+    positionsStateNow: (uid) => posState.get(uid) || null,  // harness
     // chat -> the account handle that linked it. `owner` IS the uid, which is why an account
     // reuses its xyzown handle as its id.
     pushOwnerOf: (chat) => { const r = pushRecipients.get(String(chat)); return r ? (r.owner || "") : ""; },

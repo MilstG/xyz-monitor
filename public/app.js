@@ -15,7 +15,7 @@ const LKEY = 'xyzmon.layouts.v1';   // named table layouts: columns, sort, windo
 
 const COLS=[
   {key:'ticker', label:'Ticker', type:'str', def:'asc', hideable:false,
-    td:r=>`<td class="tkc">${railHtml(r)}<span class="star${state.watch.has(r.coin)?' on':''}" data-star="${esc(r.coin)}" role="button" tabindex="0" title="${state.watch.has(r.coin)?'remove from watchlist':'add to watchlist'}">${state.watch.has(r.coin)?'★':'☆'}</span><span class="tk" title="${esc(r.nm?r.nm+' \u00b7 '+r.coin:r.coin)}">${esc(r.ticker)}</span>${earnBadge(r)}${noteBadge(r)}${cdsHtml(r)}</td>`},
+    td:r=>`<td class="tkc">${railHtml(r)}<span class="star${state.watch.has(r.coin)?' on':''}" data-star="${esc(r.coin)}" role="button" tabindex="0" title="${state.watch.has(r.coin)?'remove from watchlist':'add to watchlist'}">${state.watch.has(r.coin)?'★':'☆'}</span><span class="tk" title="${esc(r.nm?r.nm+' \u00b7 '+r.coin:r.coin)}">${esc(r.ticker)}</span>${earnBadge(r)}${noteBadge(r)}${posBadge(r)}${cdsHtml(r)}</td>`},
   {key:'sess', label:'Sess', type:'str', def:'asc', tip:'Home market of the reference line under the perp \u2014 KR (KRX), JP (TSE), HK (HKEX) for foreign listings with no US symbol; US for everything else. Lit dot = that exchange is OPEN right now (server-computed, holiday-aware). US\u00b7TW etc. on ADRs = US-listed line (full ET machinery applies) with the home line leading it overnight \u2014 context, never anchoring. Stocks scope only.',
     td:r=>sessCell(r)},
   {key:'px', label:'Price', type:'num',
@@ -87,6 +87,7 @@ const COLS=[
     td:r=>carryCell(r)},
   {key:'vol', label:'24h Vol', type:'num', td:r=>`<td class="sec">${fmtUsd(r.vol)}</td>`},
   {key:'oi', label:'OI', type:'num', td:r=>`<td class="sec">${fmtUsd(r.oi)}</td>`},
+  {key:'pos', label:'Position', type:'num', tip:'Your open position in this market, from the wallet linked under Filters \u203a Positions: side, notional at the live mark, and the move since entry signed with the side (a short whose price fell reads green). Sorts by signed notional. Hidden until a wallet is linked; unrealized P&L is derived here off the same mark the table shows, so it moves with the tape between wallet polls.', td:r=>posCell(r)},
   {key:'ma20', label:'MA 20', type:'num', tip:'20-day simple moving average of daily closes \u00b7 green when price is above it, red below \u00b7 fills in once daily history loads \u00b7 hover for distance', td:r=>maCell(r,'ma20',20)},
   {key:'ma50', label:'MA 50', type:'num', tip:'50-day simple moving average of daily closes \u00b7 green when price is above it, red below \u00b7 crypto scope shows \u2014 (31d retention holds fewer than 50 closes)', td:r=>maCell(r,'ma50',50)},
   {key:'ma100', label:'MA 100', type:'num', tip:'100-day simple moving average of daily closes \u00b7 green when price is above it, red below \u00b7 crypto scope shows \u2014 (31d retention)', td:r=>maCell(r,'ma100',100)},
@@ -123,8 +124,8 @@ function liq24Cell(r){ if(r.uni!=='main') return '<td><span class="na">\u2014</s
   return `<td class="${sk||'sec'}" title="24h forced liquidations ${fmtUsd(tot)} \u00b7 longs ${fmtUsd(L)} (${lp}%) / shorts ${fmtUsd(S)} (${100-lp}%)${lp>=67?' \u2014 long-side flush':(lp<=33?' \u2014 short-side squeeze':'')} \u00b7 aggregated CEX (Coinalyze), USD source-converted \u2014 context, not HL-native">${fmtUsd(tot)}</td>`; }
 const COL_BY_KEY={}; COLS.forEach(c=>COL_BY_KEY[c.key]=c);
 // Default table layout (order + which columns show). Hidden by default: beta, Vol(ann), ΔOI, Squeeze, Carry, OI.
-const DEFAULT_ORDER=['ticker','sess','px','m5','m15','h1','h4','d1','dopen','hopen','h4open','h12open','d7','d30','gap','rs','vstape','momp','vol','funding','rvol','adr','turn','vwap','prem','trend','dvb','dcap','hitr','mom','dd','swr','ddy','yopen','mopen','beta','vol30','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
-const DEFAULT_HIDDEN=['m5','m15','hopen','h4open','h12open','prem','trend','dvb','dcap','hitr','beta','mom','vol30','dd','swr','ddy','yopen','mopen','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
+const DEFAULT_ORDER=['ticker','sess','px','m5','m15','h1','h4','d1','dopen','hopen','h4open','h12open','d7','d30','gap','rs','vstape','momp','vol','funding','rvol','adr','turn','vwap','prem','trend','dvb','dcap','hitr','mom','dd','swr','ddy','yopen','mopen','beta','vol30','doi','sqz','cascT','liq24','carry','oi','pos','ma20','ma50','ma100','ma200','vsvwap'];
+const DEFAULT_HIDDEN=['m5','m15','hopen','h4open','h12open','prem','trend','dvb','dcap','hitr','beta','mom','vol30','dd','swr','ddy','yopen','mopen','doi','sqz','cascT','liq24','carry','oi','pos','ma20','ma50','ma100','ma200','vsvwap'];
 const LAYOUT_V=5; // bump to force a one-time reset of saved layouts to the new default (v5: sess home-market chip column after ticker)
 
 const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return localStorage.getItem('xyz-scope')==='crypto'?'crypto':'stocks';}catch(_){return 'stocks';}})(), sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:30000, benchCoin:null, benchMain:null, dvbBasket:'MAG7',
@@ -132,6 +133,7 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
   // it in place. grpSort is the lens's own sort (the names sort must survive a round trip);
   // grpDrill is the transient member filter a group-row click leaves behind — never persisted.
   grp:'names', grpWt:'vol', grpSort:{key:'d1',dir:'desc'}, grpDrill:null,
+  pos:new Map(), posOnly:false, posMeta:null,   // positions overlay (build 2026.09.16-79): coin -> held position, the ⬡ held filter, the last /api/positions envelope
   actOpen:true,   // action lists under the markets table: OPEN by default (-03), collapse persisted
   filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'30', ctf:'1d', topN:40, selected:null, search:'', topPairs:10, pair:null, showBuiltins:false},
   colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN), pollMs:30000,
@@ -880,6 +882,7 @@ function sortedRows(){ let rows=activeRows(); const f=state.filter.trim().toUppe
   if(f) rows=rows.filter(r=>r.ticker.toUpperCase().includes(f)||r.coin.toUpperCase().includes(f));
   if(state.watchOnly) rows=rows.filter(r=>state.watch.has(r.coin));
   if(state.noteOnly) rows=rows.filter(r=>r.nt&&r.nt.n);
+  if(state.posOnly) rows=rows.filter(r=>state.pos.has(r.coin));
   rows=thresholdRows(rows);
   const k=state.sortKey, dir=state.sortDir==='asc'?1:-1, col=COLS.find(c=>c.key===k);
   rows.sort((a,b)=>{ let av=a[k],bv=b[k]; if(col.type==='str')return dir*String(av).localeCompare(String(bv));
@@ -1244,6 +1247,7 @@ function groupRowsSorted(){
   let rows=activeRows();
   if(state.watchOnly) rows=rows.filter(r=>state.watch.has(r.coin));
   if(state.noteOnly) rows=rows.filter(r=>r.nt&&r.nt.n);
+  if(state.posOnly) rows=rows.filter(r=>state.pos.has(r.coin));
   rows=thresholdRows(rows);
   const list=computeMktGroups(rows, mktGrp(), state.grpWt);
   mktGroupCohesion(list);
@@ -1529,7 +1533,7 @@ function renderActionLists(){
   });
 }
 function render(){
-  if(!state.rows.size) return; computeDerived(); evaluateAlerts();
+  if(!state.rows.size) return; computeDerived(); evaluateAlerts(); posDecorate();
   // Reconcile the note book against the digest riding the snapshot. The digest is authoritative:
   // if the counts disagree, somebody wrote from another browser and our bodies are behind. One
   // comparison per render, one fetch only when they actually diverge.
@@ -2878,6 +2882,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
       ${st('ΔOI ('+state.tf+')', r.doi!=null?`<span class="${r.doi>=0?'pos':'neg'}">${r.doi>=0?'+':''}${r.doi.toFixed(2)}%</span>`:'<span class="na">—</span>')}
       ${st('24h Vol',fmtUsd(r.vol))} ${st('Open Interest',fmtUsd(r.oi))}
     </div>
+    <div id="dpos"></div>
     ${sessDrawerHtml(r)}
     ${earnDrawerHtml(r)}
     ${noteDrawerHtml(r)}
@@ -2908,6 +2913,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
   loadDrawerLedger(coin);
   if(r.uni==='main') loadDrawerDerivs(coin);
   if(r.uni==='xyz') loadDrawerFund(coin);
+  renderDrawerPos(coin);
   fillDrawerNews(); if(!state.news) loadNews();   // slice from the shared payload; first open triggers the fetch
   { const dai=el('dai'); if(dai){ dai.onclick=()=>{ closeDetail(); openAiReport(coin); };
     // state-aware label: annotate with the shared cache's age so the group knows a read exists
@@ -3279,6 +3285,7 @@ function loadPrefs(){ let p; try{ p=JSON.parse(store.get(PKEY)||'null'); }catch(
       colAdjacent(v,'momp','mom');   // the candidate migrates in NEXT TO the incumbent, not appended at the far right
       colAdjacent(v,'m5','px'); colAdjacent(v,'m15','m5');   // the intraday pair migrates in next to Price, ahead of 1h
       colAdjacent(v,'hopen','dopen'); colAdjacent(v,'h4open','hopen'); colAdjacent(v,'h12open','h4open');   // the anchored-open trio migrates in next to D open
+      colAdjacent(v,'pos','oi');   // the position column migrates in next to OI
       state.colOrder=v; }
     if(Array.isArray(p.colHidden)) state.colHidden=new Set(p.colHidden.filter(k=>COL_BY_KEY[k]));
   }
@@ -3389,6 +3396,7 @@ function applyLayout(name){ const s=name!=null?state.layouts.list[name]:null;
   colAdjacent(ord,'momp','mom');   // same adjacency rule for saved layouts
   colAdjacent(ord,'m5','px'); colAdjacent(ord,'m15','m5');
   colAdjacent(ord,'hopen','dopen'); colAdjacent(ord,'h4open','hopen'); colAdjacent(ord,'h12open','h4open');
+  colAdjacent(ord,'pos','oi');
   state.colOrder=ord; state.colHidden=hid;
   if(src.sortKey&&COL_BY_KEY[src.sortKey]){ state.sortKey=src.sortKey; state.sortDir=src.sortDir==='asc'?'asc':'desc'; }
   state.watchOnly=!!src.watchOnly; el('watchOnly').classList.toggle('on', state.watchOnly);
@@ -3432,6 +3440,95 @@ function buildLayoutMenu(){ const pop=el('laypop'); const names=Object.keys(stat
     state.layouts.list[a]=layoutSnapshot(); saveLayouts(); updateLayoutBtn(); buildLayoutMenu(); });
   const inp=el('layName'); if(inp) inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); const b=el('laySaveAs'); if(b) b.click(); } });
 }
+
+// ===== positions overlay: what the linked wallet actually holds (build 2026.09.16-79) ==========
+// The server ships the STRUCTURE of each position (side, size, entry, leverage, liquidation, margin,
+// funding paid since open); everything that moves with price — notional, unrealized P&L, ROE, the
+// move since entry — is derived here off the same live mark the rest of the row shows, so a
+// position reads consistently with the columns beside it and never waits on a wallet poll.
+// Derived in one place (posCalc) for the cell, the badge and the drawer panel.
+function posCalc(r){ const p=state.pos.get(r.coin); if(!p) return null;
+  const mark=(r.px!=null&&isFinite(r.px))?r.px:null, dir=p.side==='long'?1:-1;
+  const ntl=mark!=null?p.sz*mark:p.ntl;
+  const upnl=(mark!=null&&p.entry!=null)?(mark-p.entry)*p.sz*dir:p.upnl;
+  const roe=(p.margin>0&&upnl!=null)?upnl/p.margin*100:null;
+  const vsEntry=(mark!=null&&p.entry>0)?(mark/p.entry-1)*100*dir:null;
+  const liqDist=(mark!=null&&p.liq>0)?(p.liq/mark-1)*100:null;   // signed: negative below the mark (a long's liq), positive above (a short's)
+  return {p, mark, ntl, upnl, roe, vsEntry, liqDist}; }
+function posDecorate(){ for(const r of state.rows.values()){ const c=state.pos.size?posCalc(r):null; r.pos=c?(c.p.side==='long'?1:-1)*(c.ntl||0):undefined; } }
+function posTip(r,c){ const p=c.p, s=[];
+  s.push(`${p.side==='long'?'LONG':'SHORT'} ${p.sz} ${esc(r.ticker)} · ${fmtUsd(c.ntl)} notional${p.lev?' · '+p.lev+'x'+(p.levType?' '+p.levType:''):''}`);
+  if(p.entry!=null) s.push(`entry ${fmtPrice(p.entry)}${c.mark!=null?' · mark '+fmtPrice(c.mark):''}${c.vsEntry!=null?' · '+(c.vsEntry>=0?'+':'')+c.vsEntry.toFixed(2)+'% since entry':''}`);
+  if(c.upnl!=null) s.push(`unrealized ${c.upnl>=0?'+':'−'}${fmtUsd(Math.abs(c.upnl))}${c.roe!=null?' · ROE '+(c.roe>=0?'+':'')+c.roe.toFixed(1)+'%':''}`);
+  if(p.liq!=null) s.push(`liquidation ${fmtPrice(p.liq)}${c.liqDist!=null?' ('+(c.liqDist>=0?'+':'')+c.liqDist.toFixed(1)+'% from mark)':''}`);
+  if(p.fundOpen!=null) s.push(`funding since open ${p.fundOpen>=0?'paid ':'received '}${fmtUsd(Math.abs(p.fundOpen))}`);
+  return s.join('\n'); }
+function posCell(r){ const c=posCalc(r); if(!c) return '<td class="sec">—</td>';
+  const cls=c.upnl>0?'pos':(c.upnl<0?'neg':'sec');
+  return `<td class="posc" title="${esc(posTip(r,c))}"><span class="pside ${c.p.side}">${c.p.side==='long'?'L':'S'}</span>${fmtUsd(c.ntl)} <span class="${cls}">${c.vsEntry==null?'':(c.vsEntry>=0?'+':'')+c.vsEntry.toFixed(1)+'%'}</span></td>`; }
+// The markets-table marker, beside the note post-it: absent when nothing is held, a hexagon in the
+// side's colour otherwise, tinted by whether the position is currently winning.
+function posBadge(r){ const c=posCalc(r); if(!c) return '';
+  const cls=c.upnl>0?'win':(c.upnl<0?'lose':'flat');
+  return `<span class="posb ${c.p.side} ${cls}" title="${esc(posTip(r,c))}">\u2b21</span>`; }
+function renderDrawerPos(coin){ const box=el('dpos'); if(!box) return; const r=state.rows.get(coin); const c=r?posCalc(r):null;
+  if(!c){ box.innerHTML=''; return; }
+  const p=c.p, meta=state.posMeta||{};
+  const chip=(k,v,t)=>`<div class="dzchip"${t?' data-tip="'+esc(t)+'"':''}><span class="dzk">${k}</span><span class="dzv">${v}</span></div>`;
+  const sgn=(v,d,suf)=>v==null?'<span class="na">·</span>':`<span class="${v>0?'pos':(v<0?'neg':'sec')}">${v>=0?'+':''}${v.toFixed(d)}${suf||''}</span>`;
+  // The board's read of the name, next to the side you are on. tscore is the trend ladder, signed.
+  const ts=r.tscore; let agree='';
+  if(typeof ts==='number'&&ts!==0){ const boardSide=ts>0?'long':'short'; agree=boardSide===p.side
+    ? `<span class="pos">with the trend board</span> (D1 ladder ${ts>0?'+':''}${ts})`
+    : `<span class="neg">against the trend board</span> (D1 ladder ${ts>0?'+':''}${ts})`; }
+  box.innerHTML=`<div class="dsec" data-tip="your open position in this market, from the wallet linked under Filters \u203a Positions \u00b7 structure (size, entry, leverage, liquidation, margin, funding) from the wallet poll, everything price-dependent derived off the live mark in the header">Position <span class="dzsrc">${esc(meta.wallet&&meta.wallet.label?meta.wallet.label:(meta.wallet?meta.wallet.addr.slice(0,6)+'\u2026'+meta.wallet.addr.slice(-4):''))}${meta.ts?' \u00b7 polled '+fmtAge(Date.now()-meta.ts)+' ago':''}</span></div>`
+    +`<div class="dzchips">`
+    +chip('side \u00b7 size', `<span class="pside ${p.side}">${p.side==='long'?'LONG':'SHORT'}</span> ${p.sz}`, 'signed size from the clearinghouse')
+    +chip('notional', fmtUsd(c.ntl), 'size \u00d7 live mark')
+    +chip('entry', p.entry!=null?fmtPrice(p.entry):'<span class="na">\u00b7</span>', 'average entry price')
+    +chip('since entry', sgn(c.vsEntry,2,'%'), 'move from entry, signed with the side \u2014 positive = the position is winning')
+    +chip('unrealized', c.upnl==null?'<span class="na">\u00b7</span>':`<span class="${c.upnl>0?'pos':(c.upnl<0?'neg':'sec')}">${c.upnl>=0?'+':'\u2212'}${fmtUsd(Math.abs(c.upnl))}</span>`, '(mark \u2212 entry) \u00d7 size, signed with the side')
+    +chip('ROE', sgn(c.roe,1,'%'), 'unrealized P&L over the margin backing the position')
+    +chip('leverage', p.lev?p.lev+'x'+(p.levType?' <span class="sec">'+esc(p.levType)+'</span>':''):'<span class="na">\u00b7</span>', 'as set on the wallet')
+    +chip('liquidation', p.liq!=null?fmtPrice(p.liq)+(c.liqDist!=null?' <span class="sec">('+(c.liqDist>=0?'+':'')+c.liqDist.toFixed(1)+'%)</span>':''):'<span class="na">\u00b7</span>', 'estimated liquidation price and its distance from the live mark')
+    +chip('margin', p.margin!=null?fmtUsd(p.margin):'<span class="na">\u00b7</span>', 'margin used by this position')
+    +chip('funding', p.fundOpen==null?'<span class="na">\u00b7</span>':`<span class="${p.fundOpen>0?'neg':(p.fundOpen<0?'pos':'sec')}">${p.fundOpen>0?'paid ':'received '}${fmtUsd(Math.abs(p.fundOpen))}</span>`, 'cumulative funding since the position opened \u2014 the carry you have actually paid or received')
+    +`</div>`+(agree?`<div class="sec" style="font-size:11.5px;margin:-4px 0 10px">${agree}</div>`:''); }
+let POSSEQ=0, _posColShown=false;
+async function loadPositions(quiet){ if(!prefsSignedIn()){ posStatText(); return; } const seq=++POSSEQ;
+  let d; try{ d=await fetchJSON('/api/positions'); }catch(_){ return; }
+  if(seq!==POSSEQ||!d||!d.ok) return;
+  state.posMeta=d;
+  const next=new Map(); for(const p of (d.positions||[])) if(p&&p.coin) next.set(p.coin,p);
+  // Structural equality: a re-pull that changed nothing must not repaint the table.
+  const sig=m=>[...m.entries()].map(([k,p])=>k+':'+p.side+':'+p.sz+':'+p.entry+':'+p.margin+':'+p.lev).sort().join('|');
+  const changed=sig(next)!==sig(state.pos);
+  state.pos=next;
+  // Pending = the lane is fetching a wallet it has not read yet: pull again shortly rather than wait for the poke.
+  if(d.pending&&d.wallet) setTimeout(()=>{ if(seq===POSSEQ) loadPositions(true); }, 4000);
+  // First positions for a linked wallet: show the column once, unless the operator has hidden it since.
+  if(d.wallet&&next.size&&!_posColShown&&state.colHidden.has('pos')&&store.get('xyzmon.posCol')!=='hidden'){ _posColShown=true; state.colHidden.delete('pos'); buildHead(); }
+  posStatText();
+  if(changed||!quiet){ render(); if(state.detail) renderDrawerPos(state.detail); } }
+function posStatText(){ const s=el('posStat'), inp=el('posAddr'), lb=el('posLink'), ub=el('posUnlink'); if(!s) return;
+  const m=state.posMeta;
+  if(!prefsSignedIn()){ s.textContent='sign in to link a wallet'; if(inp) inp.disabled=true; if(lb) lb.disabled=true; if(ub) ub.hidden=true; return; }
+  if(inp) inp.disabled=false; if(lb) lb.disabled=false;
+  if(!m||!m.wallet){ s.textContent='no wallet linked \u2014 paste an address to overlay its open perps'; if(ub) ub.hidden=true; return; }
+  if(ub) ub.hidden=false;
+  const a=m.wallet.addr, short=a.slice(0,6)+'\u2026'+a.slice(-4);
+  if(m.err&&!m.positions.length){ s.textContent=`${short} \u00b7 wallet read failed: ${m.err}`; return; }
+  if(m.pending){ s.textContent=`${short} \u00b7 reading\u2026`; return; }
+  const eq=m.summary&&m.summary.equity!=null?' \u00b7 equity '+fmtUsd(m.summary.equity):'';
+  s.textContent=`${m.wallet.label?m.wallet.label+' ':''}${short} \u00b7 ${m.positions.length} open${eq}`; }
+async function posLink(addr){ const inp=el('posAddr');
+  try{ const r=await fetch('/api/positions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(addr?{addr}:{remove:true})});
+    const d=await r.json().catch(()=>null);
+    if(!r.ok||!d||!d.ok){ if(inp){ inp.classList.add('bad'); inp.title=(d&&d.error)||'could not link'; } const s=el('posStat'); if(s) s.textContent=(d&&d.error)||'could not link that address'; return; }
+    if(inp){ inp.classList.remove('bad'); inp.title=''; inp.value=''; }
+    if(!addr){ state.pos=new Map(); state.posMeta={ok:true,wallet:null,positions:[]}; posStatText(); render(); if(state.detail) renderDrawerPos(state.detail); return; }
+    loadPositions();
+  }catch(_){} }
 
 // ===== alerts (in-tab, edge-triggered) =====
 // What remains of the in-tab evaluator. Everything the SERVER can compute moved there in -05, so
@@ -10095,6 +10192,8 @@ function startEvents(){ if(typeof EventSource==='undefined'||_sseSrc) return;
     if(d&&d.v&&state.build&&d.v!==state.build) notifyNewBuild(d.v);
     // Another of this member's devices wrote its watchlist or layouts: a version poke, pull on demand.
     if(d&&d.prefs) prefsRemoteFrame(d.prefs);
+    // The positions lane saw a structural change in this member's book (a fill, a close, a new leg).
+    if(d&&d.pos) loadPositions();
     // The dm frame carries a sequence, never a message. Pull whatever tab is showing: the unread
     // pip has to be right before you look at it, not after you switch to the tab.
     if(d&&d.dm){
@@ -10157,6 +10256,12 @@ el('watchOnly').addEventListener('click',()=>{ state.watchOnly=!state.watchOnly;
 // Deliberately NOT part of a saved layout, unlike ★-only: adding a field to the layout signature
 // would mark every layout the operator has already saved as dirty. Per browser, in prefs.
 { const nb=el('noteOnly'); if(nb) nb.addEventListener('click',()=>{ state.noteOnly=!state.noteOnly; nb.classList.toggle('on', state.noteOnly); updateFilterChip(); render(); savePrefs(); }); }
+{ const pb=el('posOnly'); if(pb) pb.addEventListener('click',()=>{ state.posOnly=!state.posOnly; pb.classList.toggle('on', state.posOnly); updateFilterChip(); render(); });
+  const lk=el('posLink'), inp=el('posAddr'), ub=el('posUnlink');
+  if(lk&&inp){ lk.addEventListener('click',()=>{ const v=(inp.value||'').trim(); if(!v){ inp.classList.add('bad'); inp.focus(); return; } posLink(v); });
+    inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); lk.click(); } }); }
+  if(ub) ub.addEventListener('click',()=>{ if(confirm('Unlink the wallet? The overlay disappears; nothing else changes.')) posLink(null); });
+  posStatText(); }
 { const db=el('dimOff');   // variant A toggle — visual only, per browser, never part of a saved layout
   if(db){ db.classList.toggle('on', state.dimOff);
     db.addEventListener('click',()=>{ state.dimOff=!state.dimOff; db.classList.toggle('on', state.dimOff);
@@ -10202,7 +10307,7 @@ applyNumFilters();
 el('clearFilters').addEventListener('click', ()=>{ ['volMin','volMax','oiMin','oiMax'].forEach(id=>{ el(id).value=''; el(id).classList.remove('bad'); });
   state.filters={volMin:null,volMax:null,oiMin:null,oiMax:null}; updateFilterChip(); render(); savePrefs(); });
 function updateFilterChip(){
-  const f=state.filters, on = f.volMin!=null||f.volMax!=null||f.oiMin!=null||f.oiMax!=null||!!state.watchOnly||!!state.noteOnly;
+  const f=state.filters, on = f.volMin!=null||f.volMax!=null||f.oiMin!=null||f.oiMax!=null||!!state.watchOnly||!!state.noteOnly||!!state.posOnly;
   const dot=el('filtDot'); if(dot) dot.hidden=!on;
   const b=el('filtersBtn'); if(b) b.classList.toggle('on', on);
 }
@@ -10218,7 +10323,7 @@ function buildColMenu(){ const pop=el('colpop'); let h='<div class="cphead">Show
   h+='<button class="btn" id="colReset" style="margin-top:8px;width:100%;justify-content:center">Reset layout</button>';
   pop.innerHTML=h;
   pop.querySelectorAll('input[type=checkbox]').forEach(cb=>cb.addEventListener('change',()=>{
-    const k=cb.dataset.col; if(cb.checked) state.colHidden.delete(k); else state.colHidden.add(k); buildHead(); render(); savePrefs(); }));
+    const k=cb.dataset.col; if(cb.checked) state.colHidden.delete(k); else state.colHidden.add(k); if(k==='pos') store.set('xyzmon.posCol', cb.checked?'shown':'hidden'); buildHead(); render(); savePrefs(); }));
   el('colReset').addEventListener('click',()=>{ state.colOrder=[...DEFAULT_ORDER]; state.colHidden=new Set(DEFAULT_HIDDEN); buildColMenu(); buildHead(); render(); savePrefs(); });
 }
 el('colsBtn').addEventListener('click',e=>{ e.stopPropagation(); const pop=el('colpop');
@@ -11530,6 +11635,7 @@ function termAutoGrow(el){ if(!el) return; el.style.height='auto'; el.style.heig
 (async ()=>{
   startEvents();   // push channel first: a change during boot loads lands as an instant re-pull
   prefsPullAll();  // account copy of watchlist + layouts: newer stamp wins, so a cold browser adopts the server's
+  loadPositions(); setInterval(()=>{ if(state.posMeta&&state.posMeta.wallet&&!document.hidden) loadPositions(true); }, 5*60*1000);   // equity/margin refresh; marks are live already
   await Promise.all([loadSnapshot(), loadDaily()]);
   applyHash();
   startCycle();

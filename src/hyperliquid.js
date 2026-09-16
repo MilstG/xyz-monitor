@@ -98,6 +98,11 @@ function fetchMetaAndCtxs(dex) {
 function fetchCandles(coin, interval, startTime, endTime, weight) {
   return infoPost({ type: "candleSnapshot", req: { coin, interval, startTime, endTime } }, weight);
 }
+// A wallet's open perp positions on ONE dex. HIP-3 dexes keep their own clearinghouse, so the
+// xyz book and the main-dex book are two calls; `dex` empty = the main perp universe. Weight 2.
+function fetchClearinghouseState(user, dex, fetchImpl) {
+  return infoPost(Object.assign({ type: "clearinghouseState", user }, dex ? { dex } : {}), 2, fetchImpl);
+}
 function fetchFundingHistory(coin, startTime, endTime, weight) {
   return infoPost({ type: "fundingHistory", coin, startTime, endTime }, weight);
 }
@@ -244,4 +249,4 @@ function createCoinalyze({ key, log }) {
   };
 }
 
-module.exports = { infoPost, fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, limiter, createUniverseSocket, createCoinalyze };
+module.exports = { infoPost, fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, fetchClearinghouseState, sleep, limiterUsage, limiter, createUniverseSocket, createCoinalyze };
