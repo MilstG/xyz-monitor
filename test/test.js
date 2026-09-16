@@ -308,7 +308,7 @@ test("funding heatmap: the grid's own rules — quantity, gaps, and a sign that 
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   for (const pin of ["function fhColor(v,cap)", "function renderFundHeat(fh)",
-    "function attachFundHeatControls()", "cap=ax.cap"])
+    "function attachFundHeatControls()", "cap=fhCap(fh,tf)"])
     assert.ok(app.includes(pin), `app.js missing funding-heatmap pin: ${pin}`);
   // an unknown bucket is hatched, never painted as zero carry
   assert.ok(/if\(v==null\|\|!isFinite\(v\)\) return null;/.test(app) && app.includes("url(#${pid})"),
@@ -319,8 +319,35 @@ test("funding heatmap: the grid's own rules — quantity, gaps, and a sign that 
   assert.ok(app.includes("'longs pay'") && app.includes("'longs receive'"), "tooltips name the direction");
   assert.ok(app.includes('class="fh-nv ') && app.includes("fhPct(mean,dp)"), "every row is direct-labelled with its signed mean");
   assert.ok(app.includes("\\u22480%"), "a value that rounds away must not claim a direction");
-  // the timeframe must never be presented as a zoom
-  assert.ok(/change the quantity, not the zoom/.test(app), "the caption says the timeframe changes the quantity");
+  // per bucket, the timeframe must never be presented as a zoom
+  assert.ok(/change the quantity, not the zoom/.test(app), "the per-bucket caption says the timeframe changes the quantity");
+});
+
+test("funding heatmap: the annualized read (build 2026.09.16-77) — a multiplier over the same payload, one cap across resolutions", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  for (const pin of ["const FH_UNITS=[['apr','annualized'],['bucket','per bucket']]", "const FH_HPY=24*365",
+    "function fhUnit()", "function fhAnn(fh,tf)", "function fhCapApr(fh,tf)", "function fhCells(fh,row,tf)", "function fhDpApr(cap)"])
+    assert.ok(app.includes(pin), `app.js missing annualized pin: ${pin}`);
+  // annualized is the DEFAULT, and the choice is remembered per browser — never shipped in the payload
+  assert.ok(/localStorage\.getItem\('xyz-fh-unit'\)==='bucket'\?'bucket':'apr'/.test(app), "annualized unless the browser remembers per bucket");
+  assert.ok(app.includes("localStorage.setItem('xyz-fh-unit'"), "the unit switch persists");
+  // the multiplier is the site-wide convention (hourly ×24×365), applied per bucket width
+  assert.ok(app.includes("FH_HPY/ax.bucketHours"), "a cell annualizes by its own bucket's hours-per-year");
+  // an unknown bucket stays unknown under the multiplier
+  assert.ok(/c\.map\(v=>\(v==null\|\|!isFinite\(v\)\)\?null:v\*a\)/.test(app), "null × 1095 is still null");
+  // one cap across resolutions under APR: the default grid's, annualized — not each grid's own
+  assert.ok(/k=axs\[fh&&fh\.tfDefault\]\?fh\.tfDefault:tf/.test(app), "the shared cap anchors on the default (8h) grid");
+  // sorts are unit-blind: ranking still runs on the raw per-bucket mean
+  assert.ok(/const key=r=>\{ const m=fhMean\(r,tf\);/.test(app), "sort keys read the raw mean, not the unit-scaled one");
+  // an annual rate prints at 0–2 decimals, never a bucket cost's 3–6
+  assert.ok(/return clamp\(2-Math\.floor\(Math\.log10\(c\)\),0,2\); \}/.test(app), "APR decimals are capped at two");
+  // both units in every tooltip, and the label on the timeframe control follows the unit
+  assert.ok(app.includes("over this ${ax.bucketHours}h bucket") && app.includes("} APR`"), "tooltips carry the bucket cost under APR and the APR under per bucket");
+  assert.ok(app.includes("${apr?'resolution':'funding per'}"), "the timeframe control is a resolution when annualized");
+  // the unit buttons wear the same segment styling as the timeframe buttons
+  assert.ok(css.includes(".fhtf.on,.fhunit.on{") && css.includes(".fhtf+.fhtf,.fhunit+.fhunit{"), "unit buttons styled as a segment");
 });
 
 const { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, pearson, meanPairwiseCorr, corrMatrix, studyBreakdown, playbook, confSplit, studyOIFlush, studyFPDiv, offDriftStats } = require("../src/compute");
@@ -13348,7 +13375,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.11-76"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.16-77"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
