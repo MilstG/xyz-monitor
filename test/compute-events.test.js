@@ -1553,3 +1553,29 @@ test("congress -10: an encrypted PTR is decrypted, not mistaken for a scan", () 
   assert.ok(objs3.encryption && /not implemented/.test(objs3.encryption.unsupported || ""),
     "an unimplemented encryption revision says so rather than pretending the file is empty");
 });
+
+test("fomcResult: the decision is the first observation AFTER decision day, the prior the range in force ON it", () => {
+  const C = require("../src/compute");
+  // The 2026-09-16 hike as FRED's daily target series shows it: the decision-day observation
+  // still carries the range going in; the new range takes effect the next day.
+  const hist = [
+    { d: "2026-09-14", lo: 3.5, hi: 3.75 }, { d: "2026-09-15", lo: 3.5, hi: 3.75 }, { d: "2026-09-16", lo: 3.5, hi: 3.75 },
+  ];
+  assert.equal(C.fomcResult(hist, "2026-09-16"), null, "decision day itself: nothing published for after the meeting — pend, never 'held'");
+  hist.push({ d: "2026-09-17", lo: 3.75, hi: 4.0 });
+  assert.deepEqual(C.fomcResult(hist, "2026-09-16"), { actual: { lo: 3.75, hi: 4.0 }, prior: { lo: 3.5, hi: 3.75 } }, "a hike reads as a hike, against the range held going in");
+  // A genuine hold: the prior is the range on decision day, NOT the last distinct range months
+  // back (which would have printed a stale 'cut').
+  const hold = [{ d: "2026-07-28", lo: 4.0, hi: 4.25 }, { d: "2026-07-29", lo: 4.0, hi: 4.25 }, { d: "2026-07-30", lo: 3.75, hi: 4.0 },
+    { d: "2026-09-16", lo: 3.75, hi: 4.0 }, { d: "2026-09-17", lo: 3.75, hi: 4.0 }];
+  assert.deepEqual(C.fomcResult(hold, "2026-09-16"), { actual: { lo: 3.75, hi: 4.0 }, prior: { lo: 3.75, hi: 4.0 } });
+  assert.deepEqual(C.fomcResult(hold, "2026-07-29"), { actual: { lo: 3.75, hi: 4.0 }, prior: { lo: 4.0, hi: 4.25 } }, "the July cut, read the same way");
+  // Junk and gaps: a row without both bounds is skipped; no history is null; strings coerce.
+  assert.equal(C.fomcResult(null, "2026-09-16"), null);
+  assert.equal(C.fomcResult([{ d: "2026-09-17", lo: null, hi: 4 }], "2026-09-16"), null);
+  assert.deepEqual(C.fomcResult([{ d: "2026-09-17", lo: "3.75", hi: "4.00" }], "2026-09-16"), { actual: { lo: 3.75, hi: 4 }, prior: { lo: 3.75, hi: 4 } }, "no observation on or before: the prior falls back to the result itself rather than inventing");
+  // The message built from that result says hiked, not held.
+  const msg = C.pushFmt({ kind: "macro", k: "FOMC", label: "FOMC rate decision", sub: "result", d: "2026-09-16", tEt: "14:00", sep: true,
+    prior: { lo: 3.5, hi: 3.75 }, actual: { lo: 3.75, hi: 4.0 } }, {});
+  assert.ok(/hiked/.test(msg) && !/held/.test(msg), msg);
+});

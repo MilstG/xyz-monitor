@@ -6194,6 +6194,25 @@ function macroStatText(k, s) {
   if (k === "GDP") return Number.isFinite(+s.qoq) ? (+s.qoq).toFixed(1) + "% QoQ ann." : null;
   return null;
 }
+// The result of an FOMC decision, read off the daily target-range series (DFEDTARL/U). A new
+// range takes effect the day AFTER the meeting — the H.15 daily series shows the OLD range on
+// decision day itself — so the result is the first observation dated strictly after the decision,
+// and the prior is the range in force ON decision day (the last observation on or before it).
+// Reading "on or after" here is how a hike printed as "held": the decision-day observation still
+// carried the range going in. `hist` is ascending [{d, lo, hi}]; null = not published yet (pend).
+function fomcResult(hist, d) {
+  if (!Array.isArray(hist) || typeof d !== "string") return null;
+  let after = null, before = null;
+  for (const o of hist) {
+    if (!o || typeof o.d !== "string" || o.lo == null || o.hi == null || !Number.isFinite(+o.lo) || !Number.isFinite(+o.hi)) continue;   // +null is 0: a missing bound must not read as a 0% floor
+    if (o.d <= d) before = o;
+    else if (!after) after = o;
+  }
+  if (!after) return null;
+  const range = (o) => ({ lo: +o.lo, hi: +o.hi });
+  return { actual: range(after), prior: range(before || after) };
+}
+module.exports.fomcResult = fomcResult;
 module.exports.macroMonthText = macroMonthText;
 module.exports.macroRangeText = macroRangeText;
 module.exports.macroStatText = macroStatText;
