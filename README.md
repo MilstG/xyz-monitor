@@ -49,10 +49,15 @@ instant, and the per-IP rate limit stops being a per-user problem.
   (H.4.1 lines publish in millions, ON RRP/GDP in billions). Refires after the Thursday ~4:30pm ET
   release and every 6h otherwise; warm-cached (`liquidity.json`). Ships admin-only.
 - **Funding tab** (`/api/funding`) — the funding heatmap: a row per market, a column per time
-  bucket, readable at **1h, 8h or 24h**. A cell is the funding a 1× long *paid* over that bucket
-  (the hourly funding spine summed across it and scaled to full width), so the timeframe buttons
-  change the quantity rather than the zoom — the same market reads ~8× larger per 8h than per 1h —
-  and each timeframe carries its own colour cap. Red = longs pay (crowded long, carry is a cost),
+  bucket, readable at **1h, 8h or 24h**, in one of two units. **Annualized** (the default): a cell
+  is the bucket's mean hourly rate ×24×365 — the convention every other funding readout on the site
+  uses — so the timeframe is a *resolution* (one market reads one number on every grid) and all
+  three share one colour cap (the 8h grid's percentile, annualized) so a zoom never repaints a cell.
+  **Per bucket**: a cell is the funding a 1× long *paid* over that bucket (the hourly funding spine
+  summed across it and scaled to full width), so the timeframe buttons change the quantity rather
+  than the zoom — the same market reads ~8× larger per 8h than per 1h — and each timeframe carries
+  its own colour cap. The unit is a client-side multiplier over the same payload, remembered per
+  browser; every tooltip carries both. Red = longs pay (crowded long, carry is a cost),
   green = longs receive; a bucket whose spine covers under half its hours is hatched rather than
   drawn as zero, and the newest column is always the last *complete* bucket. Rows rank by open
   interest, capped at 60. Built per universe, lazily, off the funding history already on the

@@ -149,8 +149,11 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
   earn:null, earnPayload:null,   // earnings calendar: ticker -> upcoming entries, and the raw /api/earnings payload
   layouts:{ list:{}, active:null },
   analytics:{ data:null, err:null, ts:0, regime:{ sel:'all' }, clock:{ sel:'all', metric:'vol' }, overlay:{ metric:'vol' }, dow:{ sel:'all', metric:'vol' }, season:{ sel:'all' },
-    // funding heatmap: timeframe is the quantity (funding paid per 1h/8h/24h bucket), not a zoom
-    fheat:{ tf:'8h', sort:'oi', rows:'25' } },
+    // funding heatmap. `unit` is how a cell is READ (build 2026.09.16-77): 'apr' annualizes every
+    // cell (hourly ×24×365, the convention the whole site quotes funding in) and the timeframe is
+    // then a resolution; 'bucket' is the funding a 1× long paid over the bucket, and the timeframe
+    // is the quantity. Remembered per browser like the dim-off switch; annualized on a fresh one.
+    fheat:{ tf:'8h', sort:'oi', rows:'25', unit:(()=>{try{return localStorage.getItem('xyz-fh-unit')==='bucket'?'bucket':'apr';}catch(_){return 'apr';}})() } },
   // FUNDING tab (build 2026.08.26-34) — its own board on /api/funding. Two slots so a scope flip
   // mid-flight can never paint a crypto grid into a stocks view; `view` is whichever matches.
   // err and ts live INSIDE each slot: held globally, one universe's failure and freshness stamp
@@ -4725,6 +4728,35 @@ function attachDowControls(){
 const FH_STRIDE={'1h':6,'8h':6,'24h':5};        // label every Nth column — chosen to land on clean 6h/2d/5d marks
 const FH_SORTS=[['oi','open interest'],['pay','longs pay most'],['recv','longs receive most'],['abs','strongest carry'],['tkr','ticker A–Z']];
 const FH_ROWOPTS=[['25','top 25'],['50','top 50'],['all','all rows']];
+// ---- the unit layer (build 2026.09.16-77): annualized by default, per bucket one click away ----
+// The grid shipped reading per bucket — an honest cost, but a unit nothing else on the site uses:
+// the Markets table, the terminal, the carry column and the drawer all quote funding as an
+// annualized rate (hourly ×24×365). So the default read is now that rate, and per bucket stays as
+// the second unit because it answers a different question (what the last day actually COST).
+// Annualizing is a multiplier over the payload the server already ships — a cell is the mean
+// hourly rate the spine saw in the bucket scaled to the bucket's width, so ×(8760/bucketHours)
+// scales the same mean to a year and one market reads ONE number at 1h, 8h and 24h. No new
+// field, no ETag change, no rebuild. The multiplier is positive, so every sort is unit-blind.
+//
+// Under 'apr' the three resolutions share ONE colour cap — the default (8h) grid's own percentile,
+// annualized. Per bucket each timeframe needs its own cap because the 8h quantity genuinely is
+// eight times the 1h one; annualized they are one quantity sampled three ways (different windows,
+// different smoothing), and a cell that changed hue because you changed the resolution would be a
+// zoom that repaints. Hourly spikes saturate more often under the shared cap; that is what a cap
+// is for. The colour of a rate never depends on how finely it was sliced.
+const FH_UNITS=[['apr','annualized'],['bucket','per bucket']];
+const FH_HPY=24*365;
+function fhUnit(){ return state.analytics.fheat.unit==='bucket'?'bucket':'apr'; }
+function fhAnn(fh,tf){ const ax=(fh&&fh.axis||{})[tf]; return ax&&ax.bucketHours>0?FH_HPY/ax.bucketHours:1; }
+function fhCapApr(fh,tf){ const axs=(fh&&fh.axis)||{}, k=axs[fh&&fh.tfDefault]?fh.tfDefault:tf; return ((axs[k]||{}).cap||0)*fhAnn(fh,k); }
+function fhCap(fh,tf){ return fhUnit()==='apr'?fhCapApr(fh,tf):((fh&&fh.axis||{})[tf]||{}).cap; }
+function fhCells(fh,row,tf){ const c=(row.tf&&row.tf[tf])||[]; if(fhUnit()!=='apr') return c;
+  const a=fhAnn(fh,tf); return c.map(v=>(v==null||!isFinite(v))?null:v*a); }   // an unknown ×1095 is still unknown
+// An annual rate deserves fewer decimals than a bucket cost: one above a 10% cap, two below, never
+// more — the inputs are hourly prints rounded to the basis point, and "+11.412%" is false precision.
+function fhDpApr(cap){ const c=Math.abs((cap||0)*100)||1e-9; return clamp(2-Math.floor(Math.log10(c)),0,2); }
+function fhDpU(cap){ return fhUnit()==='apr'?fhDpApr(cap):fhDp(cap); }
+function fhUnitTag(tf){ return fhUnit()==='apr'?'APR':'per '+tf; }
 function fhColor(v,cap){
   if(v==null||!isFinite(v)) return null;                       // null = unknown; the caller hatches it
   const t=clamp(Math.abs(v)/(cap>0?cap:1e-12),0,1);
@@ -4793,7 +4825,9 @@ function fhTicks(ax,f,nb,cw){
 }
 function fhHeatSvg(fh,rows,tf){
   const ax=(fh.axis||{})[tf]; if(!ax||!rows.length) return '<div class="msg">No funding grid yet.</div>';
-  const nb=ax.buckets, cap=ax.cap, f=fhFmts(fh.tz), dp=fhDp(cap), zero=0.5*Math.pow(10,-dp)/100;
+  // cap and decimals follow the UNIT: per bucket they are this timeframe's own (cap=ax.cap); annualized the
+  // cap is shared across resolutions (fhCapApr) and the decimals are an annual rate's, not a bucket cost's.
+  const nb=ax.buckets, apr=fhUnit()==='apr', ann=fhAnn(fh,tf), cap=fhCap(fh,tf), f=fhFmts(fh.tz), dp=fhDpU(cap), zero=0.5*Math.pow(10,-dp)/100;
   // Geometry is deliberately tight: the grid must fit a laptop screen without scrolling, and the
   // SVG scales to its container, so a shorter row against the same width is what shrinks it.
   // The label gutter is measured, not guessed: a fixed one clipped the longest ticker on the
@@ -4806,15 +4840,20 @@ function fhHeatSvg(fh,rows,tf){
     `<defs><pattern id="${pid}" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">`+
     `<rect width="4" height="4" fill="var(--panel2)"/><line x1="0" y1="0" x2="0" y2="4" stroke="var(--faint)" stroke-width="1" stroke-opacity=".45"/></pattern></defs>`+
     `<text x="${lx-7}" y="13" text-anchor="end" class="fh-hd">market</text>`+
-    `<text x="${W-4}" y="13" text-anchor="end" class="fh-hd">mean / ${esc(tf)}</text>`;
+    `<text x="${W-4}" y="13" text-anchor="end" class="fh-hd">${apr?'mean APR':'mean / '+esc(tf)}</text>`;
   rows.forEach((r,ri)=>{
-    const y=pt+ri*ch, cells=(r.tf&&r.tf[tf])||[], mean=fhMean(r,tf);
+    const y=pt+ri*ch, cells=fhCells(fh,r,tf), mraw=fhMean(r,tf), mean=mraw==null?null:mraw*(apr?ann:1);
     s+=`<text x="${lx-7}" y="${(y+ch/2+3.3).toFixed(1)}" text-anchor="end" class="fh-tk">${esc(r.ticker)}</text>`;
     for(let i=0;i<nb;i++){
       const x=lx+i*cw, v=cells[i], col=fhColor(v,cap);
       const t0=ax.t0+i*ax.width, when=f.d.format(t0)+(ax.bucketHours>=24?'':' '+f.h.format(t0));
+      // Both units in every tooltip: the rate says how crowded, the bucket says what it cost, and a
+      // reader sizing a hold wants the second even while scanning by the first.
+      const side=v>0?'longs pay':(v<0?'longs receive':'flat');
       const tip=`${r.ticker} \u00b7 ${when} ${fh.tz} \u00b7 ${ax.bucketHours}h bucket\n`+
-        (col==null?'no funding data for this bucket':`${fhPct(v,dp+1)} \u2014 ${v>0?'longs pay':(v<0?'longs receive':'flat')}`);
+        (col==null?'no funding data for this bucket'
+          :apr?`${fhPct(v,dp+1)} APR \u2014 ${side} \u00b7 ${fhPct(v/ann,fhDp(ax.cap)+1)} over this ${ax.bucketHours}h bucket`
+              :`${fhPct(v,dp+1)} \u2014 ${side} \u00b7 ${fhPct(v*ann,fhDpApr(fhCapApr(fh,tf))+1)} APR`);
       s+=`<rect x="${x.toFixed(2)}" y="${y}" width="${Math.max(0.5,cw-1).toFixed(2)}" height="${ch-1}" `+
          `fill="${col==null?`url(#${pid})`:col}"><title>${esc(tip)}</title></rect>`;
     }
@@ -4830,38 +4869,54 @@ function fhHeatSvg(fh,rows,tf){
     s+=`<line x1="${x.toFixed(1)}" y1="${(ay+3).toFixed(1)}" x2="${x.toFixed(1)}" y2="${(ay+6).toFixed(1)}" stroke="var(--faint)" stroke-width="1"/>`+
        `<text x="${x.toFixed(1)}" y="${(ay+14).toFixed(1)}" text-anchor="middle" class="lc-tick">${esc(t.lab)}</text>`;
   }
-  s+=`<text x="${((lx+W-rx)/2).toFixed(1)}" y="${(ay+23).toFixed(1)}" text-anchor="middle" class="lc-ax">${esc(fh.tz)} \u00b7 ${ax.bucketHours}h buckets \u00b7 oldest left</text>`;
+  s+=`<text x="${((lx+W-rx)/2).toFixed(1)}" y="${(ay+23).toFixed(1)}" text-anchor="middle" class="lc-ax">${esc(fh.tz)} \u00b7 ${ax.bucketHours}h buckets \u00b7 oldest left${apr?' \u00b7 annualized':''}</text>`;
   return s+'</svg>';
 }
 function renderFundHeat(fh){
-  const st=state.analytics.fheat, tf=fhTf(fh), ax=(fh.axis||{})[tf]||{};
+  const st=state.analytics.fheat, tf=fhTf(fh), ax=(fh.axis||{})[tf]||{}, apr=fhUnit()==='apr', cap=fhCap(fh,tf);
   const sorted=fhSortRows(fh.rows||[],tf,st.sort);
   const lim=st.rows==='all'?sorted.length:Math.min(sorted.length,parseInt(st.rows,10)||25);
   const shown=sorted.slice(0,lim);
   const tbtn=(k)=>`<button type="button" class="fhtf${tf===k?' on':''}" data-tf="${k}">${k}</button>`;
   const opt=(v,l,sel)=>`<option value="${esc(v)}"${sel===v?' selected':''}>${esc(l)}</option>`;
-  const controls=`<div class="s-ctrls"><span class="lbl">funding per</span>`+
+  const ubtn=([k,l])=>`<button type="button" class="fhunit${fhUnit()===k?' on':''}" data-u="${k}">${l}</button>`;
+  // The timeframe label follows the unit: per bucket the buttons choose what the cell IS ("funding
+  // per"); annualized they choose how finely one rate is sliced ("resolution").
+  const controls=`<div class="s-ctrls"><span class="lbl">read as</span>`+
+    `<span class="clockseg">${FH_UNITS.map(ubtn).join('')}</span>`+
+    `<span class="lbl">${apr?'resolution':'funding per'}</span>`+
     `<span class="clockseg">${(fh.tfs||['1h','8h','24h']).map(tbtn).join('')}</span>`+
     `<span class="lbl">sort</span><select id="fhsort" class="clocksel">${FH_SORTS.map(([v,l])=>opt(v,l,st.sort)).join('')}</select>`+
     `<select id="fhrows" class="clocksel">${FH_ROWOPTS.map(([v,l])=>opt(v,l,st.rows)).join('')}</select>`+
     `<span class="rt">${shown.length} of ${fh.count} markets${fh.capped?` · top ${fh.rowCap} of ${fh.universe} by OI`:''}</span></div>`;
-  const capPct=fhPct(ax.cap,fhDp(ax.cap)).replace('+','');
-  const legend=`<div class="s-leg"><span class="it">−${esc(capPct)} · longs receive</span>`+
+  const capPct=fhPct(cap,fhDpU(cap)).replace('+',''), capU=apr?' APR':'';
+  const legend=`<div class="s-leg"><span class="it">−${esc(capPct)}${capU} · longs receive</span>`+
     `<span style="width:150px;height:10px;border-radius:3px;display:inline-block;background:linear-gradient(90deg,rgb(70,185,126),rgb(20,26,33),rgb(229,96,77))"></span>`+
-    `<span class="it">longs pay · +${esc(capPct)}</span>`+
+    `<span class="it">longs pay · +${esc(capPct)}${capU}</span>`+
     `<span class="it" style="margin-left:6px"><span class="fh-gapsw"></span>no data</span>`+
-    `<span class="it">per ${esc(tf)}</span></div>`;
-  const cap=`One row per market, one column per ${ax.bucketHours}h bucket; a cell is the funding a <b>1× long paid</b> over that bucket — `+
-    `<b>red = longs pay</b> (crowded long, carry is a cost), <b>green = longs receive</b> (crowded short, carry pays you to be long). `+
-    `The timeframe buttons change the quantity, not the zoom: the same market reads roughly 8× larger per 8h than per 1h. `+
-    `The scale is capped at the grid's own ${Math.round((fh.capPctl||0.98)*100)}th percentile (±${esc(capPct)} per ${esc(tf)}) so one blowout can't flatten everything else; `+
-    `beyond that the cell just saturates. Hatched cells are gaps in the funding spine, not flat carry — a bucket needs ≥${Math.round((fh.minCov||0.5)*100)}% of its hours to print. `+
-    `The number on the right is that row's mean per bucket over the window. <b>Hover</b> any cell for its exact rate and direction.`;
+    `<span class="it">${esc(fhUnitTag(tf))}</span></div>`;
+  const pctl=Math.round((fh.capPctl||0.98)*100), cov=Math.round((fh.minCov||0.5)*100);
+  const capTxt=apr
+    ?`One row per market, one column per ${ax.bucketHours}h bucket; a cell is that bucket's funding <b>annualized</b> — the mean hourly rate the spine saw, ×24×365, the same convention as the funding column on the Markets table — `+
+     `<b>red = longs pay</b> (crowded long, carry is a cost), <b>green = longs receive</b> (crowded short, carry pays you to be long). `+
+     `The resolution buttons change how finely the same rate is sliced, not the quantity: one market reads one number at 1h, 8h and 24h. `+
+     `The scale is capped at ±${esc(capPct)} APR — the ${esc(fh.tfDefault||'8h')} grid's own ${pctl}th percentile, shared by all three resolutions so a zoom never repaints a cell; beyond it the cell just saturates. `+
+     `Hatched cells are gaps in the funding spine, not flat carry — a bucket needs ≥${cov}% of its hours to print. `+
+     `The number on the right is that row's mean annualized rate over the window. <b>Hover</b> any cell for its rate and what it cost over the bucket.`
+    :`One row per market, one column per ${ax.bucketHours}h bucket; a cell is the funding a <b>1× long paid</b> over that bucket — `+
+     `<b>red = longs pay</b> (crowded long, carry is a cost), <b>green = longs receive</b> (crowded short, carry pays you to be long). `+
+     `The timeframe buttons change the quantity, not the zoom: the same market reads roughly 8× larger per 8h than per 1h. `+
+     `The scale is capped at the grid's own ${pctl}th percentile (±${esc(capPct)} per ${esc(tf)}) so one blowout can't flatten everything else; `+
+     `beyond that the cell just saturates. Hatched cells are gaps in the funding spine, not flat carry — a bucket needs ≥${cov}% of its hours to print. `+
+     `The number on the right is that row's mean per bucket over the window. <b>Hover</b> any cell for its exact rate, direction and annualized equivalent.`;
   // No sHead: the board IS the tab now, so the tab's own title carries the name. A section header
   // here would print the same sentence twice, one line apart.
-  return controls+legend+`<div class="s-card" style="overflow-x:auto">${fhHeatSvg(fh,shown,tf)}</div>`+sCap(cap);
+  return controls+legend+`<div class="s-card" style="overflow-x:auto">${fhHeatSvg(fh,shown,tf)}</div>`+sCap(capTxt);
 }
 function attachFundHeatControls(){
+  document.querySelectorAll('.fhunit').forEach(b=>b.addEventListener('click',()=>{ state.analytics.fheat.unit=b.dataset.u==='bucket'?'bucket':'apr';
+    try{ localStorage.setItem('xyz-fh-unit', state.analytics.fheat.unit); }catch(_){}
+    renderFunding(); }));
   document.querySelectorAll('.fhtf').forEach(b=>b.addEventListener('click',()=>{ state.analytics.fheat.tf=b.dataset.tf; renderFunding(); }));
   const s=el('fhsort'); if(s) s.addEventListener('change',()=>{ state.analytics.fheat.sort=s.value; renderFunding(); });
   const r=el('fhrows'); if(r) r.addEventListener('change',()=>{ state.analytics.fheat.rows=r.value; renderFunding(); });
@@ -10483,13 +10538,13 @@ corr:`
 <p>The pair view generalized. <b>COMP/G</b> (button top-right, or <span class="amber">comp NVDA AAPL MSFT …</span> in the terminal) rebases every selected name to <b>100</b> at a chosen date and overlays them — "how have these six traded relative to each other since X." Set the anchor with the presets, the date picker, or by <b>dragging the amber line</b>. <b>Spread mode</b> plots each name minus the equal-weight basket of visible names (or a base you pick) in percentage points — a clean read on who's leading and lagging the group. Runs on the closes already loaded — daily on equities, the shared intraday grid (4h/1d/7d) on crypto, the same series the correlation matrix uses — so it's instant and never adds a fetch. A name listed after the anchor rebases to its own first close, dated in the legend — no fake shared origin.</p>`,
 funding:`
 <div class="hlp-h">What a cell is</div>
-<p>The funding a <b>1× long paid</b> over that bucket — the hourly funding spine summed across it. <b>Red = longs pay</b>: the crowded side is long and carry is a cost to hold it. <b>Green = longs receive</b>: the crowded side is short and the carry pays you to be long. Flat carry is the panel colour, so a quiet market reads as nothing rather than as a hue of its own.</p>
-<div class="hlp-h">1h / 8h / 24h change the quantity, not the zoom</div>
-<p>Hyperliquid pays hourly, so an 8h bucket is eight payments and a 24h bucket is twenty-four — the same market genuinely reads ~8× and ~24× larger. Each timeframe therefore has <b>its own colour scale</b>, and the window moves with it: 1h spans two days, 8h fourteen, 24h thirty. Don't compare a number on one timeframe to a number on another without multiplying.</p>
+<p>One time bucket of one market's funding, read in one of two units. <b>Annualized</b> (the default): the mean hourly rate the spine saw in that bucket, ×24×365 — the same convention as the funding column on the Markets table, the terminal and the drawer, so the newest 1h cell and the table agree. <b>Per bucket</b>: the funding a <b>1× long paid</b> over that bucket, the hourly spine summed across it — what the hold actually cost. Either way <b>red = longs pay</b>: the crowded side is long and carry is a cost to hold it. <b>Green = longs receive</b>: the crowded side is short and the carry pays you to be long. Flat carry is the panel colour, so a quiet market reads as nothing rather than as a hue of its own. Every tooltip carries both numbers.</p>
+<div class="hlp-h">1h / 8h / 24h — a resolution when annualized, a quantity per bucket</div>
+<p>Annualized, the buttons change how finely one rate is sliced: the same market reads one number on every grid, and all three share <b>one colour scale</b> (the 8h grid's own 98th percentile) so switching resolution never repaints a cell. Per bucket, Hyperliquid pays hourly, so an 8h bucket is eight payments and a 24h bucket is twenty-four — the same market genuinely reads ~8× and ~24× larger, and each timeframe has <b>its own colour scale</b>. In both units the window moves with the button: 1h spans two days, 8h fourteen, 24h thirty. The unit you pick is remembered in this browser.</p>
 <div class="hlp-h">Hatched means unknown, never zero</div>
 <p>The funding spine has holes — it is seeded from the persisted OI samples and topped up by a best-effort backfill. A bucket that can't see at least half its hours is drawn as a <b>hatch</b>, because a gap in the data and a market that genuinely went flat mean opposite things to anyone sizing a position. The newest column is always the last <b>complete</b> bucket for the same reason.</p>
 <div class="hlp-h">Reading it</div>
-<p>The scale is capped at the grid's own 98th percentile so one blowout can't flatten everything else; past the cap a cell just saturates. The number on the right is that row's mean per bucket over the window — its sign is the direction, stated without relying on colour. Rows rank by open interest; sort by carry side or |carry| to bring the crowded names to the top. <b>Hover</b> any cell for its exact rate and which side is paying.</p>`,
+<p>The scale is capped at the grid's own 98th percentile so one blowout can't flatten everything else; past the cap a cell just saturates. The number on the right is that row's mean over the window, in the unit you are reading — its sign is the direction, stated without relying on colour. Rows rank by open interest; sort by carry side or |carry| to bring the crowded names to the top. <b>Hover</b> any cell for its exact rate and which side is paying.</p>`,
 sessions:`
 <div class="hlp-h">Session decomposition — the flagship</div>
 <p>What an <b>overnight</b> (close→open), <b>weekend</b> (Fri→Mon), and <b>cash</b> (open→close) hold actually pays, pooled one equal-weight bet per calendar boundary across the equity class, compounded into equity curves. <b>Gross</b> vs <b>net</b>: the shaded band is the running funding drag — an edge that dies net-of-funding is not an edge, it's a donation. A persistently rising overnight curve while the cash curve is flat is the classic overnight effect; the drawer's "where the 30d return happened" split is the per-name version of the same question.</p>
