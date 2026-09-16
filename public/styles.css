@@ -1974,6 +1974,13 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 /* Age is the point: a note is a claim made at a price, and it decays. Calendar time only —
    a vol-scaled fade would move the marker when the MARKET changed, not when the note did. */
 .pit.fresh{color:var(--accent)}                       /* <= 7d  — solid accent */
+/* positions overlay (build 2026.09.16-79): the hexagon beside the ticker, the Position cell, the wallet row */
+.posb{display:inline-block;margin-left:5px;font-size:11px;line-height:1;vertical-align:0;cursor:default}
+.posb.long{color:var(--up)} .posb.short{color:var(--down)} .posb.lose{opacity:.55}
+.posc{white-space:nowrap} .pside{display:inline-block;font-family:var(--mono);font-size:9.5px;font-weight:700;padding:1px 4px;border-radius:3px;margin-right:5px;background:color-mix(in srgb,var(--text) 8%,transparent)}
+.pside.long{color:var(--up)} .pside.short{color:var(--down)}
+.filterpop .fpg-pos .faddr{flex:1 1 auto;min-width:0;font-family:var(--mono);font-size:11px}
+.filterpop .fpg-pos2{margin-top:-4px;font-size:11px;min-height:14px}
 .pit.warm{color:var(--accent-dim)}                    /* 8-30d  — dimmed */
 .pit.cold{color:var(--dim)}                         /* > 30d  — outline only */
 .pit.cold .pbody{fill:none;stroke:currentColor;stroke-width:1.15}

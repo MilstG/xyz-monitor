@@ -355,7 +355,7 @@ const DISPLAY_NAMES = {
   // indices
   SPX:"S&P 500 index", SP500:"S&P 500 index", US500:"S&P 500 index", ES:"S&P 500 futures",
   NDX:"Nasdaq-100 index", NAS100:"Nasdaq-100 index", US100:"Nasdaq-100 index", NQ:"Nasdaq-100 futures",
-  DJI:"Dow Jones Industrial Average", US30:"Dow Jones Industrial Average", DOW:"Dow Jones Industrial Average",
+  DJI:"Dow Jones Industrial Average", US30:"Dow Jones Industrial Average",
   RUT:"Russell 2000 index", US2000:"Russell 2000 index", VIX:"CBOE volatility index (VIX)",
   FTSE:"FTSE 100 index", UK100:"FTSE 100 index", DAX:"DAX 40 index", DE40:"DAX 40 index",
   NIKKEI:"Nikkei 225 index", N225:"Nikkei 225 index", JP225:"Nikkei 225 index", HSI:"Hang Seng index",

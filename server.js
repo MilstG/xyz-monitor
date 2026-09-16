@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures, featureVisible } = require("./src/compu
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.16-77";
+const VERSION = "2026.09.16-80";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -188,6 +188,10 @@ const CRYPTO = process.env.CRYPTO !== "0";
 // Built in main(), after the OI log has streamed in (store.preloadOI): its constructor is
 // synchronous and used to read the whole year-long log with readFileSync on the event loop.
 let poller = null;
+// The live SSE registry, exposed by buildServer so shutdown can close every stream. Block-scoped
+// inside buildServer before this, which made the shutdown loop a swallowed ReferenceError: streams
+// were never closed on SIGTERM and the deploy notice they carry never went out.
+let SSE_REGISTRY = null;
 
 // Weak ETag from the payload's data version so an unchanged snapshot revalidates to 304
 // (browsers polling every 30s get a tiny empty response instead of the full table).
@@ -438,6 +442,49 @@ function loginFail(ip) {
 //   claim     an existing member arriving on a legacy shared-password session
 //   bootstrap the very first account, opened with ADMIN_PASSWORD when the user table is empty
 //   dead      an invite that cannot be used, and why
+// ===== Content-Security-Policy, report-only ====================================================
+// Every HTML page the server emits carries a per-request nonce on its inline scripts and a
+// Content-Security-Policy-Report-Only header naming that nonce. Report-only on purpose: the client
+// renders through innerHTML in hundreds of places and members type prose into notes and messages,
+// so the policy is worth having, but an enforcing header that broke one chart would cost more than
+// it protected. Violations post to /api/csp-report, are counted on /api/health, and the log says
+// what fired — the operator flips to enforcing once the report stays quiet. The nonce is stamped in
+// the onSend hook, so a page author only has to write the slot into a <script> tag.
+const CSP_NONCE_SLOT = "{{csp-nonce}}";
+const cspPolicy = (nonce) => [
+  "default-src 'self'",
+  `script-src 'self' 'nonce-${nonce}'`,
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",   // style="" attributes are everywhere in the client's templates
+  "font-src 'self' https://fonts.gstatic.com data:",
+  "img-src 'self' data: blob: https:",                                // tweet-card avatars and chart rasters
+  "connect-src 'self'",
+  "worker-src 'self'", "manifest-src 'self'",
+  "object-src 'none'", "base-uri 'self'", "form-action 'self'", "frame-ancestors 'none'",
+  "report-uri /api/csp-report", "report-to csp",
+].join("; ");
+// Violation ledger: a count and the last few distinct (directive, blocked) pairs. Memory only —
+// a report is a diagnostic, and a deploy that clears it is a deploy that may have fixed it.
+const CSP_REPORTS = { n: 0, dropped: 0, recent: [], minute: 0, inMinute: 0, lastLog: 0 };
+function cspRecord(body) {
+  const items = Array.isArray(body) ? body.map((r) => r && r.body).filter(Boolean)
+    : body && body["csp-report"] ? [body["csp-report"]] : body && typeof body === "object" ? [body] : [];
+  const min = Math.floor(Date.now() / 60000);
+  if (min !== CSP_REPORTS.minute) { CSP_REPORTS.minute = min; CSP_REPORTS.inMinute = 0; }
+  for (const r of items) {
+    if (++CSP_REPORTS.inMinute > 120) { CSP_REPORTS.dropped++; continue; }   // a page in a loop is not 10k log lines
+    const directive = String(r["effective-directive"] || r.effectiveDirective || r["violated-directive"] || r.violatedDirective || "?").slice(0, 60);
+    const blocked = String(r["blocked-uri"] || r.blockedURL || r.blockedURI || "").slice(0, 160);
+    const source = String(r["source-file"] || r.sourceFile || "").slice(0, 160);
+    const line = Number(r["line-number"] || r.lineNumber) || 0;
+    CSP_REPORTS.n++;
+    const key = directive + "|" + blocked + "|" + source + "|" + line;
+    const seen = CSP_REPORTS.recent.find((x) => x.key === key);
+    if (seen) { seen.n++; seen.t = Date.now(); }
+    else { CSP_REPORTS.recent.unshift({ key, directive, blocked, source, line, n: 1, t: Date.now() }); CSP_REPORTS.recent.length = Math.min(CSP_REPORTS.recent.length, 20); }
+    if (Date.now() - CSP_REPORTS.lastLog > 60000) { CSP_REPORTS.lastLog = Date.now(); log(`CSP report: ${directive} blocked ${blocked || "(inline)"} at ${source || "?"}:${line}`); }
+  }
+}
+
 function authPage(o) {
   const mode = o.mode || "signin";
   const esc = (x) => String(x == null ? "" : x)
@@ -504,8 +551,8 @@ function authPage(o) {
   (mode === "join" || mode === "reset" || mode === "forgot" || mode === "otp"
     ? '<a class="alt" href="/login">Back to sign in</a>' : "") +
 '</div>' +
-'<script>' + AUTH_JS + '</script>' +
-'<script>window.__AUTH=' + JSON.stringify({ action, mode, next: o.next || null }) + ';authInit();</script>' +
+'<script nonce="' + CSP_NONCE_SLOT + '">' + AUTH_JS + '</script>' +
+'<script nonce="' + CSP_NONCE_SLOT + '">window.__AUTH=' + JSON.stringify({ action, mode, next: o.next || null }) + ';authInit();</script>' +
 '</body></html>';
 }
 function newAccountFoot(o) {
@@ -564,7 +611,11 @@ async function buildServer() {
     const n = await store.preloadOI();
     log(`OI log streamed in: ${n} sample(s) in ${Date.now() - t0}ms`);
   }
-  poller = createPoller({ dex: DEX, store, log, version: VERSION, crypto: CRYPTO });
+  // XYZ_NO_NET: the HTTP test suite builds this server without starting the poller, but a route can
+  // still kick an on-demand fetch (the positions lane). Under the switch that fetch fails fast and
+  // locally, so a test never reaches Hyperliquid and never waits on a timeout.
+  const noNet = process.env.XYZ_NO_NET ? () => Promise.reject(new Error("outbound network disabled (XYZ_NO_NET)")) : undefined;
+  poller = createPoller({ dex: DEX, store, log, version: VERSION, crypto: CRYPTO, posFetch: noNet });
   log(`Crypto (Hyperliquid main dex): ${CRYPTO ? "ENABLED — top-60 perps, 31d hourly / 90d daily retention" : "disabled via CRYPTO=0"}`);
   const fastify = Fastify({ logger: false });
 
@@ -741,6 +792,8 @@ async function buildServer() {
           // The invite-request hand is FOR people with no session — behind the gate it was
           // unreachable by exactly its stated audience. The route is its own throttle (1/IP-hour).
           || u === "/api/dm/request-invite"
+          // CSP violation reports come from the login page too, where nobody has a session yet.
+          || u === "/api/csp-report"
           // A site icon is not protected content, and 401ing it only puts a spurious console
           // error on the login page of every signed-out visitor.
           || u === "/icon.svg" || u === "/manifest.webmanifest" || u === "/favicon.ico") return;
@@ -1234,6 +1287,28 @@ async function buildServer() {
       // so the tab says so rather than letting the assumption stand.
       operatorReadsAll: true };
   });
+  // ---- synced UI prefs: the markets watchlist and the saved layouts, per ACCOUNT ---------------
+  // localStorage stays the working copy (a signed-out visitor keeps everything they had); an
+  // account adds a server copy that every device of that member converges on. A write pokes the
+  // member's OTHER streams with {prefs:{ts}} — same contract as dm: a version, never a payload.
+  fastify.get("/api/prefs", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    return { ok: true, prefs: ACCOUNTS.prefsGet(me.uid) };
+  });
+  fastify.post("/api/prefs", { bodyLimit: 96 * 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    const b = req.body || {};
+    const r = ACCOUNTS.prefsPut(me.uid, String(b.key || ""), b.value, b.ts);
+    if (!r.ok) return reply.code(400).send(r);
+    if (r.stored) {
+      const frame = "data: " + JSON.stringify({ prefs: { key: String(b.key), ts: r.ts, from: String(b.tab || "") } }) + "\n\n";
+      const set = sseByUid.get(me.uid);
+      if (set) for (const e of set) sseWrite(e, frame);
+    }
+    return r;
+  });
   fastify.get("/api/dm/sync", (req, reply) => {
     reply.header("cache-control", "no-store");
     const me = dmMe(req, reply); if (!me) return;
@@ -1540,10 +1615,9 @@ async function buildServer() {
   // nosniff stops MIME confusion across the JSON/HTML mix; DENY forbids framing outright —
   // nothing here is ever legitimately embedded, and a framed login page is a phishing kit;
   // same-origin referrer keeps versioned asset URLs and API paths from leaking to any external
-  // link a report might one day carry. Deliberately NO Content-Security-Policy: the audience-
-  // injected flag slot is an inline script by design, and a nonce pipeline buys nothing for a
-  // password-gated single-page tool.
-  fastify.addHook("onSend", async (req, reply) => {
+  // link a report might one day carry. The Content-Security-Policy rides the same hook, report-only
+  // with a per-request nonce on the shell's inline scripts (see cspPolicy above).
+  fastify.addHook("onSend", async (req, reply, payload) => {
     reply.header("x-content-type-options", "nosniff");
     reply.header("x-frame-options", "DENY");
     reply.header("referrer-policy", "same-origin");
@@ -1560,6 +1634,15 @@ async function buildServer() {
     const q = req.url.indexOf("?");
     if (q >= 0 && req.url.slice(q + 1) === "v=" + VERSION && reply.statusCode === 200 && !req.url.startsWith("/api/"))
       reply.header("cache-control", "public, max-age=31536000, immutable");
+    // HTML pages: mint the nonce, stamp it into every slot and name it in the report-only policy.
+    // Streams (static files) and JSON never carry the slot, so they pass through untouched. Last
+    // in the hook on purpose: returning a payload ends it, and every header above must still land.
+    if (typeof payload === "string" && /^text\/html/i.test(String(reply.getHeader("content-type") || ""))) {
+      const nonce = crypto.randomBytes(16).toString("base64");
+      reply.header("content-security-policy-report-only", cspPolicy(nonce));
+      reply.header("reporting-endpoints", 'csp="/api/csp-report"');
+      if (payload.includes(CSP_NONCE_SLOT)) return payload.split(CSP_NONCE_SLOT).join(nonce);
+    }
   });
 
   await fastify.register(require("@fastify/compress"), { global: true, encodings: ["gzip", "deflate"], threshold: 1024 });
@@ -1588,12 +1671,21 @@ async function buildServer() {
   // cache-control starts at no-cache to match the static default; the onSend hook above runs at
   // send time and upgrades CURRENT-stamp requests to immutable, same as it always has — this
   // route changes the bytes on the wire, never the caching contract.
+  // The client is ES modules (build 2026.09.16-80): app.js is the entry and public/js/*.js are the
+  // modules it imports. Every import specifier is stamped with ?v=VERSION at boot, so a module URL
+  // is as immutable as the entry's — a browser can never pair this build's entry with last build's
+  // module, and every module rides the immutable-cache tier below. The files on disk stay
+  // unstamped: tests and editors read plain modules.
+  const stampImports = (js) => js.replace(/((?:^|[\s;])import\s*(?:[^'"]*?\s*from\s*)?["'])(\.{1,2}\/[^'"?]+\.js)(["'])/g, (m, a, spec, q) => a + spec + "?v=" + VERSION + q);
+  const CLIENT_MODULES = (() => { try { return fs.readdirSync(path.join(__dirname, "public", "js")).filter((f) => /^[a-z0-9_-]+\.js$/.test(f)).sort(); } catch (_) { return []; } })();
   const PRECOMP = (() => {
     const out = {};
     for (const [route, file, type] of [["/app.js", "app.js", "text/javascript; charset=utf-8"],
-                                       ["/styles.css", "styles.css", "text/css; charset=utf-8"]]) {
+                                       ["/styles.css", "styles.css", "text/css; charset=utf-8"],
+                                       ...CLIENT_MODULES.map((f) => ["/js/" + f, "js/" + f, "text/javascript; charset=utf-8"])]) {
       try {
-        const raw = fs.readFileSync(path.join(__dirname, "public", file));
+        let raw = fs.readFileSync(path.join(__dirname, "public", file));
+        if (/\.js$/.test(file)) raw = Buffer.from(stampImports(raw.toString("utf8")), "utf8");
         const br = zlib.brotliCompressSync(raw, { params: {
           [zlib.constants.BROTLI_PARAM_QUALITY]: 11,
           [zlib.constants.BROTLI_PARAM_SIZE_HINT]: raw.length } });
@@ -1602,7 +1694,7 @@ async function buildServer() {
         // across the deploy, and any byte change is a new tag — never keyed on VERSION alone.
         const tag = 'W/"' + crypto.createHash("sha1").update(raw).digest("base64url") + '"';
         out[route] = { raw, br, gz, type, tag };
-        log(`precompressed ${file}: raw ${(raw.length / 1024).toFixed(0)} KB \u2192 br ${(br.length / 1024).toFixed(0)} KB \u00b7 gz ${(gz.length / 1024).toFixed(0)} KB`);
+        if (!file.startsWith("js/")) log(`precompressed ${file}: raw ${(raw.length / 1024).toFixed(0)} KB \u2192 br ${(br.length / 1024).toFixed(0)} KB \u00b7 gz ${(gz.length / 1024).toFixed(0)} KB`);
       } catch (e) { log(`WARN: precompress ${file} failed (${e.message}) \u2014 @fastify/static serves it per-request instead`); }
     }
     return out;
@@ -1636,6 +1728,7 @@ async function buildServer() {
     let h = fs.readFileSync(path.join(__dirname, "public", "index.html"), "utf8");
     const a = h.includes('src="/app.js"'), c = h.includes('href="/styles.css"');
     h = h.replace('src="/app.js"', `src="/app.js?v=${VERSION}"`).replace('href="/styles.css"', `href="/styles.css?v=${VERSION}"`);
+    h = h.split("<script>").join(`<script nonce="${CSP_NONCE_SLOT}">`);   // inline scripts only: the src= tag never matches
     if (!a || !c) log("WARN: index.html asset tags drifted — version stamp incomplete (cache-busting degraded, app still serves)");
     const i = h.indexOf(FLAG_SLOT);
     if (i < 0) { log("WARN: index.html flag slot missing — feature visibility will not be injected (server gate still enforces; tabs may show and 403)"); return [h, ""]; }
@@ -2373,6 +2466,7 @@ async function buildServer() {
   // baseline security headers are written by hand here. Connection cap prevents fd exhaustion —
   // client #201 gets a 503 and its EventSource retry keeps it on the poll fallback, fully served.
   const sseClients = new Set();          // entries: { res, uid }
+  SSE_REGISTRY = sseClients;
   const sseByUid = new Map();            // uid -> Set(entry), for targeted delivery
   const SSE_MAX = 200;
   // A per-member cap on top of the global one: without it a single person with a wall of tabs open
@@ -2513,11 +2607,45 @@ async function buildServer() {
   // `stale` says the poller has not landed a universe poll in five minutes. Still a 200: a 503 would
   // make Railway restart-loop a process whose only problem is upstream. Alert on the flag instead.
   const STALE_MS = 5 * 60 * 1000;
+  // ---- positions overlay: the wallet on the account, the positions the lane read for it ---------
+  poller.setWalletSource(() => ACCOUNTS.walletsAll());
+  poller.setPosPoke((uid) => {
+    const set = sseByUid.get(uid);
+    if (!set) return;
+    const frame = "data: " + JSON.stringify({ pos: { ts: Date.now() } }) + "\n\n";
+    for (const e of set) sseWrite(e, frame);
+  });
+  fastify.get("/api/positions", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    const w = ACCOUNTS.walletGet(me.uid);
+    if (!w) return { ok: true, wallet: null, positions: [], summary: null, ts: 0, pending: false, err: null };
+    return Object.assign({ ok: true, wallet: { addr: w.addr, label: w.label || null } }, poller.getPositions(me.uid, w.addr));
+  });
+  fastify.post("/api/positions", { bodyLimit: 4 * 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    const b = req.body || {};
+    const r = b.remove ? ACCOUNTS.walletDrop(me.uid) : ACCOUNTS.walletSet(me.uid, b.addr, b.label);
+    if (!r.ok) return reply.code(400).send(r);
+    return r;
+  });
+
+  // Browsers post violations as application/csp-report (report-uri) or application/reports+json
+  // (Reporting API); Fastify 415s both unless told how to read them. No auth: the login page is
+  // covered by the policy and its visitor has no session by definition. 8 KB is generous for a report.
+  fastify.addContentTypeParser(["application/csp-report", "application/reports+json"], { parseAs: "string", bodyLimit: 8192 },
+    (req, body, done) => { try { done(null, JSON.parse(body)); } catch (_) { done(null, null); } });
+  fastify.post("/api/csp-report", { bodyLimit: 8192 }, (req, reply) => {
+    try { cspRecord(req.body); } catch (_) {}
+    return reply.code(204).header("cache-control", "no-store").send();
+  });
   fastify.get("/api/health", (req) => {
     const full = { ok: true, version: VERSION,
       stale: poller.lastPollAt() > 0 && Date.now() - poller.lastPollAt() > STALE_MS, lastPollAgoMs: poller.lastPollAt() > 0 ? Date.now() - poller.lastPollAt() : null,
       volume: { boots: HEARTBEAT.boots, firstBoot: HEARTBEAT.firstBoot, dataDir: DATA_DIR },
       loop: { ...loopSample(), sinceMs: Date.now() - loopResetAt, windowMs: LOOP_WINDOW, maxEver: loopMaxEver, hist: loopRing },
+      csp: { mode: "report-only", reports: CSP_REPORTS.n, dropped: CSP_REPORTS.dropped, recent: CSP_REPORTS.recent.map(({ key, ...r }) => r) },
       ...poller.stats(), ts: Date.now() };
     // Railway's healthcheck needs {ok} and nothing else; the volume path, the loop histogram
     // (live sample + closed-window ring + worst-ever) and the poller internals are for a signed-in
@@ -2564,6 +2692,7 @@ async function shutdown() {
   try { rollLoopWindow(); } catch (_) {}
   // Close every SSE stream: their EventSource auto-reconnects to the NEW build and receives the
   // fresh `v` in the initial frame — the push channel doubles as the fastest deploy notice.
+  const sseClients = SSE_REGISTRY || new Set();   // buildServer's registry; block-scoped there, so it has to be handed out
   try { for (const e of sseClients) { try { e.res.end(); } catch (_) {} } sseClients.clear(); } catch (_) {}   // entries are {res, uid}: res.end() on the entry was a swallowed TypeError
   try { store.close(); } catch (_) {}
   try { ACCOUNTS.close(); } catch (_) {}   // checkpoints the WAL so a redeploy never leaves -wal/-shm behind
