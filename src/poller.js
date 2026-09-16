@@ -14,6 +14,7 @@ const {
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
 } = require("./compute");
 const { pxRingPush, pxRingRef, dipReclaim } = require("./compute");
+const { fomcResult } = require("./compute");
 const { focusSelect, focusGapSigma, focusLevelDist, firstHourStats, sessionCloseStats, FOCUS_CAP, FOCUS_PER_CLUSTER, focusPreview, focusDiff, FOCUS_PREVIEW_N, foldLiveMark,
   focusGate, focusLimits, FOCUS_HARD_VOL, FOCUS_HARD_OI, FOCUS_BELOW_N } = require("./compute");
 const { featuresFromHourly, bucketOpens, oiDeltaPct, fundingAvg, fundingHeat, FUNDHEAT_MIN_COV, meanPairwiseCorr, regimeAggregate,
@@ -7563,10 +7564,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         const s = macroStats.FOMC;
         if (s && s.cur) {
           if (macroEntryState(e, now) === "released") {
-            // actual = the range once the daily target series has an obs ON/after decision day;
-            // prior = the range in force going in (the current one until the print moves it).
-            if (s.cur.d >= e.d) { out.actual = { lo: s.cur.lo, hi: s.cur.hi };
-              out.prior = s.prev ? { lo: s.prev.lo, hi: s.prev.hi } : { lo: s.cur.lo, hi: s.cur.hi }; }
+            // actual/prior come from the daily series' history around the decision day
+            // (fomcResult); until the first observation AFTER the decision is published the row
+            // is pend with the range going in as its prior — a decision is never read off the
+            // decision-day observation, which still carries the old range.
+            const r = fomcResult(s.hist, e.d);
+            if (r) { out.actual = r.actual; out.prior = r.prior; }
             else { out.pend = true; out.prior = { lo: s.cur.lo, hi: s.cur.hi }; }
           } else out.prior = { lo: s.cur.lo, hi: s.cur.hi };
         }
@@ -7626,11 +7629,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           const loS = fredObsSeries(tl), hiS = fredObsSeries(tu);
           const lo = lastObs(loS), hi = lastObs(hiS);
           if (lo && hi) {
-            // prev = the last DISTINCT range before the current one (daily series repeats the
-            // held range every day) — lets a released decision row read "held" vs "cut/hiked".
-            let loP = null, hiP = null;
-            for (let i = hiS.length - 2; i >= 0; i--) if (hiS[i][1] !== hi.v || (loS[i] && loS[i][1] !== lo.v)) { hiP = hiS[i][1]; loP = loS[i] ? loS[i][1] : null; break; }
-            macroStats.FOMC = { cur: { lo: lo.v, hi: hi.v, d: hi.d }, prev: loP != null && hiP != null ? { lo: loP, hi: hiP } : null };
+            // The recent daily range history rides the stat (60d, by date): the decision row reads
+            // its result and its prior off THIS through fomcResult — the first observation after
+            // the decision day vs the range in force on it — never off "latest vs last distinct",
+            // which read a decision-day observation of the range going in as the decision itself.
+            const loBy = new Map(loS.map(([d, v]) => [d, v]));
+            const hist = hiS.filter(([d]) => loBy.has(d)).map(([d, v]) => ({ d, lo: loBy.get(d), hi: v })).sort((a, b) => a.d < b.d ? -1 : 1);
+            macroStats.FOMC = { cur: { lo: lo.v, hi: hi.v, d: hi.d }, hist };
           }
         }
         // Level series (rates + claims) for the morning brief. Isolated on purpose: these are
@@ -12304,7 +12309,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       // would be the false-precision failure this codebase refuses everywhere else.
       if (e.actual != null) legs.push({ sub: "result" });
       for (const leg of legs) {
-        const key = e.k + "|" + e.d + "|" + leg.sub;
+        // An FOMC result is keyed by the range it announces: if a result was announced off a
+        // wrong read, the corrected one is a different key and goes out rather than being
+        // swallowed by the dedupe (the 2026-09-16 hike that printed as "held").
+        const key = e.k + "|" + e.d + "|" + leg.sub
+          + (e.k === "FOMC" && leg.sub === "result" && e.actual ? "|" + (+e.actual.lo).toFixed(2) + "-" + (+e.actual.hi).toFixed(2) : "");
         if (macroAlerted.has(key)) continue;
         macroAlerted.set(key, now);
         if (!macroPrimed) { seeded++; continue; }

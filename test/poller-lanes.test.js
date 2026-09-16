@@ -1160,3 +1160,31 @@ test("congress -04: parse queue — scans marked once, transient failures retrie
   fs.rmSync(dir2, { recursive: true, force: true });
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test("macro scan: an FOMC result announced off a wrong read re-announces once the corrected range lands", () => {
+  const p = ctxHarness();
+  const macro = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "macro" && e.k === "FOMC");
+  p.macroPrimeNow();
+  const d = "2026-09-16";
+  // The bad read: decision day, the series still carrying the range going in → "held".
+  p.macroSeedNow([{ k: "FOMC", label: "FOMC rate decision", d, tEt: "14:00", sep: true, prior: { lo: 3.5, hi: 3.75 }, actual: { lo: 3.5, hi: 3.75 } }]);
+  p.macroScanNow();
+  assert.equal(macro().length, 1);
+  p.macroScanNow();
+  assert.equal(macro().length, 1, "the same result never repeats");
+  // The next fetch reads the day-after observation: a different range is a different key.
+  p.macroSeedNow([{ k: "FOMC", label: "FOMC rate decision", d, tEt: "14:00", sep: true, prior: { lo: 3.5, hi: 3.75 }, actual: { lo: 3.75, hi: 4.0 } }]);
+  p.macroScanNow();
+  assert.equal(macro().length, 2, "the corrected decision goes out");
+  assert.deepEqual(macro().at(-1).actual, { lo: 3.75, hi: 4.0 }, "newest last: the corrected range is the latest event");
+  p.macroScanNow();
+  assert.equal(macro().length, 2);
+  // Other releases keep the plain key: a revised CPI actual is not re-announced.
+  p.macroSeedNow([{ k: "CPI", label: "CPI", d, tEt: "08:30", prior: { yoy: 2.9, m: "2026-07" }, actual: { yoy: 3.0, m: "2026-08" } }]);
+  p.macroScanNow();
+  const cpi = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "macro" && e.k === "CPI");
+  assert.equal(cpi().length, 1);
+  p.macroSeedNow([{ k: "CPI", label: "CPI", d, tEt: "08:30", prior: { yoy: 2.9, m: "2026-07" }, actual: { yoy: 3.1, m: "2026-08" } }]);
+  p.macroScanNow();
+  assert.equal(cpi().length, 1);
+});
