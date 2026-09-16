@@ -80,6 +80,28 @@ instant, and the per-IP rate limit stops being a per-user problem.
   tmp-then-rename, warm-loaded on boot) rather than in `localStorage` next to the watchlist: a layout is
   a *view* and losing it costs a re-click, but a note is prose somebody sat and typed. Ships admin-only,
   with the write verb behind its own key so opening the tab to the group never hands the group the pen.
+- **Positions overlay** (`/api/positions`) — one Hyperliquid wallet per account, linked under Filters ›
+  Positions (public address only: the app reads the public clearinghouse state and can never sign).
+  A poller lane reads the xyz book and, when the crypto lane runs, the main-dex book — weight 2
+  each, every 30s, but **only for wallets somebody is looking at** (a read marks the account wanted
+  for ten minutes). The server ships the *structure* of each position (side, size, entry, leverage,
+  liquidation, margin, funding paid since open); notional, unrealized P&L, ROE and the move since
+  entry are derived client-side off the live mark the row already shows, so they move with the tape
+  and the lane only pokes the member's tabs (`{pos}` on the SSE stream) on a structural change. On
+  the table: a ⬡ beside the ticker in the side's colour, a sortable **Position** column (hidden until
+  a wallet is linked, migrated in next to OI in saved layouts), a ⬡ held filter; in the drawer, a
+  panel with the trend board's read next to the side you are on.
+- **Account-synced watchlist and layouts** (`/api/prefs`) — the ★ watchlist and the saved layouts
+  list follow the account: a `user_pref` row per (member, key), last-writer-wins on the client's own
+  stamp, and a `{prefs}` poke to the member's other tabs so a phone and a desktop converge on
+  whichever change was made later. localStorage stays the working copy (signed out, nothing
+  changes); the *active* layout is deliberately per browser — the phone runs its own.
+- **Content-Security-Policy, report-only** — every HTML page carries a per-request nonce on its inline
+  scripts and a `Content-Security-Policy-Report-Only` header naming it. Violations post to
+  `/api/csp-report`, are counted and summarized on the signed-in `/api/health`, and logged at most
+  once a minute. Report-only on purpose: the client renders through innerHTML in hundreds of places
+  and members type prose into notes and messages; the operator flips to enforcing once the report
+  stays quiet.
 - **Note markers on Markets** — a post-it in the ticker cell of any name you have written on. No new
   column (same reasoning as the E badge: that cell is the only one always on screen), and *absent*
   entirely when there is no note, so it never competes with the ☆ beside it. The glyph encodes three
@@ -264,16 +286,29 @@ served by the app.
 ## Project layout
 
 ```
-server.js            Fastify server: serves /public + the JSON API, owns the poller
-src/hyperliquid.js   REST client + weight-based rate limiter
-src/compute.js       stats + feature extraction (ported from the original client)
-src/poller.js        universe poll, candle backfill, OI sampling, snapshot build
-src/store.js         append-only persistent OI log (no native deps)
+server.js            Fastify server: serves /public + the JSON API, owns the poller, auth, SSE, CSP
+src/hyperliquid.js   REST client + weight-based rate limiter, WebSocket universe feed, Coinalyze
+src/compute.js       stats + feature extraction, event studies, calendars, brief/landscape prose
+src/poller.js        universe poll, candle backfill, OI sampling, snapshot build, every data lane
+src/store.js         persistence on the volume: OI log, candle archive, feature cache, notes
+src/accounts.js      SQLite (accounts.db): members, invites, messages, prefs, wallets
+src/sectors.js       curated sector / industry / display-name tables
 public/index.html    frontend shell
 public/styles.css    styles
-public/app.js         frontend logic (renders the cached snapshot)
+public/app.js        client entry: imports the modules below and runs their boot steps in order
+public/js/*.js       the client, one ES module per area (core, markets, drawer, notes, messages, …)
+public/sw.js         install-only service worker (caches nothing)
+scripts/             bench-builds.js — event-loop cost of the poller's synchronous builds
+test/                node:test suites, one file per module and area (see Tests)
+docs/                design notes and mocks (not served)
 railway.json         Railway build/deploy config
 ```
+
+The client is native ES modules with no bundler: `app.js` imports every module under `public/js`
+and then calls their `__boot_*` functions in the original single-file order, so a module can
+import any other (cycles included) without a top-level statement ever reading a binding that has
+not been initialised. The server stamps `?v=BUILD` onto every import specifier at boot and serves
+the modules precompressed and immutable at the current stamp, the same contract the entry has.
 
 ## Run locally
 
@@ -328,20 +363,34 @@ You need a GitHub account and a Railway account.
 - Keep the service **always-on** (Railway's default). The whole benefit is the warm cache —
   if it slept, a visitor would trigger a cold resync.
 - Cost at this scale is typically just the Railway Hobby base (~\$5/mo).
-- Redeploys keep OI history (it's on the volume) but re-backfill candle history (~1–2 min),
-  which is cheap and expected.
+- Redeploys keep OI history and the candle archive (both on the volume: `oi.log`, `candles.db`);
+  only spines that went stale while the server was down are re-fetched, so a warm table is back
+  within a poll or two.
 - While the live push stream (SSE) is healthy the status line reads **push live** and your
   browser pulls the moment the server's data changes (~15s snapshot cadence). The refresh
   selector (15s–15m, default 30s) only paces the fallback poll used when the stream is down.
   The server updates independently every ~15–30s regardless.
 
-## Tests
+## Tests, lint, bench
 
 ```bash
-npm test
+npm test          # node:test, one file per module/area under test/, run in parallel (~20s)
+npm run test:cov  # the same with Node's built-in coverage table (what CI runs)
+npm run lint      # ESLint 10, flat config: server (CommonJS), client (ES modules), service worker
+npm run bench     # event-loop cost of the poller's synchronous builds on a synthetic 150-market book
 ```
 
-Runs the classifier + compute regression tests (Node's built-in runner, no deps).
+Test files are named for what they exercise (`compute-signals`, `poller-lanes`, `client-core`,
+`accounts`, `server` for the HTTP suite through `fastify.inject()`, `server-pins` for source pins).
+Shared fixtures live in `test/_shared.js`; tests that read "the client source" get it from
+`test/_client.js`, which concatenates the modules with the module syntax removed — exactly the old
+single-file scope, so a grabbed function body runs the same way it always did.
+
+On the worker-thread question the codebase keeps asking: `npm run bench` is the measurement. On a
+150-market synthetic book the warm snapshot build holds the loop for 12–35 ms and the loop's p99
+under a build every 200 ms is 16 ms — under the 50 ms gate the histogram on `/api/health` was
+armed for — and shipping one market's daily bars to a worker costs more than the level-map work on
+them. The build stays on the loop until those numbers, or the production histogram, say otherwise.
 
 ## Optional: earnings calendar (Finnhub)
 

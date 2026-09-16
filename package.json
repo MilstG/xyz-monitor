@@ -9,9 +9,11 @@
   },
   "scripts": {
     "start": "node --experimental-sqlite server.js",
-    "test": "node --experimental-sqlite --test --test-timeout=120000",
+    "test": "node --experimental-sqlite --test --test-timeout=120000 'test/*.test.js'",
+    "test:cov": "node --experimental-sqlite --test --test-timeout=120000 --experimental-test-coverage --test-coverage-exclude='test/**' 'test/*.test.js'",
     "lint": "eslint .",
-    "audit": "npm audit --audit-level=high"
+    "audit": "npm audit --audit-level=high",
+    "bench": "node --experimental-sqlite scripts/bench-builds.js"
   },
   "dependencies": {
     "@fastify/compress": "^9.2.0",
