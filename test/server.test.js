@@ -282,3 +282,26 @@ test("positions: the wallet is an account surface — validated, one per member,
   assert.deepEqual(JSON.parse((await post("/api/positions", { remove: true }, gus)).body), { ok: true, wallet: null });
   assert.equal(JSON.parse((await get("/api/positions", gus)).body).wallet, null);
 });
+
+test("modules: the entry is a module, every /js module is served stamped, precompressed and immutable at the current stamp", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const { VERSION } = require("../server.js");
+  const shell = (await get("/", gus)).body;
+  assert.ok(shell.includes(`<script type="module" src="/app.js?v=${VERSION}"></script>`), "the shell loads the entry as a module, stamped");
+  const entry = await get("/app.js?v=" + VERSION, gus);
+  assert.equal(entry.statusCode, 200);
+  assert.match(entry.headers["cache-control"], /immutable/);
+  assert.ok(/import \{ __boot_core_1 \} from "\.\/js\/core\.js\?v=/.test(entry.body), "the entry's imports carry the build stamp: " + entry.body.slice(0, 400));
+  assert.ok(!/from "\.\/js\/[a-z]+\.js"/.test(entry.body), "no unstamped import survives");
+  const core = await get("/js/core.js?v=" + VERSION, gus);
+  assert.equal(core.statusCode, 200); assert.match(core.headers["content-type"], /javascript/); assert.match(core.headers["cache-control"], /immutable/);
+  assert.ok(core.headers.etag, "strong content identity on modules too");
+  assert.equal((await get("/js/core.js?v=" + VERSION, gus, { "if-none-match": core.headers.etag })).statusCode, 304);
+  const br = await get("/js/markets.js?v=" + VERSION, gus, { "accept-encoding": "br" });
+  assert.equal(br.headers["content-encoding"], "br", "modules ride the brotli-at-boot path");
+  const stale = await get("/js/core.js?v=old", gus);
+  assert.equal(stale.statusCode, 200); assert.equal(stale.headers["cache-control"], "no-cache", "a stale stamp revalidates, never caches for a year");
+  const raw = require("fs").readFileSync(require("path").join(__dirname, "..", "public", "js", "markets.js"), "utf8");
+  assert.ok(/from "\.\/core\.js"/.test(raw), "on disk the modules stay unstamped");
+  assert.ok((await get("/js/markets.js", gus)).body.includes(`from "./core.js?v=${VERSION}"`), "and stamped on the wire");
+});

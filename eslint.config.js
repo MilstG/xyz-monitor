@@ -32,7 +32,7 @@ module.exports = [
   {
     files: ["public/**/*.js"],
     ignores: ["public/sw.js"],
-    languageOptions: { ecmaVersion: 2024, sourceType: "script", globals: { ...globals.browser } },
+    languageOptions: { ecmaVersion: 2024, sourceType: "module", globals: { ...globals.browser } },
     rules: shared,
   },
   {

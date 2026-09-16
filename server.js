@@ -1671,12 +1671,21 @@ async function buildServer() {
   // cache-control starts at no-cache to match the static default; the onSend hook above runs at
   // send time and upgrades CURRENT-stamp requests to immutable, same as it always has — this
   // route changes the bytes on the wire, never the caching contract.
+  // The client is ES modules (build 2026.09.16-80): app.js is the entry and public/js/*.js are the
+  // modules it imports. Every import specifier is stamped with ?v=VERSION at boot, so a module URL
+  // is as immutable as the entry's — a browser can never pair this build's entry with last build's
+  // module, and every module rides the immutable-cache tier below. The files on disk stay
+  // unstamped: tests and editors read plain modules.
+  const stampImports = (js) => js.replace(/((?:^|[\s;])import\s*(?:[^'"]*?\s*from\s*)?["'])(\.{1,2}\/[^'"?]+\.js)(["'])/g, (m, a, spec, q) => a + spec + "?v=" + VERSION + q);
+  const CLIENT_MODULES = (() => { try { return fs.readdirSync(path.join(__dirname, "public", "js")).filter((f) => /^[a-z0-9_-]+\.js$/.test(f)).sort(); } catch (_) { return []; } })();
   const PRECOMP = (() => {
     const out = {};
     for (const [route, file, type] of [["/app.js", "app.js", "text/javascript; charset=utf-8"],
-                                       ["/styles.css", "styles.css", "text/css; charset=utf-8"]]) {
+                                       ["/styles.css", "styles.css", "text/css; charset=utf-8"],
+                                       ...CLIENT_MODULES.map((f) => ["/js/" + f, "js/" + f, "text/javascript; charset=utf-8"])]) {
       try {
-        const raw = fs.readFileSync(path.join(__dirname, "public", file));
+        let raw = fs.readFileSync(path.join(__dirname, "public", file));
+        if (/\.js$/.test(file)) raw = Buffer.from(stampImports(raw.toString("utf8")), "utf8");
         const br = zlib.brotliCompressSync(raw, { params: {
           [zlib.constants.BROTLI_PARAM_QUALITY]: 11,
           [zlib.constants.BROTLI_PARAM_SIZE_HINT]: raw.length } });
@@ -1685,7 +1694,7 @@ async function buildServer() {
         // across the deploy, and any byte change is a new tag — never keyed on VERSION alone.
         const tag = 'W/"' + crypto.createHash("sha1").update(raw).digest("base64url") + '"';
         out[route] = { raw, br, gz, type, tag };
-        log(`precompressed ${file}: raw ${(raw.length / 1024).toFixed(0)} KB \u2192 br ${(br.length / 1024).toFixed(0)} KB \u00b7 gz ${(gz.length / 1024).toFixed(0)} KB`);
+        if (!file.startsWith("js/")) log(`precompressed ${file}: raw ${(raw.length / 1024).toFixed(0)} KB \u2192 br ${(br.length / 1024).toFixed(0)} KB \u00b7 gz ${(gz.length / 1024).toFixed(0)} KB`);
       } catch (e) { log(`WARN: precompress ${file} failed (${e.message}) \u2014 @fastify/static serves it per-request instead`); }
     }
     return out;

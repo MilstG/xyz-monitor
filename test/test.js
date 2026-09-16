@@ -251,7 +251,7 @@ test("funding board: a row dropped for a thin spine does not vote on the colour 
 test("funding heatmap: it is a tab of its own — nav, route, gate, hash, scope, help", () => {
   const fs = require("fs"), path = require("path");
   const C = require("../src/compute");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
@@ -305,7 +305,7 @@ test("funding heatmap: it is a tab of its own — nav, route, gate, hash, scope,
 
 test("funding heatmap: the grid's own rules — quantity, gaps, and a sign that is never colour-only", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   for (const pin of ["function fhColor(v,cap)", "function renderFundHeat(fh)",
     "function attachFundHeatControls()", "cap=fhCap(fh,tf)"])
@@ -325,7 +325,7 @@ test("funding heatmap: the grid's own rules — quantity, gaps, and a sign that 
 
 test("funding heatmap: the annualized read (build 2026.09.16-77) — a multiplier over the same payload, one cap across resolutions", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   for (const pin of ["const FH_UNITS=[['apr','annualized'],['bucket','per bucket']]", "const FH_HPY=24*365",
     "function fhUnit()", "function fhAnn(fh,tf)", "function fhCapApr(fh,tf)", "function fhCells(fh,row,tf)", "function fhDpApr(cap)"])
@@ -1693,7 +1693,7 @@ test("pre-epoch crypto purge: claims stamped under the OLD geometry leave the le
     "every record entry carries cl: the distinct tape-day count behind n");
   // client wiring pins: xyz-only selection, tab whitelist without signals, drawer skip
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const pin of ["function sigRecKey(thr,pr){",
     "const shPanel=d&&d.shadows&&(state.scope==='crypto'?d.shadows.main:d.shadows.xyz);",
     // Signals and Actionable are in scope for crypto again; markets stays PINNED public so the
@@ -1820,7 +1820,7 @@ test("news feed: merge purity, payload badge stamps, full wiring chain", () => {
     assert.ok(pol.includes(pin), `news worker pin missing: ${pin}`);
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   assert.ok(srv.includes('error: "not fetched yet"') && srv.split('fastify.get("/api/news"').length - 1 === 1, "route registered once with an honest fallback");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const pin of ["function renderNews()", "function fillDrawerNews()", "function newsRow(",
     "id=\"dnews\"", "all ${esc(r.ticker)} news", "headlines in the last 72h",
     "if(v==='news'){ if(el('view-news')) openNews();", "nbadge${a.sig?' sig':(a.ed!=null?' earn':'')}"])
@@ -1843,7 +1843,7 @@ test("view wiring invariant: every tab has a section, a visibility toggle, AND a
   // dispatch lines must all describe the same set of views, or the suite fails.
   const fs = require("fs"), path = require("path");
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const tabs = new Set([...html.matchAll(/data-view="([a-z]+)"/g)].map((m) => m[1]));
   const sections = new Set([...html.matchAll(/id="view-([a-z]+)"/g)].map((m) => m[1]));
   const toggles = new Set([...app.matchAll(/setHidden\('view-([a-z]+)'/g)].map((m) => m[1]));
@@ -1895,7 +1895,7 @@ test("transport cap: per-universe lanes so a volatile crypto day cannot evict th
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   assert.ok(pol.includes("const top = crypto ? capPerUniverse(kept, 40, 40) : kept.slice(0, 40);"),
     "the build routes through the lanes when crypto is enabled and keeps the plain slice when it is not");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const pin of ["function setSigTabBadge()",
     "const u = state.scope==='crypto' ? 'm' : 'x';",
     "d&&d.countU&&d.countU[u]!=null ? d.countU[u] : (d?(d.count||0):0)"])
@@ -1955,7 +1955,7 @@ test("AI sector classification: enum-validated, write-once, static map wins, thr
   assert.ok(/AI_CLASSIFY_EFFORT = process\.env\.AI_CLASSIFY_EFFORT \|\| "low"/.test(pol), "classifier effort must default to low (nano classification wants no reasoning tokens)");
   assert.ok(pol.includes('classify: "gpt-5.4-nano"') && pol.includes('classify: "claude-haiku-4-5"'), "each provider must default the classifier to a cheap classification-grade tier");
   assert.ok(!pol.includes("callModel(AI_MODEL_FALLBACK, pend"), "the classifier must no longer reuse the report/ask fallback model");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const pin of ["id=\"nsec\"", "data-nv=", "newsView==='sector'", "nsec-badge${a.secAi?' ai':''}",
     "const SEC_SHORT=", "newsSec&&a.sec!==newsSec", "'unclassified'"])
     assert.ok(app.includes(pin), `sector UI pin missing: ${pin}`);
@@ -2029,7 +2029,7 @@ test("news relevance pipeline: no off-universe leaks — gate, AI verdicts, re-t
   assert.ok(r3.idle, "fully classified store goes idle — nothing loops");
   // wiring pins: lane semantics client-side, drawer guard, health counters
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const pin of ["newsMode='universe'", "filings are exclusive BOTH ways",
     "relevance verdict pending", "a.sec==='off-topic'?' off'", "const lane=r.mlane||null;",
     "attribution AI-verified", "no verified headlines for this name in the last 72h"])
@@ -2132,7 +2132,7 @@ test("empty record still RENDERS: awaits, shadows, variants — executed, not st
   // crypto engine, so the roster is asserted per scope and the sandbox supplies the same scoped
   // record-set helper the shipped renderer calls.
   const fs = require("fs"), path = require("path");
-  const src = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const src = require("./_client").clientSource();
   const grab = (name) => { const i = src.indexOf("function " + name); assert.ok(i >= 0, name + " missing");
     let dep = 0, j = src.indexOf("{", i);
     for (let k = j; k < src.length; k++) { if (src[k] === "{") dep++; if (src[k] === "}") { dep--; if (!dep) return src.slice(i, k + 1); } } };
@@ -2348,7 +2348,7 @@ test("analyst-read ledger: directional reports freeze claims, episodes hold, buc
   assert.ok(served.analystRecord && served.analystRecord.open === 1, "the served report carries the live record");
   // client + wiring pins
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const pin of ["analyst reads:", "first reads still open", "d.analystRecord"])
     assert.ok(app.includes(pin), `client analyst-record pin missing: ${pin}`);
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
@@ -2441,7 +2441,7 @@ test("telegram feed: parser + drift, lane caps, single-name attribution through 
     "telegram: { channels: tgChannels.length", "function purgeTgOrphans()",
     "cached posts from since-removed channels die at hydrate", 'r.uni !== "xyz") continue;'])
     assert.ok(pol.includes(pin), `tg pin missing: ${pin}`);
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const pin of ["'telegram'?!!a.tg", "id=\"ntg-gear\"", "function loadTgChannels()", "function saveTgChannels(", "data-rmch"])
     assert.ok(app.includes(pin), `tg client pin missing: ${pin}`);
   const st = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
@@ -2486,7 +2486,7 @@ test("EDGAR filings lane: parser, 7d retention, hard isolation from every other 
     "filings are NOT headlines: the report's news context stays empty — the news contract never sees them");
   // client pins: exclusive lane, sub-chips, form rows, grouped-view guard
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const pin of ["newsMode==='filings'?!!a.fl:(a.fl?false:", "'universe','tape','telegram','filings'",
     "data-nfl=", "newsFl==='mat'&&!a.mat", "class=\"nform", "newsView==='sector'&&newsMode!=='filings'",
     "a.sec&&!a.fl&&inLane(a)"])
@@ -2534,7 +2534,7 @@ test("earnings<->filings join: the release links once it's live, tiered preferen
   for (const pin of ["const entries = linkEarningsFilings(earnCache.entries, flItems", "if (sig !== earnLnSig) { earnLnSig = sig; earnLnVer = Date.now(); }",
     "dataTs: Math.max(earnCache.dataTs || 0, earnLnVer, macroCache ? (macroCache.dataTs || 0) : 0)"])
     assert.ok(pol.includes(pin), `earnings-link pin missing: ${pin}`);
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const pin of ["function earnFilingHtml(e)", "earnFilingHtml(e)", "the earnings release itself",
     "if(ev.target.closest('a,button')) return;"])
     assert.ok(app.includes(pin), `earnings-link client pin missing: ${pin}`);
@@ -2814,7 +2814,7 @@ test("earnings: back-window reconciliation mirrors the feed's current claim, nev
   assert.ok(pol.includes("voids: [...earnVoids]"), "tombstones persist to the volume");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   assert.equal(srv.split('fastify.post("/api/earnings/void"').length - 1, 1, "void route registered exactly once");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const frag of ["earn-void", "/api/earnings/void", "in line"])
     assert.ok(app.includes(frag), `missing client void/verdict marker: ${frag}`);
 });
@@ -2860,7 +2860,7 @@ test("earnings row: the printed EPS pair reconciles with the surprise % printed 
   // actual printed two decimals and the estimate one. Both are display lies about a number the
   // operator trades on, so both are pinned here against the real functions in app.js.
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const grab = (name) => {
     const i = app.indexOf("function " + name + "(");
     assert.ok(i > -1, name + " present in app.js");
@@ -3407,7 +3407,7 @@ test("insiders backfill: the SEC submissions index reaches the history the atom 
 
 test("insiders tab: columns sort, hide and REORDER, and the view survives a column list that changed", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const els = {};
   const mk = (id) => ({ id, innerHTML: "", hidden: false, value: "", checked: false, textContent: "", style: {}, dataset: {},
     classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
@@ -3533,7 +3533,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   // lines and still passed node --check (valid JS) and this suite (which never read the client).
   // This test makes structural damage to the client a suite failure.
   const fs = require("fs"), path = require("path");
-  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const s = require("./_client").clientSource();
   assert.ok(s.length > 250000, `app.js suspiciously small: ${s.length} bytes`);
   const defs = {};
   for (const m of s.matchAll(/^(?:async )?function ([A-Za-z0-9_]+)\(/gm)) defs[m[1]] = (defs[m[1]] || 0) + 1;
@@ -4182,7 +4182,7 @@ test("trend ladder + reads: full trend, retest, lagging rung, mixed, and exclusi
 
 test("trend leaderboard integrity: client, markup and server carry the tab end to end", () => {
   const fs = require("fs"), path = require("path");
-  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const s = require("./_client").clientSource();
   const defs = {};
   for (const m of s.matchAll(/^(?:async )?function ([A-Za-z0-9_]+)\(/gm)) defs[m[1]] = (defs[m[1]] || 0) + 1;
   for (const n of ["loadTrend", "openTrend", "renderTrend", "trendDotHtml", "trendSectionHtml", "trendMAChips"]) {
@@ -4212,7 +4212,7 @@ test("trend leaderboard integrity: client, markup and server carry the tab end t
   // chart modal contract markers: the button ships on rows, the fetch carries tf=, and the
   // candles route branches to the ladder-series getter — drop any one and the modal quietly
   // degrades (silent-fetch-swallowing is exactly how the -42 route deletion hid for six builds)
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const frag of ["tchart-btn", "&tf=", "tcbtn-td"])
     assert.ok(app.includes(frag), `missing chart-modal client marker: ${frag}`);
   // signals card grammar (build -67): meta column, scope tag, watch line, unified pill classes
@@ -4798,7 +4798,7 @@ test("ai report: universe gate — unknown coins and disabled-crypto rows are re
 
 test("client + server integrity: the Report tab ships end to end (markers, styles, retention bump)", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
@@ -4942,7 +4942,7 @@ test("ai report: level discipline — EMA annotations banned, directional reads 
 
 test("client: report chart renderer ships the fixes — price-only domain, line mode, staggered labels, clustered marks, span-aware axis, norisk grid", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   for (const frag of ["lineMode", "close-line mode", "off-chart:", "labs[i].y-labs[i-1].y<15", "groups.find", "axDec", "hasRisk", "ai-scen${hasRisk?'':' norisk'}"])
     assert.ok(app.includes(frag), `app.js missing chart-fix marker: ${frag}`);
@@ -5031,7 +5031,7 @@ test("ai report -73: daily OHLC upgrade — a closes-only warm restore renders r
 
 test("client -73: multi-timeframe chart + action panel ship end to end", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   for (const frag of ["aiChartTfSeg", "data-aitf", "state.report.tf", "aiActionHtml", "enter_on_pullback", "entryIsMarket", "EMA13 ", "fill-opacity=\"0.08\""])
@@ -5116,7 +5116,7 @@ test("ai report -74/-75: first-fire marks pass the proven-edge gate — episode 
 
 test("client -74: side-typed glyphs + legend ship end to end; schema bumped so -73 reports invalidate", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   for (const frag of ["AI_MK", "ai-mkleg", "proven-edge signals only", "g.kind==='short'", "distinct signal types at onset", "outTxt", "marksSuppressed"])
@@ -5130,7 +5130,7 @@ test("UI batch -99: density toggle, keyboard nav and focused-ticker chip are ful
   // Three independent features shipped in one build — each pinned across every file it touches,
   // so a partial delivery (markup without wiring, wiring without CSS) is a suite failure.
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   // Density (rewritten 2026.07.27-23): the toggle is gone and compact is the only density. The
@@ -5159,7 +5159,7 @@ test("UI batch -99: density toggle, keyboard nav and focused-ticker chip are ful
 
 test("UI -23: amber theme removed, one density, status bar reformatted", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
 
@@ -5244,7 +5244,7 @@ test("UI -24: session-wide controls live outside every per-view section", () => 
   // falls inside one. Anything that must be reachable from every tab belongs to the shell.
   const fs = require("fs"), path = require("path");
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
 
   // Every id showView() toggles is a per-view section; derive the list from app.js so a new view
   // is covered the day it ships rather than the day someone remembers to add it here.
@@ -5289,7 +5289,7 @@ test("mobile suite -100: touch parity, mobile preset and PWA shell are fully wir
   // edit that adds caches.open / caches.match to /sw.js is reintroducing the stale-client bug
   // class the version-stamped shell exists to kill, and must fail here first.
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
@@ -5465,7 +5465,7 @@ test("terminal ticker guard: English words never resolve to tickers mid-sentence
   // Extract TSTOP + termTickerish from the client and RUN them: "what's on the tape" must never
   // become the ON Semiconductor card; caps, $-prefix, and single-word queries stay intentional.
   const fs = require("fs"), path = require("path");
-  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const s = require("./_client").clientSource();
   const m = s.match(/const TSTOP=new Set\([\s\S]*?function termTickerish\(w,only\)\{[\s\S]*?\n\}/);
   assert.ok(m, "TSTOP + termTickerish not extractable from app.js");
   const tickerish = new Function(m[0] + "; return termTickerish;")();
@@ -5558,7 +5558,7 @@ test("perf batch 2026.07.21-08: getFunding memo, bucketsFor memo, gzip+dataTs wi
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
 
   // #4 getFunding memo + its per-row invalidation at every fundH mutation site (5 writes + clear + sweep)
   assert.ok(pol.includes("r._fgVer === r._fVer && r._fgH === hourKey"), "getFunding memo key missing");
@@ -5685,7 +5685,7 @@ test("daily report budget + admin reset + terra effort routing", async () => {
     assert.ok(locked.retryMs > 0, "lockout must report a retry window");
   } finally { delete process.env.ADMIN_PASSWORD; }
   // ---- client wiring ---------------------------------------------------------------------
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(/admin\\s\+reset-reports/.test(app), "terminal must intercept the admin command");
   assert.ok(app.includes("••••"), "the echoed admin line must be redacted — the password never sits in scrollback");
   assert.ok(app.includes("function termRun") && app.indexOf("admin\\s+reset-reports") < app.indexOf("termEcho(line);"),
@@ -5741,7 +5741,7 @@ test("ask daily budget: cap enforced, only successful non-cached calls burn it, 
   } finally { delete process.env.ASK_MAX_PER_DAY; }
 
   // ---- client (Option B ambient chip) wiring ----
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(app.includes("function renderAskBudget"), "ambient chip renderer missing");
   assert.ok(/renderAskBudget\(h\.ai\.askDayLeft, h\.ai\.askPerDay\)/.test(app), "chip must be fed by the health poll");
   assert.ok(app.includes("renderAskBudget(d.askDayLeft, d.askPerDay)"), "chip must update from each ask response");
@@ -5780,7 +5780,7 @@ test("regimeAggregate: tape-wide OI + OI-weighted funding APR, forward-filled, c
 test("regime strip: pure aggregate rides /api/analytics sections, split crypto/stocks, rendered with the shared hoverChart", () => {
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(pol.includes("function buildRegime") && pol.includes("regimeAggregate("), "buildRegime + pure aggregate call missing from poller");
   assert.ok(pol.includes("regime,"), "regime must be a key on the analytics sections payload");
   assert.ok(/function buildRegime[\s\S]*mainMarkets\(\)/.test(pol) && /function buildRegime[\s\S]*activeMarkets\(\)/.test(pol), "regime must combine crypto (mainMarkets) + stocks (activeMarkets), not filter one roster");
@@ -6037,7 +6037,7 @@ test("deep archive + CHARTS tab: source + wiring manifest (store, capture lane, 
   const fs = require("fs"), path = require("path");
   const rd = (f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8");
   const sto = rd("src/store.js"), pol = rd("src/poller.js"), srv = rd("server.js");
-  const app = rd("public/app.js"), html = rd("public/index.html"), css = rd("public/styles.css");
+  const app = require("./_client").clientSource(), html = rd("public/index.html"), css = rd("public/styles.css");
   const C = require("../src/compute");
   // store: both tables STRICT/WITHOUT ROWID with the upsert, keyed off one statement map
   assert.ok(sto.includes('for (const iv of ["4h", "12h", "1d"]') && sto.includes('const tbl = "candles_" + iv'),
@@ -6105,7 +6105,7 @@ test("charts -02: chEmaWalk arithmetic — SMA seed, honest warm-up nulls, textb
   // The walk lives client-side; extract the REAL function and execute it (string pins prove
   // presence, only execution proves the arithmetic — the -84 lesson).
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const m = app.match(/function chEmaWalk\(series,n\)\{[\s\S]*?\n\}/);
   assert.ok(m, "chEmaWalk not found in app.js");
   const chEmaWalk = new Function("return " + m[0])();
@@ -6325,7 +6325,7 @@ test("fundamentals: poller module wired, gated on the earnings roster, price-tri
 
 test("client: CASC column + drawer deriv panel wired, crypto-scoped, honestly labeled", () => {
   const fs = require("fs"), path = require("path");
-  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const s = require("./_client").clientSource();
   for (const fn of ["cascCell", "liq24Cell", "loadDrawerDerivs", "renderDerivs", "dzWire"]) {
     const n = [...s.matchAll(new RegExp("^(?:async )?function " + fn + "\\(", "gm"))].length;
     assert.equal(n, 1, `client function ${fn} must exist exactly once`);
@@ -6417,7 +6417,7 @@ test("backtest v2 manifest: seventeen-signal roster, scope seam, data gates, sec
   // Source-manifest guard, same philosophy as the client-integrity test: each of these silently
   // reverting would leave a plausible-looking tab quietly running the old four-signal, xyz-only test.
   const fs = require("fs"), path = require("path");
-  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const s = require("./_client").clientSource();
   // the roster: every key present with a short label
   for (const k of ["mom:'", "smom:'", "rev:'", "res:'", "lowvol:'", "ivol:'", "beta:'", "max:'", "carry:'", "hprox:'", "volt:'", "oid:'",
     "m0:'", "mres:'", "moi:'", "mfund:'", "mpart:'"])
@@ -6460,7 +6460,7 @@ test("live-score variant family (2026.07.24-05): btMomVariant executed — M0 mi
   // construction. Each variant is asserted AGAINST M0 on the same inputs, so a regression in
   // any single modulation fails its own assertion by name.
   const fs = require("fs"), path = require("path");
-  const src = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const src = require("./_client").clientSource();
   const grab = (name) => { const i = src.indexOf("function " + name); assert.ok(i >= 0, name + " missing");
     let dep = 0, j = src.indexOf("{", i);
     for (let k = j; k < src.length; k++) { if (src[k] === "{") dep++; if (src[k] === "}") { dep--; if (!dep) return src.slice(i, k + 1); } } };
@@ -6744,7 +6744,7 @@ test("poller score duel: one snapshot per UTC day, IC lands when the next day's 
 
 test("build -07 manifest: pair math welded across compute.js and app.js; duel plumbing pinned end to end", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const cmp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
@@ -6987,7 +6987,7 @@ test("levels -09: manifest — detector, context block, snap rule and prompt con
     // could then disagree with the validator that accepted the read
     "structLevels: (ctx.levels && Array.isArray(ctx.levels.items))"])
     assert.ok(pol.includes(pin), `poller.js missing -09 pin: ${pin}`);
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const pin of ["c.structLevels", "detected structural level(s) drawn faint",
     "flip \\u2014 has served as both resistance and support"])
     assert.ok(app.includes(pin), `app.js missing -09 pin: ${pin}`);
@@ -7220,7 +7220,7 @@ test("levels study -10: poller wiring manifest — section, scope, source, memo,
 
 test("levels study -10: client manifest — panel renderers, deck entry, hover contract", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const fn of ["renderLevels", "lvlTouchSvg", "lvlHoldRow", "lvlPct"])
     assert.equal((app.match(new RegExp("^function " + fn + "\\(", "gm")) || []).length, 1, `exactly one ${fn} definition`);
   for (const pin of [
@@ -7445,7 +7445,7 @@ test("anatomy -11: poller wiring manifest — section, scope, memo, sig", () => 
 
 test("anatomy -11: client manifest — renderers, deck entry, hover contract, honest-n language", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const fn of ["renderAnatomy", "anMfeSvg", "anPct"])
     assert.equal((app.match(new RegExp("^function " + fn + "\\(", "gm")) || []).length, 1, `exactly one ${fn} definition`);
   for (const pin of [
@@ -7595,7 +7595,7 @@ test("shadow pair -12: manifest — EV_META, poller wiring, geometry gate, shado
   const seg = pol.slice(pol.indexOf("outsized-wick fill + round-figure front-run"), pol.indexOf('openLedger(r, "roundfr"'));
   assert.ok(seg.includes('if (r.uni === "xyz")'), "the pair is xyz-gated at the call site (belt to openLedger's crypto suspenders)");
   // shadows stay invisible: no client labels, ever, until a promotion build adds them deliberately
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(!app.includes("wickfill") && !app.includes("roundfr"), "no client surface for unpromoted shadows");
 });
 
@@ -7676,7 +7676,7 @@ test("-13 wiring manifest: byTicker on both studies, candles + pivots served, si
     "const one = levelStudy(r._lvEv, { horizon: LVL_HORIZON, cellFloor: LVL_CELL_FLOOR });",   // per-name verdicts through the SAME aggregator
     "anSt.candles ? anSt.candles.n : 0",                                                        // candles/pivots content busts the ETag
   ]) assert.ok(pol.includes(pin), `poller.js missing -13 pin: ${pin}`);
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const fn of ["renderCandles", "renderPivots", "pivotHistSvg", "studyScopeSel", "studyScopeState", "attachStudyScope"])
     assert.equal((app.match(new RegExp("^function " + fn + "\\(", "gm")) || []).length, 1, `exactly one ${fn}`);
   for (const pin of [
@@ -7779,7 +7779,7 @@ test("-14 anatomyTickerSummary: per-name mfe histogram, candle share/rngX, withi
 
 test("-14 client: charts follow the scope selector; pivots selector exists and is wired", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const pin of [
     "attachStudyScope('pvsel','pivots')",                       // the missing selector, wired
     "studyScopeSel('pvsel'",                                    // and rendered
@@ -7802,7 +7802,7 @@ test("-14 client: charts follow the scope selector; pivots selector exists and i
 
 test("-15 sessions groups: collapse behavior, persistence, dimmed all-pending groups", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const grab = (name) => {
     const i = app.indexOf("function " + name + "(");
     assert.ok(i >= 0, "missing " + name);
@@ -7842,7 +7842,7 @@ test("-15 sessions groups: collapse behavior, persistence, dimmed all-pending gr
 
 test("-15 client + styles manifest: status line, sticky jump bar, verdicts from section payloads", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const pin of [
     'class="sg-status"',                                     // coverage cards + readiness bar collapse to one line
     "full numbers stay on hover",                            // and the detail is not lost, it moves to the tooltip
@@ -7872,7 +7872,7 @@ test("-15 client + styles manifest: status line, sticky jump bar, verdicts from 
 
 test("-16 sigSec: collapsed by default, opens from the persisted set, toggle round-trips", () => {
   const fs = require("fs"), path = require("path");
-  const src = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const src = require("./_client").clientSource();
   const grabAt = (sig) => { const i = src.indexOf(sig); assert.ok(i >= 0, sig + " missing");
     let d = 0, j = src.indexOf("{", i);
     for (let k = j; k < src.length; k++) { if (src[k] === "{") d++; if (src[k] === "}") { d--; if (!d) return src.slice(i, k + 1); } } };
@@ -7898,7 +7898,7 @@ test("-16 sigSec: collapsed by default, opens from the persisted set, toggle rou
 
 test("-16 client manifest: every stats section behind sigSec, strip included, toggles bound", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const id of ["evtable", "slices", "curve", "tuning", "shadows", "resolutions", "recstrip"])
     assert.ok(app.includes(`sigSec('${id}'`), `section '${id}' renders through sigSec`);
   for (const pin of [
@@ -8008,7 +8008,7 @@ test("-17 crypto analytics build: every applicable study lives on a 90d crypto u
 
 test("-17 client + server wiring manifest: dual-universe route, tz-aware renderers, sessions tab in crypto", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const cmp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
@@ -8164,7 +8164,7 @@ function _sessPayload(isCrypto) {
 }
 test("-17 regression: drawSessions EXECUTES and renders for both universes (no ReferenceError)", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const { els, mk } = _sessDomStub();
   const saved = { si: global.setInterval, st: global.setTimeout, raf: global.requestAnimationFrame,
     doc: global.document, win: global.window, ls: global.localStorage, f: global.fetch };
@@ -8209,7 +8209,7 @@ test("-17 regression: drawSessions EXECUTES and renders for both universes (no R
 // ===== build 2026.07.24-20: crypto publishes fewer groups; thin per-name tables fall back ========
 test("-20: crypto renders only Positioning + Holds; stocks keeps all five groups", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   // server declares the set once, per universe, and skips building the disabled studies
   assert.ok(pol.includes('groups: ["positioning", "holds", "structure"],'), "crypto descriptor publishes three groups since -27");
@@ -8234,7 +8234,7 @@ test("-20: crypto renders only Positioning + Holds; stocks keeps all five groups
 
 test("-20: a per-name scope under the sample floor falls back to pooled instead of a dash wall", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   // the fallback helpers exist and every thin-cell table consults them
   assert.ok(app.includes("function _anyCell(") && app.includes("function _fbNote("), "fallback helpers defined");
   for (const fb of ["const qFallback=", "const moFallback=", "const nkFallback=", "const cbFallback=", "const cvFallback="])
@@ -8335,7 +8335,7 @@ test("ai report -01: prompt and validator agree on the target contract, and a re
 
 test("client -01: the target reconciliation is disclosed on the card, with hover, next to the void precedent", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(app.includes("c.correctedTarget?"), "the card must read the reconciliation flag from the server payload");
   assert.ok(app.includes("target reconciled to the chart level"), "the disclosure text is missing");
   // standing requirement: every annotation of this class carries hover context, same as the void's
@@ -8588,7 +8588,7 @@ test("actionable -08: geometry that is no longer tradeable is counted, and the c
 const ACT_TIP_COLS = ["ago", "fired", "entry", "late", "void", "target", "rr", "evR", "rec"];
 test("actionable -09: client renders the server's numbers and states the carry contract on the tab", () => {
   const fs = require("fs"), path = require("path");
-  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const s = require("./_client").clientSource();
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   // Tab + view + controls exist and are wired into navigation.
@@ -8810,7 +8810,7 @@ test("triggers -04: a cold start with a stale board seeds silently instead of de
 
 test("triggers -05: browser transport is a consumer only, and the toast surface avoids the terminal", () => {
   const fs = require("fs"), path = require("path");
-  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const s = require("./_client").clientSource();
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   // Consumer, not detector: the client must read the server's stream and advance a cursor. If it
   // ever decides for itself what counts as "new", a future Telegram push has a second opinion.
@@ -8899,7 +8899,7 @@ test("triggers -06: R:R is the board's kill switch, set at 2.0, with no second l
 
 test("tabs: backtest is hidden from the strip by default without withdrawing the feature", () => {
   const fs = require("fs"), path = require("path");
-  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const s = require("./_client").clientSource();
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   // HIDDEN_TABS was retired in 2026.07.26-05: the same two tabs are now admin-state entries in the
@@ -8998,7 +8998,7 @@ test("tabs: every HIDDEN_TABS entry matches a real nav button, and every hidden 
   // 'action' — passes that guard and ships a visible tab. This test joins the two files.
   const fs = require("fs"), path = require("path");
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const nav = html.match(/<nav class="tabs"[\s\S]*?<\/nav>/);
   assert.ok(nav, "nav.tabs block not found — applyTabVisibility's selector would find nothing");
   const views = [...nav[0].matchAll(/data-view="([a-z]+)"/g)].map((m) => m[1]);
@@ -9036,7 +9036,7 @@ test("features: manifest covers every tab in the markup, and every entry is real
   const fs = require("fs"), path = require("path");
   const C = require("../src/compute");
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
 
   const keys = new Set(C.FEATURES.map((f) => f.key));
   assert.equal(keys.size, C.FEATURES.length, "duplicate key in FEATURES — two entries would fight over one state");
@@ -9210,7 +9210,7 @@ test("features: scope enforcement wiring — routes, memo, wire, panel (manifest
   const fs = require("fs"), path = require("path");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   // Every scoped payload route must pass the caller's rank down — a getter called without it
   // resolves as public-by-default in featureScopeVis only because !!undefined is false, which
@@ -9504,7 +9504,7 @@ test("client flags: the injection slot exists, is pre-paint, and the server's co
 
 test("client flags: tabVisible is the single composition point and every entry path uses it", () => {
   const fs = require("fs"), path = require("path");
-  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const s = require("./_client").clientSource();
   // Reads the injected set; never re-derives a visibility from a raw flag.
   assert.ok(/const FLAGS = \(window\.__FLAGS && typeof window\.__FLAGS==='object'\) \? window\.__FLAGS : null;/.test(s), "FLAGS must read the injected set defensively");
   assert.ok(/const IS_ADMIN = !!window\.__ADMIN;/.test(s), "IS_ADMIN marker must be read");
@@ -9585,7 +9585,7 @@ test("admin panel: setFlag refuses the locked key and getFeatures ships both aud
 
 test("admin panel: markup, wiring and the no-draft-state write path are all present", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   // Markup: tab, section, and every id the renderer writes into.
@@ -9809,7 +9809,7 @@ test("scope isolation: neither board ever shows the other universe's rows, execu
   // competing on R:R inside a crypto ranking. Both look entirely normal and are silently wrong,
   // which is why this executes the real filter expressions instead of pinning their source.
   const fs = require("fs"), path = require("path");
-  const src = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const src = require("./_client").clientSource();
 
   // The two filters, lifted verbatim from the shipped client and run against a mixed payload.
   const sigFilter = (signals, scope) => {
@@ -10582,7 +10582,7 @@ test("snapshot: alertVer ships AND rides the content signature, so a fired alert
 
 test("client: the alert pull rides the snapshot poll and is not gated on the setup toggle", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
 
   // The alertVer check must sit BEFORE applySnapshot's unchanged-dataTs early return, or an idle
   // board skips the alert pull precisely when it matters.
@@ -10608,7 +10608,7 @@ test("client: the alert pull rides the snapshot poll and is not gated on the set
 
 test("client: the feed is the record — fire* interrupt only, and read state is a persisted watermark", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
 
   // A second copy of the event list is exactly how the badge, the panel and the toast could
   // disagree about what had happened. Only the local metric rules (fireAlert) still write a log.
@@ -10883,7 +10883,7 @@ test("rules survive a restart WITH their edge state, so a redeploy re-announces 
 
 test("client: the in-tab evaluator is bounded to what only a browser can compute", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const cat = app.slice(app.indexOf("const ALERT_METRICS=["), app.indexOf("const AM_BY="));
   for (const k of ["sqz", "mom", "beta"]) assert.ok(cat.includes("k:'" + k + "'"), `${k} stays in-tab`);
   for (const k of ["px", "h1", "funding", "vol", "oi", "prem", "doi"])
@@ -11414,7 +11414,7 @@ test("brief: the delivery hour resolves against a stored offset, and UTC is disc
     "delivery and the payload must both go through briefTzFor");
   assert.ok(!/rec\.quiet && Number\.isFinite\(rec\.quiet\.tz\) \? rec\.quiet\.tz : 0;\s*\n\s*const local = new Date\(now/.test(pol),
     "the old inline quiet-hours offset must be gone from the brief tick");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(app.includes("tz:-new Date().getTimezoneOffset()"),
     "the browser is the only party that knows the offset \u2014 it must send it with the hour");
   assert.ok(app.includes("r.briefUtc?' UTC':''"), "the chip must mark a default rider as UTC, never imply local time");
@@ -11503,7 +11503,7 @@ test("brief: the admin test-fire is admin-only, takes the real path, and reports
   const fn = pol.slice(pol.indexOf("async function briefTestNow("), pol.indexOf("async function briefTestNow(") + 1200);
   assert.ok(/generateBrief\(/.test(fn) && /pushEnqueue\(c, m, true\)/.test(fn));
   assert.ok(/if \(fresh\) briefCache = null;/.test(fn), "cached vs fresh must be a real distinction, not a label");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(app.includes("/api/alerts/brief-test"), "client never calls the route");
 });
 
@@ -11531,7 +11531,7 @@ function ADM_PUSH(over) {
 }
 function runAdmFn(name, nodes, pushState, openRec) {
   const fs = require("fs"), path = require("path");
-  const src = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const src = require("./_client").clientSource();
   const grab = (fn, until) => src.slice(src.indexOf(fn), src.indexOf(until));
   const body = name === "renderAdmBrief"
     ? grab("function renderAdmBrief()", "function renderAdmin()")
@@ -11604,7 +11604,7 @@ test("brief chip renders on an expanded admin roster row, and reports UTC honest
   // The admin write must carry the hour and NOT a timezone: stamping the operator's offset onto
   // somebody else's account would silently move their delivery time.
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const h = app.slice(app.indexOf("data-apbrief]"), app.indexOf("data-apbrief]") + 900);
   assert.ok(/digestHour: v===''\?null:\+v/.test(h), "admin chip must write the hour");
   assert.ok(!/tz:/.test(h), "…and must never write a timezone on somebody else's behalf");
@@ -11804,7 +11804,7 @@ test("ownership is a signed handle, not a guessable id, and legacy rows stay adm
 
 test("panel: sections collapse, class chips wrap, and repeated rows collapse with a count", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
 
   // Four stacked blocks plus a log had turned the panel into a wall.
@@ -11826,7 +11826,7 @@ test("panel: sections collapse, class chips wrap, and repeated rows collapse wit
 
 test("panel: thresholds are precise, cover R:R, and drive both surfaces from one control", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   // R:R was in the client state from the start with no way to set it — the board's own grinder /
   // windfall split is exactly the filter someone wants on an alert.
   assert.ok(/numIn\('at-rr',T\.minRR/.test(app), "R:R at fire must be settable");
@@ -11845,7 +11845,7 @@ test("panel: thresholds are precise, cover R:R, and drive both surfaces from one
 
 test("clearing is a per-browser view watermark, never a deletion from the record", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(/clearedSeq:0/.test(app) && /clearedSeq:state\.alerts\.clearedSeq/.test(app), "the watermark exists and persists");
   assert.ok(/A\.feed\.filter\(e=>\(e\.seq\|\|0\)>\(A\.clearedSeq\|\|0\)\)/.test(app), "the log renders above the watermark");
   // The ring is the record. A client deleting from it would mean the phone and the panel could
@@ -11905,7 +11905,7 @@ test("the family filter is validated server-side and named in the message", () =
   assert.ok(/error: "bad-class"/.test(pol), "an unrecognised family is rejected — accepting it would filter every setup out silently");
   assert.ok(/if \(cls && cls\.length === 1\) r\.trig\.cls = cls;/.test(pol), "both-selected stores nothing rather than a no-op filter");
 
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   // One vocabulary: the alert control must use the board's exact words for the split.
   assert.ok(/2:1\+ setups/.test(app) && /positive-EV grinders/.test(app), "the alert filter reuses the board's labels verbatim");
   assert.ok(/if\(Array\.isArray\(c\.cls\) && c\.cls\.length && !c\.cls\.includes\(ev\.cls\)\) return false;/.test(app),
@@ -12202,7 +12202,7 @@ test("telegram + bell carry the confirmation line from ONE event", () => {
   assert.ok(!old.includes("\u23f1"), "no confirmation data, no fabricated line");
   // The web client's formatter mirrors the same fields (pinned as source, mirrored logic).
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(/function trendWhenTxt\(ev\)/.test(app));
   assert.ok(/confirmed \$\{ev\.confTf\|\|ev\.tf\|\|''\} close/.test(app), "the bell log names the confirming close");
   assert.ok(/k==='trend'/.test(app) && /trendWhenTxt\(ev\)/.test(app), "alertText's trend branch reads the shared stamp");
@@ -12414,7 +12414,7 @@ test("ma200 lane manifest: closed source, dedup by the bar itself, full-roster s
   assert.ok(/if \(maState\.size\) maPrimed = true;/.test(pol),
     "restored state IS the seed — keeping the priming delay after a restore would only eat real transitions");
   // Client: the bell log reads the same event through the shared stamp.
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(app.includes("if(k==='ma200')") && /ma200:\['MA200'/.test(app), "alertText branch + feed tag");
 });
 
@@ -12491,7 +12491,7 @@ test("telegram messages carry the app's look: glyphs, side dots, aligned monospa
 
 test("panel: your recipients only in the bell, everyone's in the admin panel, collapsed", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   // Three linked accounts x nine class chips had turned the bell into a wall of controls for people
   // you cannot help.
@@ -12513,7 +12513,7 @@ test("panel: your recipients only in the bell, everyone's in the admin panel, co
 
 test("a popover control that rebuilds its own panel must not close it", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   // The mechanism: a section header calls buildAlertsPanel(), which replaces pop.innerHTML. By the
   // time the click bubbles to document the clicked node is DETACHED, and a detached node is
   // contained by nothing — so the outside-click test fires and the drawer shuts under the user.
@@ -12662,7 +12662,7 @@ test("rule catalog carries the board's windowed columns, not a subset of them", 
 
 test("admin edits any recipient's classes from the roster; a person's own controls are untouched", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   // The roster edits in place, over the same route the owner uses — the server already honoured the
   // admin override, the UI had simply stopped offering it.
   assert.ok(/data-apcls=/.test(app) && /data-apchat=/.test(app), "the admin roster has class chips");
@@ -12765,7 +12765,7 @@ test("stamped assets cache immutable; everything else still force-revalidates", 
 
 test("terminal -15: causal intent escalates to the analyst — a ticker inside a 'why' is context, never the answer", () => {
   const fs = require("fs"), path = require("path");
-  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const s = require("./_client").clientSource();
   // Extract the guard regex from nlResolve and RUN it against the screenshot phrasings.
   const m = s.match(/\/\\bwhy\\b\|[^/]*behind \(the\|this\|its\)\\b\//);
   assert.ok(m, "causal-intent guard regex not found in app.js");
@@ -13094,7 +13094,7 @@ test("settled -02: boot-stamped episodes are excluded from lateness, first-cohor
 
 test("settled -02: the client renders the honest surfaces — cost-colored lateness, exp \u00b1 split, shown-first ordering, exit price, bt and corr tags", () => {
   const fs = require("fs"), path = require("path");
-  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const s = require("./_client").clientSource();
   assert.ok(s.includes("function actSetCost"), "lateness needs its own formatter — it is a cost, not a return");
   assert.ok(s.includes("lateness ${actSetCost(u.lat)}"), "the strip must render lateness through the cost formatter (positive = red), not the generic R formatter that painted it green");
   assert.ok(s.includes("exp \\u00b1"), "the stats table must carry the signed expiry split column");
@@ -13117,7 +13117,7 @@ test("settled -02: the client renders the honest surfaces — cost-colored laten
 
 test("settled -02: the cost formatter executes with cost semantics and the episode table's colspan matches its columns", () => {
   const fs = require("fs"), path = require("path");
-  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const s = require("./_client").clientSource();
   // Execute the formatter, don't just pin it: positive lateness is a COST and must class red.
   const m = s.match(/function actSetCost\(x\)\{[^\n]*\}/);
   assert.ok(m, "actSetCost must be a one-line pure function");
@@ -13149,7 +13149,7 @@ test("settled -02: server invariants — bt stamping window, shown-basis pf, and
 
 test("settled -15: the client renders the server's record and never re-scores an episode", () => {
   const fs = require("fs"), path = require("path");
-  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const s = require("./_client").clientSource();
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   assert.ok(s.includes("function actSettled") && s.includes("function actEpDetail") && s.includes("function actSettledWire"),
     "settled renderer missing");
@@ -13168,7 +13168,7 @@ test("settled -15: the client renders the server's record and never re-scores an
 
 test("settled -03: the episode record is paged — bounded DOM, per-universe batch, sticky anchor-preserving size", () => {
   const fs = require("fs"), path = require("path");
-  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const s = require("./_client").clientSource();
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   // Only the current batch is ever mounted — the loop must iterate the slice, not the full list.
   // (The -84 lesson: an existence pin on the pager proves nothing if the render still walks every row.)
@@ -13196,7 +13196,7 @@ test("settled -03: the episode record is paged — bounded DOM, per-universe bat
 
 test("settled -03: actEpSizeSet executes with real validation — only 10/20/50, and it persists", () => {
   const fs = require("fs"), path = require("path");
-  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const s = require("./_client").clientSource();
   const m = s.match(/function actEpSizeSet\(n\)\{[\s\S]*?\}\n/);
   assert.ok(m, "actEpSizeSet must be a single named function");
   const rec = [];
@@ -13532,7 +13532,7 @@ test("swing -20: poller wiring manifest — fire sites, resolver, rosters, gloss
   // exactly one bracketTouch call per resolver concern: the touch-mode scan and the parallel track
   assert.equal((pol.match(/bracketTouch\(/g) || []).length, 2, "two resolver call sites, no strays");
   assert.ok(pol.includes("stopTouched, bracketTouch,"), "primitive imported alongside stopTouched");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const pin of ["tch hit", "tch med", "tch pf", "r.hitB", "r.medB", "r.pfB", 'colspan="10"'])
     assert.ok(app.includes(pin), `app.js missing -20 pin: ${pin}`);
 });
@@ -13720,7 +13720,7 @@ test("levels -22: wiring manifest — poller assembly, snapshot column, study au
     "stride: LVL_STRIDE + 2",                                           // audit stride bounds the prefix-profile cost
     "detect: (pb, px2, sd2) => {",                                      // HVN audit rides the injectable detector
   ]) assert.ok(pol.includes(pin), `poller.js missing -22 pin: ${pin}`);
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const pin of [
     "{key:'swr', label:'Swing R'",
     "hand-set weights (str 1.0 \\u00b7 hvn 0.8 \\u00b7 e200 0.7 \\u00b7 e50 0.6 \\u00b7 lvn 0.5)",  // disclosure lives where the number is
@@ -13849,7 +13849,7 @@ test("ema200 -26: poller + client wiring manifest — section, memo, retest ride
   ]) assert.ok(pol.includes(pin), `poller.js missing -26 pin: ${pin}`);
   // one code path: volMapFor must now consume the extracted helper, not a private copy
   assert.ok(/const bars = mergedDailyBars\(r\);/.test(pol), "volMapFor reads mergedDailyBars");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const pin of [
     "function renderEma200(em)", "function emaXCell(", "function emaRtRow(",
     "a.sections && a.sections.ema200",
@@ -14060,7 +14060,7 @@ test("ema200 shadows -28: crypto depth regression — a main-universe row's dete
 
 test("now -29: the chip family is wired into both claim views, and the payload stayed untouched", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   // the shared helpers, each defined exactly once (the integrity manifest counts them too)
   for (const f of ["liveMark", "claimDelta", "brkBar", "nowChip"])
     assert.equal((app.match(new RegExp("^function " + f + "\\(", "gm")) || []).length, 1, `exactly one ${f}`);
@@ -14089,7 +14089,7 @@ test("now -29: delta is signed WITH the claim, and the bracket bar only exists w
   // The two pure functions behind the chip, extracted from app.js and evaluated directly — the
   // sign convention is the whole point of the column and must not be reasoned about by eye.
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const grab = (name) => {
     const i = app.indexOf("function " + name + "(");
     assert.ok(i > -1, name + " present");
@@ -14138,12 +14138,15 @@ test("now -29: delta is signed WITH the claim, and the bracket bar only exists w
 // carries an `A.` read along with it fails here.
 test("every function reading the `A.` alerts alias declares it (no borrowed caller scope)", () => {
   const fs = require("fs"), path = require("path");
-  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const s = require("./_client").clientSource();
   const re = /^function\s+([A-Za-z0-9_$]+)\s*\(([^)]*)\)\s*\{/gm;
   const offenders = [];
   let m, checked = 0;
   while ((m = re.exec(s))) {
     const name = m[1], params = m[2];
+    // A section's __boot_* function holds its original top-level statements (the module split,
+    // build 2026.09.16-80); those read the module-scope alias exactly as the top level always did.
+    if (name.startsWith("__boot_")) continue;
     // brace-match the body from the opening brace
     let i = m.index + m[0].length - 1, depth = 0, end = -1;
     for (; i < s.length; i++) {
@@ -14239,7 +14242,7 @@ test("postres -31: a re-arm-parked signal ships its resolution stub, loses prime
 
 test("postres -31: the client renders the scored chip on the re-arm branch, dash only when there is truly nothing", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   // the scored branch lives INSIDE nowChip's no-claim path, before the dash fallback
   const i0 = app.indexOf("const sc=o.scored;");
   const iDash = app.indexOf("no ledger claim behind this signal yet");
@@ -14684,7 +14687,7 @@ test("macro lane wiring: the server decides which tape headline is which macro n
 
 test("macro lane, rendered: the drawer shows a scoped tape, an honest empty, or nothing at all", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const grab = (name) => {
     const i = app.indexOf("function " + name + "(");
     assert.ok(i >= 0, `${name} not found in app.js`);
@@ -14744,7 +14747,7 @@ test("macro lane, rendered: the drawer shows a scoped tape, an honest empty, or 
 
 test("display-name client wiring: drawer head, board tooltip, report head, style", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   assert.ok(app.includes('${r.nm?`<div class="dname"'), "drawer head renders the name line only when a name exists");
@@ -14829,7 +14832,7 @@ test("-04 IND table integrity: derived from the table, not pinned to it", () => 
 test("-04 wiring manifest: server ships ind thin, client groups on ONE key, control persists", () => {
   const fs = require("fs"), path = require("path");
   const pl = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   // Wire: shipped only when it differs — absence IS the fallback, by contract.
@@ -14871,7 +14874,7 @@ test("-04 wiring manifest: server ships ind thin, client groups on ONE key, cont
 // computeSectors then actually splits on it.
 test("-05 regression: applySnapshot carries `ind` into state.rows and the industry grouping splits", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const { els, mk } = _sessDomStub();
   const saved = { si: global.setInterval, st: global.setTimeout, raf: global.requestAnimationFrame,
     doc: global.document, win: global.window, ls: global.localStorage, f: global.fetch };
@@ -14974,7 +14977,7 @@ test("-06 ratioCloses + emaSeries: null propagation, SMA seed, one EMA construct
 
 test("-06 client/server duel: basketClosesClient reproduces compute.basketCloses bit-identically on a ragged fixture", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const grab = (name) => {
     const i = app.indexOf("function " + name + "(");
     assert.ok(i > -1, name + " present in app.js");
@@ -15057,7 +15060,7 @@ test("-06 tier boundary: baskets/ratio never reach the alert emitters, the fire 
 
 test("-06 ratio SVG behavioral: real candles render, the EMA path appears only when the series exists, rebase is a scalar transform", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const grab = (name) => {
     const i = app.indexOf("function " + name + "(");
     assert.ok(i > -1, name + " present");
@@ -15089,7 +15092,7 @@ test("-06 wiring pins: panels + guards + chip anatomy + verbs + honest copy exis
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   assert.ok(ht.includes('<div id="ratiopanel" class="corrpanel" hidden></div>'), "ratio panel div, born hidden");
   assert.ok(ht.includes('<div id="basketpanel" class="corrpanel" hidden></div>'), "basket manager div, born hidden");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const pin of ["function renderBasketPanel(", "function openRatio(", "function renderRatio(", "function ratioSvg(",
     "function termBasket(", "function termRatio(", "function loadBaskets(", "function basketTip(", "function compgBasketBars(",
     "if(h==='basket') return termBasket", "if(h==='ratio') return termRatio",
@@ -15181,7 +15184,7 @@ test("-06 end to end: create/list/drop against a live roster, ratio candles + EM
 
 test("-07 COMP/G: no-history render is an honest loading line (no fake chart, no NaN), and heals when daily lands", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const els = {};
   const mk = (id) => ({ id, innerHTML: "", hidden: false, value: "", checked: false, textContent: "", style: {}, dataset: {},
     classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
@@ -15229,7 +15232,7 @@ test("-07 COMP/G: no-history render is an honest loading line (no fake chart, no
 
 test("-07 wiring: the daily hook repaints COMP/G out of empty, and cg-basectl's [hidden] guard exists", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(app.includes("if(COMPG._empty && el('compg') && !el('compg').hidden) renderCompg()"),
     "daily-arrival hook carries the self-heal repaint");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
@@ -15433,7 +15436,7 @@ test("the widened earnings class did not weaken the claim-scoped leg", () => {
 
 test("client: the macro class and the preview shape are renderable in the bell log", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(/macro:\['MACRO','sec'\]/.test(app), "the log needs a tag or the class renders untagged");
   assert.ok(/if\(k==='macro'\)/.test(app), "…and a renderer, or it renders as a setup and lies");
   assert.ok(/if\(ev\.sub==='preview'\)/.test(app), "the two earnings shapes are told apart client-side too");
@@ -15448,7 +15451,7 @@ test("client: the macro class and the preview shape are renderable in the bell l
 
 function _p2Harness(){
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const els = {};
   const mk = (id) => ({ id, innerHTML: "", hidden: false, value: "", checked: false, textContent: "", style: {}, dataset: {},
     classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
@@ -15563,7 +15566,7 @@ test("-09 backtest yardstick: dashed ⬒ line draws only when picked, hover carr
 
 test("-09 wiring pins: column registered + gated, prefs survive, toggle seg exists, tier copy states the boundary", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const pin of ["key:'dvb'", "function computeDvb(", "function dvbCell(", "function dvbBasketDef(",
     "function basketVirtualRow(", "function corrBasketRows(", "function syncCorrBk(",
     "c.key==='dvb'&&!featureOn('baskets')",            // flag gate in visibleCols
@@ -15628,7 +15631,7 @@ test("-10 curated baskets: under 2 listed members the built-in honestly does not
 
 test("-10 markets defaults: the shipped visible set matches the intended columns, Δ vs ⬒ hidden + defaulting to MAG7", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const ord = app.match(/const DEFAULT_ORDER=\[([^\]]*)\]/)[1].split(",").map(x => x.replace(/'/g, "").trim());
   const hid = new Set(app.match(/const DEFAULT_HIDDEN=\[([^\]]*)\]/)[1].split(",").map(x => x.replace(/'/g, "").trim()));
   const visible = ord.filter(k => !hid.has(k));
@@ -15667,7 +15670,7 @@ test("-11 server: create/drop refuse a non-admin, stamp owner:admin, and never l
 
 test("-11 guest client: customs live in localStorage, merge into the picker, and never call the server", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const els = {};
   const mk = (id) => ({ id, innerHTML: "", hidden: false, value: "", checked: false, textContent: "", style: {}, dataset: {},
     classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
@@ -15723,7 +15726,7 @@ test("-11 guest client: customs live in localStorage, merge into the picker, and
 
 test("-11 wiring: mutations route through basketMutate, guest scope is disclosed, owner seam carried server-side", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   // no direct /api/baskets POST survives outside basketMutate (the single gate)
   const posts = (app.match(/fetch\('\/api\/baskets'/g) || []).length;
   assert.equal(posts, 1, "exactly one /api/baskets POST in the codebase — inside basketMutate");
@@ -15768,7 +15771,7 @@ test("-11 shadow baskets: sectors + industries derive as usable instruments, fla
 
 test("-11 client: shadows are pickable everywhere but excluded from the manager list", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const els = {};
   const mk = (id) => ({ id, innerHTML: "", hidden: false, value: "", dataset: {},
     classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
@@ -15816,7 +15819,7 @@ test("-11 corr reorder + 7d floor: pairs sit above COMP/G, and the overlap floor
     iRatio = ht.indexOf('id="ratiopanel"'), iBasket = ht.indexOf('id="basketpanel"');
   assert.ok(iPairs > -1 && iCompg > iPairs, "strongest pairs sit above COMP/G");
   assert.ok(iRatio > iCompg && iBasket > iRatio, "COMP/G -> ratio -> baskets follow, in that order");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const m = app.match(/minOv=Math\.max\((\d+),\s*Math\.floor\(Math\.min\(Ldays,\s*90\)\s*\*\s*([\d.]+)\)\)/);
   assert.ok(m, "the overlap floor scales with the window (not a flat 15)");
   // simulate: for every offered window, the floor must be achievable (< the window's day count)
@@ -15862,7 +15865,7 @@ test("-11 shadow baskets resolve by natural label: ratio accepts the typed indus
 
 test("-12 clean labels: display shows the label, selection keeps the token", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const els = {};
   const mk = (id) => ({ id, innerHTML: "", hidden: false, value: "", dataset: {},
     classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
@@ -16067,7 +16070,7 @@ test("today's already-reported names are routed as printed, not as pending", () 
 
 test("client: one schedule chip per registered send, parsed to numbers before it leaves", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(/data-psched=/.test(app) && /data-asched=/.test(app),
     "both the reader's own panel and the operator roster drive off the registry");
   assert.ok(/\(P\.schedKinds\|\|\[\]\)\.map/.test(app), "chips are derived from the server's registry, not hardcoded");
@@ -16385,7 +16388,7 @@ test("landscape delivery walks the registry: due only on scheduled days, once pe
 
 test("admin panel: landscape state block, test pair, and the route that serves them", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(/THE LANDSCAPE<\/div>/.test(app), "the admin box states the layer's own health");
   assert.ok(/id="adm-land"/.test(app) && /id="adm-land-f"/.test(app), "cached and fresh test fires, like the brief");
   assert.ok(/kind:'landscape'/.test(app), "routed through the one endpoint rather than a near-clone");
@@ -16483,7 +16486,7 @@ test("test fires target the DESIGNATED operator, from any browser, and the desig
 
 test("the roster carries the operator toggle and the boxes say where tests go", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(/data-aop=/.test(app), "the toggle chip exists on the roster row");
   assert.ok(/operator:to/.test(app) && /confirm\(/.test(app),
     "toggling is confirm-guarded and states both consequences (ops alerts + test fires)");
@@ -16496,7 +16499,7 @@ test("the roster carries the operator toggle and the boxes say where tests go", 
 
 test("the admin boxes carry the operator's own schedule and truthful test labels", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   // Both test pairs send operator:true — the button fires at the designated operator, which is
   // this test's -21 ancestor corrected: the owner-cookie version missed an operator on a second
   // browser, so the flag replaced the cookie and these pins moved with it.
@@ -16639,7 +16642,7 @@ test("askBoard: planner may emit fund/etf (symbols outside the universe validate
 
 test("terminal fund/etf: card builders render fixture payloads (behavioral), routing + grammar + NL + help + completions wired, server routes exist", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   // Behavioral render: extract the pure builders (tmoney/tcount/termFundCard/termEtfCard) and
@@ -16853,7 +16856,7 @@ test("5m/15m columns: ring lookups against a real mapped-row-shaped flow (execut
 
 test("5m/15m columns: client wiring — hidden by default, adjacent to Price, honest null fold", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   // both columns registered with header tooltips
   assert.ok(/key:'m5', label:'5m', type:'num', tip:/.test(app), "m5 column registered with a tooltip");
   assert.ok(/key:'m15', label:'15m', type:'num', tip:/.test(app), "m15 column registered with a tooltip");
@@ -16940,7 +16943,7 @@ test("loop instrumentation 2026.07.29-05: ms conversion against a real histogram
 
 test("loop instrumentation 2026.07.29-05: client surfaces — tray dot, admin row, crosshair hover, markup and css", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   // Tray dot: value-graded on the LIVE p99 at the decision-gate thresholds, reusing the fdot classes.
@@ -16970,7 +16973,7 @@ test("loop instrumentation 2026.07.29-05: renderAdmLoop EXECUTES against a full 
   // renderer runs for real. Reuses the drawSessions DOM stub; querySelector returns null in the
   // stub, so hover wiring is skipped (guarded in the renderer) — this validates markup emission.
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const { els, mk } = _sessDomStub();
   const saved = { si: global.setInterval, st: global.setTimeout, raf: global.requestAnimationFrame,
     doc: global.document, win: global.window, ls: global.localStorage, f: global.fetch };
@@ -17085,7 +17088,7 @@ test("sse push 2026.07.29-07: server — route once, versions-only frames, 1s wa
 
 test("sse push 2026.07.29-07: client — poll survives stretched, snaps back on error, push reuses loadSnapshot", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(app.includes("typeof EventSource==='undefined'||_sseSrc"), "no-EventSource browsers keep the poll untouched; double-start guarded");
   assert.ok(app.includes("function _cycleMs(){ return _sseOk?Math.max(state.refreshMs,120000):state.refreshMs; }"),
     "healthy stream stretches the poll to a 120s fallback — never kills it (half-open streams are real)");
@@ -17102,7 +17105,7 @@ test("sse push 2026.07.29-07: client — poll survives stretched, snaps back on 
 // tab is running raises ONE persistent "please refresh" toast with a real reload action.
 test("update notice -62: a changed server build raises one persistent refresh toast", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(app.includes("if(state.build&&state.build!==s.v) notifyNewBuild(s.v); state.build=s.v;"),
     "applySnapshot compares the incoming build BEFORE overwriting — and never fires on the first snapshot");
   assert.ok(app.includes("if(d&&d.v&&state.build&&d.v!==state.build) notifyNewBuild(d.v);"),
@@ -17153,7 +17156,7 @@ test("perf -08: tick instrumentation, cooperative yields and the serialized buil
   assert.ok(srv.includes("return Buffer.isBuffer(gz) ? reply.send(gz) : gz.then((buf) => reply.send(buf));"),
     "resolved Buffer takes the synchronous fast path; the in-flight promise is awaited, never re-compressed");
   // Client: the Loop dot names the culprit, and says when a duration is wall time, not loop hold.
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(app.includes("worst tick: ${w.name}") && app.includes("(yielding build, wall time)"),
     "the Loop tooltip must attribute the worst tick by name and label async durations honestly");
 });
@@ -17176,7 +17179,7 @@ test("perf -08 behavior: the chain serializes — actionable's self-heal settles
 // ===== row-level table patching (build 2026.07.29-09) ==========================================
 test("row patching 2026.07.29-09: one producer, gated patch path, self-healing rebuild, cache discipline", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   // ONE producer of row markup: rowHtml() exists and the <tr data-coin= template appears exactly
   // once in the whole client — a second producer is exactly the divergence this design forbids.
   assert.ok(app.includes("function rowHtml(r, vc, bScope)"), "rowHtml producer missing");
@@ -17208,7 +17211,7 @@ test("row patching 2026.07.29-09: patched output is byte-identical to a rebuild 
   // assembled DOM equals what a full rebuild of the same state would produce, byte for byte, and
   // that the write count equals exactly the number of rows whose data actually moved.
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const escSrc = app.match(/function esc\([\s\S]*?\n(?=function|const|let)/)[0];
   const rowSrc = app.match(/function rowHtml\(r, vc, bScope\)\{[\s\S]*?\n\}/)[0];
   const patchSrc = app.match(/function patchRowsInto\(children, oldHtml, newHtml\)\{[\s\S]*?\n\}/)[0];
@@ -17394,7 +17397,7 @@ test("brief: a partial prose pass ships the clean half and discloses the withhel
 // implied. Manifest pins for the wiring, real execution for the cell markup.
 test("D open column: manifest wiring — placed after 24h, visible by default, layout reset armed", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   // label rename, with the rolling-window disclosure on the tooltip
   assert.ok(/key:'d1', label:'24h'/.test(app), "1d column relabeled 24h");
   assert.ok(app.includes("Rolling 24-hour change") && app.includes("prevDayPx"), "24h tooltip discloses the rolling window and its source");
@@ -17414,7 +17417,7 @@ test("D open column: manifest wiring — placed after 24h, visible by default, l
 
 test("D open cell: executed against real row shapes — % only, shaded, level in hover, honest dash", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const grab = (name) => { const i = app.indexOf("function " + name); assert.ok(i >= 0, name + " missing");
     let d = 0, j = i; for (; j < app.length; j++) { if (app[j] === "{") d++; else if (app[j] === "}") { d--; if (d === 0) break; } }
     return app.slice(i, j + 1); };
@@ -17455,7 +17458,7 @@ test("earnings payloads and renderers carry no positioning anywhere", () => {
   assert.ok(!/claim:/.test(scan), "neither earnings leg emits a claim field — the gate is server-side only");
   assert.ok(/if \(!isOpenAnnounced\(e\)\) continue;/.test(scan), "…while the urgent leg's claim GATE is untouched");
   // Client bell log: the earnings line renders without the claim suffix even on old entries.
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(!app.includes("' \\u00b7 open '+ev.claim+' claim'"), "bell-log earnings line no longer renders the claim");
 });
 
@@ -17503,7 +17506,7 @@ test("audit manifest: constants, routes, files, functions, css classes all pinne
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const sec = fs.readFileSync(path.join(__dirname, "..", "src", "sectors.js"), "utf8");
   const stf = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   const once = (s, needle, what) => assert.strictEqual(s.split(needle).length - 1, 1, what + " pinned exactly once");
@@ -17658,7 +17661,7 @@ test("audit poller verbs: seed -> revert pins against re-apply, manual apply res
 test("audit ack: clears the row, keeps the overlay, resurfaces on re-apply, route + verb pinned", () => {
   const fs = require("fs"), path = require("path");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const stf = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
   const once = (str, needle, what) => assert.strictEqual(str.split(needle).length - 1, 1, what + " pinned exactly once");
   once(srv, '"/api/sector-audit/ack"', "ack route");
@@ -17715,7 +17718,7 @@ test("audit ack: clears the row, keeps the overlay, resurfaces on re-apply, rout
 
 test("markets group lens: manifest pins across app.js / index.html / styles.css", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const pin of [
     "function mktGrp()", "state.scope==='crypto'&&g==='industries'",   // crypto coerces industries -> sectors, never rewrites the choice
     "function computeMktGroups(rows, mode, wt)", "function mktGroupCohesion(list)",
@@ -17752,7 +17755,7 @@ test("markets group lens: manifest pins across app.js / index.html / styles.css"
 // behavior). computeMktGroups is deliberately dependency-free, so the extracted source runs as-is.
 function mktGroupsFn() {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const a = app.indexOf("function computeMktGroups"), b = app.indexOf("function mktGroupCohesion");
   assert.ok(a >= 0 && b > a, "computeMktGroups must precede mktGroupCohesion for extraction");
   return new Function(app.slice(a, b) + "; return computeMktGroups;")();
@@ -17856,7 +17859,7 @@ test("dipReclaim: measures the deepest dip's reclaim, floors noise, fails closed
 // marker is dependency-free by design, so the real shipped functions run against fixtures.
 function actionMathFns() {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const a = app.indexOf("const ACT_LEGS="), b = app.indexOf("// end action math");
   assert.ok(a >= 0 && b > a, "action math block must sit between ACT_LEGS and its extraction marker");
   return new Function(app.slice(a, b) + "; return { ACT_LEGS, accelPace, heatOf, pickAction, shareDeltaPp, groupHeatOf, bidPhrase, chipStory };")();
@@ -17906,7 +17909,7 @@ test("rotation + action manifest: wire, merge, leaders fill, drill unification, 
     "const sw = detectSweep(tail5, dayHi, dayLo, r.px, SWEEP_FRAC);",           // ...and the sweep detector
     "bid: r.bidInfo ? { d: r.bidInfo.dip, r: r.bidInfo.rec, m: r.bidInfo.mins } : undefined,",
   ]) assert.ok(pol.includes(pin), "poller pin missing: " + pin);
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const pin of [
     "r.bid=(m.bid!==undefined&&m.bid!==null)?m.bid:null;",                      // absence clears, never carries
     "function actionScores()", "function renderActionLists()", "function actChip(s, kind)",
@@ -17933,7 +17936,7 @@ test("rotation + action manifest: wire, merge, leaders fill, drill unification, 
 
 test("leaders rank arrows: trajectory glyph, quadrant color, phrase honest about which side of the S&P (build -04)", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const pin of [
     "const q=leadQuad(s.x,s.y);",                                              // rank list speaks the map's own quadrant vocabulary
     "behind the S&amp;P, but closing the gap — losing by less lately, not beating it",
@@ -17978,7 +17981,7 @@ test("group action math: share-of-tape delta, group heat, honest reclaim phrasin
 
 test("action lens manifest: group rendering, name-level bid, share hover, drill routing", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const pin of [
     "function groupActionScores()", "function groupShareInputs(rows, mode, wt)", "function groupChip(s, kind)",
     "function shareDeltaPp(volNow, volAllNow, volBase, volAllBase)", "function groupHeatOf(accel, doi, dSharePp)",
@@ -18023,7 +18026,7 @@ test("chip stories: the level-vs-derivative tension said out loud, per quadrant 
 
 test("chip stories manifest: tag rendered on name and group chips, story leads every hover", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   for (const pin of [
     "function chipStory(kind, winRet, doi, rec, grouped)",
     "let why, tip, story=chipStory(kind, s.winRet, r.doi, s.bid?s.bid.r:null, false);",
@@ -18126,7 +18129,7 @@ test("snapshot wiring: mapMarket ships hopenPx/h4openPx/h12openPx from bucketOpe
 test("anchored-open wiring pins: poller snapshot path + client column family, defaults, migration", () => {
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   // poller: computed at snapshot time from the live clock, shipped sig-quantized like p5m/p15m
   assert.ok(pol.includes("const bopen = bucketOpens(r.hourlyRaw, nowMs, HOUR)"), "mapMarket must anchor on the snapshot's own nowMs");
   assert.ok(pol.includes("hopenPx: sig(bopen.h, 9) ?? undefined"), "hopenPx ships quantized, absent-when-null");
@@ -18248,7 +18251,7 @@ test("anchored-open wiring pins: poller snapshot path + client column family, de
     // The daily + snapshot signatures must both carry the home flips, or foreign names go stale.
     assert.ok(/\["KR", "JP", "HK"\]\.map\(\(k\) => \(offHoursBy\[k\]\.closed \? 1 : 0\)\)/.test(pol), "daily sig signs home flips");
     assert.ok(/\["KR", "JP", "HK"\]\.map\(\(k\) => \(homeState\[k\]\.closed \? 1 : 0\)/.test(pol), "snapshot csig signs home flips");
-    const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+    const app = require("./_client").clientSource();
     for (const pin of ["function rowSessState", "function sessCell", "function railHtml", "function cdsHtml",
       "function sessDrawerHtml", "function homeArcSvg", "key:'sess'", "state.dimOff", "s.homeState", "s.homeMkts",
       "if(prev!=null&&prev!==sig) loadDaily()"])
@@ -18286,7 +18289,7 @@ test("anchored-open wiring pins: poller snapshot path + client column family, de
 // path can. -17 harness pattern, exactly as the -05 ind regression does.
 test("2026.08.14-02 regression: applySnapshot carries hm/hadr into state.rows; chip + live gap read them", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const { els, mk } = _sessDomStub();
   const saved = { si: global.setInterval, st: global.setTimeout, raf: global.requestAnimationFrame,
     doc: global.document, win: global.window, ls: global.localStorage, f: global.fetch };
@@ -18446,7 +18449,7 @@ test("focus -01: manifest pins — the tab, the route, the engine and the client
   const fs = require("fs"), path = require("path");
   const rd = (f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8");
   const cmp = rd("src/compute.js"), pol = rd("src/poller.js"), srv = rd("server.js"),
-    app = rd("public/app.js"), idx = rd("public/index.html"), css = rd("public/styles.css"), sto = rd("src/store.js");
+    app = require("./_client").clientSource(), idx = rd("public/index.html"), css = rd("public/styles.css"), sto = rd("src/store.js");
   // manifest: the focus tab exists, soaks admin, and owns exactly its route
   assert.ok(cmp.includes('{ key: "focus",      kind: "tab", label: "Focus",       def: "admin",  routes: ["/api/focus"] }'), "focus manifest entry (admin soak)");
   // server: the route serves keyed on the focus stamp; the chart's 1m branch exists and is no-store
@@ -18581,7 +18584,7 @@ test("focus -02: engine harness — no phantom preview on a booting universe, we
 test("focus -02: manifest pins — preview machinery, TG lane, diff disclosure, client wiring", () => {
   const fs = require("fs"), path = require("path");
   const rd = (f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8");
-  const cmp = rd("src/compute.js"), pol = rd("src/poller.js"), app = rd("public/app.js"), css = rd("public/styles.css");
+  const cmp = rd("src/compute.js"), pol = rd("src/poller.js"), app = require("./_client").clientSource(), css = rd("public/styles.css");
   for (const pin of ["function focusPreview(", "function focusDiff(", "const FOCUS_PREVIEW_N = 10",
     "if (Number.isFinite(c.tg4h)) s += Math.min(c.tg4h, 2) * 0.5"])
     assert.ok(cmp.includes(pin), "compute pin: " + pin);
@@ -18776,7 +18779,7 @@ test("whale wiring manifest: feature keys, routes, tab markup, terminal + planne
   assert.ok(/op === "seen"[\s\S]{0,120}?if \(!isAdmin\(req\)\) return/.test(sv), "seen is any-viewer; every other write rechecks the admin cookie in-handler");
   const ih = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   assert.ok(ih.includes('data-view="funds"') && ih.includes('id="view-funds"'), "tab button + section in the shell");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(app.includes("'funds'") && /setHidden\('view-funds', v!=='funds'\)/.test(app), "showView wired");
   assert.ok(/if\(v==='funds'\)\{ if\(el\('view-funds'\)\) openFunds\(\)/.test(app), "open hook");
   assert.ok(/h==='whale'\|\|h==='13f'\) return termWhale/.test(app), "termExec routes whale");
@@ -18913,7 +18916,7 @@ test("whale pull -03: 'find latest filing' populates a dash row on demand, first
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   assert.ok(/op === "pull"[\s\S]{0,80}whalePull/.test(sv), "route op wired");
   assert.ok(sv.indexOf('op === "pull"') > sv.indexOf("if (!isAdmin(req)) return"), "pull sits BEHIND the in-handler admin recheck");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(app.includes("data-whlpull=") && app.includes("find latest filing") && app.includes("sub==='pull'"), "row button + terminal verb present");
   assert.ok(/data-whlbell\],\[data-whlrm\],\[data-whlpull\]/.test(app), "row-open click guard knows the new button — a pull click must not also open the modal");
 });
@@ -18982,7 +18985,7 @@ test("whale scale -04: thousands-convention filings detected by implied share pr
   assert.equal(old2.scaled, 1, "and flagged");
   assert.equal(modern.total, 3e9, "a dollars filing is untouched");
   assert.equal(modern.scaled, 0, "and carries no false flag");
-  const app = require("fs").readFileSync(require("path").join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(app.includes("thousands convention") && app.includes("\\u00d7k"), "correction is DISCLOSED on the row, the card and the terminal — never silent");
   assert.ok(app.includes("never read as returns") && app.includes("ENTERING the 13F universe"), "-06: the \u0394QoQ header carries the five-inputs framing — the column must never present as performance");
 });
@@ -19037,7 +19040,7 @@ test("whale cadence -05: fast polling runs through the post-deadline grace windo
 test("focus chart -17.01: manifest pins — archive-sourced 72h chart, retired 1m path stays dead", () => {
   const fs = require("fs"), path = require("path");
   const rd = (f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8");
-  const app = rd("public/app.js"), pol = rd("src/poller.js"), srv = rd("server.js");
+  const app = require("./_client").clientSource(), pol = rd("src/poller.js"), srv = rd("server.js");
   // timeframe set: exactly 5/15/60/240, 3m gone, default 15m
   for (const pin of ['data-foctf="5"', 'data-foctf="15" class="on"', 'data-foctf="60"', 'data-foctf="240"'])
     assert.ok(app.includes(pin), "tf pin: " + pin);
@@ -19063,7 +19066,7 @@ test("focus chart -17.01: manifest pins — archive-sourced 72h chart, retired 1
 test("focus chart -17.02: manifest pins — viewport math, one-fetch invariant, touch path", () => {
   const fs = require("fs"), path = require("path");
   const rd = (f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8");
-  const app = rd("public/app.js"), css = rd("public/styles.css");
+  const app = require("./_client").clientSource(), css = rd("public/styles.css");
   // per-TF default windows + zoom clamp: 5m opens on 12h, 15m on 36h, 1h/4h full 72h, floor 2h
   assert.ok(app.includes("const FOCCH_DEF={5:12*3600000,15:36*3600000,60:72*3600000,240:72*3600000}"), "per-timeframe default windows");
   assert.ok(app.includes("const FOCCH_MIN_SPAN=2*3600000"), "zoom floor");
@@ -19127,7 +19130,7 @@ test("focus -17.03: a partial forming window is a real read at minBars=1", () =>
 test("focus -17.03: manifest pins — forming engine transient, cadence, client styling, ET clocks", () => {
   const fs = require("fs"), path = require("path");
   const rd = (f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8");
-  const pol = rd("src/poller.js"), app = rd("public/app.js"), css = rd("public/styles.css"), cmp = rd("src/compute.js");
+  const pol = rd("src/poller.js"), app = require("./_client").clientSource(), css = rd("public/styles.css"), cmp = rd("src/compute.js");
   // 2026.08.18-04: the cadence moved 55s -> 25s (FOCUS_FORMING_MS, shipped on the payload) and the
   // fold is no longer handed a null — a seat with no bars publishes coverage and no record at all.
   // The transience contract this test guards is unchanged; the two constants it named are not.
@@ -19158,7 +19161,7 @@ test("focus -17.03: manifest pins — forming engine transient, cadence, client 
 // ============================================================================================
 test("focus -17.03: PX column pins — one accessor, frozen ticks labeled, honest staleness", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public/app.js"), "utf8");
+  const app = require("./_client").clientSource();
   // the column reads liveMark — the screener's own accessor — so the two tabs can never disagree
   assert.ok(app.includes("{k:'px', label:'PX'"), "PX column exists");
   assert.ok((app.match(/liveMark\(p\.coin\)/g) || []).length >= 2, "PX reads the board's live-mark accessor (cell + sort)");
@@ -19176,7 +19179,7 @@ test("focus -17.03: PX column pins — one accessor, frozen ticks labeled, hones
 
 test("whale put/call coloring (2026.08.17-04): option badges carry their side — puts down-red, calls up-green, everywhere they render", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(app.includes('whl-put ${p.put}'), "modal badge carries the side class");
   assert.ok(/whl-oc '\+r\.put\+'/.test(app), "season/crowding suffixes carry it");
   assert.ok(app.includes("p.put==='put'?'neg':'pos'") && app.includes("r.put==='put'?'neg':'pos'"), "terminal cards reuse the terminal's own side colors");
@@ -19277,7 +19280,7 @@ test("whale roster -01 (2026.08.18-01): a watchlist edit reopens the season buil
 
 test("whale roster -01: the crowding grid has ONE producer — cells cannot be drawn from the live watchlist", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const fn = app.slice(app.indexOf("function renderWhlSeason()"));
   const body = fn.slice(0, fn.indexOf("\nfunction "));
   const cells = body.slice(body.indexOf("const cells="), body.indexOf("const crowd="));
@@ -19523,7 +19526,7 @@ test("focus -03: 'cleared' and 'pending' are different claims and must not colla
 
 test("focus -03: the prior list renders only when asked, and the toggle survives the clear", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const fn = app.slice(app.indexOf("function renderFocus()"));
   const body = fn.slice(0, fn.indexOf("\nfunction "));
   const pick = body.slice(body.indexOf("const day="), body.indexOf("\n  if(!FOC.showPrev"));
@@ -19785,7 +19788,7 @@ test("focus -04: manifest pins — the gate, the routes, the two-lock write, the
   const fs = require("fs"), path = require("path");
   const rd = (f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8");
   const cmp = rd("src/compute.js"), pol = rd("src/poller.js"), srv = rd("server.js"),
-    app = rd("public/app.js"), idx = rd("public/index.html"), css = rd("public/styles.css");
+    app = require("./_client").clientSource(), idx = rd("public/index.html"), css = rd("public/styles.css");
   // manifest: the write verb owns its own act key, path-wide (the GET returns the scan and is
   // exactly as admin-only as the write), so opening the focus TAB can never open the wall.
   assert.ok(cmp.includes('{ key: "focus.limits",  kind: "act", label: "Set FOCUS liquidity floors", def: "admin", routes: ["/api/focus/limits"] }'),
@@ -19997,7 +20000,7 @@ test("focus -05: the seat lane is scoped to the seats and to the window, and idl
 test("focus -05: manifest pins — 1m base everywhere the hour is measured, 30s cadence, honest dash", () => {
   const fs = require("fs"), path = require("path");
   const rd = (f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8");
-  const pol = rd("src/poller.js"), app = rd("public/app.js"), css = rd("public/styles.css");
+  const pol = rd("src/poller.js"), app = require("./_client").clientSource(), css = rd("public/styles.css");
   // engine: both the forming read and the freeze read 1m; neither reads 5m for the hour
   assert.equal(pol.split("store.readCandles1m(p.coin").length - 1, 3, "forming, freeze and the close fill read the 1m archive — exactly three sites (-19-05)");
   assert.ok(!/readCandles\(p\.coin/.test(pol), "no first-hour path reads the 5m archive any more");
@@ -20090,7 +20093,7 @@ test("whale who-holds (2026.08.18-05): reverse lookup matches by ticker/name/sub
   const fs = require("fs"), path = require("path");
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   assert.ok(sv.includes("qq.holds != null") && sv.includes("getWhaleHolds"), "route branch wired");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(app.includes("whl-whoq") && app.includes("whlWho(") && app.includes("sub==='who'||sub==='holds'"), "panel + terminal verbs present");
   assert.ok(app.includes("data-whlopen2"), "a holds row deep-links to the fund's full book");
 });
@@ -20213,7 +20216,7 @@ test("whale who-holds -07: a spelling collision is two issuers, never one merged
 
   // --- client + wiring pins ----------------------------------------------------------------------
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(app.includes("r.issuers") && app.includes("data-whoalt"), "the panel reads the issuer list and can expand a weaker match");
   assert.ok(app.includes("function whoLot(") && !app.includes("whl-clstag\">"),
     "one lot-class chip component; the -06 two-widget split is gone");
@@ -20277,7 +20280,7 @@ test("whale season roster (2026.08.18-06): the producer exists — build writes 
   assert.equal(s2.amended, false, "a shape heal is not an amendment — nothing at EDGAR moved");
   // Wiring pins for the client half.
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(app.indexOf("whl-who") < app.indexOf("d.watch.length?") && app.indexOf("whl-who") > app.indexOf("whl-head"), "-06: the search panel sits under the tab header, ABOVE the watchlist table — a search nobody finds is a search that doesn't exist");
   assert.ok(app.includes("whl-clstag"), "duplicate display names get their share-class tag");
   assert.ok(app.includes("grid cells pending one season rebuild"), "defensive note if an unhealed payload ever serves");
@@ -20339,7 +20342,7 @@ test("whale season heal v2 (2026.08.19-01): aggregate and header fields are ONE 
   p3.hydrateWhaleNow();
   const s3 = await p3.getWhaleSeasonQ("Q2 2026");
   assert.equal(s3.filedN, 2); assert.equal(s3.watchN, 3);
-  const app = require("fs").readFileSync(require("path").join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(app.includes("rebuilt from stored books"), "healed builds say what they are in both headers — not 'rebuilt after amendment'");
 });
 
@@ -20405,7 +20408,7 @@ test("whale traded-basis lanes (2026.08.19-02): mark drift is priced out — sha
     })().then(() => {
   // Client pins: labels name the basis; tag collisions fall to cusip.
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(app.includes("MOST BOUGHT \\u00b7 net traded $ (est)") && app.includes("MOST SOLD \\u00b7 net traded $ (est)"), "lane labels state the traded basis");
   assert.ok(app.includes("no comparable share counts"), "value-only legs disclosed per row");
   assert.ok(app.includes("tagCount"), "duplicate-name tags that collide (Equity/Equity) fall back to the cusip head");
@@ -20482,7 +20485,7 @@ test("whale season sync (2026.08.19-03): closed-quarter builds follow the live w
 // ================================================================================================
 const FOCCH_SRC = (() => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const grab = (name) => {
     const i = app.indexOf("function " + name + "(");
     assert.ok(i > -1, name + " present in app.js");
@@ -20763,7 +20766,7 @@ test("focus -05: sessionCloseStats is bounded by the window at BOTH ends", () =>
 // ---- the two columns, executed ------------------------------------------------------------------
 function focColsApi() {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const grab = (name) => {
     const i = app.indexOf("function " + name + "(");
     assert.ok(i > -1, name + " present in app.js");
@@ -20855,7 +20858,7 @@ test("focus -05: focMoveCol is the ONE reorder, shared by the mouse and touch pa
 test("focus -05: manifest — close fill wired into the tick, touch reorder wired into the header", () => {
   const fs = require("fs"), path = require("path");
   const rd = (f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8");
-  const app = rd("public/app.js"), pol = rd("src/poller.js"), css = rd("public/styles.css");
+  const app = require("./_client").clientSource(), pol = rd("src/poller.js"), css = rd("public/styles.css");
   for (const pin of ["function closeFocus(", "const FOCUS_CLOSE_GRACE", "const FOCUS_CLOSE_SLOP",
     "if (held && now >= sess.close) closeFocus(focusState, now);",
     "closedAt: 0, closeNote: null, closeLate: 0"])
@@ -20976,7 +20979,7 @@ test("housing tab: source + wiring manifest (FRED board, feature-gated route, vi
   const fs = require("fs"), path = require("path");
   const R = (p) => fs.readFileSync(path.join(__dirname, "..", p), "utf8");
   const srv = R("server.js"), pol = R("src/poller.js"), cmp = R("src/compute.js"), sto = R("src/store.js");
-  const idx = R("public/index.html"), app = R("public/app.js"), css = R("public/styles.css");
+  const idx = R("public/index.html"), app = require("./_client").clientSource(), css = R("public/styles.css");
   // manifest entry + gated route, declared once each
   assert.ok(/\{ key: "housing",\s+kind: "tab",\s+label: "Housing",\s+def: "admin",\s+routes: \["\/api\/housing"\] \}/.test(cmp), "FEATURES entry");
   assert.strictEqual((srv.match(/fastify\.get\("\/api\/housing"/g) || []).length, 1, "route declared once");
@@ -21041,7 +21044,7 @@ test("housing tab: a retired series is dropped, not served stale", () => {
   assert.ok(!pol.includes('sid: "DRTSPM"'), "the retired series is off the board");
   // and the roadmap placeholders are not cards
   assert.ok(!pol.includes("HOUSING_PENDING"), "no pending placeholder payload");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(!app.includes("hsg-pending") && !app.includes("d.pending||[]"), "no pending cards rendered");
 });
 
@@ -21101,7 +21104,7 @@ test("13f ingest: the SEC URL convention, and a default quarter that can exist",
 test("nav groups: every tab is placed once, and renames/moves are validated at the write", () => {
   const fs = require("fs"), path = require("path");
   const R = (p) => fs.readFileSync(path.join(__dirname, "..", p), "utf8");
-  const app = R("public/app.js"), css = R("public/styles.css"), cmp = R("src/compute.js"), srv = R("server.js");
+  const app = require("./_client").clientSource(), css = R("public/styles.css"), cmp = R("src/compute.js"), srv = R("server.js");
   const C = require("../src/compute.js");
 
   // every tab the manifest ships is placed by the taxonomy — the drift guard
@@ -21174,7 +21177,7 @@ test("liquidity tab: source + wiring manifest (net liquidity math, units, Thursd
   const fs = require("fs"), path = require("path");
   const R = (p) => fs.readFileSync(path.join(__dirname, "..", p), "utf8");
   const srv = R("server.js"), pol = R("src/poller.js"), cmp = R("src/compute.js"), sto = R("src/store.js");
-  const idx = R("public/index.html"), app = R("public/app.js");
+  const idx = R("public/index.html"), app = require("./_client").clientSource();
   assert.ok(/\{ key: "liquidity",\s+kind: "tab",\s+label: "Liquidity",\s+def: "admin",\s+routes: \["\/api\/liquidity"\] \}/.test(cmp), "FEATURES entry");
   assert.strictEqual((srv.match(/fastify\.get\("\/api\/liquidity"/g) || []).length, 1, "route declared once");
   assert.ok(/getLiquidity\s*:/.test(pol), "poller exports getLiquidity");
@@ -21317,7 +21320,7 @@ test("whale 13f data-set index (2026.08.21-05): fixture ZIP through the REAL ing
   // A ticker/name miss cannot map to a CUSIP (the data set carries none) — said, not hidden.
   const miss2 = await p.getWhaleHolds("ZZZUNKNOWN");
   assert.ok(!miss2.ok && /keyed by CUSIP/.test(miss2.error), "the why-not is stated on ticker misses when an index exists");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(app.includes("TOP HOLDERS \\u00b7 MARKET-WIDE") && app.includes("whl-trk") && app.includes("sub==='ingest13f'"), "panel + tracked badge + admin verb wired");
   assert.ok(app.includes("INSTITUTIONAL MANAGERS only"), "the IPO invisibility banner exists");
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
@@ -21342,7 +21345,7 @@ test("whale 13f data-set index (2026.08.21-05): fixture ZIP through the REAL ing
 
 function _btHarness(){
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const els = {};
   const mk = (id) => ({ id, innerHTML: "", hidden: false, value: "", checked: false, textContent: "", style: {}, dataset: {},
     classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
@@ -21550,7 +21553,7 @@ test("backtest render: the picker is always offered, and one pick disables exact
 
 test("backtest single-asset manifest: precedence, no lookahead in the entry scale, scope hygiene, help", () => {
   const fs = require("fs"), path = require("path");
-  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const s = require("./_client").clientSource();
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   // picks supersede the universe select — the one precedence rule a fixture can't prove is absent
   assert.ok(s.includes("const pr=btPickRows(); if(pr.length) return pr;"), "picks must short-circuit btUniverse");
@@ -21675,8 +21678,10 @@ test("notes: the digest rides every snapshot row, and its revision busts the con
   assert.ok(/nt: noteDigest\(r\.coin\)/.test(src), "mapMarket ships the per-coin digest");
   assert.ok(/\+ "#" \+ notesRev;/.test(src),
     "notesRev must ride the snapshot content signature, or a note written on a quiet board never surfaces its marker");
-  const app = fs.readFileSync(path.join(__dirname, "../public/app.js"), "utf8");
-  assert.ok(/const NOTES_WRITE = IS_ADMIN && featureOn\('notes\.write'\)/.test(app),
+  const app = require("./_client").clientSource();
+  // Assigned from the notes module's boot since the module split (it calls into admin.js, which
+  // imports notes.js back — a const at module scope could observe an uninitialised binding).
+  assert.ok(/NOTES_WRITE = IS_ADMIN && featureOn\('notes\.write'\)/.test(app),
     "the client gates the pen on both locks");
   // Age is calendar time. A vol-scaled fade was considered and rejected: it would move the marker
   // when the MARKET changed rather than when the note did.
@@ -21888,7 +21893,7 @@ test("congress -02: House index ingest — candidates, by-name parse, idempotent
     "the read path leaves gating to the manifest instead of duplicating it");
   assert.ok(sv.slice(postIdx, postIdx + 500).indexOf('op === "ingest"') > sv.slice(postIdx, postIdx + 500).indexOf("if (!isAdmin(req))"),
     "the ingest op sits behind the admin recheck, same ordering the 13F op is pinned to");
-  const app2 = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app2 = require("./_client").clientSource();
   assert.ok(app2.includes("async function termCongress(") && app2.includes("h==='congress'"), "admin verb wired into the terminal");
   assert.ok(app2.includes("congress is admin-only"), "the verb refuses non-admins client-side too");
   // Phase 2 adds the tab, but ADMIN-ONLY: the manifest entry is what gates it, so taking the lane
@@ -22087,7 +22092,7 @@ test("congress -28: a verb is never read as a ticker", () => {
   // DIFFERENT command is worse than an error: the answer looked authoritative and was about
   // something else entirely.
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const i = app.indexOf("const CNG_VERBS=");
   assert.ok(i > 0, "the verb list exists");
   const list = app.slice(i, app.indexOf("]", i));
@@ -22244,7 +22249,7 @@ test("congress -23: diag takes a member name, and picks the filing that needs ex
   assert.equal(store.congressFilerDoc("pelosi").docId, "41003");
   assert.equal(store.congressFilerDoc("nobody"), null, "and an unknown member is null, not a wrong filing");
   // The panel prints the doc id rather than burying it in a tooltip.
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(/congress diag \$\{esc\(x\.emptyDoc\)\}/.test(app), "the command to run is visible, not hovered for");
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -22323,7 +22328,7 @@ test("congress -21: starred filters in SQL, and an impossible lag is not a fact"
   store.congressSaveTx("H:8999", [{ owner: "self", asset: "Sony Group Corporation", ticker: "SONY",
     act: "buy", txDate: "2026-12-26", notified: null, loAmt: 1001, hiAmt: 15000, tkSrc: "name", atype: "ST" }]);
   assert.equal(p.congressStatus().parse.badDate, 1, "the impossible row is counted, not rendered as a negative lag");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(/lag<0/.test(app), "and the panel refuses to print a negative lag as if it were measured");
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -22612,7 +22617,7 @@ test("congress -12: issuer names resolve to tickers conservatively, and the clai
   assert.equal(clean("AB"), null, "too short to be an issuer name is null, not a lookup");
   // The stored row records HOW the ticker was arrived at, so a name-derived match is never
   // presented with the same authority as one the filer wrote.
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(app.includes("cng-tk derived") || app.includes("'cng-tk'"), "the panel marks a derived ticker");
   assert.ok(/tkSrc==='name'/.test(app), "and distinguishes it from the form's own parenthetical");
   const st = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
@@ -22670,7 +22675,7 @@ test("congress -32: the issuer name resolves through cleaning, prefix and share 
   assert.ok(/ticker IS NULL OR ticker=''/.test(st), "and only an EMPTY ticker is ever written to");
   const pl = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   assert.ok(/async function congressReticker/.test(pl), "exposed as a run, not a migration");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(app.includes("'reticker'"), "and reachable from the terminal");
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -23104,7 +23109,7 @@ test("messages: the client escapes every rendered body, handle and preview", () 
   // Message bodies are the FIRST attacker-controlled strings this client renders — everything else
   // on the board is a server-computed number. There is no trusted rendering path for a message.
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const dm = app.slice(app.indexOf("// ===== MESSAGES tab"), app.indexOf("// ===== admin panel: access"));
   assert.ok(dm.length > 4000, "found the messages tab source");
   // Every string a PERSON can author has to go through esc() on the way to innerHTML. The list
@@ -24023,7 +24028,7 @@ test("the operator can read every message, and every read is on the record", () 
 
   const fs = require("fs"), path = require("path");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(/fastify\.get\("\/api\/access\/dm"/.test(srv), "read-through lives on its own admin-gated route");
   const block = srv.slice(srv.indexOf("// ===== operator read-through"), srv.indexOf("// ---- the Telegram reply bridge"));
   assert.ok(!/isMember|threadPeers/.test(block), "it must not consult membership — that is the point of separating it");
@@ -24039,7 +24044,7 @@ test("the operator can read every message, and every read is on the record", () 
 test("admin panel: every segment is foldable and collapsed in the markup", () => {
   const fs = require("fs"), path = require("path");
   const R = (p) => fs.readFileSync(path.join(__dirname, "..", p), "utf8");
-  const html = R("public/index.html"), app = R("public/app.js"), css = R("public/styles.css");
+  const html = R("public/index.html"), app = require("./_client").clientSource(), css = R("public/styles.css");
   const sec = html.slice(html.indexOf('<section id="view-admin"'), html.indexOf("</section>", html.indexOf('<section id="view-admin"')));
   assert.ok(sec.length > 1000, "found the admin section");
 
@@ -24509,20 +24514,20 @@ test("audit -67: learned aliases must look like names; the ask universe is pinne
 
 test("audit -67 client: the SSE stream is recreated after a terminal close, foregrounding re-syncs, and typing no longer re-renders per keystroke", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const sse = app.slice(app.indexOf("function startEvents()"), app.indexOf("function startEvents()") + 1600);
   assert.ok(/if\(_sseSrc&&_sseSrc\.readyState===2\)\{ try\{ _sseSrc\.close\(\); \}catch\(_\)\{\} _sseSrc=null;/.test(sse), "a CLOSED source is dropped so startEvents can run again");
   assert.ok(/_sseRetryT=setTimeout\(startEvents,_sseBackoff\); _sseBackoff=Math\.min\(_sseBackoff\*2,60000\)/.test(sse), "and re-opened with backoff");
   assert.ok(/_sseSrc\.onopen=\(\)=>\{ _sseOk=true; _sseBackoff=2000;/.test(sse), "backoff resets on a good open");
   assert.ok(/document\.addEventListener\('visibilitychange',\(\)=>\{ if\(document\.hidden\) return;\s*\n\s*if\(!_sseSrc\) startEvents\(\);\s*\n\s*if\(typeof dmSync==='function'&&dmState&&dmState\.me\)/.test(app), "foregrounding reopens the stream and pulls messages once");
   assert.ok(/el\('filter'\)\.addEventListener\('input', e=>\{ state\.filter=e\.target\.value; scheduleRender\(\); savePrefs\(\); \}\);/.test(app), "the markets filter renders once per frame");
-  assert.ok(/updateFilterChip\(\); scheduleRender\(\); savePrefs\(\);\n\}\n\['volMin'/.test(app), "so do the numeric filters");
+  assert.ok(/updateFilterChip\(\); scheduleRender\(\); savePrefs\(\);\n\}/.test(app) && /\['volMin','volMax','oiMin','oiMax'\]\.forEach\(id=>el\(id\)\.addEventListener\('input', applyNumFilters\)\);/.test(app), "so do the numeric filters");
   assert.ok(/nfT=setTimeout\(\(\)=>\{ renderNews\(\);[\s\S]{0,200}\},120\); \}; \}/.test(app), "the news filter debounces");
 });
 
 test("audit -67 client: stale responses cannot paint over newer state; one bad trigger event cannot replay the batch; starring keeps the drawer", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(/const mySeq=\(FOCCH\.seq=\(FOCCH\.seq\|\|0\)\+1\);/.test(app) && /if\(mySeq!==FOCCH\.seq\) return;   \/\/ superseded while in flight/.test(app), "focus chart fetches are sequenced like the trend modal's");
   assert.ok(/if\(q!==dmState\.q\.trim\(\)\) return;   \/\/ the box moved on/.test(app), "a DM search answer for an older query is dropped");
   const lt = app.slice(app.indexOf("for(const ev of d.events){"), app.indexOf("for(const ev of d.events){") + 1600);
@@ -24552,7 +24557,7 @@ test("audit -67 lows: shutdown ends the right object, admin writes recheck authz
   assert.ok(/continue; \}\n\s*briefSent\.set\(rec\.chat, day\);/.test(pol) && /continue; \}\n\s*landSent\.set\(rec\.chat, day\);/.test(pol), "scheduled sends are marked after generation succeeds");
   assert.ok(/if \(pushOffset && pushOffset !== offsetBefore\) persistPush\(\);/.test(pol), "push.json is rewritten only when the cursor moved");
   assert.ok(/\} catch \(e\) \{ log\("maintenance tail failed: "/.test(pol), "the maintenance tail is caught");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(!/\$\{'\$\{\(sc\.covered/.test(app) && /scoped to the \$\{\(sc\.covered \|\| 0\)\.toLocaleString\(\)\}/.test(app), "the insiders footer renders the number, not the placeholder text");
   assert.ok(/function hsgNum\(v,d\)/.test(app) && !/sf\.last\.v\.toFixed\(2\)/.test(app), "housing KPIs are null-safe");
   assert.ok(/function isoUtc\(ts,a,b\)/.test(app) && !/new Date\(L\.maxEver\.t\)\.toISOString/.test(app) && !/new Date\(e\.tShow\)\.toISOString/.test(app), "server stamps format through a guard");
@@ -24569,7 +24574,7 @@ test("audit -67 lows: shutdown ends the right object, admin writes recheck authz
 // ===== build 2026.09.11-68: UI/UX audit fixes =================================================
 test("ux -68: one funding colour convention, alert kinds routed to channels, unread marked on close", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   assert.ok(/c:f>0\?'neg':\(f<0\?'pos':'sec'\)/.test(app), "positive funding (longs pay) is red in the table, as on the heatmap and the sessions clock");
   assert.ok(/red = positive \(longs pay/.test(html), "the footer legend says so");
@@ -24581,7 +24586,7 @@ test("ux -68: one funding colour convention, alert kinds routed to channels, unr
 test("ux -68: the phone gets its table back, controls reach the keyboard, quiet text clears AA", () => {
   const fs = require("fs"), path = require("path");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   assert.ok(/viewport-fit=cover/.test(html) && /env\(safe-area-inset-bottom\)/.test(css), "safe areas for the installed PWA");
   assert.ok(/\.controls\{flex-wrap:nowrap;overflow-x:auto/.test(css) && /\.sub\{display:none\}/.test(css), "the six-row control stack is one strip under 680px");
@@ -24596,7 +24601,7 @@ test("ux -68: the phone gets its table back, controls reach the keyboard, quiet 
 
 test("ux -68: typed prose is protected, sessions expire into a banner, the drawer leads with actions and metrics", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   assert.ok(/function ntCloseCompose\(force\)\{[\s\S]{0,200}confirm\('Discard this note\?/.test(app) && /sessionStorage\.setItem\(ntDraftKey\(coin\), box\.value\)/.test(app), "Escape asks, and a draft survives");
   assert.ok(/if\(confirm\('Remove this rule\?'\)\) deleteAlertRule/.test(app) && /confirm\('Remove this rule\? It fires from the server/.test(app), "rules are not deleted by a mis-tap");
@@ -24671,7 +24676,7 @@ test("chat terminal -69: a command result is a message with cmd, no stamp, no ed
   assert.ok(/cmd: typeof b\.cmd === "string" \? b\.cmd : null, cmdAi: !!b\.cmdAi/.test(srv), "the fields reach the store — a non-string cmd is no cmd, not \"[object Object]\"");
 
   // Client: one code path — the panel's handlers with the output redirected, the AI leg latched.
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const app = require("./_client").clientSource();
   assert.ok(/let _termSink=null;\nfunction termEmit\(d\)\{ if\(_termSink\)\{ _termSink\.blocks\.push\(d\); return; \}/.test(app), "termEmit is the one door every terminal block goes through");
   for (const fn of ["termOut", "termOutTrans", "termOutAI", "termEcho", "termErr"])
     assert.ok(new RegExp("function " + fn + "\\([^)]*\\)\\{[^\\n]*termEmit\\(d\\);").test(app), fn + " must emit through the sink, not append to the panel directly");
@@ -24685,7 +24690,8 @@ test("chat terminal -69: a command result is a message with cmd, no stamp, no ed
   for (const v of ["comp", "basket", "report", "admin", "clear", "stocks", "crypto"]) assert.ok(new RegExp("\\b" + v + ":'").test(app.slice(app.indexOf("const DM_CMD_BLOCKED="), app.indexOf("const DM_CMD_BLOCKED=") + 800)), v + " is refused from chat — it opens a view or changes state");
   assert.ok(/whale:\['add','pick','rm','ingest13f','pull','mute','unmute'\]/.test(app) && /earnings:\['backfill'\]/.test(app), "state-changing subverbs are refused too");
   assert.ok(/function dmAskAllowed\(\)\{ return IS_ADMIN\|\|featureOn\('dm\.ask'\); \}/.test(app), "the client's AI switch reads the resolved flag");
-  assert.ok(/const sink=\{blocks:\[\],ai:ai,via:'dm',check:dmCmdCheck\}; _termSink=sink;/.test(app) && /finally\{ _termSink=null; dmState\.cmdBusy=false;/.test(app), "the sink is released on every path, and carries the allowlist");
+  // Since the module split the sink is a terminal.js let behind termSetSink(): messages.js can only point it, never reach in.
+  assert.ok(/const sink=\{blocks:\[\],ai:ai,via:'dm',check:dmCmdCheck\}; termSetSink\(sink\);/.test(app) && /finally\{ termSetSink\(null\); dmState\.cmdBusy=false;/.test(app), "the sink is released on every path, and carries the allowlist");
   assert.ok(/if\(_termSink&&_termSink\.check\)\{ const why=_termSink\.check\(d\.query\); if\(why\) return termErr/.test(app), "an AI-planned query obeys the chat allowlist — it must not navigate the sender away");
   assert.ok(/const shown=line\.replace\(\/\^\(admin\\s\+\(\?:unlock\|reset-reports\)\)/.test(app), "an admin password typed into chat is redacted in the private echo");
   assert.ok(/cmd:line,cmdAi:!cmd\|\|r\.ai/.test(app), "a planner answer (AI planned, board computed) still posts as AI — the badge follows the spend");
@@ -24811,7 +24817,7 @@ test("prefs: per-account, last-writer-wins on the client's stamp, shape-checked,
 
 test("prefs: the client's decision table — newer stamp wins, a stamp-less non-empty local pushes once", () => {
   const fs = require("fs"), path = require("path");
-  const src = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const src = require("./_client").clientSource();
   const grab = (name) => { const i = src.indexOf("function " + name + "("); assert.ok(i >= 0, name + " missing");
     let dep = 0; for (let k = src.indexOf("{", i); k < src.length; k++) { if (src[k] === "{") dep++; if (src[k] === "}") { dep--; if (!dep) return src.slice(i, k + 1); } } };
   const prefsDecide = new Function(grab("prefsDecide") + "; return prefsDecide;")();
@@ -24902,7 +24908,7 @@ test("positions lane: polls only wanted wallets, pokes on structure not on P&L, 
 
 test("positions client: P&L derives off the live mark, signed with the side; the overlay is wired into cell, badge, drawer, filter and stream", () => {
   const fs = require("fs"), path = require("path");
-  const src = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const src = require("./_client").clientSource();
   const grab = (name) => { const i = src.indexOf("function " + name + "("); assert.ok(i >= 0, name + " missing");
     let dep = 0; for (let k = src.indexOf("{", i); k < src.length; k++) { if (src[k] === "{") dep++; if (src[k] === "}") { dep--; if (!dep) return src.slice(i, k + 1); } } };
   const state = { pos: new Map(), rows: new Map() };
