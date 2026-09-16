@@ -5451,7 +5451,6 @@ test("perf: serveCached caches serialization per payload object; series downsamp
   const mod = { downsampleSeries: null, SERIES_CAP: null };
   const m = srv.match(/function downsampleSeries\(arr, cap\) \{[\s\S]*?\n\}/);
   assert.ok(m, "downsampleSeries body not found");
-  // eslint-disable-next-line no-new-func
   const ds = new Function(m[0] + "; return downsampleSeries;")();
   const big = []; for (let i = 0; i < 9000; i++) big.push([i, i * 2]);
   const out = ds(big, 1500);
@@ -16924,7 +16923,7 @@ test("loop instrumentation 2026.07.29-05: ms conversion against a real histogram
   // stall: a sync block placed immediately after enable() lands before the first sample and is
   // invisible (empirically verified — max reads 0). Warm up 50ms, THEN stall inside a timer.
   return new Promise((res) => setTimeout(() => {
-    const t0 = Date.now(); while (Date.now() - t0 < 60) {}   // one deliberate ~60ms stall to observe
+    const t0 = Date.now(); while (Date.now() - t0 < 60) { /* spin */ }   // one deliberate ~60ms stall to observe
     setTimeout(() => {
     h.disable();
     const ms = (ns) => Math.round(ns / 1e5) / 10;
@@ -24775,4 +24774,59 @@ test("chat terminal -69: a command result is a message with cmd, no stamp, no ed
   assert.ok(/if\(d&&d\.disabled\) return _termSink\?termErr\("the AI fallback isn't enabled on the server/.test(app), "'AI not enabled' is private in chat");
   assert.ok(/if\(d&&d\.error==='rate'\) return _termSink\?termErr\(/.test(app) && /if\(_termSink&&\(d&&\(d\.error==='ask-user-cap'\|\|d\.error==='ask-daily-cap'\)\)\) return termErr\(/.test(app), "busy and capped are private in chat");
   assert.ok(/if\(head==='holds'\) return !!p\[1\];\n\s*if\(head==='who'\) return p\.length===2&&!!termFind\(p\[1\]\);/.test(app), "'who reports tomorrow' reaches the phrasebook — the grammar claims `who` only for a listed name");
+});
+
+// ===== build 2026.09.16-78: account-synced prefs (watchlist + layouts) ==========================
+test("prefs: per-account, last-writer-wins on the client's stamp, shape-checked, size-capped", () => {
+  const A = freshAccounts({});
+  try {
+    const { g, l } = seedTwo(A);
+    assert.deepEqual(A.prefsGet(g.uid), {}, "nothing stored yet");
+    const w1 = A.prefsPut(g.uid, "watch", ["xyz:NVDA", "xyz:AAPL"], 1000);
+    assert.deepEqual(w1, { ok: true, stored: true, ts: 1000 });
+    // A stale stamp loses quietly — the caller learns it lost (stored:false) and pulls, never a 4xx.
+    assert.deepEqual(A.prefsPut(g.uid, "watch", ["xyz:HOOD"], 999), { ok: true, stored: false, ts: 1000 });
+    assert.deepEqual(A.prefsPut(g.uid, "watch", ["xyz:HOOD"], 1000), { ok: true, stored: false, ts: 1000 }, "an equal stamp is not newer");
+    assert.deepEqual(A.prefsGet(g.uid).watch, { v: ["xyz:NVDA", "xyz:AAPL"], ts: 1000 });
+    assert.equal(A.prefsPut(g.uid, "watch", ["xyz:HOOD"], 1001).stored, true);
+    assert.deepEqual(A.prefsGet(g.uid).watch.v, ["xyz:HOOD"]);
+    // Layouts: the list travels, nothing else — and it is keyed per account, so lena sees none of it.
+    assert.equal(A.prefsPut(g.uid, "layouts", { list: { swing: { colOrder: ["ticker"], sortKey: "vol" } } }, 5).stored, true);
+    assert.deepEqual(Object.keys(A.prefsGet(g.uid)).sort(), ["layouts", "watch"]);
+    assert.deepEqual(A.prefsGet(l.uid), {});
+    // Shape and size are the server's business; meaning is the client's.
+    assert.equal(A.prefsPut(g.uid, "theme", "dark", 7).ok, false, "unknown key");
+    assert.equal(A.prefsPut(g.uid, "watch", "xyz:NVDA", 7).ok, false, "watch must be a list");
+    assert.equal(A.prefsPut(g.uid, "watch", [1, 2], 7).ok, false, "of strings");
+    assert.equal(A.prefsPut(g.uid, "layouts", { active: "x" }, 7).ok, false, "layouts must carry a list object");
+    assert.equal(A.prefsPut(g.uid, "layouts", { list: [] }, 7).ok, false);
+    assert.equal(A.prefsPut(g.uid, "watch", ["x"], 0).ok, false, "a stamp is required");
+    assert.equal(A.prefsPut(g.uid, "watch", ["x"], "soon").ok, false);
+    const big = {}; for (let i = 0; i < 40; i++) big["layout" + i] = { colOrder: Array.from({ length: 200 }, (_, k) => "col" + k + "x".repeat(20)) };
+    assert.equal(A.prefsPut(g.uid, "layouts", { list: big }, 8).error, "too large");
+    assert.equal(A.prefsGet(g.uid).layouts.ts, 5, "a refused write leaves the stored value alone");
+  } finally { A.close(); require("fs").rmSync(A._dir, { recursive: true, force: true }); }
+});
+
+test("prefs: the client's decision table — newer stamp wins, a stamp-less non-empty local pushes once", () => {
+  const fs = require("fs"), path = require("path");
+  const src = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const grab = (name) => { const i = src.indexOf("function " + name + "("); assert.ok(i >= 0, name + " missing");
+    let dep = 0; for (let k = src.indexOf("{", i); k < src.length; k++) { if (src[k] === "{") dep++; if (src[k] === "}") { dep--; if (!dep) return src.slice(i, k + 1); } } };
+  const prefsDecide = new Function(grab("prefsDecide") + "; return prefsDecide;")();
+  assert.equal(prefsDecide({ ts: 10 }, { ts: 20 }, false), "pull", "server newer");
+  assert.equal(prefsDecide({ ts: 30 }, { ts: 20 }, false), "push", "local newer (an offline edit)");
+  assert.equal(prefsDecide({ ts: 20 }, { ts: 20 }, false), null, "in step");
+  assert.equal(prefsDecide(null, { ts: 20 }, true), "pull", "a cold browser adopts the account's copy");
+  assert.equal(prefsDecide(null, null, false), "push", "first sign-in: the watchlist built before accounts existed reaches the account");
+  assert.equal(prefsDecide(null, null, true), null, "nothing anywhere: nothing to do");
+  assert.equal(prefsDecide({ ts: 5 }, null, true), "push", "a stamped local value with no server copy pushes even when empty (an emptied watchlist is a choice)");
+  // Wiring: both save paths feed the sync, the stream frame is handled, boot pulls, and the active
+  // layout stays out of the payload (the phone runs its own).
+  assert.ok(/updateLayoutBtn\(\); prefsMaybePush\('watch'\);/.test(src), "savePrefs pushes the watchlist");
+  assert.ok(/store\.set\(LKEY, [^\n]*\); prefsMaybePush\('layouts'\); \}/.test(src), "saveLayouts pushes the list");
+  assert.ok(src.includes("if(d&&d.prefs) prefsRemoteFrame(d.prefs);"), "the SSE poke pulls");
+  assert.ok(src.includes("prefsPullAll();  // account copy"), "boot pulls");
+  assert.ok(src.includes("function prefsLocal(key){ return key==='watch' ? [...state.watch].sort() : { list: state.layouts.list }; }"), "only the list travels — never the active layout");
+  assert.ok(src.includes("if(!p||p.from===TAB_ID) return;"), "a tab ignores its own poke");
 });

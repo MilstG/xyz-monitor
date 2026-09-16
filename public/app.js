@@ -2896,7 +2896,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
   if(!state._drawerFrom) state._drawerFrom=document.activeElement;   // return focus here on close
   el('dclose').onclick=closeDetail;
   try{ el('dclose').focus({preventScroll:true}); }catch(_){}
-  { const b=el('drep'); if(b) b.onclick=()=>{ showView('report'); if(typeof reportOpenFor==='function') reportOpenFor(coin); };
+  { const b=el('drep'); if(b) b.onclick=()=>{ showView('report'); aiPick(coin); };
     const a=el('dalert'); if(a) a.onclick=()=>openRuleFor(r); }
   el('dstar').onclick=()=>{ toggleWatch(coin);   // renders the table; the drawer (and a half-typed note) stays put
     const on=state.watch.has(coin), st=el('dstar'); if(st){ st.textContent=on?'\u2605':'\u2606'; st.classList.toggle('on',on); } };
@@ -3271,7 +3271,7 @@ function savePrefs(){ clearTimeout(prefsT); prefsT=setTimeout(()=>{ store.set(PK
   sortKey:state.sortKey, sortDir:state.sortDir, filterText:state.filter, watch:[...state.watch], watchOnly:!!state.watchOnly, noteOnly:!!state.noteOnly, dvbBasket:state.dvbBasket||null,
   sectGrp:state.sect.grp, grp:state.grp, grpWt:state.grpWt, actOpen2:state.actOpen?1:0,
   filters:{vMin:el('volMin').value,vMax:el('volMax').value,oMin:el('oiMin').value,oMax:el('oiMax').value} }));
-  updateLayoutBtn(); }, 250); }
+  updateLayoutBtn(); prefsMaybePush('watch'); }, 250); }
 function loadPrefs(){ let p; try{ p=JSON.parse(store.get(PKEY)||'null'); }catch(_){ p=null; } if(!p) return;
   if(p.layoutV===LAYOUT_V){ // otherwise a one-time migration leaves the new default layout in place
     if(Array.isArray(p.colOrder)){ const v=p.colOrder.filter(k=>COL_BY_KEY[k]);
@@ -3312,10 +3312,66 @@ function layoutSnapshot(){ return {
 function layoutSig(s){ if(!s) return '';
   return JSON.stringify({o:s.colOrder||[], h:[...(s.colHidden||[])].sort(), k:s.sortKey, d:s.sortDir, t:s.tf, w:!!s.watchOnly,
     f:{vMin:(s.filters&&s.filters.vMin)||'', vMax:(s.filters&&s.filters.vMax)||'', oMin:(s.filters&&s.filters.oMin)||'', oMax:(s.filters&&s.filters.oMax)||''}}); }
-function saveLayouts(){ store.set(LKEY, JSON.stringify({list:state.layouts.list, active:state.layouts.active})); }
+function saveLayouts(){ store.set(LKEY, JSON.stringify({list:state.layouts.list, active:state.layouts.active})); prefsMaybePush('layouts'); }
 function loadLayouts(){ let d; try{ d=JSON.parse(store.get(LKEY)||'null'); }catch(_){ d=null; } if(!d) return;
   if(d.list&&typeof d.list==='object'&&!Array.isArray(d.list)) state.layouts.list=d.list;
   if(typeof d.active==='string'&&state.layouts.list[d.active]) state.layouts.active=d.active; }
+// ===== account-synced prefs: watchlist + layouts follow the ACCOUNT (build 2026.09.16-78) =========
+// localStorage stays the working copy and the signed-out experience is untouched. Signed in, each
+// key carries a stamp — the time of the last local change, or the server's stamp when a remote
+// value was adopted — and the newer stamp wins in both directions: on boot, on every local edit
+// (a debounced POST), and on a {prefs} poke from another device (a GET). The active layout is NOT
+// synced: the phone runs its own layout by design, only the list of saved ones travels.
+const SKEY='xyzmon.sync.v1';
+const TAB_ID=Math.random().toString(36).slice(2);
+function prefsSignedIn(){ return !!(window.__ME&&window.__ME.uid); }
+function prefsLocal(key){ return key==='watch' ? [...state.watch].sort() : { list: state.layouts.list }; }
+function prefsSig(v){ return JSON.stringify(v); }
+function prefsMeta(){ let m; try{ m=JSON.parse(store.get(SKEY)||'null'); }catch(_){ m=null; } return (m&&typeof m==='object')?m:{}; }
+function prefsSetMeta(key, ts, sig){ const m=prefsMeta(); m[key]={ts, sig}; store.set(SKEY, JSON.stringify(m)); }
+// Pure: given the local stamp/signature and the server's, say which way the value flows.
+// 'pull' = adopt the server's, 'push' = send ours, null = already in step. A stamp-less local value
+// that is non-empty still pushes on first sign-in — otherwise the watchlist a browser built up
+// before accounts existed would never reach the account.
+function prefsDecide(local, remote, empty){
+  const lts=(local&&local.ts)||0, rts=(remote&&remote.ts)||0;
+  if(rts>lts) return 'pull';
+  if(rts<lts) return 'push';
+  if(!rts&&!lts&&!empty) return 'push';
+  return null;
+}
+let _prefsPushT={};
+function prefsMaybePush(key){ if(!prefsSignedIn()) return;
+  const v=prefsLocal(key), sig=prefsSig(v), m=prefsMeta()[key]||{};
+  if(m.sig===sig) return;                        // unchanged since the last sync in either direction
+  const ts=Date.now(); prefsSetMeta(key, ts, sig);
+  clearTimeout(_prefsPushT[key]); _prefsPushT[key]=setTimeout(()=>prefsPush(key, v, ts), 400); }
+async function prefsPush(key, v, ts){
+  try{ const r=await fetch('/api/prefs',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key, value:v, ts, tab:TAB_ID})});
+    if(r.status===401) return;                   // signed out mid-session: the local copy stands
+    const d=await r.json().catch(()=>null);
+    // Our stamp lost to a newer one on the server: somebody else's device wrote after us — pull it.
+    if(d&&d.ok&&d.stored===false) prefsPullAll();
+  }catch(_){} }
+function prefsApply(key, v, ts){
+  if(key==='watch'){ if(!Array.isArray(v)) return; state.watch=new Set(v.filter(c=>typeof c==='string')); prefsSetMeta(key, ts, prefsSig(prefsLocal(key)));
+    render(); savePrefs(); const st=el('dstar'); if(st&&state.detail){ const on=state.watch.has(state.detail); st.textContent=on?'\u2605':'\u2606'; st.classList.toggle('on',on); } }
+  else { if(!v||typeof v!=='object'||!v.list||typeof v.list!=='object') return; state.layouts.list=v.list;
+    if(state.layouts.active&&!state.layouts.list[state.layouts.active]) state.layouts.active=null;
+    prefsSetMeta(key, ts, prefsSig(prefsLocal(key))); saveLayouts(); updateLayoutBtn();
+    const pop=el('laypop'); if(pop&&!pop.hidden) buildLayoutMenu(); } }
+let _prefsPulling=null;
+function prefsPullAll(){ if(!prefsSignedIn()) return Promise.resolve(); if(_prefsPulling) return _prefsPulling;
+  _prefsPulling=fetchJSON('/api/prefs').then(d=>{ if(!d||!d.ok||!d.prefs) return; const meta=prefsMeta();
+    for(const key of ['watch','layouts']){ const loc=meta[key]||{}, rem=d.prefs[key]||null, v=prefsLocal(key);
+      const empty=key==='watch'?!v.length:!Object.keys(v.list||{}).length;
+      const how=prefsDecide(loc, rem, empty);
+      if(how==='pull') prefsApply(key, rem.v, rem.ts);
+      else if(how==='push'){ const ts=loc.ts||Date.now(); prefsSetMeta(key, ts, prefsSig(v)); prefsPush(key, v, ts); } }
+  }).catch(()=>{}).finally(()=>{ _prefsPulling=null; });
+  return _prefsPulling; }
+function prefsRemoteFrame(p){ if(!p||p.from===TAB_ID) return; prefsPullAll(); }
+
 function layoutDirty(){ const a=state.layouts.active; if(!a||!state.layouts.list[a]) return false;
   return layoutSig(state.layouts.list[a])!==layoutSig(layoutSnapshot()); }
 function updateLayoutBtn(){ const b=el('layBtn'); if(!b) return; const a=state.layouts.active;
@@ -7182,7 +7238,7 @@ function pushTrigToast(ev){
     +(ev.earn?`<div class="tt-w">⚠ earnings ${ev.earn.days}d out — inside the ${ev.horizonD}d horizon</div>`:'')
     +`<div class="tt-a"><button class="btn" data-rep="1">AI report →</button><button class="btn" data-mute="1">Mute ${esc(ev.t)}</button></div>`;
   t.querySelector('[data-x]').addEventListener('click',()=>t.remove());
-  t.querySelector('[data-rep]').addEventListener('click',()=>{ t.remove(); showView('report'); if(typeof reportOpenFor==='function') reportOpenFor(ev.coin); });
+  t.querySelector('[data-rep]').addEventListener('click',()=>{ t.remove(); showView('report'); aiPick(ev.coin); });
   t.querySelector('[data-mute]').addEventListener('click',()=>{ const A=state.alerts;
     if(!A.trig.muted.includes(ev.coin)) A.trig.muted.push(ev.coin);
     saveAlerts(); t.remove(); if(!el('alertpop').hidden) buildAlertsPanel(); });
@@ -7649,7 +7705,7 @@ function renderActionable(){
   box.querySelectorAll('tr.act-row').forEach(tr=>tr.addEventListener('click',()=>{
     const k=tr.dataset.key; _actOpen[k]=!_actOpen[k]; renderActionable(); }));
   box.querySelectorAll('[data-rep]').forEach(b=>b.addEventListener('click',(e)=>{ e.stopPropagation();
-    showView('report'); if(typeof reportOpenFor==='function') reportOpenFor(b.dataset.rep); }));
+    showView('report'); aiPick(b.dataset.rep); }));
   box.querySelectorAll('[data-dr]').forEach(b=>b.addEventListener('click',(e)=>{ e.stopPropagation();
     const cn=b.dataset.dr; if(state.rows.has(cn)) openDetail(cn); }));   // in-place drawer — no tab switch
 }
@@ -10037,6 +10093,8 @@ function startEvents(){ if(typeof EventSource==='undefined'||_sseSrc) return;
     // dataTs is a restarted counter that can coincide with the one this tab already holds, so
     // the version notice must not depend on that comparison triggering a pull.
     if(d&&d.v&&state.build&&d.v!==state.build) notifyNewBuild(d.v);
+    // Another of this member's devices wrote its watchlist or layouts: a version poke, pull on demand.
+    if(d&&d.prefs) prefsRemoteFrame(d.prefs);
     // The dm frame carries a sequence, never a message. Pull whatever tab is showing: the unread
     // pip has to be right before you look at it, not after you switch to the tab.
     if(d&&d.dm){
@@ -11471,6 +11529,7 @@ function termAutoGrow(el){ if(!el) return; el.style.height='auto'; el.style.heig
 
 (async ()=>{
   startEvents();   // push channel first: a change during boot loads lands as an instant re-pull
+  prefsPullAll();  // account copy of watchlist + layouts: newer stamp wins, so a cold browser adopts the server's
   await Promise.all([loadSnapshot(), loadDaily()]);
   applyHash();
   startCycle();

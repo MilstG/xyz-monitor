@@ -14633,7 +14633,6 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     pollNow: pollUniverse,   // diagnostics + harness: force one universe reconciliation
     buildSignalsNow: buildSignals,   // harness: run a full signals build synchronously
     settleBuildsNow: () => buildChain,   // harness: await every build currently queued on the serialized chain — how a test observes an async self-heal without patching around the production path
-    resolveLedgerNow: resolveLedger,   // harness: resolve due claims against the seeded spines without waiting out a build cycle
     buildDailyNow: buildDaily,       // harness: populate daily closes so the signals loop has inputs
     buildSnapshotNow: buildSnapshot, // harness: run one snapshot build synchronously (content-sig identity test)
     buildAnalyticsNow: buildAnalytics, // harness: run one analytics build synchronously (regime aggregate path)

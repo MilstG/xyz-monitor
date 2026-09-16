@@ -210,3 +210,53 @@ test("chat terminal -69: a member may post computed results, AI results are admi
   assert.equal(JSON.parse((await post("/api/features", { key: "dm.ask", state: "admin" }, gus)).body).ok, true);
   void caraUid;
 });
+
+test("csp: every HTML page carries a report-only policy whose nonce is stamped on its inline scripts; reports land on health", async () => {
+  // The signed-out login page and the signed-in shell are the two HTML shapes the server emits.
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  for (const res of [await get("/"), await get("/", gus)]) {
+    const csp = res.headers["content-security-policy-report-only"];
+    assert.ok(csp, "report-only header present");
+    assert.equal(res.headers["content-security-policy"], undefined, "report-only: nothing is enforced yet");
+    const nonce = (csp.match(/'nonce-([^']+)'/) || [])[1];
+    assert.ok(nonce && nonce.length >= 16, "the policy names a nonce");
+    assert.ok(!res.body.includes("{{csp-nonce}}"), "no slot survives to the browser");
+    const inline = [...res.body.matchAll(/<script(?![^>]*\bsrc=)([^>]*)>/g)].map((m) => m[1]);
+    assert.ok(inline.length >= 2, "both pages carry inline scripts");
+    for (const attrs of inline) assert.match(attrs, new RegExp('nonce="' + nonce.replace(/[+/=]/g, "\\$&") + '"'), "every inline script carries this response's nonce");
+    assert.match(csp, /report-uri \/api\/csp-report/); assert.match(csp, /frame-ancestors 'none'/);
+    assert.equal(res.headers["reporting-endpoints"], 'csp="/api/csp-report"');
+  }
+  // Two responses, two nonces: a nonce that repeats is a hash with extra steps.
+  const a = (await get("/", gus)).headers["content-security-policy-report-only"], b = (await get("/", gus)).headers["content-security-policy-report-only"];
+  assert.notEqual(a, b);
+  // JSON never grows a policy header (nothing inline to nonce), static assets neither.
+  assert.equal((await get("/api/health")).headers["content-security-policy-report-only"], undefined);
+  assert.equal((await get("/styles.css", gus)).headers["content-security-policy-report-only"], undefined);
+  // A browser's report, in both wire shapes, no session required, is counted and summarized for the operator.
+  const legacy = await app.inject({ method: "POST", url: "/api/csp-report", headers: { "content-type": "application/csp-report" },
+    payload: JSON.stringify({ "csp-report": { "effective-directive": "script-src", "blocked-uri": "inline", "source-file": "https://x/app.js", "line-number": 12 } }) });
+  assert.equal(legacy.statusCode, 204);
+  const modern = await app.inject({ method: "POST", url: "/api/csp-report", headers: { "content-type": "application/reports+json" },
+    payload: JSON.stringify([{ type: "csp-violation", body: { effectiveDirective: "img-src", blockedURL: "http://evil/x.png" } }]) });
+  assert.equal(modern.statusCode, 204);
+  assert.equal((await app.inject({ method: "POST", url: "/api/csp-report", headers: { "content-type": "application/csp-report" }, payload: "not json" })).statusCode, 204, "garbage is dropped, never a 500");
+  const h = JSON.parse((await get("/api/health", gus)).body);
+  assert.ok(h.csp && h.csp.reports >= 2, JSON.stringify(h.csp));
+  assert.ok(h.csp.recent.some((r) => r.directive === "script-src" && r.line === 12) && h.csp.recent.some((r) => r.directive === "img-src"));
+  assert.ok(!h.csp.recent.some((r) => "key" in r), "the dedupe key is internal");
+  assert.equal(JSON.parse((await get("/api/health")).body).csp, undefined, "the ledger is diagnostics: signed-in only");
+});
+
+test("prefs: /api/prefs is an account surface — 401 signed out, round-trips per member, stale stamps report stored:false", async () => {
+  assert.equal((await get("/api/prefs")).statusCode, 401);
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  assert.deepEqual(JSON.parse((await get("/api/prefs", gus)).body), { ok: true, prefs: {} });
+  const w = await post("/api/prefs", { key: "watch", value: ["xyz:NVDA"], ts: 5000, tab: "t1" }, gus);
+  assert.equal(w.statusCode, 200, w.body); assert.deepEqual(JSON.parse(w.body), { ok: true, stored: true, ts: 5000 });
+  assert.deepEqual(JSON.parse((await post("/api/prefs", { key: "watch", value: [], ts: 4000 }, gus)).body), { ok: true, stored: false, ts: 5000 });
+  assert.deepEqual(JSON.parse((await get("/api/prefs", gus)).body).prefs.watch, { v: ["xyz:NVDA"], ts: 5000 });
+  const bad = await post("/api/prefs", { key: "font", value: 3, ts: 1 }, gus);
+  assert.equal(bad.statusCode, 400);
+  assert.equal((await get("/api/prefs", gus)).headers["cache-control"], "no-store");
+});
