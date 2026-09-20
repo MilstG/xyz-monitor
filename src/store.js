@@ -172,7 +172,7 @@ function openStore(dataDir) {
   }
   let buf = [];
   let pruning = false;   // while true, hold appends in `buf` so we never touch the file mid-rewrite
-  let hourlyWriting = false;   // while true, an async hourly NDJSON write is in flight — skip overlapping ticks
+  let hourlyWriting = null;   // the in-flight hourly NDJSON write (a promise) — an overlapping tick joins it instead of skipping
 
   // ---- 5-minute OHLCV candle archive (node:sqlite) -----------------------------------------
   // Build-forward archive. Hyperliquid's candleSnapshot only serves the most recent 5000 candles
@@ -202,7 +202,7 @@ function openStore(dataDir) {
     // idempotent, so overlap on re-fetch is absorbed rather than duplicated.
     cInsert = cdb.prepare("INSERT INTO candles_5m (coin, ts, o, h, l, c, v) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(coin, ts) DO UPDATE SET o=excluded.o, h=excluded.h, l=excluded.l, c=excluded.c, v=excluded.v");
     cRange = cdb.prepare("SELECT ts, o, h, l, c, v FROM candles_5m WHERE coin = ? AND ts >= ? AND ts <= ? ORDER BY ts");
-    cEvict = cdb.prepare("DELETE FROM candles_5m WHERE ts < ?");
+    cEvict = cdb.prepare("DELETE FROM candles_5m WHERE coin = ? AND ts < ?");   // PK range per coin — see evictCandles
     cCov = cdb.prepare("SELECT MIN(ts) AS mn, MAX(ts) AS mx, COUNT(*) AS n FROM candles_5m WHERE coin = ?");
     cCount = cdb.prepare("SELECT COUNT(*) AS n FROM candles_5m");
     // ---- 1-minute OPENING-HOUR archive (build 2026.08.18-04) ------------------------------
@@ -239,8 +239,11 @@ function openStore(dataDir) {
     }
   } catch (_) { cdb = null; }
 
-  function flush() {
-    if (!buf.length || pruning) return;
+  // `force` (close() only) appends even while a prune is streaming: close() precedes process.exit,
+  // so the prune's rename never lands and the live file — the one that survives — must carry the
+  // buffered samples. Anywhere else the buffer waits for the prune's own flush.
+  function flush(force) {
+    if (!buf.length || (pruning && !force)) return;
     try { fs.appendFileSync(file, buf.join("")); buf = []; }
     catch (_) {
       // Keep the buffer for the next attempt, but don't let it grow without bound if the
@@ -272,12 +275,21 @@ function openStore(dataDir) {
       let removed = 0;
       const full = Number.isFinite(keepFullAfter) ? keepFullAfter : before;
       const lastHour = new Map();           // coin -> last hourly bucket kept in the thinned band
+      // A file that does not end in "\n" has a torn last row (a crash mid-append). The field-count
+      // check below catches a row that lost a tab, but a row cut INSIDE its last field still has four
+      // fields and used to be re-emitted by the prune — legitimised with a newline, and then read as
+      // a sample forever after. loadAll drops that tail; the prune must too, so the final line is
+      // held back one step and written only when a line follows it (or the file ended cleanly).
+      const cleanEnd = fileEndsWithNewline(file);
       try {
         await new Promise((resolve, reject) => {
           const input = fs.createReadStream(file, { encoding: "utf8" });
           const output = fs.createWriteStream(tmp);
           const rl = readline.createInterface({ input, crlfDelay: Infinity });
+          let held = null, heldSeq = -1, seq = -1;   // the most recent KEPT line not yet written, and whether it is the file's physical last line
+          const emit = (ln) => { if (held != null) output.write(held + "\n"); held = ln; heldSeq = seq; };
           rl.on("line", (ln) => {
+            seq++;
             if (!ln) return;
             const i1 = ln.indexOf("\t"), i2 = ln.indexOf("\t", i1 + 1);
             if (i1 < 0 || i2 < 0) return;
@@ -287,17 +299,20 @@ function openStore(dataDir) {
             const coin = ln.slice(0, i1);
             if (shortFn && shortFn(coin)) {   // short-retention universe: flat cutoff, full resolution, no thinning band
               if (t < (Number.isFinite(shortBefore) ? shortBefore : before)) removed++;
-              else output.write(ln + "\n");
+              else emit(ln);
               return;
             }
             if (t < before) { removed++; return; }
-            if (t >= full) { output.write(ln + "\n"); return; }
+            if (t >= full) { emit(ln); return; }
             const hb = Math.floor(t / 3600000);
             if (lastHour.get(coin) === hb) { removed++; return; }
             lastHour.set(coin, hb);
-            output.write(ln + "\n");
+            emit(ln);
           });
-          rl.on("close", () => output.end());
+          rl.on("close", () => {
+            if (held != null) { if (cleanEnd || heldSeq !== seq) output.write(held + "\n"); else removed++; }   // a held line that IS the torn physical tail is dropped, never legitimised
+            output.end();
+          });
           rl.on("error", reject);
           output.on("finish", resolve);
           output.on("error", reject);
@@ -457,15 +472,14 @@ function openStore(dataDir) {
     },
     // Telegram channel list: shared group CONFIG (not cache) — its own file so a corrupt or
     // trimmed news cache can never lose the channel list.
+    // Config-grade (somebody typed the channel list): fsync + .bak + quarantine-on-corrupt, like
+    // notes/rules. tmp+rename alone left a zero-length file on an overlay volume after a kill, and
+    // the plain loader read that as first boot and saved an empty list over it.
     saveTgChannels(data) {
-      try {
-        const tmp = tgFile + ".tmp";
-        fs.writeFileSync(tmp, JSON.stringify(data));
-        fs.renameSync(tmp, tgFile);
-      } catch (_) {}
+      try { saveConfig(tgFile, data); return true; } catch (_) { return false; }
     },
     loadTgChannels() {
-      try { return JSON.parse(fs.readFileSync(tgFile, "utf8")); } catch (_) { return null; }
+      return loadConfig(tgFile, "tgchannels.json");
     },
     // Trigger-alert state: which setups have already been announced, plus the emitted event log
     // and its sequence high-water mark. Persisted for one reason — without it, every redeploy
@@ -519,27 +533,20 @@ function openStore(dataDir) {
       catch (_) {}
       return null;
     },
+    // Push recipients + delivery cursor and the announced-trigger set are config-grade: a torn
+    // alertpush.json read as "first boot" dropped every Telegram recipient, and a torn triggers.json
+    // re-announced every open claim. Both go through saveConfig/loadConfig (fsync, .bak, quarantine).
     savePush(data) {
-      try {
-        const tmp = pushFile + ".tmp";
-        fs.writeFileSync(tmp, JSON.stringify(data));
-        fs.renameSync(tmp, pushFile);
-      } catch (_) {}
+      try { saveConfig(pushFile, data); return true; } catch (_) { return false; }
     },
     loadPush() {
-      try { if (fs.existsSync(pushFile)) return JSON.parse(fs.readFileSync(pushFile, "utf8")); }
-      catch (_) {}
-      return null;
+      return loadConfig(pushFile, "alertpush.json");
     },
     saveTriggers(data) {
-      try {
-        const tmp = trigFile + ".tmp";
-        fs.writeFileSync(tmp, JSON.stringify(data));
-        fs.renameSync(tmp, trigFile);
-      } catch (_) {}
+      try { saveConfig(trigFile, data); return true; } catch (_) { return false; }
     },
     loadTriggers() {
-      try { return JSON.parse(fs.readFileSync(trigFile, "utf8")); } catch (_) { return null; }
+      return loadConfig(trigFile, "triggers.json");
     },
     // News feed warm cache (atomic like the rest): a redeploy serves the last fetched
     // headlines instead of a blank tab while the worker's first rotation completes.
@@ -681,9 +688,17 @@ function openStore(dataDir) {
     // JSON.stringify + writeFileSync that froze every in-flight request. Still atomic: written to a
     // temp file and renamed into place, so a crash mid-write can't corrupt the live spine. Guarded
     // against overlap so two persist ticks can't fight over the temp file.
+    // An overlapping call JOINS the in-flight write (returns its promise) instead of returning at
+    // once: the shutdown path awaits persistHourly, and "a write is already running" used to make
+    // that await resolve immediately — SIGTERM then killed the process mid-stream and the spine on
+    // disk was whatever the PREVIOUS tick left, up to 10 minutes stale.
     async saveHourly(data) {
-      if (!data || !data.hourly || hourlyWriting) return;
-      hourlyWriting = true;
+      if (!data || !data.hourly) return;
+      if (hourlyWriting) return hourlyWriting;   // async adopts it: the caller's await now waits for the in-flight write
+      hourlyWriting = this._saveHourlyRun(data).finally(() => { hourlyWriting = null; });
+      return hourlyWriting;
+    },
+    async _saveHourlyRun(data) {
       const tmp = hourlyFile + ".tmp";
       try {
         await new Promise((resolve, reject) => {
@@ -709,8 +724,6 @@ function openStore(dataDir) {
         try { if (fs.existsSync(hourlyJsonFile)) fs.unlinkSync(hourlyJsonFile); } catch (_) {}   // retire the legacy bridge file
       } catch (_) {
         try { fs.unlinkSync(tmp); } catch (_) {}
-      } finally {
-        hourlyWriting = false;
       }
     },
     // Streaming boot restore: parse the NDJSON one small line at a time via readline (never a single
@@ -774,10 +787,23 @@ function openStore(dataDir) {
         return out;
       } catch (_) { return []; }
     },
-    // Retention: drop every bar older than `before`. One statement over the whole archive.
+    // Retention: drop every bar older than `before`. Per COIN through the (coin, ts) primary key —
+    // a single `DELETE ... WHERE ts < ?` has no index to use on this table and walked all ~15M rows
+    // once a day, on the event loop. The distinct coins come from a recursive skip over the PK
+    // (one seek per coin, never a full scan), and each per-coin DELETE is a range at the head of
+    // that coin's cluster. A secondary index on ts would do the same job at the cost of write
+    // amplification on every captured bar and a few hundred MB of disk; the PK already knows.
     evictCandles(before) {
       if (!cdb) return 0;
-      try { return Number(cEvict.run(Math.trunc(+before)).changes) || 0; } catch (_) { return 0; }
+      const cut = Math.trunc(+before);
+      let n = 0;
+      try {
+        const coins = cdb.prepare(`WITH RECURSIVE c(coin) AS (SELECT MIN(coin) FROM candles_5m
+          UNION ALL SELECT (SELECT MIN(coin) FROM candles_5m WHERE coin > c.coin) FROM c WHERE c.coin IS NOT NULL)
+          SELECT coin FROM c WHERE coin IS NOT NULL`).all().map((r) => r.coin);
+        for (const coin of coins) n += Number(cEvict.run(coin, cut).changes) || 0;
+      } catch (_) {}
+      return n;
     },
     // Per-coin coverage for the capture cursor + the UI depth disclosure: {min, max, count}.
     // Because the instruments are 24/7 with no halts, count vs (max-min) span is itself the gap
@@ -870,11 +896,22 @@ function openStore(dataDir) {
     // Off-copy for backup: VACUUM INTO writes a clean, defragmented snapshot. This archive is the
     // only copy of anything past the native window, so this is the recovery hedge — the caller
     // schedules it and (ideally) ships the file off-volume. Defaults beside the live db.
+    // Written to `.tmp` beside the destination and renamed over it: the old shape unlinked the
+    // previous .bak BEFORE the VACUUM, so a failed VACUUM (disk full is the likely one — the copy is
+    // the size of the archive) left NO off-copy at all, at exactly the moment one was most wanted.
+    // VACUUM INTO refuses an existing target, so a stale .tmp from a crashed run is cleared first.
     snapshotCandles(dest) {
       if (!cdb) return false;
-      const out = dest || (candleFile + ".bak");
-      try { fs.unlinkSync(out); } catch (_) {}
-      try { cdb.exec("VACUUM INTO '" + String(out).replace(/'/g, "''") + "'"); return true; } catch (_) { return false; }
+      const out = dest || (candleFile + ".bak"), tmp = out + ".tmp";
+      try { fs.unlinkSync(tmp); } catch (_) {}
+      try {
+        cdb.exec("VACUUM INTO '" + String(tmp).replace(/'/g, "''") + "'");
+        fs.renameSync(tmp, out);
+        return true;
+      } catch (_) {
+        try { fs.unlinkSync(tmp); } catch (_) {}
+        return false;   // the previous .bak is untouched
+      }
     },
     closeCandles() { try { if (cdb) cdb.close(); } catch (_) {} cdb = null; },
     // ---- Coinalyze deriv-context history ------------------------------------------------
@@ -885,8 +922,8 @@ function openStore(dataDir) {
       dbuf.push(coin + "\t" + ts + "\t" + (ll == null ? "" : ll) + "\t" + (sl == null ? "" : sl) + "\t" + (oi == null ? "" : oi) + "\n");
       if (dbuf.length >= 200) this.flushDerivs();
     },
-    flushDerivs() {
-      if (!dbuf.length || dPruning) return;
+    flushDerivs(force) {
+      if (!dbuf.length || (dPruning && !force)) return;   // `force`: close() only — see flush()
       try { fs.appendFileSync(derivFile, dbuf.join("")); dbuf = []; }
       catch (_) { if (dbuf.length > MAX_BUF) dbuf = dbuf.slice(dbuf.length >> 1); }
     },
@@ -970,16 +1007,10 @@ function openStore(dataDir) {
     // unseen-filing state and persisted season builds. Same tmp+rename atomicity as every other
     // config-grade file; a torn write can never half-replace the watchlist.
     saveWhale(data) {
-      try {
-        const tmp = whaleFile + ".tmp";
-        fs.writeFileSync(tmp, JSON.stringify(data));
-        fs.renameSync(tmp, whaleFile);
-      } catch (_) {}
+      try { saveConfig(whaleFile, data); return true; } catch (_) { return false; }   // the watchlist is typed in: fsync + .bak + quarantine, like every other config-grade file
     },
     loadWhale() {
-      try { if (fs.existsSync(whaleFile)) return JSON.parse(fs.readFileSync(whaleFile, "utf8")); }
-      catch (_) {}
-      return null;
+      return loadConfig(whaleFile, "whale.json");
     },
     // ---- market-wide 13F holder index (build 2026.08.21-05) -----------------------------------
     // A SEPARATE SQLite file (whale13f.db) holding the SEC quarterly Form 13F structured data
@@ -1604,7 +1635,15 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
       catch (_) {}
       return null;
     },
-    close() { flush(); this.flushDerivs(); try { if (cdb) cdb.close(); } catch (_) {} },
+    // Exit-only. Appends are forced past a mid-flight prune (the prune's rename will never land —
+    // the process exits right after this), and EVERY SQLite handle is closed: the lazily opened
+    // whale13f / insiders / congress databases run in WAL mode and used to be left open, so each
+    // redeploy left their -wal/-shm files behind for the next boot to recover.
+    close() {
+      flush(true); this.flushDerivs(true);
+      for (const d of [cdb, t13f, insiders, congress]) { try { if (d) d.close(); } catch (_) {} }
+      cdb = null; t13f = null; insiders = null; congress = null;
+    },
   };
 }
 
