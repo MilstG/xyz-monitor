@@ -227,6 +227,7 @@ test("roster 2026-09-20: every live xyz name classifies except the five the audi
   assert.deepEqual([c("XBI").sector, c("XBI").ind], ["Health Care", "Biotech"]);
   assert.deepEqual([c("KORU").assetClass, c("KORU").sector], ["ETF", "Index"], "a leveraged region fund groups with the region funds");
   assert.equal(c("HO").sector, "Commodity");
+  for (const t of ["CXMT", "YMTC", "GIGADEV", "UNITREE"]) assert.equal(S.homeMkt(t, "xyz"), "CN", t + " anchors to the Shanghai session");
   // Rates: a duration trade is neither an index nor a sector fund — its own class, like FX and Commodity.
   assert.deepEqual(c("TLT"), { assetClass: "Rates", sector: "Rates", ind: "Rates" });
   assert.ok(S.macroLane("TLT", "xyz"), "the long bond has a news lane");

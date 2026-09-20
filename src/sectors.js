@@ -86,6 +86,8 @@ function overlayFor(t) { return OVERLAY.get(norm(t)) || null; }
 // JP = TSE (SOFTBANK 9984, KIOXIA 285A, IBIDEN 4062).
 // HK = HKEX (ZHIPU 02513.HK and MINIMAX — both listed Hong Kong, Jan 2026).
 const HOME_MKT = { SMSN: "KR", SKHX: "KR", HYUNDAI: "KR", SOFTBANK: "JP", KIOXIA: "JP", IBIDEN: "JP", ZHIPU: "HK", MINIMAX: "HK",
+  // Shanghai (SSE / STAR), 2026.09.20: the mainland memory and robotics listings.
+  CXMT: "CN", YMTC: "CN", GIGADEV: "CN", UNITREE: "CN",
   // Index perps (2026.08.14-03): the cash Nikkei/KOSPI only PRINT during TSE/KRX hours — outside
   // them the reference level freezes exactly like a single name's book, so they anchor home too.
   // (Futures trade nearly 24h elsewhere, but the oracle tracks the index, not CME/SGX futures.)

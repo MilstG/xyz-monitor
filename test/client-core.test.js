@@ -2052,7 +2052,43 @@ test("anchored-open wiring pins: poller snapshot path + client column family, de
     // that is the DEGRADE contract: weekend-only, never a guessed lunar date.
     assert.equal(homeDayStatus("KR", 2027, 2, 10), 0, "weekday beyond horizon trades under the approximation");
     assert.equal(homeDayStatus("KR", 2027, 2, 13), 2, "Saturday beyond horizon still closed");
-    for (const mk of ["KR", "JP", "HK"]) assert.ok(HOME_MKTS[mk] && HOME_MKTS[mk].utcOff >= 8, mk + " def present");
+    for (const mk of ["KR", "JP", "HK", "CN"]) assert.ok(HOME_MKTS[mk] && HOME_MKTS[mk].utcOff >= 8, mk + " def present");
+  });
+
+  test("Shanghai (2026.09.20): SSE joins the home-market table — hours, lunch, 2026 closures, the STAR names", () => {
+    const M = HOME_MKTS.CN;
+    assert.deepEqual([M.ex, M.utcOff, M.o, M.c, M.half], ["SSE", 8, [9, 30], [15, 0], null]);
+    assert.deepEqual(M.lunch, [[11, 30], [13, 0]], "the 90-minute lunch halt is declared for the ribbon, not modeled in the holds");
+    for (const t of ["CXMT", "YMTC", "GIGADEV", "UNITREE"]) assert.equal(homeMkt(t, "xyz"), "CN", t + " anchors to Shanghai");
+    assert.equal(homeMkt("CXMT", "main"), null, "crypto scope never has a home market");
+    assert.equal(homeCalCovered("CN", 2026), true); assert.equal(homeCalCovered("CN", 2027), false);
+    // Spring Festival 2026 (CNY Feb 17): the exchange is shut Feb 16-23; Feb 14 is a make-up
+    // WORKING day on the State Council calendar but a Saturday, and the exchange never opens one.
+    for (const d of [16, 17, 18, 19, 20, 23]) assert.equal(homeDayStatus("CN", 2026, 2, d), 2, "Feb " + d + " closed for Spring Festival");
+    assert.equal(homeDayStatus("CN", 2026, 2, 14), 2, "make-up Saturday: still closed");
+    assert.equal(homeDayStatus("CN", 2026, 2, 24), 0, "first session back");
+    assert.equal(homeDayStatus("CN", 2026, 10, 1), 2, "National Day"); assert.equal(homeDayStatus("CN", 2026, 10, 7), 2);
+    assert.equal(homeDayStatus("CN", 2026, 10, 8), 0);
+    assert.equal(homeDayStatus("CN", 2026, 4, 6), 2, "Qingming Monday"); assert.equal(homeDayStatus("CN", 2026, 6, 19), 2, "Dragon Boat");
+    assert.equal(homeDayStatus("CN", 2026, 9, 25), 2, "Mid-Autumn"); assert.equal(homeDayStatus("CN", 2026, 1, 2), 2, "New Year bridge");
+    assert.equal(homeDayStatus("CN", 2026, 3, 2), 0, "an ordinary Monday trades");
+    // Wall clock: 09:30 CST is 01:30 UTC, 21:30 ET the previous evening — the mirror of the ET day.
+    assert.equal(homeWallToUtc("CN", 2026, 3, 2, 9, 30), Date.UTC(2026, 2, 2, 1, 30));
+    // Sessions: the Spring Festival week yields none, and the closed window across it pools as one weekend-class hold.
+    const ses = homeMarketSessions("CN", Date.UTC(2026, 1, 15), Date.UTC(2026, 1, 23, 23));
+    assert.equal(ses.filter((s) => s.open >= Date.UTC(2026, 1, 16) && s.open < Date.UTC(2026, 1, 24)).length, 0, "no session Feb 16-23");
+    const win = homeClosedWindows("CN", Date.UTC(2026, 1, 12), Date.UTC(2026, 1, 26));
+    const span = win.find((w) => w.exit === homeWallToUtc("CN", 2026, 2, 24, 9, 30));
+    assert.ok(span && span.tag === "weekend" && span.enter === homeWallToUtc("CN", 2026, 2, 13, 15, 0), "Feb 13 close -> Feb 24 open is one hold");
+    // The poller ships CN with the other three — nothing enumerates the markets by hand any more.
+    const { createPoller } = require("../src/poller");
+    const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+    const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+    p.seedRowNow("xyz:CXMT", { px: 8.5, ticker: "CXMT", uni: "xyz", vol: 1e6 });
+    p.buildSnapshotNow();
+    const snap = p.getSnapshot();
+    assert.ok(snap.homeMkts.CN && snap.homeMkts.CN.ex === "SSE" && snap.homeState.CN && typeof snap.homeState.CN.closed === "boolean", "CN rides the wire");
+    assert.equal(snap.markets.find((m) => m.ticker === "CXMT").hm, "CN", "the row carries its home market");
   });
 
   test("home-session wiring manifest: poller re-anchors, ships state; client renders it; A+C+E present", () => {
@@ -2064,8 +2100,9 @@ test("anchored-open wiring pins: poller snapshot path + client column family, de
       "homeOvernightAnchors(hmk", "homeWeekendAnchors(hmk"])
       assert.ok(pol.includes(pin), "poller pin missing: " + pin);
     // The daily + snapshot signatures must both carry the home flips, or foreign names go stale.
-    assert.ok(/\["KR", "JP", "HK"\]\.map\(\(k\) => \(offHoursBy\[k\]\.closed \? 1 : 0\)\)/.test(pol), "daily sig signs home flips");
-    assert.ok(/\["KR", "JP", "HK"\]\.map\(\(k\) => \(homeState\[k\]\.closed \? 1 : 0\)/.test(pol), "snapshot csig signs home flips");
+    // Every market in the table, never a fixed list — adding SSE (2026.09.20) must not need a second edit here.
+    assert.ok(/Object\.keys\(HOME_MKTS\)\.map\(\(k\) => \(offHoursBy\[k\]\.closed \? 1 : 0\)\)/.test(pol), "daily sig signs home flips");
+    assert.ok(/Object\.keys\(HOME_MKTS\)\.map\(\(k\) => \(homeState\[k\]\.closed \? 1 : 0\)/.test(pol), "snapshot csig signs home flips");
     const app = require("./_client").clientSource();
     for (const pin of ["function rowSessState", "function sessCell", "function railHtml", "function cdsHtml",
       "function sessDrawerHtml", "function homeArcSvg", "key:'sess'", "state.dimOff", "s.homeState", "s.homeMkts",

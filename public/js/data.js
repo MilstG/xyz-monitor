@@ -139,7 +139,7 @@ function applySnapshot(s){
   // for that market's names, open→closed needs their new liveClose anchors.
   if(s.homeMkts) state.homeMkts=s.homeMkts;
   if(s.homeState){ const prev=state._hmSig;
-    const sig=['KR','JP','HK'].map(k=>s.homeState[k]&&s.homeState[k].closed?1:0).join('');
+    const sig=Object.keys(s.homeState).sort().map(k=>s.homeState[k]&&s.homeState[k].closed?1:0).join('');   // every home market the server ships, never a fixed list
     state.homeState=s.homeState;
     if(prev!=null&&prev!==sig) loadDaily();
     state._hmSig=sig; }
