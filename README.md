@@ -59,8 +59,10 @@ instant, and the per-IP rate limit stops being a per-user problem.
   its own colour cap. The unit is a client-side multiplier over the same payload, remembered per
   browser; every tooltip carries both. Red = longs pay (crowded long, carry is a cost),
   green = longs receive; a bucket whose spine covers under half its hours is hatched rather than
-  drawn as zero, and the newest column is always the last *complete* bucket. Rows rank by open
-  interest, capped at 60. Built per universe, lazily, off the funding history already on the
+  drawn as zero, and the newest column is always the last *complete* bucket. Beside each row's
+  window mean sits its *current* funding (this hour's rate off the live snapshot, in the same
+  unit), so carry building or fading reads as now vs mean. Rows rank by open interest; every
+  market with a spine ships, and the client trims to top 25 / 50 / all. Built per universe, lazily, off the funding history already on the
   volume — no new fetch and no new persistence. Ships in the market-data menu (the `tape` group);
   an admin can rename that menu or move the tab out of it without a deploy.
 - **Sectors tab** — sector classification, a rotation flow map, a Relative Rotation Graph (RS-Ratio / RS-Momentum vs the S&P), per-sector detail, and a sector×sector correlation matrix.

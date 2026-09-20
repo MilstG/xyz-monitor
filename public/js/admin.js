@@ -1044,6 +1044,22 @@ function fhCells(fh,row,tf){ const c=(row.tf&&row.tf[tf])||[]; if(fhUnit()!=='ap
 function fhDpApr(cap){ const c=Math.abs((cap||0)*100)||1e-9; return clamp(2-Math.floor(Math.log10(c)),0,2); }
 function fhDpU(cap){ return fhUnit()==='apr'?fhDpApr(cap):fhDp(cap); }
 function fhUnitTag(tf){ return fhUnit()==='apr'?'APR':'per '+tf; }
+// ---- the "now" column (build 2026.09.20-81): the market's CURRENT funding beside the window mean ----
+// The mean says what the window averaged; the live rate says what the book is paying this hour,
+// which is the number a reader arriving from the Markets table already has in mind. It is read
+// off the client's own streaming snapshot (state.rows, keyed by coin — the same keys the board
+// ships), never from the board payload: the snapshot refreshes every ~15s, the board every 60s,
+// and a "current" rate that was 60s stale by construction would be a mean wearing a live label.
+// Printed in the unit on screen — hourly ×24×365 annualized, hourly × bucketHours per bucket —
+// so the two columns are directly comparable: now above mean = carry is building.
+let _fhNowSig='';
+function fhNowOf(r){ const lr=r&&r.coin?state.rows.get(r.coin):null; const f=lr?lr.funding:null; return (f==null||!isFinite(f))?null:f; }
+function fhNowSig(fh){ if(!fh||!Array.isArray(fh.rows)) return ''; let s='';
+  for(const r of fh.rows){ const f=fhNowOf(r); s+=(f==null?'x':f.toExponential(4))+','; } return s; }
+// Called from the snapshot path: a funding roll while the tab is open repaints the column, an
+// unchanged rate does not (a repaint every 15s would reset every open tooltip on the grid).
+function fhLiveRefresh(){ if(state.view!=='funding') return; const v=state.funding&&state.funding.view, fh=v&&v.data;
+  if(fh&&Array.isArray(fh.rows)&&fh.rows.length&&fhNowSig(fh)!==_fhNowSig) renderFunding(); }
 function fhColor(v,cap){
   if(v==null||!isFinite(v)) return null;                       // null = unknown; the caller hatches it
   const t=clamp(Math.abs(v)/(cap>0?cap:1e-12),0,1);
@@ -1120,14 +1136,16 @@ function fhHeatSvg(fh,rows,tf){
   // The label gutter is measured, not guessed: a fixed one clipped the longest ticker on the
   // book (BRENTOIL read as "3RENTOIL"), and a half-drawn ticker is worse than a narrower grid.
   let mtk=0; for(const r of rows) if(r.ticker&&r.ticker.length>mtk) mtk=r.ticker.length;
-  const lx=clamp(Math.ceil(mtk*5.7)+9,40,86), rx=64, pt=18, ch=13, pb=26, W=780;
+  const lx=clamp(Math.ceil(mtk*5.7)+9,40,86), rx=126, pt=18, ch=13, pb=26, W=780;   // right gutter holds TWO numbers: window mean, then now
+  const nowMul=apr?FH_HPY:ax.bucketHours, nowTip=apr?'current funding \u2014 this hour\u2019s rate \u00d724\u00d7365, from the live snapshot':`current funding \u2014 this hour\u2019s rate \u00d7 ${ax.bucketHours}h, from the live snapshot`;
   const cw=(W-lx-rx)/nb, H=pt+ch*rows.length+pb;
   const pid='fhg'+(++_hoverSeq);   // one hatch pattern per render — ids must not collide across redraws
   let s=`<svg viewBox="0 0 ${W} ${H.toFixed(1)}" class="sheat fheat" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`+
     `<defs><pattern id="${pid}" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">`+
     `<rect width="4" height="4" fill="var(--panel2)"/><line x1="0" y1="0" x2="0" y2="4" stroke="var(--faint)" stroke-width="1" stroke-opacity=".45"/></pattern></defs>`+
     `<text x="${lx-7}" y="13" text-anchor="end" class="fh-hd">market</text>`+
-    `<text x="${W-4}" y="13" text-anchor="end" class="fh-hd">${apr?'mean APR':'mean / '+esc(tf)}</text>`;
+    `<text x="${W-66}" y="13" text-anchor="end" class="fh-hd">${apr?'mean APR':'mean / '+esc(tf)}</text>`+
+    `<text x="${W-4}" y="13" text-anchor="end" class="fh-hd"><title>${esc(nowTip)}</title>${apr?'now APR':'now / '+esc(tf)}</text>`;
   rows.forEach((r,ri)=>{
     const y=pt+ri*ch, cells=fhCells(fh,r,tf), mraw=fhMean(r,tf), mean=mraw==null?null:mraw*(apr?ann:1);
     s+=`<text x="${lx-7}" y="${(y+ch/2+3.3).toFixed(1)}" text-anchor="end" class="fh-tk">${esc(r.ticker)}</text>`;
@@ -1147,7 +1165,11 @@ function fhHeatSvg(fh,rows,tf){
     // Direct label: the row's signed mean per bucket. The sign is the whole point — it says which
     // way the carry runs without asking the reader to separate red from green.
     const flat = mean==null||Math.abs(mean)<zero;   // rounds away -> it is not a direction, so it wears neither colour
-    s+=`<text x="${W-4}" y="${(y+ch/2+3.3).toFixed(1)}" text-anchor="end" class="fh-nv ${flat?'sec':(mean>0?'neg':'pos')}">${esc(fhPct(mean,dp))}</text>`;
+    s+=`<text x="${W-66}" y="${(y+ch/2+3.3).toFixed(1)}" text-anchor="end" class="fh-nv ${flat?'sec':(mean>0?'neg':'pos')}">${esc(fhPct(mean,dp))}</text>`;
+    // Now: the live rate in the same unit, same decimals, same sign rule — so the two columns read
+    // as one pair. A market the snapshot has not priced prints a dash, never a zero.
+    const fnow=fhNowOf(r), now=fnow==null?null:fnow*nowMul, nflat=now==null||Math.abs(now)<zero;
+    s+=`<text x="${W-4}" y="${(y+ch/2+3.3).toFixed(1)}" text-anchor="end" class="fh-nv ${nflat?'sec':(now>0?'neg':'pos')}"><title>${esc(r.ticker)} \u00b7 ${esc(nowTip)}</title>${esc(fhPct(now,dp))}</text>`;
   });
   const ay=pt+ch*rows.length;
   s+=`<line x1="${lx}" y1="${(ay+3).toFixed(1)}" x2="${(W-rx).toFixed(1)}" y2="${(ay+3).toFixed(1)}" stroke="var(--grid)" stroke-width="1"/>`;
@@ -1161,6 +1183,7 @@ function fhHeatSvg(fh,rows,tf){
 }
 function renderFundHeat(fh){
   const st=state.analytics.fheat, tf=fhTf(fh), ax=(fh.axis||{})[tf]||{}, apr=fhUnit()==='apr', cap=fhCap(fh,tf);
+  _fhNowSig=fhNowSig(fh);   // what the now column was painted from; the snapshot path repaints only when this moves
   const sorted=fhSortRows(fh.rows||[],tf,st.sort);
   const lim=st.rows==='all'?sorted.length:Math.min(sorted.length,parseInt(st.rows,10)||25);
   const shown=sorted.slice(0,lim);
@@ -1189,13 +1212,13 @@ function renderFundHeat(fh){
      `The resolution buttons change how finely the same rate is sliced, not the quantity: one market reads one number at 1h, 8h and 24h. `+
      `The scale is capped at ±${esc(capPct)} APR — the ${esc(fh.tfDefault||'8h')} grid's own ${pctl}th percentile, shared by all three resolutions so a zoom never repaints a cell; beyond it the cell just saturates. `+
      `Hatched cells are gaps in the funding spine, not flat carry — a bucket needs ≥${cov}% of its hours to print. `+
-     `The number on the right is that row's mean annualized rate over the window. <b>Hover</b> any cell for its rate and what it cost over the bucket.`
+     `The two numbers on the right are that row's mean annualized rate over the window and its <b>current</b> funding (this hour's rate, annualized, from the live snapshot) — now above mean means carry is building. <b>Hover</b> any cell for its rate and what it cost over the bucket.`
     :`One row per market, one column per ${ax.bucketHours}h bucket; a cell is the funding a <b>1× long paid</b> over that bucket — `+
      `<b>red = longs pay</b> (crowded long, carry is a cost), <b>green = longs receive</b> (crowded short, carry pays you to be long). `+
      `The timeframe buttons change the quantity, not the zoom: the same market reads roughly 8× larger per 8h than per 1h. `+
      `The scale is capped at the grid's own ${pctl}th percentile (±${esc(capPct)} per ${esc(tf)}) so one blowout can't flatten everything else; `+
      `beyond that the cell just saturates. Hatched cells are gaps in the funding spine, not flat carry — a bucket needs ≥${cov}% of its hours to print. `+
-     `The number on the right is that row's mean per bucket over the window. <b>Hover</b> any cell for its exact rate, direction and annualized equivalent.`;
+     `The two numbers on the right are that row's mean per bucket over the window and its <b>current</b> funding (this hour's rate × the bucket width, from the live snapshot). <b>Hover</b> any cell for its exact rate, direction and annualized equivalent.`;
   // No sHead: the board IS the tab now, so the tab's own title carries the name. A section header
   // here would print the same sentence twice, one line apart.
   return controls+legend+`<div class="s-card" style="overflow-x:auto">${fhHeatSvg(fh,shown,tf)}</div>`+sCap(capTxt);
@@ -1368,4 +1391,4 @@ function renderSeasonality(se){
   return sHead('Return seasonality by hour','quarantined — pick all, a sector or one name; grey is noise, colored cleared significance')+controls+banner+sCard(seasonBarSvg(v.hours))+sCap(cap);
 }
 function attachSeasonControls(){ const sel=el('seasonsel'); if(sel) sel.addEventListener('change',()=>{ state.analytics.season.sel=sel.value; drawSessions(); }); }
-export { IS_ADMIN, WD_NAMES, _hoverReg, _szCash, applyHash, attachClockControls, attachDowControls, attachLineHover, attachOverlayControls, attachSeasonControls, covPct, featureOn, fp, hoverChart, lcGrid, lcTicks, loadAnalytics, loadFunding, openAdmin, openFunding, renderClassOverlay, renderClocks, renderClusters, renderDow, renderFunding, renderSeasonality, renderSessionDecomp, renderSessions, sCap, sCard, sHead, sLeg, sessDate, syncAnalyticsSlot, syncFundingSlot, tabVisible, toggleViewAsPublic };
+export { IS_ADMIN, WD_NAMES, _hoverReg, _szCash, applyHash, attachClockControls, attachDowControls, attachLineHover, attachOverlayControls, attachSeasonControls, covPct, featureOn, fhLiveRefresh, fp, hoverChart, lcGrid, lcTicks, loadAnalytics, loadFunding, openAdmin, openFunding, renderClassOverlay, renderClocks, renderClusters, renderDow, renderFunding, renderSeasonality, renderSessionDecomp, renderSessions, sCap, sCard, sHead, sLeg, sessDate, syncAnalyticsSlot, syncFundingSlot, tabVisible, toggleViewAsPublic };

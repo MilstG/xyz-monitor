@@ -52,6 +52,25 @@ test("funding heatmap: the annualized read (build 2026.09.16-77) — a multiplie
   assert.ok(css.includes(".fhtf.on,.fhunit.on{") && css.includes(".fhtf+.fhtf,.fhunit+.fhunit{"), "unit buttons styled as a segment");
 });
 
+test("funding heatmap: the now column and the lifted row cap (build 2026.09.20-81)", () => {
+  const fs = require("fs"), path = require("path");
+  const app = require("./_client").clientSource();
+  const pl = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // current funding is read off the client's live snapshot by coin, never off the 60s board payload
+  for (const pin of ["function fhNowOf(r)", "state.rows.get(r.coin)", "function fhNowSig(fh)", "function fhLiveRefresh()"])
+    assert.ok(app.includes(pin), `client missing now-column pin: ${pin}`);
+  assert.ok(app.includes("fhLiveRefresh();   // the funding board's now column reads these rows"), "the snapshot path repaints the column when a rate rolls");
+  assert.ok(/fhNowSig\(fh\)!==_fhNowSig\) renderFunding\(\)/.test(app), "and only when it rolled — not on every 15s snapshot");
+  // same unit as the mean it sits beside: ×8760 annualized, × bucketHours per bucket
+  assert.ok(app.includes("const nowMul=apr?FH_HPY:ax.bucketHours"), "the now column follows the unit on screen");
+  assert.ok(app.includes("'now APR':'now / '+esc(tf)"), "and is headed as such");
+  // an unpriced market is a dash, never a zero
+  assert.ok(app.includes("const fnow=fhNowOf(r), now=fnow==null?null:fnow*nowMul"), "no snapshot row -> null -> em dash");
+  // "all rows" means all rows: the server ships every market with a spine, the client trims
+  assert.ok(pl.includes("const FUNDHEAT_ROWS = 400;"), "the 60-row server cap is gone");
+  assert.ok(app.includes("const FH_ROWOPTS=[['25','top 25'],['50','top 50'],['all','all rows']]"), "the client owns the trim");
+});
+
 test("transport cap: per-universe lanes so a volatile crypto day cannot evict the equity board", () => {
   // The lanes (capPerUniverse, the -85 fix) came back with the crypto engine. This is not
   // housekeeping: crypto's intensity terms are sigma multiples and crypto sigma is 5-20x the
