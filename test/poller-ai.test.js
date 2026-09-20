@@ -1224,3 +1224,58 @@ test("messages -66: the desk digest is per-recipient, deterministic, and off unt
   assert.ok(text.includes("100% right"), "the person summary scores");
   assert.ok(!text.includes("Earnings today"), "no earnings cache, no earnings section — absent, never fabricated");
 });
+
+test("ai report: Anthropic body — effort on models that take it, cached system block, max_tokens stop is a named failure", async () => {
+  const prevProv = process.env.AI_PROVIDER, prevKey = process.env.ANTHROPIC_API_KEY;
+  process.env.AI_PROVIDER = "anthropic"; process.env.ANTHROPIC_API_KEY = "sk-ant-test";
+  try {
+    const calls = [];
+    let px0;
+    const { p, px } = aiTestPoller({ aiFetch: async (url, opts) => {
+      const body = JSON.parse(opts.body); calls.push({ url, body });
+      return { ok: true, json: async () => ({ stop_reason: "end_turn",
+        content: [{ type: "text", text: AI_GOOD(px0, +(px0 * 0.95).toPrecision(6), +(px0 * 1.10).toPrecision(6)) }] }) };
+    } });
+    px0 = px;
+    const g = await p.generateAiReport("xyz:NVDA");
+    assert.ok(g.ok, "Anthropic path must generate: " + (g.error || ""));
+    const b = calls[0].body;
+    assert.equal(b.model, "claude-fable-5");
+    assert.deepEqual(b.output_config, { effort: "high" }, "reports run Fable at high effort via output_config");
+    assert.ok(Array.isArray(b.system) && b.system[0].type === "text" && b.system[0].cache_control && b.system[0].cache_control.type === "ephemeral",
+      "the system prompt rides as a cache_control block so repeat calls read it from the prompt cache");
+    assert.ok(b.system[0].text.length > 1000, "the cached block is the real system prompt");
+    assert.ok(!("thinking" in b) && !("temperature" in b), "body stays minimal otherwise");
+    // the classifier model (Haiku 4.5) does not accept output_config: effort must never be sent there
+    assert.equal(p.anthropicEffortOk("claude-haiku-4-5"), false);
+    assert.equal(p.anthropicEffortOk("claude-opus-4-8"), true);
+    assert.equal(p.anthropicEffortOk("claude-fable-5"), true);
+    // output cut at max_tokens is a failure, not a half-report handed to the validator
+    const { p: p2 } = aiTestPoller({ aiFetch: async () => ({ ok: true, json: async () => ({ stop_reason: "max_tokens",
+      content: [{ type: "text", text: "{\"ai\":{\"read\":\"truncated" }] }) }) });
+    const g2 = await p2.generateAiReport("xyz:NVDA");
+    assert.equal(g2.ok, false);
+    assert.ok(/max_tokens/.test(g2.error), "truncation must be named in the error: " + g2.error);
+  } finally {
+    if (prevProv === undefined) delete process.env.AI_PROVIDER; else process.env.AI_PROVIDER = prevProv;
+    if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prevKey;
+  }
+});
+
+test("AI admin gate: lockout is per caller with a global backstop — a stranger's failures never lock the operator out", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  const prev = process.env.ADMIN_PASSWORD;
+  try {
+    process.env.ADMIN_PASSWORD = "s3cret-pw";
+    const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test" });
+    for (let i = 0; i < 8; i++) p.checkAdminPassword("wrong", "10.0.0.1");
+    assert.equal(p.checkAdminPassword("s3cret-pw", "10.0.0.1").error, "rate", "the guessing IP is locked out");
+    assert.equal(p.checkAdminPassword("s3cret-pw", "10.0.0.2").ok, true, "another caller still gets in with the right password");
+    assert.equal(p.resetAiDay("s3cret-pw", "10.0.0.2").ok, true, "resetAiDay carries the same caller key");
+    // 40 failures spread over many sources trip the global backstop for everyone
+    for (let i = 0; i < 40; i++) p.checkAdminPassword("wrong", "10.1.0." + (i % 20));
+    assert.equal(p.checkAdminPassword("s3cret-pw", "10.9.9.9").error, "rate", "distributed guessing hits the aggregate cap");
+  } finally { if (prev === undefined) delete process.env.ADMIN_PASSWORD; else process.env.ADMIN_PASSWORD = prev; }
+});

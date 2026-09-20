@@ -947,19 +947,6 @@ function freshAccounts(marks) {
   A._dir = dir;
   return A;
 }
-function seedTwo(A) {
-  const g = A.bootstrap("gustavo", "correct-horse-battery");
-  const code = A.mintInvite(g.user.uid, "for lena", 7, "join").invite.code;
-  const l = A.redeem(code, "lena", "another-long-password");
-  return { g: g.user, l: l.user, gTok: g.token, lTok: l.token };
-}
-
-// ===== messages v2: groups, attachments, reactions, search, bridge (build 2026.09.03-50) =======
-function seedDesk(marks) {
-  const A = freshAccounts(marks);
-  const g = A.bootstrap("gus", "correct-horse-battery").user;
-  const mk = (h) => A.redeem(A.mintInvite(g.uid, null, 7, "join").invite.code, h, "another-long-password").user;
-  return { A, g, l: mk("lena"), m: mk("marco"), d: mk("dan") };
-}
-
-module.exports = { classify, companyName, forceRebuild, stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, pearson, meanPairwiseCorr, corrMatrix, studyBreakdown, playbook, confSplit, studyOIFlush, studyFPDiv, offDriftStats, HOUR, DAY, C, blendClosed, f4Doc, F4_BUY, F4_DERIV, F4_PLANSELL, fourHourReturns, tapeRedStats, rvolMulti, spineFrom4h, aiTestPoller, AI_GOOD, zigDaily, ZIG_PTS, aiLevelPoller, normCdf, touchBaseline, studyBars, levelOutcomes, levelStudy, LVL_EDGES, PLACEBO_K, _walk, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, MFE_EDGES, NAKED_HORIZONS, detectWickFill, detectRoundFront, roundStep, candleType, candleEvents, candlePool, pivotPool, anatomyTickerSummary, CANDLE_TYPES, PIVOT_EARLY_H, _sessDomStub, _sessPayload, ACT_TIP_COLS, actClosedRecord, pushHarness, ruleHarness, ctxHarness, BRIEF_CTX, ADM_DOM, ADM_PUSH, runAdmFn, twoUserHarness, trendHarness, clOf, maDaily, maSd, settledPoller, svBars, _p2Harness, briefAuditHarness, mktGroupsFn, mktGroupsFixture, actionMathFns, focusSelect, focusScore, focusGapSigma, focusLevelDist, fhStats, FOCUS_CAP, FOCUS_PER_CLUSTER, focusPreview, focusDiff, FOCUS_PREVIEW_N, foldLiveMark, focus07LaneRig, focusLimits, focusFloorFail, focusGate, FOCUS_HARD_VOL, FOCUS_HARD_OI, FOCUS_BELOW_N, focus04Rig, FOCUS04_FULL, FOCUS04_GRADED, FOCCH_SRC, FOCCH_FIX, focchApi, focus05CloseRig, focColsApi, focCols, _btHarness, _mkPtrPdf, _encPdf, freshAccounts, seedTwo, seedDesk };
+// seedTwo/seedDesk moved into test/accounts.test.js as async fixtures when bootstrap/redeem went
+// async (security batch 2026.09.20); nothing else imported them.
+module.exports = { classify, companyName, forceRebuild, stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, pearson, meanPairwiseCorr, corrMatrix, studyBreakdown, playbook, confSplit, studyOIFlush, studyFPDiv, offDriftStats, HOUR, DAY, C, blendClosed, f4Doc, F4_BUY, F4_DERIV, F4_PLANSELL, fourHourReturns, tapeRedStats, rvolMulti, spineFrom4h, aiTestPoller, AI_GOOD, zigDaily, ZIG_PTS, aiLevelPoller, normCdf, touchBaseline, studyBars, levelOutcomes, levelStudy, LVL_EDGES, PLACEBO_K, _walk, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, MFE_EDGES, NAKED_HORIZONS, detectWickFill, detectRoundFront, roundStep, candleType, candleEvents, candlePool, pivotPool, anatomyTickerSummary, CANDLE_TYPES, PIVOT_EARLY_H, _sessDomStub, _sessPayload, ACT_TIP_COLS, actClosedRecord, pushHarness, ruleHarness, ctxHarness, BRIEF_CTX, ADM_DOM, ADM_PUSH, runAdmFn, twoUserHarness, trendHarness, clOf, maDaily, maSd, settledPoller, svBars, _p2Harness, briefAuditHarness, mktGroupsFn, mktGroupsFixture, actionMathFns, focusSelect, focusScore, focusGapSigma, focusLevelDist, fhStats, FOCUS_CAP, FOCUS_PER_CLUSTER, focusPreview, focusDiff, FOCUS_PREVIEW_N, foldLiveMark, focus07LaneRig, focusLimits, focusFloorFail, focusGate, FOCUS_HARD_VOL, FOCUS_HARD_OI, FOCUS_BELOW_N, focus04Rig, FOCUS04_FULL, FOCUS04_GRADED, FOCCH_SRC, FOCCH_FIX, focchApi, focus05CloseRig, focColsApi, focCols, _btHarness, _mkPtrPdf, _encPdf, freshAccounts };

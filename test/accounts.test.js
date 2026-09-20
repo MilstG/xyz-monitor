@@ -6,8 +6,7 @@ const { HOUR, C, freshAccounts } = require("./_shared");
 
 // The account-creating fixtures live here now, not in _shared.js: hashPw runs on the threadpool
 // (security batch 2026.09.20), so bootstrap/redeem/claim/login/setPassword/otpVerify are async and
-// every seed has to be awaited. TODO(_shared.js owner): seedTwo/seedDesk there are the pre-async
-// copies and nothing imports them any more — delete them or make them await these calls.
+// every seed has to be awaited (the pre-async copies in _shared.js are gone).
 async function seedTwo(A) {
   const g = await A.bootstrap("gustavo", "correct-horse-battery");
   const code = A.mintInvite(g.user.uid, "for lena", 7, "join").invite.code;

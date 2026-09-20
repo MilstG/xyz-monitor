@@ -2514,7 +2514,7 @@ async function buildServer() {
   // 8 KB body cap — the payload is just { password }; anything larger is malformed or hostile (413).
   fastify.post("/api/ai-reset", { bodyLimit: 8 * 1024 }, async (req, reply) => {
     reply.header("cache-control", "no-store");
-    const r = poller.resetAiDay(String((req.body || {}).password || ""));
+    const r = poller.resetAiDay(String((req.body || {}).password || ""), req.ip);
     return reply.code(r.ok ? 200 : (r.error === "rate" ? 429 : r.error === "not-configured" ? 503 : 403)).send(r);
   });
   // Admin AI unlock: verify ADMIN_PASSWORD (same constant-time compare + shared lockout as the
@@ -2522,7 +2522,7 @@ async function buildServer() {
   // there is no header/script path. Body is just { password } — 8 KB cap like the reset route.
   fastify.post("/api/ai-unlock", { bodyLimit: 8 * 1024 }, async (req, reply) => {
     reply.header("cache-control", "no-store");
-    const r = poller.checkAdminPassword(String((req.body || {}).password || ""));
+    const r = poller.checkAdminPassword(String((req.body || {}).password || ""), req.ip);
     if (!r.ok) return reply.code(r.error === "rate" ? 429 : r.error === "not-configured" ? 503 : 403).send(r);
     setAiUnlockCookie(reply, req, signAiUnlock(Date.now() + AI_UNLOCK_MS));
     // The terminal path is also an escalation path: someone who proves ADMIN_PASSWORD here gets the

@@ -9787,13 +9787,26 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     marks.sort((a, b) => a.t - b.t);
     return { marks: marks.slice(-20), suppressed };
   }
+  // Anthropic request body. `effort` is only attached to model lines that accept output_config
+  // (Haiku 4.5 does not); "medium" is the API default, so it is omitted rather than sent — the
+  // wire stays identical to the pre-effort body for the default surface.
+  function anthropicEffortOk(model) { return /^claude-(fable|opus-4-8|sonnet-5|mythos)/.test(String(model || "")); }
+  function anthropicBody(model, sys, ctx, maxTok, effort) {
+    const body = { model, max_tokens: maxTok,
+      system: [{ type: "text", text: sys, cache_control: { type: "ephemeral" } }],
+      messages: [{ role: "user", content: "Context:\n" + JSON.stringify(ctx) }] };
+    if (effort && effort !== "medium" && anthropicEffortOk(model)) body.output_config = { effort };
+    return body;
+  }
   async function callModel(model, ctx, opts) {
     // opts.system / opts.maxTokens let lightweight tasks (sector classification) reuse this
     // exact transport — provider switch, refusal handling, timeout — without inheriting the
     // report prompt or its token budget. Absent opts = the report path, byte-identical.
     const sys = (opts && opts.system) || AI_SYSTEM, maxTok = (opts && opts.maxTokens) || AI_MAX_TOKENS;
-    // opts.effort maps to OpenAI's reasoning_effort (low|medium|high) and is silently ignored
-    // on the Anthropic path — Fable's adaptive thinking must not be steered.
+    // opts.effort maps to OpenAI's reasoning_effort (low|medium|high). On Anthropic it becomes
+    // output_config.effort for the models that accept it (Fable 5 / Opus 4.8 / Sonnet 5 lines —
+    // Haiku 4.5 rejects the field, so it is never sent there): reports get the deep pass, the
+    // classifier the cheap one, exactly as on OpenAI.
     const effort = (opts && opts.effort) || null;
     const doFetch = aiFetch || fetch;
     const ctrl = new AbortController();
@@ -9828,9 +9841,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         headers: { "content-type": "application/json", "x-api-key": AI_KEY(),
           "anthropic-version": "2023-06-01" },
         // Deliberately minimal body: Fable rejects some sampling params other models accept, and
-        // its adaptive thinking must be left alone (an explicit thinking:disabled is a 400).
-        body: JSON.stringify({ model, max_tokens: maxTok, system: sys,
-          messages: [{ role: "user", content: "Context:\n" + JSON.stringify(ctx) }] }),
+        // its adaptive thinking must be left alone (an explicit thinking:disabled is a 400). The
+        // system prompt rides as a cache_control block: it is identical across every call of a
+        // surface (the ~4k-token report prompt most of all), so the second call within the cache
+        // window reads it at a tenth of the price; a prompt too short to cache is simply not cached.
+        body: JSON.stringify(anthropicBody(model, sys, ctx, maxTok, effort)),
         signal: ctrl.signal,
       });
       if (!res.ok) { let msg = "HTTP " + res.status; try { const j = await res.json(); if (j && j.error && j.error.message) msg += " — " + j.error.message; } catch (_) {} return { ok: false, error: msg }; }
@@ -9841,6 +9856,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       const text = data && Array.isArray(data.content)
         ? data.content.filter((b) => b && b.type === "text").map((b) => b.text).join("\n") : "";
       if (!text) return { ok: false, error: "empty model response" };
+      // Output cut at max_tokens is never a usable answer here: every consumer parses the whole
+      // body (JSON reports, the brief's sections, the terminal's line protocol), and a truncated
+      // JSON object fails validation in a way that reads like a bad model instead of a small budget.
+      if (data.stop_reason === "max_tokens")
+        return { ok: false, error: "output truncated at max_tokens (" + maxTok + ") — raise the budget for this surface" };
       return { ok: true, text, usage: data.usage || null };
     } catch (e) {
       return { ok: false, error: e && e.name === "AbortError" ? "model call timed out" : ("fetch failed: " + (e && e.message)) };
@@ -10371,20 +10391,29 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // returned. Constant-time compare so a right-length guess can't be timed; only FAILURES
   // count toward a sliding-window lockout, so online brute force over the group's shared
   // endpoint is infeasible while legitimate resets stay free. Fails closed when unconfigured.
-  const ADMIN_WINDOW_MS = 5 * 60 * 1000, ADMIN_MAX_FAILS = 8;
-  const adminFails = [];
-  // Constant-time ADMIN_PASSWORD check with a shared sliding-window lockout. Used by BOTH the
+  const ADMIN_WINDOW_MS = 5 * 60 * 1000, ADMIN_MAX_FAILS = 8, ADMIN_MAX_FAILS_GLOBAL = 40;
+  // Failures are keyed by caller (the client IP the route passes in) so one stranger hammering
+  // the endpoint cannot lock the operator out of their own reset — the old single shared list was
+  // a five-minute denial of service for the price of eight wrong guesses. A global backstop still
+  // caps the aggregate guess rate across every source, so a distributed attacker gains nothing.
+  const adminFails = new Map(), adminFailsAll = [];
+  const adminTrim = (arr, now) => { while (arr.length && arr[0] < now - ADMIN_WINDOW_MS) arr.shift(); return arr; };
+  // Constant-time ADMIN_PASSWORD check with a sliding-window lockout. Used by BOTH the
   // report-budget reset and the AI unlock, so brute-force attempts against either count together.
-  function checkAdminPassword(password) {
+  function checkAdminPassword(password, who) {
     const admin = process.env.ADMIN_PASSWORD || "";
     if (!admin) return { ok: false, error: "not-configured" };
-    const now = Date.now();
-    while (adminFails.length && adminFails[0] < now - ADMIN_WINDOW_MS) adminFails.shift();
-    if (adminFails.length >= ADMIN_MAX_FAILS)
-      return { ok: false, error: "rate", retryMs: ADMIN_WINDOW_MS - (now - adminFails[0]) };
+    const now = Date.now(), key = String(who || "?");
+    adminTrim(adminFailsAll, now);
+    for (const [k, arr] of adminFails) if (!adminTrim(arr, now).length) adminFails.delete(k);
+    const mine = adminFails.get(key) || [];
+    if (mine.length >= ADMIN_MAX_FAILS)
+      return { ok: false, error: "rate", retryMs: ADMIN_WINDOW_MS - (now - mine[0]) };
+    if (adminFailsAll.length >= ADMIN_MAX_FAILS_GLOBAL)
+      return { ok: false, error: "rate", retryMs: ADMIN_WINDOW_MS - (now - adminFailsAll[0]) };
     const a = Buffer.from(String(password || ""), "utf8"), b = Buffer.from(admin, "utf8");
     const okPw = a.length === b.length && require("crypto").timingSafeEqual(a, b);
-    if (!okPw) { adminFails.push(now); return { ok: false, error: "bad-password" }; }
+    if (!okPw) { mine.push(now); adminFails.set(key, mine); adminFailsAll.push(now); return { ok: false, error: "bad-password" }; }
     return { ok: true };
   }
   // ===== feature visibility state (admin panel) =================================================
@@ -10503,8 +10532,8 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (r.ok) r.view = view, r.group = group;
     return r;
   }
-  function resetAiDay(password) {
-    const chk = checkAdminPassword(password);
+  function resetAiDay(password, who) {
+    const chk = checkAdminPassword(password, who);
     if (!chk.ok) return chk;
     aiDayRoll(); aiDay.count = 0; persistAiReports();
     log("AI daily report budget reset by admin");
@@ -14586,6 +14615,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     askBoard,   // terminal Tier-3: NL question -> planner query or grounded analyst answer
     resetAiDay,   // terminal admin command: zero the daily report budget (ADMIN_PASSWORD-gated)
     checkAdminPassword,   // shared ADMIN_PASSWORD verify (+ lockout) — backs the AI unlock route
+    anthropicEffortOk,    // which Anthropic model lines accept output_config.effort (test seam)
     getFlags, getFeatures, setFlag,   // feature-visibility state (admin panel)
     getNavGroups, setNavGroupLabel, setNavViewGroup,   // ribbon menus: rename, and move a tab between them
     getHousing: () => housingCache,   // Housing tab board (FRED-fed, 6h refresh)
