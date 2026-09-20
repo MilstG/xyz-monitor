@@ -7,7 +7,7 @@ import { setHash } from "./alerts.js";
 import { showView } from "./backtest.js";
 import { nowChip } from "./base.js";
 import { loadNews } from "./calendar.js";
-import { DAY, G, activeRows, el, esc, fmtFunding, fmtPct, fmtPrice, fmtUsd, inScope, momColor, regimeReadout, state } from "./core.js";
+import { DAY, G, activeRows, el, esc, fmtFunding, fmtPct, fmtPrice, fmtUsd, inScope, momColor, overlayPop, overlayPush, regimeReadout, state } from "./core.js";
 import { corrColor, dailyReturns, pearson, sparkline } from "./corr.js";
 import { fetchJSON } from "./data.js";
 import { render, sessDrawerHtml, sessEx } from "./markets.js";
@@ -26,6 +26,10 @@ function comoversFor(coin, L){ const me=state.rows.get(coin); if(!me||!me.daily)
     if(a.length<20) continue; const c=pearson(a,b); if(c!=null&&isFinite(c)) res.push([r.ticker,c]); }
   res.sort((x,y)=>y[1]-x[1]); return res; }
 function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.detail=coin;
+  // Remember the opener EVERY open (it was recorded once and never used). A re-open from inside the
+  // drawer keeps the original opener: the element under the caret is about to be rebuilt.
+  { const ae=document.activeElement, dr=el('drawer');
+    if(ae&&ae!==document.body&&!(dr&&dr.contains(ae))){ const tr=ae.closest?ae.closest('tr[data-coin]'):null; state._drawerFrom={el:ae, coin:tr?tr.dataset.coin:null}; } }
   state.focus=coin; updateFocusChip();   // focus survives the drawer closing — it follows you across tabs
   const co=comoversFor(coin,90), pos=co?co.slice(0,6):[], neg=co?co.slice(-6).reverse().filter(x=>x[1]<0):[];
   const closes=r.daily?r.daily.slice(-90).map(k=>parseFloat(k.c)).filter(isFinite):[];
@@ -86,7 +90,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
     <div class="dsec">Top co-movers (90d)</div>${pos.length?pos.map(x=>li(x[0],x[1])).join(''):'<div class="sec" style="font-size:12px">daily history still loading…</div>'}
     <div class="dsec">Top hedges — inverse (90d)</div>${neg.length?neg.map(x=>li(x[0],x[1])).join(''):'<div class="sec" style="font-size:12px">no negative correlations</div>'}`;
   el('drawer').classList.add('show'); el('drawerbg').classList.add('show'); el('drawer').setAttribute('aria-hidden','false');
-  if(!state._drawerFrom) state._drawerFrom=document.activeElement;   // return focus here on close
+  overlayPush('drawer', closeDetail);
   el('dclose').onclick=closeDetail;
   try{ el('dclose').focus({preventScroll:true}); }catch(_){}
   { const b=el('drep'); if(b) b.onclick=()=>{ showView('report'); aiPick(coin); };
@@ -459,6 +463,12 @@ function openSigHistory(ticker){
   runSigHist();
   const p=el('sighist-panel'); if(p) try{ p.scrollIntoView({block:'nearest'}); }catch(_){}
 }
-function closeDetail(){ state.detail=null; el('drawer').classList.remove('show'); el('drawerbg').classList.remove('show'); el('drawer').setAttribute('aria-hidden','true'); setHash(state.view==='markets'?'':state.view); }
+function closeDetail(){ state.detail=null; overlayPop('drawer'); el('drawer').classList.remove('show'); el('drawerbg').classList.remove('show'); el('drawer').setAttribute('aria-hidden','true'); setHash(state.view==='markets'?'':state.view);
+  // Focus goes back where it came from. A table row may have been patched (replaced) while the
+  // drawer was open, so fall back to the row that now carries the same coin.
+  const f=state._drawerFrom; state._drawerFrom=null; if(!f) return;
+  let t=f.el&&f.el.isConnected?f.el:null;
+  if(!t&&f.coin){ const b=el('body'); t=b&&b.querySelector?b.querySelector(`tr[data-coin="${CSS.escape(f.coin)}"]`):null; }
+  if(t&&t.focus) try{ t.focus({preventScroll:true}); }catch(_){} }
 function toggleWatch(coin){ if(state.watch.has(coin)) state.watch.delete(coin); else state.watch.add(coin); savePrefs(); render(); }
 export { closeDetail, openDetail, openSigHistory, runSigHist, shDate, toggleWatch };

@@ -885,7 +885,7 @@ function renderClocks(hc){
   let selHtml=`<select id="clocksel" class="clocksel">`;
   selHtml+=`<optgroup label="Pooled">`+opt('all','All markets',st.sel)+classes.map(c=>opt('class:'+c, c, st.sel)).join('')+`</optgroup>`;
   const byCls={}; (hc.tickers||[]).forEach(t=>{ (byCls[t.assetClass]=byCls[t.assetClass]||[]).push(t); });
-  for(const c of Object.keys(byCls).sort()){ selHtml+=`<optgroup label="${esc(c)}">`+byCls[c].sort((a,b)=>a.ticker<b.ticker?-1:1).map(t=>opt('coin:'+t.coin, t.ticker, st.sel)).join('')+`</optgroup>`; }
+  for(const c of Object.keys(byCls).sort()){ selHtml+=`<optgroup label="${esc(c)}">`+byCls[c].sort((a,b)=>String(a.ticker).localeCompare(String(b.ticker))).map(t=>opt('coin:'+t.coin, t.ticker, st.sel)).join('')+`</optgroup>`; }
   selHtml+=`</select>`;
   const mbtn=(m,l)=>`<button type="button" class="clockmetric${st.metric===m?' on':''}" data-m="${m}">${l}</button>`;
   const controls=`<div class="s-ctrls"><span class="lbl">clock</span>${selHtml}`+

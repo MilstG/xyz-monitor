@@ -13,7 +13,7 @@ import { fmtAge } from "./trend.js";
 // ===== persistence (localStorage; UI prefs only) =====
 let prefsT=null;
 function savePrefs(){ clearTimeout(prefsT); prefsT=setTimeout(()=>{ store.set(PKEY, JSON.stringify({
-  colOrder:state.colOrder, colHidden:[...state.colHidden], layoutV:LAYOUT_V, tf:state.tf, refreshMs2:state.pollMs,
+  colOrder:state.colOrder, colHidden:[...state.colHidden], layoutV:LAYOUT_V, tf:state.tf, refreshMs2:state.refreshMs,
   sortKey:state.sortKey, sortDir:state.sortDir, filterText:state.filter, watch:[...state.watch], watchOnly:!!state.watchOnly, noteOnly:!!state.noteOnly, dvbBasket:state.dvbBasket||null,
   sectGrp:state.sect.grp, grp:state.grp, grpWt:state.grpWt, actOpen2:state.actOpen?1:0,
   filters:{vMin:el('volMin').value,vMax:el('volMax').value,oMin:el('oiMin').value,oMax:el('oiMax').value} }));
@@ -34,8 +34,8 @@ function loadPrefs(){ let p; try{ p=JSON.parse(store.get(PKEY)||'null'); }catch(
   // default in every browser that ever saved prefs (the actOpen trap again), so a saved 60000
   // under it cannot be read as a choice — only a NON-default old value migrates. A deliberate 1m
   // picked from now on persists under the new key and is honored.
-  if(typeof p.refreshMs2==='number'&&p.refreshMs2>0){ state.refreshMs=p.refreshMs2; state.pollMs=p.refreshMs2; }
-  else if(typeof p.refreshMs==='number'&&p.refreshMs>0&&p.refreshMs!==60000){ state.refreshMs=p.refreshMs; state.pollMs=p.refreshMs; }
+  if(typeof p.refreshMs2==='number'&&p.refreshMs2>0) state.refreshMs=p.refreshMs2;
+  else if(typeof p.refreshMs==='number'&&p.refreshMs>0&&p.refreshMs!==60000) state.refreshMs=p.refreshMs;
   if(p.sortKey&&COL_BY_KEY[p.sortKey]){ state.sortKey=p.sortKey; state.sortDir=p.sortDir==='asc'?'asc':'desc'; }
   if(p.grp==='sectors'||p.grp==='industries'||p.grp==='names') state.grp=p.grp;   // the drill filter is deliberately NOT persisted — a reload always lands on the full lens
   state.actOpen = p.actOpen2===undefined ? true : !!p.actOpen2;   // -03: open unless explicitly collapsed. New key on purpose — the -02 key (actOpen) stored the unchosen collapsed DEFAULT in every browser that saved prefs, so honoring it would pin the strip shut for exactly the people who never chose that. The old key is ignored, not migrated.

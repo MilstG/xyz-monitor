@@ -5,7 +5,7 @@
 import { IS_ADMIN, featureOn } from "./admin.js";
 import { pushToast } from "./alerts.js";
 import { showView } from "./backtest.js";
-import { G, el, esc, fmtPrice, state } from "./core.js";
+import { G, el, esc, fmtPrice, overlayPop, overlayPush, state } from "./core.js";
 import { ratioImageSvg } from "./corr.js";
 import { fetchJSON } from "./data.js";
 import { openDetail } from "./drawer.js";
@@ -58,15 +58,17 @@ async function dmRefreshOpen(){
 async function dmLoadOlder(){
   const id=dmState.sel; if(!id) return;
   const arr=dmMsgs(id); if(!arr.length) return;
-  const anchor=arr[0].id;
+  const anchor=arr[Math.max(0,arr.length-_dmWin)].id;   // the top of what is showing stays put
+  const keepTop=()=>{ const elm=document.querySelector('.dm-msg[data-mid="'+anchor+'"]'); if(elm) elm.scrollIntoView({block:'start'}); };
+  // Cached but outside the window: widen the window, no fetch.
+  if(arr.length>_dmWin){ _dmWin=Math.min(arr.length,_dmWin+DM_WINDOW); dmRenderNow(); keepTop(); return; }
   try{
-    const d=await fetchJSON('/api/dm/'+encodeURIComponent(id)+'?before='+encodeURIComponent(anchor)+'&limit=100');
+    const d=await fetchJSON('/api/dm/'+encodeURIComponent(id)+'?before='+encodeURIComponent(arr[0].id)+'&limit='+DM_WINDOW);
     if(d&&d.ok){
+      _dmWin+=(d.messages||[]).length;   // the page just fetched is the page being asked for — show it
       dmMerge(d.messages);
       const info=dmState.info.get(id); if(info) info.more=!!d.more;
-      dmRender();
-      const elm=document.querySelector('.dm-msg[data-mid="'+anchor+'"]');
-      if(elm) elm.scrollIntoView({block:'start'});
+      dmRenderNow(); keepTop();
     }
   }catch(_){ }
 }
@@ -135,17 +137,29 @@ function dmThread(id){ return dmState.threads.find(t=>t.id===id)||null; }
 function dmMsgs(id){ let a=dmState.msgs.get(id); if(!a){ a=[]; dmState.msgs.set(id,a); } return a; }
 // Merge by id, newest wins: an edit, a reaction or a tombstone arrives as the same id with new
 // fields, so a blind push would render the message twice — once stale.
+// The log is WINDOWED: a thread paints its newest DM_WINDOW messages and the "older" pager walks
+// back (locally first, then the server's before= pages). The per-thread cache is capped at
+// DM_CACHE newest — a conversation that lives for days used to keep every message ever merged.
+// The open thread's cap stretches to whatever the pager has walked to, so paging never trims
+// what it just fetched.
+const DM_WINDOW=100, DM_CACHE=500;
+let _dmWin=DM_WINDOW;   // how many of the open thread's messages the log shows; reset on every open
 function dmMerge(list){
+  const touched=new Set(); let added=0; const updated=[];
   for(const m of (list||[])){
     const arr=dmMsgs(m.thread);
     const i=arr.findIndex(x=>x.id===m.id);
-    if(i>=0) arr[i]=m; else arr.push(m);
+    if(i>=0){ arr[i]=m; if(m.thread===dmState.sel) updated.push(m.id); } else { arr.push(m); added++; }
+    touched.add(m.thread);
     // The sync cursor is deliberately NOT advanced here. It is global across threads, and a
     // single-thread history fetch advancing it meant opening thread A skipped every not-yet-
     // synced lower-id message in thread B. Only dmSync, which sees all threads, moves it; a
     // message merged twice is a no-op by the id-dedupe above.
   }
-  for(const [,arr] of dmState.msgs) arr.sort((a,b)=>a.id-b.id);
+  for(const [id,arr] of dmState.msgs){ if(!touched.has(id)) continue; arr.sort((a,b)=>a.id-b.id);
+    const cap=id===dmState.sel?Math.max(DM_CACHE,_dmWin):DM_CACHE;
+    if(arr.length>cap){ arr.splice(0,arr.length-cap); const info=dmState.info.get(id); if(info) info.more=true; } }   // what was dropped is still on the server: the pager can re-fetch it
+  return {added, updated};
 }
 
 async function dmLoad(){
@@ -197,7 +211,7 @@ async function dmSync(){
     const prevCursor=dmState.cursor||0;
     const d=await fetchJSON('/api/dm/sync?since='+encodeURIComponent(prevCursor));
     if(d&&d.ok){
-      dmMerge(d.messages);
+      const chg=dmMerge(d.messages);
       if(d.threads) dmState.threads=d.threads;
       if(d.cursor>dmState.cursor) dmState.cursor=d.cursor;
       if(d.more) _dmSyncQueued=true;   // the server truncated: come straight back for the rest
@@ -221,7 +235,9 @@ async function dmSync(){
       // concluded delivery itself was broken. Reading is being here with the tab visible.
       if(state.view==='dm'&&dmState.sel&&!document.hidden
         &&(d.messages||[]).some(m=>m.thread===dmState.sel&&!m.mine)) dmMarkRead(dmState.sel);
-      if(state.view==='dm') dmRender();
+      // Nothing NEW on the open thread (a reaction, an edit, a read receipt): touch only those rows.
+      if(state.view==='dm'){ if(chg.added||!dmState.sel||dmState.results||dmState.mode!=='chat') dmRender();
+        else { for(const id of chg.updated) dmPatchMsg(id); dmPatchReceipt(); } }
     }
   }catch(_){ /* the next frame or the next open retries; a failed sync is never fatal */ }
   finally{ _dmSyncing=false; if(_dmSyncQueued){ _dmSyncQueued=false; dmSync(); } }
@@ -232,10 +248,27 @@ async function dmSync(){
 function dmTypingFrame(t){
   if(!t||!t.thread) return;
   dmState.typing.set(t.thread,{uids:(t.uids||[]).filter(u=>u!==(dmState.me&&dmState.me.uid)),at:Date.now()});
-  if(state.view==='dm'&&dmState.sel===t.thread) dmRender();
+  dmPatchTyping(t.thread);
   setTimeout(()=>{ const e=dmState.typing.get(t.thread);
-    if(e&&Date.now()-e.at>=5500){ dmState.typing.delete(t.thread); if(state.view==='dm') dmRender(); } },6000);
+    if(e&&Date.now()-e.at>=5500){ dmState.typing.delete(t.thread); dmPatchTyping(t.thread); } },6000);
 }
+// A typing frame arrives on every keystroke at the other end; it used to rebuild the whole panel.
+// The line has its own slot under the log, so only that slot is rewritten.
+function dmPatchTyping(id){ if(state.view!=='dm'||dmState.sel!==id) return; const box=el('dm-typing'); if(box) box.innerHTML=dmTypingLine(id); }
+// One message changed in place (a reaction, an edit, a tombstone): rewrite that row only.
+function dmPatchMsg(id){ const t=dmThread(dmState.sel); if(!t) return;
+  const elm=document.querySelector('#dm-log .dm-msg[data-mid="'+(+id)+'"]'); if(!elm) return;
+  const arr=dmMsgs(t.id), i=arr.findIndex(x=>x.id===id); if(i<0) return;
+  elm.outerHTML=dmMessageHtml(arr[i],t,arr[i-1]); }
+// "seen by" under your last message rides the thread list, not a message: rewrite that line only.
+function dmReceiptHtml(t, arr){
+  const lastMine=[...arr].reverse().find(x=>x.mine&&!x.sys);
+  const seenBy=(t.seen||[]).filter(x=>lastMine&&x.readMsgId>=lastMine.id).map(x=>x.handle);
+  return lastMine?('<div class="dm-seen">'+(seenBy.length
+    ?('seen by '+esc(seenBy.join(', ')))
+    :(t.kind!=='dm'?'sent':'sent \u00b7 not read yet'))+'</div>'):''; }
+function dmPatchReceipt(){ const t=dmThread(dmState.sel); if(!t) return; const cur=document.querySelector('#dm-log .dm-seen'); if(!cur) return;
+  const html=dmReceiptHtml(t, dmMsgs(t.id)); if(html&&cur.outerHTML!==html) cur.outerHTML=html; }
 function dmTypingLine(threadId){
   const e=dmState.typing.get(threadId);
   if(!e||Date.now()-e.at>6000||!e.uids.length) return '';
@@ -247,13 +280,13 @@ async function dmOpenThread(id){
   // Whatever is in the box belongs to the thread being left, not the one being opened.
   if(dmState.sel&&dmState.sel!==id){ const ta=el('dm-input'); if(ta) dmDraftSave(dmState.sel,ta.value); }
   dmState.sel=id; dmState.editing=null; dmState.replying=null; dmState.picking=false; dmState.manage=false;
-  dmState.results=null; dmState.pendingPeer=null; dmState.pendingFile=null; dmState.mode='chat';
+  dmState.results=null; dmState.pendingPeer=null; dmState.pendingFile=null; dmState.mode='chat'; _dmWin=DM_WINDOW;
   // Where "new" starts is decided NOW, before markRead moves the watermark: the divider draws at
   // the read position this open found, and stays put while you read past it.
   { const th0=dmThread(id);
     dmState.unreadMark=(th0&&th0.unread>0)?{thread:id,after:+th0.myRead||0}:null;
     dmState.scrollToNew=!!dmState.unreadMark; }
-  dmRender();
+  dmRenderNow();
   { const ta=el('dm-input'); if(ta){ ta.value=dmDraftGet(id); dmAutoGrow(ta); } }
   try{
     const d=await fetchJSON('/api/dm/'+encodeURIComponent(id));
@@ -713,7 +746,7 @@ async function dmStartWith(uid){
   }
   // No thread until there is a message: an empty conversation in the rail is a row that says
   // nothing happened. The composer targets the member directly and the thread appears on send.
-  dmState.picking=false; dmState.sel=null; dmState.pendingPeer=uid; dmState.results=null; dmRender();
+  dmState.picking=false; dmState.sel=null; dmState.pendingPeer=uid; dmState.results=null; dmRenderNow();
   const ta=el('dm-input'); if(ta) ta.focus();
 }
 
@@ -1370,9 +1403,20 @@ async function dmFetchCalls(){
   const d=await fetchJSON('/api/dm/calls?limit=500'+by); if(d&&d.ok) dmState.calls=d;
 }
 
+// Throttled: the first call in a frame paints at once (callers read the composer straight after),
+// every further call in the same frame folds into one paint on the next frame — a burst of sync
+// frames, receipts and typing hints used to rebuild the panel once per event.
+let _dmRaf=0, _dmDirty=false;
 function dmRender(){
+  if(_dmRaf){ _dmDirty=true; return; }
+  dmRenderNow();
+  if(typeof requestAnimationFrame==='function') _dmRaf=requestAnimationFrame(()=>{ _dmRaf=0; if(_dmDirty){ _dmDirty=false; dmRender(); } })||0;
+}
+function dmRenderNow(){
   const host=el('dm-body'); if(!host) return;
   const keep=dmCapture();
+  // Search results are a layer over the conversation: Escape backs out through the overlay stack.
+  if(dmState.results||dmState.searching) overlayPush('dm-search',()=>{ dmState.q=''; dmState.results=null; dmState.searching=false; dmRender(); }); else overlayPop('dm-search');
   if(!dmSignedIn()){
     host.innerHTML='<div class="msg">Messages need an account. '
       +'<a href="/login">Sign in</a> — or ask the operator for an invite link.'
@@ -1417,15 +1461,11 @@ function dmRender(){
     main='<div class="dm-log" id="dm-log"><div class="dm-empty">'
       +(dmState.threads.length?'Pick a conversation.':'No conversations yet — press <b>+ new</b>.')+'</div></div>';
   }else{
-    const arr=dmMsgs(t.id);
+    const all=dmMsgs(t.id), arr=all.length>_dmWin?all.slice(-_dmWin):all;   // the window; pins and the receipt read the whole cache
     // "Seen" only under the LAST message you sent: a receipt on every line is noise, and the only
     // question it answers is whether the thing you just said has landed.
-    const lastMine=[...arr].reverse().find(x=>x.mine&&!x.sys);
-    const seenBy=(t.seen||[]).filter(x=>lastMine&&x.readMsgId>=lastMine.id).map(x=>x.handle);
-    const receipt=lastMine?('<div class="dm-seen">'+(seenBy.length
-      ?('seen by '+esc(seenBy.join(', ')))
-      :(t.kind!=='dm'?'sent':'sent \u00b7 not read yet'))+'</div>'):'';
-    const pinned=(t.pins?arr.filter(x=>x.pinned):[]);
+    const receipt=dmReceiptHtml(t, all);
+    const pinned=(t.pins?all.filter(x=>x.pinned):[]);
     // On a topic board the FIRST pinned message is the standing post — the thesis the topic was
     // opened to argue — rendered in full at the top rather than as a one-line strip row.
     const thesis=(t.kind==='board'&&pinned.length)?pinned[0]:null;
@@ -1453,7 +1493,7 @@ function dmRender(){
         parts.push('<div class="dm-day dm-newmark"><span>new</span></div>'); newMarked=true; }
       parts.push(dmMessageHtml(m,t,p));
     }
-    const older=(info&&info.more&&arr.length)
+    const older=(((info&&info.more)||all.length>arr.length)&&arr.length)
       ?'<div class="dm-more"><button type="button" class="dm-tool" id="dm-older">↑ load older messages</button></div>':'';
     const log=(arr.length?older+parts.join('')+receipt:'<div class="dm-empty">No messages yet.</div>')+dmLocalHtml(t.id);
     const grp=t.kind==='group'||t.kind==='board';
@@ -1479,7 +1519,7 @@ function dmRender(){
       +'<button type="button" class="btn dm-mutebtn" id="dm-close" title="Close this conversation \u2014 it leaves your list; the history stays and it comes back the moment either of you writes again.">close</button>'
       +'</span></div>'
       +dmManageHtml(info)+thesisHtml+pinStrip
-      +'<div class="dm-log" id="dm-log">'+log+'</div>'+dmTypingLine(t.id);
+      +'<div class="dm-log" id="dm-log">'+log+'</div><div id="dm-typing">'+dmTypingLine(t.id)+'</div>';
   }
 
   const canWrite=!!(t||pendingPeer)&&!dmState.results&&!dmState.searching&&dmState.mode!=='calls';
@@ -1583,8 +1623,8 @@ function dmRender(){
       else if(e.key==='Tab'&&/^\//.test(ta.value)){ e.preventDefault(); dmState.compIdx=0; if(dmCmdPop(ta)){ const o=el('dm-mpop').querySelector('[data-dmcomp]'); if(o) dmCompPick(o.dataset.dmcomp); } return; }
       // Enter sends, Shift+Enter is a newline. A chat box that needs a mouse to send is a form.
       if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); dmSend(); }
-      if(e.key==='Escape'&&dmState.editing){ dmState.editing=null; ta.value=dmDraftGet(dmState.sel)||''; dmAutoGrow(ta); dmRender(); }
-      else if(e.key==='Escape'&&dmState.replying){ dmState.replying=null; dmRender(); }
+      if(e.key==='Escape'&&dmState.editing){ e.stopPropagation(); dmState.editing=null; ta.value=dmDraftGet(dmState.sel)||''; dmAutoGrow(ta); dmRender(); }
+      else if(e.key==='Escape'&&dmState.replying){ e.stopPropagation(); dmState.replying=null; dmRender(); }
     });
     // A pasted screenshot is the desk's most common attachment — straight from the clipboard to
     // the pending chip, no save-to-disk detour.
@@ -1604,8 +1644,7 @@ function dmRender(){
     });
   }
   const q=el('dm-q');
-  if(q){ q.addEventListener('input',()=>dmSearchInput(q.value));
-    q.addEventListener('keydown',(e)=>{ if(e.key==='Escape'){ dmState.q=''; dmState.results=null; dmRender(); } }); }
+  if(q) q.addEventListener('input',()=>dmSearchInput(q.value));   // Escape: the 'dm-search' overlay (core.js stack) clears the results
   { const w=el('dm-wadd');
     if(w) w.addEventListener('keydown',(e)=>{
       if(e.key==='Enter'&&w.value.trim()) dmWatch(w.value.trim(),true);
@@ -1701,7 +1740,7 @@ function dmWire(){
       else pushToast('That market is not on the board right now');
       return; }
     const rp=e.target.closest('[data-dmreply]');
-    if(rp){ dmState.replying=+rp.dataset.dmreply; dmState.editing=null; dmRender();
+    if(rp){ dmState.replying=+rp.dataset.dmreply; dmState.editing=null; dmRenderNow();
       const ta=el('dm-input'); if(ta) ta.focus(); return; }
     if(e.target.closest('#dm-cancelreply')){ dmState.replying=null; dmRender(); return; }
     const q=e.target.closest('[data-dmq]');
@@ -1774,6 +1813,7 @@ function dmWire(){
 // outer handler guarantees all three, which is why none of it is re-checked here.
 function dmKeys(e){
   if(e.key==='Escape'){
+    if(e.defaultPrevented) return;   // the overlay stack already spent this Escape (search results, a modal)
     if(dmState.mode==='calls'){ dmState.mode='chat'; dmRender(); }
     else if(dmState.results){ dmState.q=''; dmState.results=null; dmRender(); }
     else if(dmState.picking||dmState.manage){ dmState.picking=false; dmState.manage=false; dmRender(); }
@@ -1814,7 +1854,7 @@ export function __boot_messages_14817() {
 // a conversation is on screen, re-pull its page every 45s: dmMerge replaces rows by id, so every
 // visible stamp (and the calls view) re-marks against the current price.
 setInterval(async ()=>{
-  if(!dmSignedIn()||state.view!=='dm') return;
+  if(document.hidden||!dmSignedIn()||state.view!=='dm') return;   // nobody is reading a hidden tab; the visibilitychange sync catches up
   try{
     await dmLoad();   // presence, thread list and the pip stay fresh while the tab sits open
     if(dmState.mode==='calls') await dmFetchCalls();

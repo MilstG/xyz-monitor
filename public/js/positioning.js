@@ -79,7 +79,7 @@ function renderRegime(reg, sel){
 function lvlPct(x){ return x==null?'—':(x*100).toFixed(1)+'%'; }
 // scope selector shared by the study panels: pooled default, or one name (within-name time series)
 function studyScopeSel(id, byTicker, sel){
-  const opts=Object.entries(byTicker||{}).map(([coin,v])=>({coin,tk:v.ticker})).sort((a,b)=>a.tk<b.tk?-1:1);
+  const opts=Object.entries(byTicker||{}).map(([coin,v])=>({coin,tk:v.ticker})).sort((a,b)=>String(a.tk).localeCompare(String(b.tk)));
   return `<select id="${id}" class="clocksel"><option value="">All equities — pooled</option>`+
     opts.map(o=>`<option value="${esc(o.coin)}"${sel===o.coin?' selected':''}>${esc(o.tk)}</option>`).join('')+`</select>`;
 }
