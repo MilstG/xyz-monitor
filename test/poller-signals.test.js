@@ -408,8 +408,11 @@ test("HTF shadow batch 2: failbrk mirror, pead reaction gate, fundext restored a
   assert.ok(pd.stop < 107 && pd.target > 107, "long geometry: stop below, target above");
   assert.ok(Math.abs(pd.stop - 106 * 0.98) < 1e-6, "stop 1σ back through the reaction close");
   assert.ok(Math.abs(pd.target - 107 * 1.03) < 1e-6, "target = half the reaction further from the mark");
-  const printsA = [{ t: "X", d: dayOf(daily[26].t), s: "AMC" }];
-  assert.ok(C.detectPead(printsA, daily, 107, 2), "AMC books the NEXT bar as the reaction — same convention as earnReactionsFor");
+  // Re-baselined (AMC timing fix): a 16:05 ET AMC print sits inside its own UTC-day bar, so the print
+  // day's bar IS the reaction bar for AMC too — same convention as earnReactionsFor.
+  const printsA = [{ t: "X", d: dayOf(daily[27].t), s: "AMC" }];
+  assert.ok(C.detectPead(printsA, daily, 107, 2), "AMC books the print day's OWN bar as the reaction — same convention as earnReactionsFor");
+  assert.equal(C.detectPead([{ t: "X", d: dayOf(daily[26].t), s: "AMC" }], daily, 107, 2), null, "dating the print a day early reads a flat bar: no reaction");
   assert.equal(C.detectPead(printsB, daily, 107, 5), null, "a reaction under 1.5σ is noise, not a REACTION");
   const incomplete = daily.slice(0, 28);   // reaction bar is the LAST bar — session not complete
   assert.equal(C.detectPead(printsB, incomplete, 106, 2), null, "no entry until the reaction session is complete");

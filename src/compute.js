@@ -25,10 +25,25 @@ function linregR2(ys) {
   for (let i = 0; i < n; i++) { const yh = slope * i + b; sr += (ys[i] - yh) ** 2; st += (ys[i] - my) ** 2; }
   return { slope, r2: st > 0 ? 1 - sr / st : 0 };
 }
-function priceAt(c, target, tol) {
+// Reference price "as of" `target` from object-shape hourly rows ({t, c}, t = the bar's OPEN).
+// A row's close is the print at t + width, so the level that existed at `target` is the close of
+// the LAST bar that had CLOSED by then. The previous rule matched the bar whose OPEN sat nearest
+// the target, which is one bar late everywhere and catastrophically so at the short end: with the
+// forming bar in the spine, at :45 past the hour "1h ago" resolved to the forming bar itself, whose
+// close is the live mark, so the "1h %" column read the change since the top of the hour. Bars
+// whose close is after `now` (the forming bar) are never a reference. `tol` keeps its old meaning —
+// how stale a reference may be before an honest null — measured from the bar's close.
+function priceAt(c, target, tol, now, width) {
   if (!c || !c.length) return null;
+  const W = width > 0 ? width : 3600 * 1000;
   let best = null, bd = Infinity;
-  for (const k of c) { const d = Math.abs(k.t - target); if (d < bd) { bd = d; best = k; } }
+  for (const k of c) {
+    const close = +k.t + W;
+    if (now != null && close > now) continue;          // still forming at `now`: not a reference
+    const d = target - close;
+    if (d < 0 || d >= bd) continue;                    // closed at/before the target, latest such wins
+    bd = d; best = k;
+  }
   if (!best || bd > tol) return null;
   const v = parseFloat(best.c);
   return isFinite(v) ? v : null;
@@ -36,11 +51,12 @@ function priceAt(c, target, tol) {
 
 // Reference prices (1h/4h/7d/30d) + momentum/vol features from ~30d of hourly candles.
 function featuresFromHourly(c, now, HOUR, DAY) {
+  // Each reference is the close of the last bar that ended at or before now - horizon (see priceAt).
   const ref = {
-    p1h: priceAt(c, now - 1 * HOUR, 95 * 60 * 1000),
-    p4h: priceAt(c, now - 4 * HOUR, 3 * HOUR),
-    p7d: priceAt(c, now - 7 * DAY, 4 * HOUR),
-    p30d: priceAt(c, now - 30 * DAY, 6 * HOUR),
+    p1h: priceAt(c, now - 1 * HOUR, 95 * 60 * 1000, now, HOUR),
+    p4h: priceAt(c, now - 4 * HOUR, 3 * HOUR, now, HOUR),
+    p7d: priceAt(c, now - 7 * DAY, 4 * HOUR, now, HOUR),
+    p30d: priceAt(c, now - 30 * DAY, 6 * HOUR, now, HOUR),
   };
   const rets = [], dayMap = new Map(), dayHLC = new Map();
   let prev = null, hi = -Infinity, lo = Infinity, vwNum = 0, vwDen = 0;
@@ -318,12 +334,19 @@ function pearson(a, b) {
 // Mean pairwise daily-return correlation across a set of series over the trailing `Ldays`.
 // Same overlap rule as the client correlation tab (>= max(15, half the window)), so the strip's
 // number and the matrix agree. Returns { corr, pairs } — corr is null until enough pairs qualify.
-function meanPairwiseCorr(seriesList, Ldays) {
-  const cutoff = Math.floor(Date.now() / 86400000) - Ldays;
+// `now` (optional): the series are the raw daily spines, whose last bar is TODAY's in-progress
+// candle; its partial-day "return" is a different animal from the closed-day returns around it
+// (a few hours of drift, re-sampled every rebuild) and must not enter a regime correlation. With
+// `now` supplied, a bar whose UTC day has not ended (t + DAY > now) is dropped — the same rule
+// closedDailyCloses applies. Absent, the old behaviour stands (cutoff from the wall clock, no trim).
+function meanPairwiseCorr(seriesList, Ldays, now) {
+  const nowMs = now == null ? Date.now() : now;
+  const cutoff = Math.floor(nowMs / 86400000) - Ldays;
+  const openDay = now == null ? Infinity : Math.floor(nowMs / 86400000);   // today's day index: still forming
   const minOv = Math.max(15, Math.floor(Ldays * 0.5));
   const maps = seriesList.map((s) => {
     const m = dailyLogReturns(s), f = new Map();
-    for (const [d, v] of m) if (d >= cutoff) f.set(d, v);
+    for (const [d, v] of m) if (d >= cutoff && d < openDay) f.set(d, v);
     return f;
   });
   let sum = 0, n = 0;
@@ -453,8 +476,13 @@ function usMarketCalendar(y) {
     lastWd(y, 5, 1), observedHol(y, 6, 19), observedHol(y, 7, 4), nthWd(y, 9, 1, 1),
     nthWd(y, 11, 4, 4), observedHol(y, 12, 25),
   ];
+  // A Saturday New Year's Day is NOT observed on Friday Dec 31 (NYSE Rule 7.2: no Friday
+  // observance when a holiday falls on a Saturday if that Friday is the last business day of the
+  // year — the exchange was open Fri 2021-12-31 and will be Fri 2027-12-31). The generic
+  // observedHol(y, 1, 1) already returns Dec 31 of y-1 for that case and the w.y === y filter
+  // above drops it, which is the correct outcome; a line that re-added it from the NEXT year's
+  // Jan 1 was closing a session that trades.
   for (const w of closed) if (w.y === y) m.set(K(w), 2);
-  const ny = observedHol(y + 1, 1, 1); if (ny.y === y) m.set(K(ny), 2);   // next New Year observed Fri Dec 31
   const early = [];
   const j4wd = wallWd(y, 7, 4);
   if (j4wd >= 2 && j4wd <= 5) early.push({ y, mo: 7, d: 3 });             // Jul 3 early when Jul 4 is Tue..Fri
@@ -629,17 +657,37 @@ function cryptoWeekendAnchors(startMs, endMs) {
 // For each defined event, scan a market's OWN history, find every occurrence, and measure what
 // happened next. The output is an honest conditional base rate — median forward return, hit
 // rate, and (crucially) sample size — not a prediction. n < 8 is reported, never hidden.
-function summarizeEvents(rets) {
+// `med` is the ordinary median (mean of the two middle values on an even n) — the SAME definition
+// median() and _stats' q(0.5) use everywhere else. The old upper-median (s[floor(n/2)]) made a
+// two-event study read +3 where the rest of the code would say +1, so the same numbers summarized
+// two ways disagreed. `netRets` (optional, study C): the same events net of the funding a 1x
+// position paid over the horizon, signed with the event direction; when present, `medNet` sits
+// next to `med`. Absent (no funding supplied), medNet is undefined — never fabricated as gross.
+function summarizeEvents(rets, netRets) {
   const v = rets.filter(Number.isFinite);
   if (!v.length) return { n: 0 };
-  const s = [...v].sort((a, b) => a - b);
-  const med = s[Math.floor(s.length / 2)];
-  return {
+  const out = {
     n: v.length,
-    med: +med.toFixed(2),
+    med: +median(v).toFixed(2),
     hit: +(v.filter((x) => x > 0).length / v.length).toFixed(2),
     avg: +(v.reduce((a, b) => a + b, 0) / v.length).toFixed(2),
   };
+  if (Array.isArray(netRets)) { const nv = netRets.filter(Number.isFinite); if (nv.length) out.medNet = +median(nv).toFixed(2); }
+  return out;
+}
+// ---- study C: net-of-funding R --------------------------------------------------------------
+// A perp event study measures price only; the position that would have captured it also paid (or
+// received) funding every hour of the horizon. netEventR converts one event's R into the R a 1x
+// position in the event direction would have banked: R − dir·Σfunding·100/σ, where Σfunding is
+// the fraction a 1x LONG pays over [t0, t1) (fundingOver's convention; a short receives it). The
+// event's close time is its bar's open + DAY (closes carry the bar's open), so the horizon over
+// which funding accrues is [closes[i][0] + DAY, closes[i+k][0] + DAY). Returns null without
+// funding rows for the horizon so `medNet` stays honest rather than reading as gross.
+function netEventR(funding, dir, fPct, sd, t0, t1) {
+  if (!Array.isArray(funding) || !funding.length || !(sd > 0) || !Number.isFinite(fPct)) return null;
+  const f = fundingOver(funding, t0, t1);
+  if (!f.any) return null;
+  return +((dir * (fPct - f.sum * 100)) / sd).toFixed(3);
 }
 function retStd(rets, min) {
   const v = rets.filter(Number.isFinite);
@@ -687,21 +735,46 @@ function fwdRet(closes, i, k) {
 }
 // Big-move continuation: |1d return| >= 2 sigma of the trailing 30 daily returns. Forward
 // returns are SIGNED IN THE DIRECTION of the move: positive = continuation, negative = fade.
-function studyBigMove(closes) {
-  const rets = dailyRets(closes), d1 = [], d3 = [];
+// Every daily event study below takes an optional `funding` ([[t, hourlyRate], ...], the shape
+// fundingOver reads); when supplied, each horizon's summary also carries `medNet` (study C) and
+// `rawNet` mirrors `raw`. Without it the output is byte-identical to before (no medNet, no rawNet).
+// One helper books an event at horizon k: pushes the gross R and, when funding is known for the
+// horizon, the net R; `end` guards stay in the caller because they are per-study policy.
+function bookEvent(store, closes, ci, k, dir, sd, funding) {
+  const f = fwdRet(closes, ci, k);
+  if (f == null) return false;
+  store.raw.push(+(dir * f / sd).toFixed(3));
+  if (store.net) { const nr = netEventR(funding, dir, f, sd, closes[ci][0] + DAY, closes[ci + k][0] + DAY); if (nr != null) store.net.push(nr); }
+  return true;
+}
+function studyOut(stores, unitKeys) {
+  const out = { raw: {}, unit: "R" };
+  let anyNet = false;
+  for (const key of unitKeys) { out[key] = summarizeEvents(stores[key].raw, stores[key].net); out.raw[key] = stores[key].raw; if (stores[key].net) anyNet = true; }
+  if (anyNet) { out.rawNet = {}; for (const key of unitKeys) out.rawNet[key] = stores[key].net; }
+  return out;
+}
+function mkStores(keys, funding) { const s = {}; for (const k of keys) s[k] = { raw: [], net: Array.isArray(funding) ? [] : null }; return s; }
+function studyBigMove(closes, funding) {
+  const rets = dailyRets(closes), S = mkStores(["d1", "d3"], funding);
   let end1 = -1, end3 = -1;   // F10: per-horizon overlap guards, keyed on the forward-window start ci
   for (let i = 30; i < rets.length; i++) {
     const sd = sdAt(rets, i);
     if (sd == null || sd <= 0 || !Number.isFinite(rets[i]) || Math.abs(rets[i]) < 2 * sd) continue;
     const dir = rets[i] > 0 ? 1 : -1, ci = i + 1;   // rets[i] is the move into closes[ci]
-    if (ci >= end1) { const f1 = fwdRet(closes, ci, 1); if (f1 != null) { d1.push(+(dir * f1 / sd).toFixed(3)); end1 = ci + 1; } }
-    if (ci >= end3) { const f3 = fwdRet(closes, ci, 3); if (f3 != null) { d3.push(+(dir * f3 / sd).toFixed(3)); end3 = ci + 3; } }
+    if (ci >= end1 && bookEvent(S.d1, closes, ci, 1, dir, sd, funding)) end1 = ci + 1;
+    if (ci >= end3 && bookEvent(S.d3, closes, ci, 3, dir, sd, funding)) end3 = ci + 3;
   }
-  return { d1: summarizeEvents(d1), d3: summarizeEvents(d3), raw: { d1, d3 }, unit: "R" };
+  return studyOut(S, ["d1", "d3"]);
 }
 // 30d-high breakout: close crosses above the max of the prior 30 closes. Forward 1d / 5d.
-function studyBreakout(closes) {
-  const rets = dailyRets(closes), d1 = [], d5 = [];
+// "First cross only": the PRIOR day must not already have been above ITS OWN trailing-30 window
+// (closes[i-31..i-2]). The old guard compared closes[i-1] against a window that CONTAINED closes[i-1]
+// (closes[i-30..i-1]), which is never strictly exceeded — a no-op, so a 20-day staircase of new
+// highs booked 20 "first" breakouts and the study measured continuation-of-continuation, not the
+// cross. Both windows exclude the day they test, so a day counts iff it crossed and yesterday didn't.
+function studyBreakout(closes, funding) {
+  const rets = dailyRets(closes), S = mkStores(["d1", "d5"], funding);
   // F10 (2026.07.30-05): two first-crosses four days apart share most of a 5d forward window;
   // summarizeEvents then counts them as independent draws, inflating n exactly like the cluster-day
   // problem does on the LIVE record. Per-horizon lastEnd guards drop an event whose forward window
@@ -709,39 +782,42 @@ function studyBreakout(closes) {
   // independent at 1d and overlapping at 5d. n shrinks and finally means what the score assumes.
   let end1 = -1, end5 = -1;
   for (let i = 31; i < closes.length; i++) {
-    let hi = -Infinity;
+    let hi = -Infinity, hiPrev = -Infinity;
     for (let j = i - 30; j < i; j++) if (closes[j][1] > hi) hi = closes[j][1];
-    if (!(closes[i][1] > hi) || closes[i - 1][1] > hi) continue;   // first cross only
+    for (let j = i - 31; j < i - 1; j++) if (closes[j][1] > hiPrev) hiPrev = closes[j][1];
+    if (!(closes[i][1] > hi) || closes[i - 1][1] > hiPrev) continue;   // first cross only: yesterday had not crossed its own window
     const sd = sdAt(rets, i - 1);
     if (sd == null || sd <= 0) continue;
-    if (i >= end1) { const f1 = fwdRet(closes, i, 1); if (f1 != null) { d1.push(+(f1 / sd).toFixed(3)); end1 = i + 1; } }
-    if (i >= end5) { const f5 = fwdRet(closes, i, 5); if (f5 != null) { d5.push(+(f5 / sd).toFixed(3)); end5 = i + 5; } }
+    if (i >= end1 && bookEvent(S.d1, closes, i, 1, 1, sd, funding)) end1 = i + 1;
+    if (i >= end5 && bookEvent(S.d5, closes, i, 5, 1, sd, funding)) end5 = i + 5;
   }
-  return { d1: summarizeEvents(d1), d5: summarizeEvents(d5), raw: { d1, d5 }, unit: "R" };
+  return studyOut(S, ["d1", "d5"]);
 }
 // 30d-low breakdown: close crosses below the min of the prior 30 closes — the bearish mirror
 // of the breakout study. Outcomes are signed WITH the breakdown (positive = continued lower),
 // matching the ledger's dir=-1 convention, so "hit" means the breakdown followed through.
-function studyBreakdown(closes) {
-  const rets = dailyRets(closes), d1 = [], d5 = [];
+// Same first-cross rule as studyBreakout: yesterday is tested against ITS OWN trailing window.
+function studyBreakdown(closes, funding) {
+  const rets = dailyRets(closes), S = mkStores(["d1", "d5"], funding);
   let end1 = -1, end5 = -1;   // F10: per-horizon overlap guards (see studyBreakout)
   for (let i = 31; i < closes.length; i++) {
-    let lo = Infinity;
+    let lo = Infinity, loPrev = Infinity;
     for (let j = i - 30; j < i; j++) if (closes[j][1] < lo) lo = closes[j][1];
-    if (!(closes[i][1] < lo) || closes[i - 1][1] < lo) continue;   // first cross only
+    for (let j = i - 31; j < i - 1; j++) if (closes[j][1] < loPrev) loPrev = closes[j][1];
+    if (!(closes[i][1] < lo) || closes[i - 1][1] < loPrev) continue;   // first cross only
     const sd = sdAt(rets, i - 1);
     if (sd == null || sd <= 0) continue;
-    if (i >= end1) { const f1 = fwdRet(closes, i, 1); if (f1 != null) { d1.push(+(-f1 / sd).toFixed(3)); end1 = i + 1; } }
-    if (i >= end5) { const f5 = fwdRet(closes, i, 5); if (f5 != null) { d5.push(+(-f5 / sd).toFixed(3)); end5 = i + 5; } }
+    if (i >= end1 && bookEvent(S.d1, closes, i, 1, -1, sd, funding)) end1 = i + 1;
+    if (i >= end5 && bookEvent(S.d5, closes, i, 5, -1, sd, funding)) end5 = i + 5;
   }
-  return { d1: summarizeEvents(d1), d5: summarizeEvents(d5), raw: { d1, d5 }, unit: "R" };
+  return studyOut(S, ["d1", "d5"]);
 }
 // Vol-regime shift: 10d realized vol crossing above the 90th percentile of its trailing 120
 // observations. Forward 5d return (does an expansion resolve up or down for this market?).
-function studyVolShift(closes) {
+function studyVolShift(closes, funding) {
   const rets = dailyRets(closes), vols = [];
   for (let i = 10; i <= rets.length; i++) vols.push(retStd(rets.slice(i - 10, i), 8));
-  const d5 = [];
+  const S = mkStores(["d5"], funding);
   let end5 = -1;   // F10: overlap guard
   for (let i = 120; i < vols.length; i++) {
     const hist = vols.slice(i - 120, i).filter((x) => x != null);
@@ -752,26 +828,35 @@ function studyVolShift(closes) {
     if (ci < end5) continue;
     const sd = sdAt(rets, ci - 1);
     if (sd == null || sd <= 0) continue;
-    const f5 = fwdRet(closes, ci, 5);
-    if (f5 != null) { d5.push(+(f5 / sd).toFixed(3)); end5 = ci + 5; }
+    if (bookEvent(S.d5, closes, ci, 5, 1, sd, funding)) end5 = ci + 5;
   }
-  return { d5: summarizeEvents(d5), raw: { d5 }, unit: "R" };
+  return studyOut(S, ["d5"]);
 }
 // Gap fade/continuation: for each closed-window hold with |gap| >= 0.75 sigma of this market's
 // own gap distribution, measure the NEXT cash session (open -> close), signed by gap direction:
 // positive = the session continued the gap, negative = it faded it.
-function studyGapFade(hourly, windows, tol) {
+// The threshold sigma is TRAILING per event — retStd over the gaps that had happened before it,
+// at least 10 of them. The old full-sample sigma let one future 30% gap at the END of the tape
+// retroactively de-select every earlier event (and let a quiet future shrink the bar for the past),
+// so the record changed shape every rebuild. `sd` in the result stays the whole-sample figure for
+// display; it no longer gates anything. `fine` (optional 5m archive, same packed shape) resolves the
+// 09:30 open and the session close to the bar; hourly-only anchors read the 09:00 close and the
+// result is stamped approx: true (see anchorPrice).
+function studyGapFade(hourly, windows, tol, fine) {
   const gaps = [];
-  for (const a of windows) {
-    const pIn = priceAsOf(hourly, a.enter, tol), pOut = priceAsOf(hourly, a.exit, tol);
-    if (pIn > 0 && pOut > 0) gaps.push({ exit: a.exit, g: (pOut / pIn - 1) * 100 });
+  let approx = false;
+  for (const a of [...windows].sort((x, y) => x.enter - y.enter)) {
+    const pIn = anchorPrice(hourly, fine, a.enter, tol), pOut = anchorPrice(hourly, fine, a.exit, tol);
+    if (pIn.px > 0 && pOut.px > 0) { gaps.push({ exit: a.exit, g: (pOut.px / pIn.px - 1) * 100 }); if (pIn.approx || pOut.approx) approx = true; }
   }
   const sd = retStd(gaps.map((x) => x.g), 10);
-  if (sd == null || sd <= 0) return { session: { n: 0 }, nGaps: gaps.length, sd: null };
+  if (sd == null || sd <= 0) return { session: { n: 0 }, nGaps: gaps.length, sd: null, approx };
   const dirRets = [];
-  for (const gp of gaps) {
-    if (Math.abs(gp.g) < 0.75 * sd) continue;
-    const open = priceAsOf(hourly, gp.exit, tol);
+  for (let gi = 0; gi < gaps.length; gi++) {
+    const gp = gaps[gi];
+    const sdT = retStd(gaps.slice(0, gi).map((x) => x.g), 10);   // only gaps that had already happened
+    if (sdT == null || sdT <= 0 || Math.abs(gp.g) < 0.75 * sdT) continue;
+    const openA = anchorPrice(hourly, fine, gp.exit, tol), open = openA.px;
     // The next cash session's TRUE close, not a fixed +6.5h — early-close days (half sessions end
     // 13:00 ET) were being measured to a phantom 16:00, folding the missing 2.5h of drift into the
     // gap record as noise. marketSessions carries the real close per calendar day (13:00 on a
@@ -781,18 +866,21 @@ function studyGapFade(hourly, windows, tol) {
     let closeT = null;
     for (const s of sess) { if (s.open >= gp.exit - HOUR) { closeT = s.close; break; } }
     if (closeT == null) closeT = gp.exit + 6.5 * HOUR;   // no session matched -> conservative fallback
-    const close = priceAsOf(hourly, closeT, tol);
+    const closeA = anchorPrice(hourly, fine, closeT, tol), close = closeA.px;
     if (!(open > 0) || !(close > 0)) continue;
+    if (openA.approx || closeA.approx) approx = true;
     dirRets.push((gp.g > 0 ? 1 : -1) * (close / open - 1) * 100);
   }
-  return { session: summarizeEvents(dirRets), nGaps: gaps.length, sd: +sd.toFixed(3), raw: { session: dirRets } };
+  return { session: summarizeEvents(dirRets), nGaps: gaps.length, sd: +sd.toFixed(3), raw: { session: dirRets }, approx };
 }
 // Funding flip: the day-summed funding changes sign after >= 3 consecutive same-sign days.
 // Forward 3d return signed TOWARD the new funding side (funding flips positive = longs now
 // crowding in; positive result = price followed the new crowd).
-function studyFundFlip(dayFunding, closes) {
+// `funding` (optional, study C) is the HOURLY series [[t, rate], ...] — dayFunding is the day-summed
+// signal input and cannot price a 3d hold hour by hour.
+function studyFundFlip(dayFunding, closes, funding) {
   const byDay = new Map(closes.map((k, i) => [Math.floor(k[0] / DAY) * DAY, i]));
-  const d3 = [];
+  const S = mkStores(["d3"], funding);
   let run = 0, prevSign = 0;
   for (let i = 0; i < dayFunding.length; i++) {
     const s = Math.sign(dayFunding[i][1]);
@@ -800,13 +888,12 @@ function studyFundFlip(dayFunding, closes) {
       const ci = byDay.get(Math.floor(dayFunding[i][0] / DAY) * DAY);
       if (ci != null) {
         const sd = sdAt(dailyRets(closes), Math.max(0, ci - 1));
-        const f3 = fwdRet(closes, ci, 3);
-        if (f3 != null && sd > 0) d3.push(+(s * f3 / sd).toFixed(3));
+        if (sd > 0) bookEvent(S.d3, closes, ci, 3, s, sd, funding);
       }
     }
     if (s === prevSign) run++; else { run = s === 0 ? run : 1; if (s !== 0) prevSign = s; }
   }
-  return { d3: summarizeEvents(d3), raw: { d3 }, unit: "R" };
+  return studyOut(S, ["d3"]);
 }
 
 // ---- signal metadata + playbooks ----------------------------------------------------------
@@ -922,8 +1009,12 @@ function playbook(ev, ctx) {
   // signed k-sigma offset from a base level
   const offSd = (base, kSd) => {
     if (base == null || !(base > 0) || !Number.isFinite(kSd)) return null;
+    // Log geometry passes the RAW sigma: logLevel returns null when it is missing (no fabricated
+    // 1% level on a crypto name). The additive equity path keeps its historical 1% stand-in so the
+    // xyz record stays byte-comparable — see the comment above logLevel.
+    if (LG) return logLevel(base, kSd, ctx.sd30);
     const s = ctx.sd30 > 0 ? ctx.sd30 : 1;
-    return LG ? logLevel(base, kSd, s) : f2(base * (1 + (kSd * s) / 100));
+    return f2(base * (1 + (kSd * s) / 100));
   };
   // signed percentage offset from a base level (study medians arrive already in %)
   const offPct = (base, kPct) => {
@@ -1149,18 +1240,21 @@ function compressionNow(closes) {
 // closed windows (overnight + weekend, each counted as ONE holdable window). The venue's
 // structural quirk: these cash-hours assets trade 24/7 here, so the overnight session — where
 // the equity literature puts most of the drift — is directly holdable.
-function offDriftStats(hs, wins, tol) {
+// `fine` (optional 5m archive, packed rows) resolves the 09:30 open to the bar; hourly-only reads
+// the 09:00 close for the open leg and the result says so (approx: true) — see anchorPrice.
+function offDriftStats(hs, wins, tol, fine) {
   if (!hs || !hs.length || !wins || !wins.length) return null;
   const rets = [];
+  let approx = false;
   const sorted = [...wins].sort((a, b) => a.enter - b.enter);
   for (const w of sorted) {
-    const pc = priceAsOf(hs, w.enter, tol), po = priceAsOf(hs, w.exit, tol);
-    if (pc > 0 && po > 0) rets.push([w.exit, +((po / pc - 1) * 100).toFixed(4)]);
+    const pc = anchorPrice(hs, fine, w.enter, tol), po = anchorPrice(hs, fine, w.exit, tol);
+    if (pc.px > 0 && po.px > 0) { rets.push([w.exit, +((po.px / pc.px - 1) * 100).toFixed(4)]); if (pc.approx || po.approx) approx = true; }
   }
   if (rets.length < 15) return null;
   const last21 = rets.slice(-21);
   const drift30 = +last21.reduce((a, k) => a + k[1], 0).toFixed(3);   // ~1 month of windows, summed
-  return { drift30, nWin: last21.length, total: rets.length };
+  return { drift30, nWin: last21.length, total: rets.length, approx };
 }
 // Direction-aware confluence split: context events (no playbook side, or "watch") count as
 // company for EITHER direction; directional events only agree with their own side. If both
@@ -1183,17 +1277,22 @@ function confSplit(sigs) {
   return { conflict, companyFor };
 }
 // ---- stop-touch detection --------------------------------------------------------------------
-// Walks hourly candles in (t0, tEnd] and reports whether the void/stop level was touched:
+// Walks hourly candles covering (t0, tEnd] and reports whether the void/stop level was touched:
 // a long claim (dir >= 0) is stopped when any candle LOW <= stp; a short claim when any
 // candle HIGH >= stp. Hourly granularity means intra-candle ordering is unknowable, so a
 // candle that touches the stop counts as stopped even if it also recovered — conservative
 // by construction. Candles are [t, o, h, l, c, v].
+// The FIRE bar — the candle with t <= t0 < t + HOUR — is included. The old `t <= t0` skip
+// dropped it entirely, so a claim fired at 10:05 whose 10:00 bar wicked through the stop at
+// 10:40 was scored as never stopped. Whether that wick came before or after the fire minute is
+// unknowable at this resolution; counting it as stopped is the conservative call (the same one
+// a both-touch bar already gets). bracketTouch documents the mirror rule for targets.
 function stopTouched(candles, t0, tEnd, dir, stp) {
   if (!Array.isArray(candles) || stp == null || !(stp > 0)) return null;
   let seen = false;
   for (const k of candles) {
     const t = k[0];
-    if (t <= t0) continue;
+    if (t + HOUR <= t0) continue;                  // closed before the fire: not in the window
     if (t > tEnd) break;
     seen = true;
     if (dir >= 0 ? k[3] <= stp : k[2] >= stp) return true;
@@ -1233,15 +1332,22 @@ function levelHit(side, kind, level, px, bar) {
 // touch evaporate by horizon, biasing every record downward on slow setups. Same conservative
 // posture as stopTouched: hourly granularity makes intra-candle ordering unknowable, so a candle
 // that touches BOTH levels counts as the stop. Candles are [t, o, h, l, c, v].
-// Returns { hit: "target"|"stop", level, t } or null (neither level touched in the window).
+// Returns { hit: "target"|"stop", level, t, amb } or null (neither level touched in the window).
+//
+// The FIRE bar (t <= t0 < t + HOUR) is walked too, asymmetrically: a stop touched inside it
+// COUNTS (amb: true — the wick's position relative to the fire minute is unknowable, and "stopped"
+// is the conservative reading), a target touched ONLY inside it does NOT (the level may have been
+// hit before the claim existed; crediting it would fabricate wins from the pre-fire wick). The old
+// `t <= t0` skip dropped the fire bar altogether, which was the permissive error on the stop side.
 function bracketTouch(candles, t0, tEnd, side, stp, tgt) {
   if (!Array.isArray(candles) || (side !== "long" && side !== "short")) return null;
   if (!(stp > 0) || !(tgt > 0)) return null;
   const long = side === "long";
   for (const k of candles) {
     const t = k[0];
-    if (t <= t0) continue;
+    if (t + HOUR <= t0) continue;                  // closed before the fire: not in the window
     if (t > tEnd) break;
+    const fireBar = t <= t0;
     const hitStop = long ? k[3] <= stp : k[2] >= stp;
     const hitTgt = long ? k[2] >= tgt : k[3] <= tgt;
     // F9 (2026.07.30-05): a single candle straddling BOTH frozen levels is genuinely ambiguous —
@@ -1250,8 +1356,8 @@ function bracketTouch(candles, t0, tEnd, side, stp, tgt) {
     // conservative call is harmless; if it is large on the crypto clock, that is the evidence that
     // justifies resolving those specific claims against the 5m archive (a separate program). The
     // measurement comes first, deliberately — the flag never changes the outcome, only records it.
-    if (hitStop) return { hit: "stop", level: stp, t, amb: hitTgt };
-    if (hitTgt) return { hit: "target", level: tgt, t, amb: false };
+    if (hitStop) return { hit: "stop", level: stp, t, amb: hitTgt || fireBar };
+    if (hitTgt && !fireBar) return { hit: "target", level: tgt, t, amb: false };
   }
   return null;
 }
@@ -1581,10 +1687,14 @@ function regime200(closes, px) {
 // Post-earnings drift (xyz only): a reaction bigger than 1.5x the name's own daily σ tends to
 // keep drifting its own way for weeks — entered AFTER the reaction session is complete (there
 // is at least one bar past the reaction index), within 3 sessions of it, drifting WITH the
-// move. Same print->reaction-index convention as earnReactionsFor (AMC books the next bar).
+// move. Same print->reaction-bar convention as earnReactionsFor: on UTC-day bars the print day's
+// OWN bar is the reaction bar for BMO and AMC alike (its 00:00Z close sits hours after a 16:05
+// ET print — see the timing note above earnPrintUtc); the reference is the bar before it.
+// `hourly` (optional, packed or object rows) + `now` anchor a BMO/AMC print at its ET time and
+// take the +24h close as the reaction close once it has printed, the daily bars otherwise.
 // Stop = 1σ back through the reaction close against the drift; target = half the reaction
 // magnitude further, from the mark — drift scales with the surprise, mechanically.
-function detectPead(prints, daily, px, sd30) {
+function detectPead(prints, daily, px, sd30, hourly, now) {
   if (!Array.isArray(prints) || !prints.length || !Array.isArray(daily) || daily.length < 25) return null;
   if (!(px > 0) || !(sd30 > 0)) return null;
   const dayOf = (t) => { const x = new Date(t); return x.getUTCFullYear() + "-" + String(x.getUTCMonth() + 1).padStart(2, "0") + "-" + String(x.getUTCDate()).padStart(2, "0"); };
@@ -1594,13 +1704,19 @@ function detectPead(prints, daily, px, sd30) {
   for (const pr of prints) {
     const pi = idxByDay.get(pr.d);
     if (pi == null) continue;
-    const ri = pr.s === "AMC" ? pi + 1 : pi;
+    const ri = pi;                                         // the print day's own bar carries the reaction
     if (ri <= 0 || ri >= daily.length - 1) continue;      // reaction session must be COMPLETE
     if (ri < daily.length - 4) continue;                   // and fresh: within 3 sessions of now
     if (!best || ri > best.ri) best = { pr, ri };
   }
   if (!best) return null;
-  const c1 = best.ri < daily.length ? daily[best.ri].c : null, c0 = daily[best.ri - 1].c;
+  let c1 = best.ri < daily.length ? daily[best.ri].c : null, c0 = daily[best.ri - 1].c;
+  if (hourly) {
+    const nowMs = now == null ? Date.now() : now, t0 = earnPrintUtc(best.pr);
+    const hs = t0 != null && t0 + 24 * HOUR <= nowMs ? packedRows(hourly) : [];
+    const p0 = hs.length ? priceAsOf(hs, t0, 3 * HOUR) : null, p1 = p0 > 0 ? priceAsOf(hs, t0 + 24 * HOUR, 3 * HOUR) : null;
+    if (p0 > 0 && p1 > 0) { c0 = p0; c1 = p1; }
+  }
   if (!Number.isFinite(c1) || !Number.isFinite(c0) || !(c0 > 0)) return null;
   const mv = (c1 - c0) / c0 * 100;
   if (!(Math.abs(mv) >= 1.5 * sd30)) return null;          // the reaction has to be a REACTION
@@ -3075,16 +3191,38 @@ function shouldPromote(inc, ch) {
 // auction — the highest-variance half hour of the day. The hourly snap is still an approximation
 // (a 09:30 boundary reads the 09:00 print), but it now errs BEFORE the anchor, never inside the
 // session it is meant to exclude.
-function priceAsOf(prices, t, tol, width) {
+//
+// `fine` (optional): the 5-minute archive in the same packed shape. When a 5m bar closed at or
+// within FINE_TOL (15 min) before the anchor, that close is the answer — a 09:30 ET open then
+// reads the 09:25–09:30 bar's close instead of the 09:00 hourly print. Otherwise the hourly rule
+// above stands, and callers that return an object stamp `approx: true` on an hourly fallback that
+// did not land exactly on the anchor (anchorPrice). Anchors resolved on hourly alone are therefore
+// exact at 16:00 ET (a bar closes there) and half an hour early at 09:30 ET.
+const FIVE_MIN = 5 * 60 * 1000, FINE_TOL = 3 * FIVE_MIN;
+function asOfRow(prices, t, tol, width) {   // { row, lag }: the last row closed by t, and how long before t it closed
+  let lo = 0, hi = prices.length - 1, idx = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (+prices[m][0] + width <= t) { idx = m; lo = m + 1; } else hi = m - 1; }
+  if (idx < 0) return null;
+  const row = prices[idx], lag = t - (+row[0] + width);
+  if (lag > tol) return null;
+  const c = row[4];
+  return Number.isFinite(c) && c > 0 ? { row, lag, px: c } : null;
+}
+function priceAsOf(prices, t, tol, width, fine) {
   tol = tol || 3 * HOUR;
   width = width || HOUR;
-  let lo = 0, hi = prices.length - 1, idx = -1;
-  while (lo <= hi) { const m = (lo + hi) >> 1; if (prices[m][0] + width <= t) { idx = m; lo = m + 1; } else hi = m - 1; }
-  if (idx < 0) return null;
-  const row = prices[idx];
-  if (t - (row[0] + width) > tol) return null;
-  const c = row[4];
-  return Number.isFinite(c) && c > 0 ? c : null;
+  if (Array.isArray(fine) && fine.length) { const f = asOfRow(fine, t, FINE_TOL, FIVE_MIN); if (f) return f.px; }
+  if (!Array.isArray(prices) || !prices.length) return null;
+  const r = asOfRow(prices, t, tol, width);
+  return r ? r.px : null;
+}
+// Anchor resolution with its honesty flag: { px, approx }. approx is false when a 5m bar resolved
+// the anchor or an hourly bar closed exactly ON it; true when the hourly close is stale against the
+// anchor (the 09:30 case) or nothing resolved at all (px null).
+function anchorPrice(prices, fine, t, tol) {
+  if (Array.isArray(fine) && fine.length) { const f = asOfRow(fine, t, FINE_TOL, FIVE_MIN); if (f) return { px: f.px, approx: false }; }
+  const r = Array.isArray(prices) && prices.length ? asOfRow(prices, t, tol || 3 * HOUR, HOUR) : null;
+  return r ? { px: r.px, approx: r.lag !== 0 } : { px: null, approx: true };
 }
 // Sum of hourly funding rates over [enter, exit) — the fraction a 1x long pays (or receives, if <0).
 function fundingOver(funding, enter, exit) {
@@ -3092,16 +3230,79 @@ function fundingOver(funding, enter, exit) {
   for (const [t, r] of funding) { if (t >= enter && t < exit && Number.isFinite(r)) { s += r; any = true; } }
   return { sum: s, any };
 }
-function holdReturn(prices, funding, enter, exit, tol) {
-  const pe = priceAsOf(prices, enter, tol), px = priceAsOf(prices, exit, tol);
-  if (pe == null || px == null) return { ok: false };
-  const gross = px / pe - 1;
+// `fine` (optional 5m archive) resolves the legs to the bar; `approx` says whether either leg fell
+// back to an hourly close that did not sit on the anchor.
+function holdReturn(prices, funding, enter, exit, tol, fine) {
+  const pe = anchorPrice(prices, fine, enter, tol), px = anchorPrice(prices, fine, exit, tol);
+  if (pe.px == null || px.px == null) return { ok: false };
+  const gross = px.px / pe.px - 1;
   const f = fundingOver(funding || [], enter, exit);
-  return { ok: true, enter, exit, hours: Math.round((exit - enter) / HOUR), pxEnter: pe, pxExit: px, gross, funding: f.sum, fundingKnown: f.any, net: gross - f.sum };
+  return { ok: true, enter, exit, hours: Math.round((exit - enter) / HOUR), pxEnter: pe.px, pxExit: px.px, gross, funding: f.sum, fundingKnown: f.any, net: gross - f.sum, approx: pe.approx || px.approx };
 }
-function runHolds(prices, funding, anchors, tol) {
+function runHolds(prices, funding, anchors, tol, fine) {
   const out = [];
-  for (const a of anchors) { const h = holdReturn(prices, funding, a.enter, a.exit, tol); if (h.ok) { h.tag = a.tag; out.push(h); } }
+  for (const a of anchors) { const h = holdReturn(prices, funding, a.enter, a.exit, tol, fine); if (h.ok) { h.tag = a.tag; out.push(h); } }
+  return out;
+}
+// ---- study B: overnight split ----------------------------------------------------------------
+// Splits each overnight hold (cash close -> next session's 09:30 ET open; `anchors` are
+// overnightAnchors/closedWindows rows {enter, exit, tag}) into two legs at 08:30 ET of the exit's
+// ET day — the after-hours leg (close -> 08:30, where earnings, guidance and Asia/Europe price in)
+// and the pre-open leg (08:30 -> 09:30, the US pre-market half hour before the auction). The 5m
+// archive resolves 08:30 and 09:30 to the bar; hourly alone reads the 08:00 and 09:00 closes and
+// the row is stamped approx (anchorPrice).
+//   hourly  : packed [[t,o,h,l,c,v], ...] (object rows {t,c} accepted)
+//   fine    : packed 5m rows, optional
+//   anchors : [{ enter, exit }] — overnight windows, any order
+//   opts    : { tol (hourly staleness, default 3h), splitH (8), splitM (30) }
+// Returns null with no resolvable window, else {
+//   n, rows: [{ enter, exit, ah, pre, total, approx }]         (leg returns in %)
+//   medAh, medPre, medTotal                                      (median leg returns, %)
+//   shareAh, sharePre  — Σ|ah| / (Σ|ah|+Σ|pre|) and its complement: the share of the overnight
+//                        move (in absolute terms) that was priced before / after 08:30 ET
+//   approx, nApprox    — true when ANY row resolved on hourly closes off the anchor; how many
+// }
+function overnightSplit(hourly, fine, anchors, opts) {
+  const o = opts || {}, tol = o.tol || 3 * HOUR, sh = o.splitH == null ? 8 : o.splitH, sm = o.splitM == null ? 30 : o.splitM;
+  const hs = packedRows(hourly), fn = Array.isArray(fine) && fine.length ? packedRows(fine) : null;
+  if (!hs.length || !Array.isArray(anchors)) return null;
+  const rows = [];
+  for (const a of [...anchors].sort((x, y) => x.enter - y.enter)) {
+    if (!(a && Number.isFinite(a.enter) && Number.isFinite(a.exit) && a.exit > a.enter)) continue;
+    const et = etParts(a.exit), tSplit = etWallToUtc(et.y, et.mo, et.d, sh, sm);
+    if (!(tSplit > a.enter && tSplit < a.exit)) continue;   // the split must fall inside the hold
+    const pc = anchorPrice(hs, fn, a.enter, tol), pm = anchorPrice(hs, fn, tSplit, tol), po = anchorPrice(hs, fn, a.exit, tol);
+    if (!(pc.px > 0) || !(pm.px > 0) || !(po.px > 0)) continue;
+    rows.push({ enter: a.enter, exit: a.exit,
+      ah: +((pm.px / pc.px - 1) * 100).toFixed(4), pre: +((po.px / pm.px - 1) * 100).toFixed(4), total: +((po.px / pc.px - 1) * 100).toFixed(4),
+      approx: pc.approx || pm.approx || po.approx });
+  }
+  if (!rows.length) return null;
+  let sAh = 0, sPre = 0, nApprox = 0;
+  for (const r of rows) { sAh += Math.abs(r.ah); sPre += Math.abs(r.pre); if (r.approx) nApprox++; }
+  const den = sAh + sPre;
+  return {
+    n: rows.length, rows,
+    medAh: +median(rows.map((r) => r.ah)).toFixed(3), medPre: +median(rows.map((r) => r.pre)).toFixed(3), medTotal: +median(rows.map((r) => r.total)).toFixed(3),
+    shareAh: den > 0 ? +(sAh / den).toFixed(3) : null, sharePre: den > 0 ? +(sPre / den).toFixed(3) : null,
+    approx: nApprox > 0, nApprox,
+  };
+}
+// Packed-row view of an hourly/5m series: the poller keeps spines packed ([[t,o,h,l,c,v], ...]),
+// but object rows ({t,o,h,l,c,v} — hoursToObj's shape) reach the same math from tests and the chart
+// path. Packed input is returned as-is (no copy); object rows are converted once.
+function packedRows(arr) {
+  if (!Array.isArray(arr) || !arr.length) return [];
+  if (Array.isArray(arr[0])) return arr;
+  const out = [];
+  for (const k of arr) {
+    if (!k) continue;
+    if (Array.isArray(k)) { out.push(k); continue; }   // mixed input: a packed row passes through
+    const t = +k.t, c = +k.c;
+    if (!Number.isFinite(t) || !Number.isFinite(c)) continue;
+    const o = +k.o, h = +k.h, l = +k.l, v = +k.v;
+    out.push([t, Number.isFinite(o) ? o : c, Number.isFinite(h) ? h : c, Number.isFinite(l) ? l : c, c, Number.isFinite(v) ? v : 0]);
+  }
   return out;
 }
 
@@ -3413,15 +3614,34 @@ function tapeRedStats(seriesByCoin, opts) {
 // why an off-hours reading is a real signal rather than a guaranteed ~0x. Coverage guards: the
 // current span needs >=75% of its candles present; each baseline sample the same; and at least
 // `minSamples` baseline days must qualify, else null.
-function rvolMulti(hs, windowsMs, now, minSamples) {
+// `tz` (optional): "UTC" or absent steps the baseline in UTC days (the 24/7 crypto book, and the
+// pre-wiring default); anything else keys the notional map by ET WALL hour, so "the same clock
+// span on prior days" survives a DST switch — in UTC keys, the 09:30 ET open on 2026-11-02 was
+// judged against 10:00 ET hours from before 2026-11-01, a guaranteed elevation with no signal in
+// it. The ET hour comes from a per-UTC-day offset cache in the activityClock manner; a UTC day
+// whose offset differs at its two ends (the switch day) is resolved per candle so no hour bins
+// on the wrong side of the change. On the fall-back day the repeated 01:00 ET hour sums into one
+// bucket — that hour genuinely traded twice.
+function rvolMulti(hs, windowsMs, now, minSamples, tz) {
   const HOUR = 3600 * 1000, minS = minSamples == null ? 7 : minSamples;
+  const et = tz != null && tz !== "UTC";
+  const offCache = new Map();                      // UTC day -> offset (hours), or "split" on a DST day
+  const hourKey = (t) => {
+    if (!et) return Math.floor(t / HOUR);
+    const day = Math.floor(t / DAY);
+    let off = offCache.get(day);
+    if (off === undefined) { const a = etOffsetAt(day * DAY), b = etOffsetAt(day * DAY + DAY - HOUR); off = a === b ? a : "split"; offCache.set(day, off); }
+    if (off === "split") off = etOffsetAt(t);
+    return Math.floor((t + off * HOUR) / HOUR);
+  };
   const ntl = new Map();                           // hour bucket -> notional
   for (const k of hs) {
     const t = k[0], c = k[4], v = k[5];
     if (!Number.isFinite(t) || !Number.isFinite(c) || !Number.isFinite(v) || v < 0) continue;
-    ntl.set(Math.floor(t / HOUR), c * v);
+    const key = hourKey(t);
+    ntl.set(key, et ? (ntl.get(key) || 0) + c * v : c * v);
   }
-  const endH = Math.floor(now / HOUR);             // exclusive: candles endH-1 and older are complete
+  const endH = hourKey(now);                       // exclusive: candles endH-1 and older are complete
   const span = (lastH, W) => {                     // sum of W hourly notionals ending AT lastH (inclusive)
     let s = 0, have = 0;
     for (let h = lastH - W + 1; h <= lastH; h++) { const x = ntl.get(h); if (x != null) { s += x; have++; } }
@@ -3872,9 +4092,17 @@ function rankAvg(a) {
   }
   return rk;
 }
+// A pair with a non-finite side (NaN score from a missing feature, a null return) is DROPPED
+// before ranking — the sort comparator treats NaN as "equal to everything", which handed such a
+// value an arbitrary rank and silently corrupted the whole ranking; a null would have coerced to
+// a zero return, which is a claim, not an absence. Null below 3 surviving pairs.
 function spearmanIC(scores, rets) {
-  if (!scores || !rets || scores.length !== rets.length || scores.length < 3) return null;
-  const r = pearson(rankAvg(scores), rankAvg(rets));
+  if (!scores || !rets || scores.length !== rets.length) return null;
+  const a = [], b = [];
+  const num = (v) => (v == null ? NaN : +v);
+  for (let i = 0; i < scores.length; i++) { const s = num(scores[i]), r = num(rets[i]); if (Number.isFinite(s) && Number.isFinite(r)) { a.push(s); b.push(r); } }
+  if (a.length < 3) return null;
+  const r = pearson(rankAvg(a), rankAvg(b));
   return (r != null && isFinite(r)) ? r : null;
 }
 
@@ -3911,7 +4139,7 @@ module.exports = {
   // EMA trend ladder (Trend tab)
   emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS,
   closedBars, closedLadder, trendWhen,
-  priceAsOf, closedDailyCloses, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats,
+  priceAsOf, anchorPrice, packedRows, FIVE_MIN, FINE_TOL, closedDailyCloses, fundingOver, netEventR, holdReturn, runHolds, overnightSplit, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats,
   // structural-level outcome study (build 2026.07.24-10): does detectLevels output actually hold?
   normCdf, touchBaseline, studyBars, levelOutcomes, levelStudy, LVL_EDGES, PLACEBO_K,
   // session anatomy (build 2026.07.24-11): excursion / open-quartile / Monday range / naked opens
@@ -3964,10 +4192,13 @@ function stopGeometryOk(side, mark0, stp) {
 const GEO_MIN_SD = 0.1;             // void floor in daily-sigma units
 const GEO_MAX_SD = 5;               // void ceiling in daily-sigma units
 const GEO_MAX_LN = Math.log(3);     // no level further than a 3x band from the mark
+// Null unless sdPct > 0. The old fallback substituted sigma = 1% when the measurement was missing,
+// which handed a crypto name that moves 8%/day a 1% void — a level the first candle takes, i.e. a
+// fabricated stop wearing a measured one's clothes. No sigma, no level; the caller ledgers the
+// claim without a stop-aware leg (claimGeometryOk's documented degradation) instead.
 function logLevel(px, kSigma, sdPct) {
-  if (!(px > 0) || !Number.isFinite(kSigma)) return null;
-  const s = sdPct > 0 ? sdPct : 1;
-  const v = px * Math.exp((kSigma * s) / 100);
+  if (!(px > 0) || !Number.isFinite(kSigma) || !(sdPct > 0)) return null;
+  const v = px * Math.exp((kSigma * sdPct) / 100);
   return Number.isFinite(v) && v > 0 ? +v.toPrecision(6) : null;
 }
 function logExtend(from, k, lo, hi) {
@@ -4178,47 +4409,62 @@ function parseEarningsCalendar(json, symMap) {
 // order within a day, ticker as tiebreak. Pure — the poller derives this from the persisted
 // print history at cache-build time, so a report keeps its beat/miss on the tab for two full
 // days after the print instead of vanishing at the ET midnight rollover.
-// Reaction to a single print, using the SAME definition the reaction study uses: close-to-close on
-// the first session the print could actually be traded — the print day itself for BMO/DMH, the next
-// session for AMC. Extracted so the brief and the study can never disagree about what "the market
-// reaction" means. Null when the spine does not reach the print or the reaction day has not closed
-// yet — an AMC print from this afternoon HAS no reaction, and saying so is the honest answer.
-function earnPrintReaction(print, daily, px) {
-  // Two tiers, in this order, because the previous single-tier version asked for the candle AFTER
-  // the print and returned null when it did not exist yet — which is every AMC print on the
-  // morning you actually read the brief. ARM, HOOD, META and MSFT all dashed on one brief for
-  // exactly this reason. The reference close always exists for a print inside the retained
-  // window; the compare does not have to be a closed candle.
-  //
-  //   final   — a candle has closed past the print. Closed-bar arithmetic, the number is done.
-  //   forming — no closed candle yet, so the live mark carries it. Honest and non-null, and the
-  //             renderer says "so far" rather than presenting it as settled.
-  //
-  // Returns { pct, state } or null only when the print predates the retained candles entirely.
-  if (!print || typeof print.d !== "string" || !Array.isArray(daily) || daily.length < 2) return null;
-  const dayOf = (t) => { const x = new Date(t); return x.getUTCFullYear() + "-" + String(x.getUTCMonth() + 1).padStart(2, "0") + "-" + String(x.getUTCDate()).padStart(2, "0"); };
-  let pi = null;
-  for (let i = 0; i < daily.length; i++) if (daily[i] && Number.isFinite(daily[i].c) && dayOf(daily[i].t) === print.d) { pi = i; break; }
-  if (pi == null) return null;
-  // Reaction leg per the EMA200/earnings study convention: BMO/DMH/TBD score the print's own UTC
-  // candle, AMC the next one (the perp trades weekends, so a Friday AMC print books Saturday).
-  const ri = print.s === "AMC" ? pi + 1 : pi;
-  if (ri <= 0) return null;
-  const c0 = daily[ri - 1].c;                       // last close BEFORE the print's reaction leg
-  if (!Number.isFinite(c0) || c0 <= 0) return null;
-  if (ri < daily.length) {
-    const c1 = daily[ri].c;
-    if (Number.isFinite(c1)) return { pct: +(((c1 - c0) / c0) * 100).toFixed(1), state: "final" };
+// Reaction to a single print, using the SAME definition the reaction study uses (earnReactionsFor,
+// timing note above earnPrintUtc): the last close BEFORE the print against the first close AFTER
+// it. On UTC-day bars that is daily[pi-1].c -> daily[pi].c for BMO and AMC alike — the print day's
+// own bar closes at 00:00Z, hours after a 16:05 ET print, so it already carries the after-hours
+// reaction. The old rule booked AMC one bar later, i.e. measured "the reaction" from a reference
+// close that was itself post-print (a +20% AMC pop read as the next day's +0.8% drift).
+// Extracted so the brief and the study can never disagree about what "the market reaction" means.
+//
+//   final   — the print day's bar has CLOSED (t + DAY <= now). Closed-bar arithmetic, the number
+//             is done.
+//   forming — the print day's bar is still open, or has not reached the spine yet (a series ending
+//             yesterday, read the afternoon of an AMC print): the live mark against the last close
+//             before the print. Honest and non-null; the renderer says "so far".
+//
+// `hourly` (optional, packed or object rows) anchors a BMO/AMC print at its ET time instead: the
+// reference is the spine's close at the anchor and the reaction the +24h close once it exists
+// (else forming against the mark). `now` defaults to the wall clock.
+// Returns { pct, state } or null when the spine has no close before the print at all.
+function earnPrintReaction(print, daily, px, hourly, now) {
+  if (!print || typeof print.d !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(print.d)) return null;
+  const nowMs = now == null ? Date.now() : now;
+  const live = Number.isFinite(px) && px > 0 ? px : null;
+  if (hourly) {
+    const t0 = earnPrintUtc(print);
+    const hs = t0 != null && t0 < nowMs ? packedRows(hourly) : [];
+    const p0 = hs.length ? priceAsOf(hs, t0, 3 * HOUR) : null;
+    if (p0 > 0) {
+      const t1 = t0 + 24 * HOUR;
+      const p1 = t1 <= nowMs ? priceAsOf(hs, t1, 3 * HOUR) : null;
+      if (p1 > 0) return { pct: +(((p1 - p0) / p0) * 100).toFixed(1), state: "final" };
+      if (live != null) return { pct: +(((live - p0) / p0) * 100).toFixed(1), state: "forming" };
+      return null;
+    }
   }
-  // No candle on the reaction leg yet. The live mark is the honest compare — the alternative was
-  // a dash on the one row the reader opened the brief for.
-  if (Number.isFinite(px) && px > 0) return { pct: +(((px - c0) / c0) * 100).toFixed(1), state: "forming" };
+  if (!Array.isArray(daily) || daily.length < 1) return null;
+  const dayOf = (t) => { const x = new Date(t); return x.getUTCFullYear() + "-" + String(x.getUTCMonth() + 1).padStart(2, "0") + "-" + String(x.getUTCDate()).padStart(2, "0"); };
+  // Reference = the last bar whose UTC day precedes the print day; reaction bar = the print day's
+  // own bar when it exists. Locating the reference by day (not by index of the print bar) is what
+  // keeps a print whose bar has not reached the spine yet measurable against yesterday's close.
+  let ref = null, pb = null;
+  for (let i = 0; i < daily.length; i++) {
+    const k = daily[i]; if (!k || !Number.isFinite(k.c)) continue;
+    const d = dayOf(k.t);
+    if (d < print.d) ref = k; else if (d === print.d) { pb = k; break; } else break;
+  }
+  if (!ref || !(ref.c > 0)) return null;
+  if (Date.UTC(+print.d.slice(0, 4), +print.d.slice(5, 7) - 1, +print.d.slice(8, 10)) > nowMs) return null;   // not printed yet
+  if (pb && Number.isFinite(+pb.t) && +pb.t + DAY <= nowMs) return { pct: +(((pb.c - ref.c) / ref.c) * 100).toFixed(1), state: "final" };
+  if (live != null) return { pct: +(((live - ref.c) / ref.c) * 100).toFixed(1), state: "forming" };
   return null;
 }
 // One print, fully dressed: what was expected, what printed, whether that beat, by how much, and
 // what the tape did about it. Every field independently nullable — a feed that shipped the date but
-// not the estimate yields a row that says so rather than a row that guesses.
-function earnPrintRow(print, daily, px) {
+// not the estimate yields a row that says so rather than a row that guesses. `hourly`/`now` pass
+// through to earnPrintReaction.
+function earnPrintRow(print, daily, px, hourly, now) {
   if (!print) return null;
   // `+null` is 0 and `+""` is 0, so a bare Number.isFinite(+x) turns a MISSING estimate into a
   // zero one — and a zero estimate makes every actual a "beat" with an undefined surprise. That is
@@ -4232,7 +4478,7 @@ function earnPrintRow(print, daily, px) {
     ? +(((epsA - eps) / Math.abs(eps)) * 100).toFixed(1) : null;
   // The reaction is a {pct,state} pair, flattened onto the row so the renderer can label a
   // still-developing move instead of showing it as settled.
-  const rx = earnPrintReaction(print, daily, px);
+  const rx = earnPrintReaction(print, daily, px, hourly, now);
   return { t: String(print.t || "").toUpperCase(), s: print.s || "TBD", d: print.d || null,
     eps, epsA, verdict, surprisePct,
     reactionPct: rx ? rx.pct : null, reactionState: rx ? rx.state : null };
@@ -4376,27 +4622,110 @@ function mergeEarnPrints(prev, incoming, nowMs, maxAgeDays) {
   out.sort((a, b) => a.d < b.d ? -1 : a.d > b.d ? 1 : (a.t < b.t ? -1 : 1));
   return out;
 }
+// ---- earnings print timing (the convention every reaction reader shares) -----------------------
+// The daily spine is UTC days: a bar opens 00:00Z (20:00 ET the previous evening in EDT, 19:00 in
+// EST) and CLOSES 00:00Z the next day. Both a BMO print (~06:00-08:30 ET) and an AMC print
+// (~16:05 ET) therefore fall INSIDE the print day's own UTC bar: the last close BEFORE either is
+// daily[pi-1].c and the first close AFTER either is daily[pi].c. So at daily resolution the
+// reaction bar is daily[pi] for BOTH sessions and the reference is daily[pi-1]. The previous
+// convention booked AMC as daily[pi+1] vs daily[pi] — a reference close taken FOUR HOURS AFTER the
+// print (the 20:00 ET close already carried the after-hours reaction), so an AMC reaction was
+// measured as the following day's drift and a +20% print read as +0.8%.
+// With an HOURLY spine the print is anchored at its ET wall time (etWallToUtc + priceAsOf):
+// AMC at 16:00 ET (the cash close; prints land minutes after), BMO at 06:00 ET (before essentially
+// every pre-market print — anchoring later risks a POST-print reference, the exact defect this
+// replaces; the price is that +1h reads a mostly pre-print hour for a 07:30 printer). DMH/TBD
+// have no known time and take the daily convention only.
+const EARN_ANCHOR_H = { AMC: 16, BMO: 6 };
+function earnPrintUtc(print, opts) {
+  if (!print || typeof print.d !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(print.d)) return null;
+  const o = opts || {};
+  const h = print.s === "AMC" ? (o.amcHour == null ? EARN_ANCHOR_H.AMC : o.amcHour) : print.s === "BMO" ? (o.bmoHour == null ? EARN_ANCHOR_H.BMO : o.bmoHour) : null;
+  if (h == null) return null;
+  return etWallToUtc(+print.d.slice(0, 4), +print.d.slice(5, 7), +print.d.slice(8, 10), Math.floor(h), Math.round((h % 1) * 60));
+}
+// ---- study A: earnings reaction curve ---------------------------------------------------------
+// For each past print with a known ET time (BMO/AMC), the price AT the print anchor from the hourly
+// spine, then the move to +1h, +4h and +24h (opts.horizons, in hours). A horizon that has not
+// elapsed by `now`, or that the spine does not cover, is null on the row and absent from the
+// aggregate — never a zero.
+//   prints : [{ t, d: "YYYY-MM-DD", s: "BMO"|"AMC"|..., ... }]
+//   hourly : packed [[t,o,h,l,c,v], ...] or object rows {t,o,h,l,c,v}
+//   opts   : { now, tol (default 3h), horizons (default [1, 4, 24]), amcHour, bmoHour, fine (5m rows) }
+// Returns null when no print anchors on the spine, else {
+//   n, rows: [{ t, d, s, t0, p0, mv: { h1, h4, h24 }, approx }]     mv in %, null when unresolved
+//   agg: { h1: { n, medAbs, med, up, upShare }, h4: ..., h24: ... }  medAbs = median |move|, up = count > 0
+//   approx                                                              any anchor read off an hourly close that missed its time
+// }
+function earnReactionCurve(prints, hourly, opts) {
+  const o = opts || {}, now = o.now == null ? Date.now() : o.now, tol = o.tol || 3 * HOUR;
+  const hz = Array.isArray(o.horizons) && o.horizons.length ? o.horizons : [1, 4, 24];
+  const hs = packedRows(hourly), fine = Array.isArray(o.fine) && o.fine.length ? packedRows(o.fine) : null;
+  if (!Array.isArray(prints) || !prints.length || !hs.length) return null;
+  const rows = [], keyOf = (h) => "h" + h;
+  let approx = false;
+  for (const p of prints) {
+    const t0 = earnPrintUtc(p, o);
+    if (t0 == null || !(t0 < now)) continue;
+    const a0 = anchorPrice(hs, fine, t0, tol);
+    if (!(a0.px > 0)) continue;
+    const mv = {};
+    let rowApprox = a0.approx, any = false;
+    for (const h of hz) {
+      const t1 = t0 + h * HOUR;
+      if (t1 > now) { mv[keyOf(h)] = null; continue; }
+      const a1 = anchorPrice(hs, fine, t1, tol);
+      if (!(a1.px > 0)) { mv[keyOf(h)] = null; continue; }
+      mv[keyOf(h)] = +((a1.px / a0.px - 1) * 100).toFixed(3);
+      if (a1.approx) rowApprox = true;
+      any = true;
+    }
+    if (!any) continue;
+    if (rowApprox) approx = true;
+    rows.push({ t: p.t, d: p.d, s: p.s, t0, p0: a0.px, mv, approx: rowApprox });
+  }
+  if (!rows.length) return null;
+  const agg = {};
+  for (const h of hz) {
+    const k = keyOf(h), v = rows.map((r) => r.mv[k]).filter(Number.isFinite);
+    if (!v.length) { agg[k] = { n: 0 }; continue; }
+    const up = v.filter((x) => x > 0).length;
+    agg[k] = { n: v.length, medAbs: +median(v.map(Math.abs)).toFixed(2), med: +median(v).toFixed(2), up, upShare: +(up / v.length).toFixed(2) };
+  }
+  return { n: rows.length, rows, agg, approx };
+}
 // Per-ticker earnings reaction study, computed on the perp's OWN daily closes (UTC days — the
-// perp trades through weekends, so an AMC Friday print's reaction is honestly captured by the
-// Saturday candle). Reaction day: BMO/DMH/TBD = the print's own candle vs the prior close;
-// AMC = the NEXT candle. Candles may be warm-cache [{t,c}] without opens — the gap metrics
-// (open vs prior close, held-to-close) compute only where opens exist and report their own n.
-// Expansion = |reaction| / mean |daily move| over the 20 candles before the print (>=8 required).
-function earnReactionsFor(prints, daily, now) {
+// perp trades through weekends, so a Friday AMC print's after-hours reaction is inside Friday's
+// own UTC bar, which closes Saturday 00:00Z). Reaction bar: the print day's OWN candle vs the
+// prior close for EVERY session — see the timing note above earnPrintUtc for why AMC is no
+// exception at UTC-day resolution. Candles may be warm-cache [{t,c}] without opens — the gap
+// metrics (open vs prior close, held-to-close) compute only where opens exist and report their
+// own n. Expansion = |reaction| / mean |daily move| over the 20 candles before the print (>=8).
+// `hourly` (optional, packed or object rows) anchors BMO/AMC prints at their ET print time and
+// takes the +24h move from earnReactionCurve as the reaction; prints the spine does not reach
+// fall back to the daily bar. `hN` reports how many reactions came off the hourly anchor.
+function earnReactionsFor(prints, daily, now, hourly, opts) {
   if (!Array.isArray(prints) || !prints.length || !Array.isArray(daily) || daily.length < 3) return null;
+  const nowMs = now == null ? Date.now() : now;
   const dayOf = (t) => { const x = new Date(t); return x.getUTCFullYear() + "-" + String(x.getUTCMonth() + 1).padStart(2, "0") + "-" + String(x.getUTCDate()).padStart(2, "0"); };
   const idxByDay = new Map();
   for (let i = 0; i < daily.length; i++) if (daily[i] && Number.isFinite(daily[i].c)) idxByDay.set(dayOf(daily[i].t), i);
+  const curve = hourly ? earnReactionCurve(prints, hourly, Object.assign({}, opts || {}, { now: nowMs, horizons: [24] })) : null;
+  const h24 = new Map();
+  if (curve) for (const r of curve.rows) if (Number.isFinite(r.mv.h24)) h24.set(r.t + "|" + r.d, r.mv.h24);
   const moves = [], exps = [], gaps = [];
+  let hN = 0;
   for (const p of prints) {
     const pi = idxByDay.get(p.d);
     if (pi == null) continue;                                    // print predates the retained daily window
-    const ri = p.s === "AMC" ? pi + 1 : pi;
+    const ri = pi;                                               // the print day's own bar carries the reaction (BMO and AMC alike)
     if (ri <= 0 || ri >= daily.length) continue;
-    if (Number.isFinite(+daily[ri].t) && +daily[ri].t + DAY > (now == null ? Date.now() : now)) continue;   // the reaction candle is still forming: not a reaction yet
+    const fromH = h24.get(p.t + "|" + p.d);
+    if (fromH == null && Number.isFinite(+daily[ri].t) && +daily[ri].t + DAY > nowMs) continue;   // the reaction candle is still forming: not a reaction yet
     const c1 = daily[ri].c, c0 = daily[ri - 1].c;
-    if (!Number.isFinite(c1) || !Number.isFinite(c0) || c0 <= 0) continue;
-    const mv = (c1 - c0) / c0 * 100;
+    if (fromH == null && (!Number.isFinite(c1) || !Number.isFinite(c0) || c0 <= 0)) continue;
+    const mv = fromH != null ? fromH : (c1 - c0) / c0 * 100;
+    if (fromH != null) hN++;
     moves.push(mv);
     let base = 0, bn = 0;
     for (let k = Math.max(1, ri - 20); k < ri; k++) {
@@ -4405,7 +4734,7 @@ function earnReactionsFor(prints, daily, now) {
     }
     if (bn >= 8 && base > 0) exps.push(Math.abs(mv) / (base / bn));
     const o = daily[ri].o;
-    if (Number.isFinite(o) && o > 0) {
+    if (Number.isFinite(o) && o > 0 && Number.isFinite(c0) && c0 > 0 && Number.isFinite(c1)) {
       const g = (o - c0) / c0 * 100;
       if (Math.abs(g) > 0.05) gaps.push({ up: g > 0, held: (c1 - o) * g > 0 });
     }
@@ -4419,11 +4748,15 @@ function earnReactionsFor(prints, daily, now) {
     up: moves.filter((m) => m > 0).length,
     xMed: exps.length ? +median(exps).toFixed(1) : null, xN: exps.length,
     gapN: gaps.length, gapUp: gaps.filter((g) => g.up).length, gapHeld: gaps.filter((g) => g.held).length,
+    hN,
   };
 }
 module.exports.mergeEarnPrints = mergeEarnPrints;
 module.exports.scrubPlaceholderActuals = scrubPlaceholderActuals;
 module.exports.earnReactionsFor = earnReactionsFor;
+module.exports.earnReactionCurve = earnReactionCurve;
+module.exports.earnPrintUtc = earnPrintUtc;
+module.exports.EARN_ANCHOR_H = EARN_ANCHOR_H;
 
 // ===== Coinalyze derivatives context (crypto universe) ==========================================
 // Pure math over the packed deriv rows [ts, longLiqUsd, shortLiqUsd, oiUsd]. Fetch/assembly lives
@@ -5964,16 +6297,21 @@ module.exports.featureSettable = featureSettable;
 // pessimistically as the void — an intrabar sequence the spine cannot see is never scored as the
 // win. `approx` is the honesty flag: no candles covered the window (a restart trimmed the spine),
 // so a touch was unknowable and the episode can only be scored at its endpoints, disclosed.
+// The bar containing tShow (t <= tShow < t + HOUR) is walked with the same asymmetry as
+// bracketTouch: a void touched inside it counts (amb: true — the wick's timing against the
+// first-show minute is unknowable and the void is the conservative reading); a target touched
+// only inside it does not (it may predate the episode). The old `t <= tShow` skip omitted the bar.
 function epResolve(candles, tShow, tEnd, side, voidLv, target) {
   const long = side === "long";
   let seen = false;
   if (Array.isArray(candles)) for (const k of candles) {
     const t = k[0];
-    if (t <= tShow) continue;
+    if (t + HOUR <= tShow) continue;               // closed before first show: not in the window
     if (t > tEnd) break;
     seen = true;
-    if (long ? k[3] <= voidLv : k[2] >= voidLv) return { kind: "void", tHit: t, approx: false };
-    if (long ? k[2] >= target : k[3] <= target) return { kind: "target", tHit: t, approx: false };
+    const showBar = t <= tShow;
+    if (long ? k[3] <= voidLv : k[2] >= voidLv) return { kind: "void", tHit: t, approx: false, amb: showBar };
+    if (!showBar && (long ? k[2] >= target : k[3] <= target)) return { kind: "target", tHit: t, approx: false, amb: false };
   }
   return { kind: "expired", tHit: null, approx: !seen };
 }
