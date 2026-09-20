@@ -6,7 +6,7 @@ import { tabVisible, toggleViewAsPublic } from "./admin.js";
 import { alertMarkRead, buildAlertsPanel, loadAlerts, notifyNewBuild, updateBell } from "./alerts.js";
 import { applyScope, setScope, showView, syncTabScroll } from "./backtest.js";
 import { COLS } from "./base.js";
-import { COL_BY_KEY, DEFAULT_HIDDEN, DEFAULT_ORDER, G, PKEY, activeRows, el, esc, fmtPrice, mktGrp, parseAmount, state, store } from "./core.js";
+import { COL_BY_KEY, DEFAULT_HIDDEN, DEFAULT_ORDER, G, PKEY, activeRows, el, esc, fmtPrice, mktGrp, overlayPop, overlayPush, overlayTop, parseAmount, state, store } from "./core.js";
 import { exportCorr, exportMarkets, openCorr, renderCorr, renderCorrPairs } from "./corr.js";
 import { loadDaily, loadSnapshot, updateFreshness } from "./data.js";
 import { closeDetail, openDetail, runSigHist, toggleWatch } from "./drawer.js";
@@ -90,23 +90,24 @@ function startEvents(){ if(typeof EventSource==='undefined'||_sseSrc) return;
 }
 function _cycleMs(){ return _sseOk?Math.max(state.refreshMs,120000):state.refreshMs; }
 function startCycle(){ clearInterval(cycleTimer); const ms=_cycleMs(); cycleTimer=setInterval(()=>{ loadSnapshot(); nextCycle=Date.now()+_cycleMs(); }, ms); nextCycle=Date.now()+ms; }
-function setRefresh(ms){ state.refreshMs=ms; state.pollMs=ms; startCycle(); }
+function setRefresh(ms){ state.refreshMs=ms; startCycle(); }
 function forceRefresh(){ loadSnapshot(); nextCycle=Date.now()+state.refreshMs; }
 // The countdown is honest about the push stream: while SSE is healthy the poll is only a
 // stretched 120s fallback, and painting THAT number read as "the app refreshes every 2 minutes"
 // when updates actually land the moment the server's content clock moves (~15s rebuild cadence).
 // So a live stream shows "push live" and the countdown only returns when the poll is really
 // what's driving.
-let _cdMode=null;
+let _cdMode=null, _cdText='';
 
-export function __boot_nav_10165() {   // last painted mode, so the 500ms tick doesn't rewrite unchanged DOM/titles
-setInterval(()=>{ const lbl=el('cdlbl'), c=el('cd'), mode=_sseOk?'push':'poll';
+export function __boot_nav_10165() {   // last painted mode + text, so the 500ms tick doesn't rewrite unchanged DOM/titles
+setInterval(()=>{ if(document.hidden) return;   // a background tab has nobody reading the countdown; visibilitychange brings it back
+  const lbl=el('cdlbl'), c=el('cd'), mode=_sseOk?'push':'poll';
   if(mode!==_cdMode){ _cdMode=mode;
     if(lbl) lbl.textContent=_sseOk?'push':'next';
     if(c) c.title=_sseOk?'the server pushes a poke the moment its data changes (~15s build cadence) and this browser pulls immediately — the refresh selector only paces the fallback poll':''; }
-  if(_sseOk){ if(c) c.textContent='live'; }
-  else { const left=Math.max(0,nextCycle-Date.now()), m=Math.floor(left/60000), s=Math.floor((left%60000)/1000);
-    if(c) c.textContent=m+':'+String(s).padStart(2,'0'); }
+  let txt='live';
+  if(!_sseOk){ const left=Math.max(0,nextCycle-Date.now()), m=Math.floor(left/60000), s=Math.floor((left%60000)/1000); txt=m+':'+String(s).padStart(2,'0'); }
+  if(c&&txt!==_cdText){ _cdText=txt; c.textContent=txt; }
   updateFreshness(); },500);
 }
 
@@ -203,8 +204,7 @@ el('watchOnly').addEventListener('click',()=>{ state.watchOnly=!state.watchOnly;
     db.addEventListener('click',()=>{ state.dimOff=!state.dimOff; db.classList.toggle('on', state.dimOff);
       try{ localStorage.setItem('xyz-dimoff', state.dimOff?'1':'0'); }catch(_){}
       render(); }); } }
-el('drawerbg').addEventListener('click', closeDetail);
-document.addEventListener('keydown', e=>{ if(e.key==='Escape' && state.detail) closeDetail(); });
+el('drawerbg').addEventListener('click', closeDetail);   // Escape is the overlay stack's (core.js): the drawer registers itself on open
 el('bellBtn').addEventListener('click',e=>{ e.stopPropagation(); const pop=el('alertpop');
   if(pop.hidden){ loadPush(); loadRules(); }   // delivery state is server-truth; read it fresh every open (a link code expires in 10 min)
   if(pop.hidden){ buildAlertsPanel(); pop.hidden=false; el('bellBtn').setAttribute('aria-expanded','true'); }
@@ -470,6 +470,7 @@ document.addEventListener('keydown',e=>{
 });
 document.addEventListener('keydown',e=>{
   if(e.ctrlKey||e.metaKey||e.altKey) return;
+  if(e.key==='Escape'&&e.defaultPrevented) return;   // the overlay stack already spent this Escape on its top layer
   const t=e.target, tag=t&&t.tagName;
   if(tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT'||(t&&t.isContentEditable)) return;
   if(e.key==='?'){ e.preventDefault(); openHelp(); return; }
@@ -481,7 +482,7 @@ document.addEventListener('keydown',e=>{
     if(!inp){ showView('markets'); inp=el('filter'); }
     if(inp){ inp.focus(); inp.select&&inp.select(); } return; }
   if(state.view==='dm'){ dmKeys(e); return; }                            // j/k walk the conversation rail, Escape backs out a level
-  if(state.view!=='markets'||state.detail||mktGrp()!=='names') return;   // j/k/Enter drive the markets NAMES table only — never under an open drawer or a group lens
+  if(state.view!=='markets'||overlayTop()||mktGrp()!=='names') return;   // j/k/Enter drive the markets NAMES table only — never under an open layer (drawer, help, palette…) or a group lens
   if(e.key==='j'){ e.preventDefault(); kmoveSel(1); return; }
   if(e.key==='k'){ e.preventDefault(); kmoveSel(-1); return; }
   if(e.key==='Enter'&&state.ksel&&state.rows.has(state.ksel)){ e.preventDefault(); openDetail(state.ksel); return; }
@@ -518,7 +519,10 @@ export function __boot_nav_10590() {
 // ===== PWA: install-only service worker (caches nothing — see server.js /sw.js) =====
 
 
-export function __boot_nav_10612() {if('serviceWorker' in navigator){ try{ navigator.serviceWorker.register('/sw.js').catch(()=>{}); }catch(_){}}
+export function __boot_nav_10612() {if('serviceWorker' in navigator){ try{ navigator.serviceWorker.register('/sw.js').catch(()=>{});
+  // A notification click on an OPEN tab asks the page to switch tabs (sw.js postMessage) instead
+  // of navigating it: a full navigation reloaded the app and dropped whatever was being typed.
+  navigator.serviceWorker.addEventListener('message',e=>{ const d=e&&e.data; if(d&&d.go==='dm') showView('dm'); }); }catch(_){}}
 
 document.querySelectorAll('#corrtf button').forEach(b=>{ if(b.dataset.d===state.corr.tf)b.classList.add('active');
   b.addEventListener('click',()=>{ state.corr.tf=b.dataset.d; document.querySelectorAll('#corrtf button').forEach(x=>x.classList.toggle('active',x===b));
@@ -732,10 +736,10 @@ function openHelp(){
     +`<div class="hlp-sub">What each element means and \u2014 more importantly \u2014 how to interpret it. Every number in the app also explains itself on hover; this is the map. Nothing here is investment advice.</div>`
     +(HELP[v]||`<div class="hlp-h">${esc(title)}</div><p>${esc((tb&&tb.title)||'')||'No explainer written for this tab yet.'}</p>`)
     +HELP_KEYS;
-  bg.hidden=false; m.hidden=false; m.scrollTop=0;
+  bg.hidden=false; m.hidden=false; m.scrollTop=0; overlayPush('help', closeHelp);
   const cb=el('helpclose'); if(cb) cb.onclick=closeHelp;
 }
-function closeHelp(){ const bg=el('helpbg'), m=el('helpmodal'); if(bg)bg.hidden=true; if(m)m.hidden=true; }
+function closeHelp(){ overlayPop('help'); const bg=el('helpbg'), m=el('helpmodal'); if(bg)bg.hidden=true; if(m)m.hidden=true; }
 
 export function __boot_nav_10624() {
 // Short entries for the tabs that had none: pressing ? on Messages used to open the Markets text
@@ -751,8 +755,7 @@ Object.assign(HELP,{
   admin:`<div class="hlp-h">What it is</div><p>Operator surface: accounts and invites, feature visibility ("Everyone / Operators / Hidden"), the alert delivery state for every member, the read-through audit log, and the boot/loop diagnostics.</p>`,
 });
 { const hb=el('helpBtn'); if(hb) hb.addEventListener('click',openHelp);
-  const bg=el('helpbg'); if(bg) bg.addEventListener('click',closeHelp);
-  document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ const m=el('helpmodal'); if(m&&!m.hidden) closeHelp(); } }); }
+  const bg=el('helpbg'); if(bg) bg.addEventListener('click',closeHelp); }   // Escape: overlay stack (core.js)
 }
 
 
@@ -777,9 +780,9 @@ function cmdkTabs(){
 }
 let _cmdkSel=0, _cmdkRows=[];
 function openCmdk(){ const bg=el('cmdkbg'), m=el('cmdk'), q=el('cmdk-q'); if(!bg||!m||!q) return;
-  bg.hidden=false; m.hidden=false; q.value=''; cmdkRender(''); q.focus();
+  bg.hidden=false; m.hidden=false; q.value=''; cmdkRender(''); q.focus(); overlayPush('cmdk', closeCmdk);
   requestAnimationFrame(()=>q.focus()); }
-function closeCmdk(){ const bg=el('cmdkbg'), m=el('cmdk'); if(bg)bg.hidden=true; if(m)m.hidden=true; _cmdkRows=[]; }
+function closeCmdk(){ overlayPop('cmdk'); const bg=el('cmdkbg'), m=el('cmdk'); if(bg)bg.hidden=true; if(m)m.hidden=true; _cmdkRows=[]; }
 function cmdkOpen(){ const m=el('cmdk'); return m&&!m.hidden; }
 function cmdkRender(qs){ const list=el('cmdk-list'); if(!list) return;
   qs=(qs||'').trim();
@@ -815,8 +818,7 @@ export function __boot_nav_10845() {
 { const q=el('cmdk-q'), bg=el('cmdkbg');
   if(bg) bg.addEventListener('click',closeCmdk);
   if(q){ q.addEventListener('input',()=>cmdkRender(q.value));
-    q.addEventListener('keydown',e=>{
-      if(e.key==='Escape'){ e.preventDefault(); closeCmdk(); return; }
+    q.addEventListener('keydown',e=>{   // Escape bubbles to the overlay stack, which closes the palette as its top layer
       if(e.key==='ArrowDown'){ e.preventDefault(); if(_cmdkRows.length){ _cmdkSel=(_cmdkSel+1)%_cmdkRows.length; cmdkPaint(); } return; }
       if(e.key==='ArrowUp'){ e.preventDefault(); if(_cmdkRows.length){ _cmdkSel=(_cmdkSel-1+_cmdkRows.length)%_cmdkRows.length; cmdkPaint(); } return; }
       if(e.key==='Enter'){ e.preventDefault(); cmdkActivate(_cmdkSel, e.shiftKey); } }); }

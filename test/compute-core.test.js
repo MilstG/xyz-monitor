@@ -75,10 +75,25 @@ test("stats: stdev / median / linregR2", () => {
   assert.ok(r2 > 0.999);
 });
 
-test("priceAt: nearest candle within tolerance", () => {
-  const c = [{ t: 1000, c: "10" }, { t: 2000, c: "20" }, { t: 3000, c: "30" }];
-  assert.equal(priceAt(c, 2100, 500), 20);
-  assert.equal(priceAt(c, 9000, 500), null); // outside tolerance
+test("priceAt: the close of the last bar that ENDED at or before the target, forming bar excluded", () => {
+  // Re-baselined (window-reference timing fix): rows carry the bar's OPEN and the close prints at
+  // t + width, so the reference at `target` is the last bar that had CLOSED by then — not the bar
+  // whose open sits nearest. The old fixture (bars 1s apart, matched on open) encoded the defect:
+  // at :45 past the hour "1h ago" resolved to the FORMING bar, i.e. the live price.
+  const c = [{ t: 0, c: "10" }, { t: HOUR, c: "20" }, { t: 2 * HOUR, c: "30" }, { t: 3 * HOUR, c: "40" }];
+  assert.equal(priceAt(c, 2 * HOUR + 6e5, HOUR), 20, "bar 1 closed at 2h: the last close by 2h10");
+  assert.equal(priceAt(c, 2 * HOUR, HOUR), 20, "a bar closing exactly on the target counts");
+  assert.equal(priceAt(c, 3 * HOUR + 30 * 60e3, HOUR, 3 * HOUR + 45 * 60e3), 30, "bar 3 is still forming at now=3h45 -> bar 2's close");
+  assert.equal(priceAt(c, 3 * HOUR + 30 * 60e3, 10 * 60e3), null, "beyond tolerance after the last eligible close");
+  assert.equal(priceAt(c, 30 * 60e3, HOUR), null, "nothing had closed by the target");
+  // The live symptom, end to end: hourly bars whose close == hours since t0, forming bar present,
+  // read at :45 past the hour. p1h must be the last close at/before now-1h, never the live price.
+  const t0 = Date.UTC(2026, 8, 1), now = t0 + 400 * HOUR + 45 * 60e3, cs = [];
+  for (let k = 0; t0 + k * HOUR <= now; k++) cs.push({ t: t0 + k * HOUR, o: k, h: k + 1, l: k, c: Math.min(k + 1, 400.75), v: 1 });
+  const { ref } = featuresFromHourly(cs, now, HOUR, DAY);
+  assert.equal(ref.p1h, 399, "1h ref = close of the bar that ended at now-1h45 (399), not the forming bar (400.75)");
+  assert.equal(ref.p4h, 396);
+  assert.equal(ref.p7d, 232);
 });
 
 test("featuresFromHourly: produces ref, px30 and dr", () => {

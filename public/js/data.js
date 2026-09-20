@@ -33,9 +33,14 @@ async function fetchJSON(url){ const r=await fetch(url,{headers:{accept:'applica
   // navigation lands on the server's login page instead of a silently dead dashboard.
   if(r.status===401){ sessionExpired(); throw new Error('HTTP 401'); }
   if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); }
+// Pulls overlap (a poke, the fallback poll and a manual refresh can all be in flight at once) and
+// nothing guarantees they answer in order: a slow older response landing last moved the board
+// backwards. Every pull takes a sequence number; only the newest pull's answer is applied.
+let _snapSeq=0;
 async function loadSnapshot(){
-  try{ const s=await fetchJSON('/api/snapshot'); applySnapshot(s); setStatus(true); }
-  catch(e){ setStatus(false); if(!activeRows().some(r=>r.px!=null)) el('body').innerHTML=errRow(e.message); }
+  const seq=++_snapSeq;
+  try{ const s=await fetchJSON('/api/snapshot'); if(seq!==_snapSeq) return; applySnapshot(s); setStatus(true); }
+  catch(e){ if(seq!==_snapSeq) return; setStatus(false); if(!activeRows().some(r=>r.px!=null)) el('body').innerHTML=errRow(e.message); }
 }
 async function loadDaily(){ try{ applyDaily(await fetchJSON('/api/daily')); }catch(_){} }
 // The signals/earnings/news tabs pull on their own cadences off the back of the snapshot poll —
@@ -51,6 +56,10 @@ function maybePullSidecars(){
 }
 function applySnapshot(s){
   if(!s||!Array.isArray(s.markets)) return;
+  // Second half of the ordering guard: a payload OLDER than what is painted is dropped outright —
+  // unless the build changed, because a redeploy restarts the server's content clock and the
+  // first snapshot of the new build must land whatever its dataTs says.
+  if(s.dataTs&&state.dataTs&&s.dataTs<state.dataTs&&(!s.v||!state.build||s.v===state.build)) return;
   // Checked BEFORE the content short-circuit below. An idle board is exactly when an alert matters
   // most, and returning early on an unchanged dataTs would have skipped the alert pull precisely
   // then. alertVer rides the snapshot's content signature server-side, so a fired alert always
@@ -174,11 +183,13 @@ function updateAggregates(){ const rows=activeRows(); let v=0,o=0;
   el('s-mkts').textContent=rows.length; el('s-vol').textContent=fmtUsd(v); el('s-oi').textContent=fmtUsd(o);
   el('s-upd').textContent=new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
 function errRow(m){ return `<tr><td colspan="${COLS.length}"><div class="msg err"><span class="big">Couldn't reach the server</span>${esc(m||'Network error')}. Will retry on the next interval.</div></td></tr>`; }
-function setStatus(ok){ state.connOk=ok; const d=el('live'); if(d){ d.style.background=ok?'var(--up)':'var(--down)'; d.title=ok?'live':'connection error'; } if(ok) updateFreshness(); }
-function updateFreshness(){ if(!state.connOk) return; const d=el('live'); if(!d||!state.dataTs) return;
-  const age=Date.now()-state.dataTs;
-  if(age>180000){ d.style.background='var(--accent)'; d.title='server data is '+Math.round(age/60000)+'m old — the poller may be stalled'; }
-  else { d.style.background='var(--up)'; d.title='live'; } }
+let _freshLast='';   // last painted freshness title — the 500ms tick only touches the DOM when it changes
+function setStatus(ok){ state.connOk=ok; const d=el('live'); if(d){ d.style.background=ok?'var(--up)':'var(--down)'; d.title=ok?'live':'connection error'; } _freshLast=ok?'live':''; if(ok) updateFreshness(); }
+function updateFreshness(){ if(!state.connOk||document.hidden) return; const d=el('live'); if(!d||!state.dataTs) return;
+  const age=Date.now()-state.dataTs, stale=age>180000;
+  const title=stale?'server data is '+Math.round(age/60000)+'m old — the poller may be stalled':'live';
+  if(title===_freshLast) return; _freshLast=title;
+  d.style.background=stale?'var(--accent)':'var(--up)'; d.title=title; }
 // Data-source freshness tray: one dot per live feed with its age, colour-graded. Reads /api/health
 // (auth-exempt, already carries every source's timestamp via poller.stats) so it needs no new
 // endpoint. Each source declares its own "aging" and "stale" thresholds because a 30s price poll and

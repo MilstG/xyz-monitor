@@ -139,7 +139,7 @@ function termScreen(expr){ const cls=(expr||'').split('&').map(c=>c.trim()).filt
     return p.op==='>'?x>p.v:p.op==='<'?x<p.v:p.op==='>='?x>=p.v:p.op==='<='?x<=p.v:x===p.v; });
   let hits=termActive().filter(pass); hits.sort((a,b)=>(sortF.g(b)||0)-(sortF.g(a)||0));
   if(!hits.length) return termOut(`<span class="tp-hd">screen</span> <span class="sec">${tesc(expr)}</span>\n<span class="tp-trans">no matches in ${state.scope}</span>`);
-  const rows=hits.slice(0,14).map(r=>`<span role="button" tabindex="0" class="tp-deep" data-tcmd="${r.ticker}">${tpad(r.ticker,8)}</span> ${tpad(fmtPrice(r.px),9,true)}  ${tpad((termAprOf(r)>=0?'+':'')+(termAprOf(r)!=null?termAprOf(r).toFixed(0):'—')+'%',7,true)} f  ${tpad(r.sqz!=null?Math.round(r.sqz):'—',3,true)} sqz  ${tpad(tint(r.mom).replace(/<[^>]+>/g,''),4,true)} mom`).join('\n');
+  const rows=hits.slice(0,14).map(r=>`<span role="button" tabindex="0" class="tp-deep" data-tcmd="${tesc(r.ticker)}">${tpad(r.ticker,8)}</span> ${tpad(fmtPrice(r.px),9,true)}  ${tpad((termAprOf(r)>=0?'+':'')+(termAprOf(r)!=null?termAprOf(r).toFixed(0):'—')+'%',7,true)} f  ${tpad(r.sqz!=null?Math.round(r.sqz):'—',3,true)} sqz  ${tpad(tint(r.mom).replace(/<[^>]+>/g,''),4,true)} mom`).join('\n');
   termOut(`<span class="tp-hd">screen</span> <span class="sec">${tesc(expr)}</span> <span class="tp-trans">· ${hits.length} match${hits.length>1?'es':''} · ${state.scope}</span>\n${rows}`); }
 function termSignals(t){ const d=state.signals; let groups=(d&&Array.isArray(d.signals))?d.signals.slice():[];
   groups=groups.filter(g=>{ const r=state.rows.get(g.coin); return r&&!r.delisted&&inScope(r); });
@@ -630,8 +630,11 @@ function termSetLock(locked){ const b=termEl('termLock'); if(!b) return;
   b.title=locked?'AI generation is locked — run: admin unlock <password>':'AI unlocked for this session'; }
 async function termRefreshLock(){ try{ const d=await fetchJSON('/api/ai-status'); const b=termEl('termLock');
   if(b) b.hidden=!(d&&d.gated); termSetLock(!(d&&d.unlocked)); }catch(_){} }
+// Scrollback is capped: the panel lives for days and every block keeps its DOM (charts included).
+const TERM_MAX_BLOCKS=200;
 let _termSink=null;
-function termEmit(d){ if(_termSink){ _termSink.blocks.push(d); return; } termEl('termScroll').appendChild(d); termScrollDown(); }
+function termEmit(d){ if(_termSink){ _termSink.blocks.push(d); return; } const s=termEl('termScroll'); s.appendChild(d);
+  while(s.children.length>TERM_MAX_BLOCKS) s.removeChild(s.firstChild); termScrollDown(); }
 function termOut(html){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<span class="tp-badge c">computed</span> <span class="tp-line">${html}</span>`; termEmit(d); }
 function termOutTrans(cmd){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<span class="tp-trans">→ ${tesc(cmd)}</span>`; termEmit(d); }
 function termOutAI(html){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<span class="tp-badge ai">AI</span> <span class="tp-line">${html}</span>`; termEmit(d); }
@@ -724,7 +727,7 @@ TALIAS = {fund:'funding',apr:'funding',rate:'funding',fundingpct:'fundpct',pctil
       // caret moves between wrapped lines like a normal textarea.
       if(e.key==='ArrowUp'&&!q.value.slice(0,q.selectionStart).includes('\n')){ e.preventDefault(); if(termHi_<termHist.length-1){ termHi_++; q.value=termHist[termHi_]; termGhostFn(); termAutoGrow(q); } return; }
       if(e.key==='ArrowDown'&&!q.value.slice(q.selectionEnd).includes('\n')){ e.preventDefault(); if(termHi_>0){ termHi_--; q.value=termHist[termHi_]; } else { termHi_=-1; q.value=''; } termGhostFn(); termAutoGrow(q); return; }
-      if(e.key==='Escape'){ termClose(); return; }
+      if(e.key==='Escape'){ e.stopPropagation(); termClose(); return; }   // consumed here: the overlay stack must not also close whatever sits under the panel
       if(e.key==='ArrowRight'&&termEl('termGhost').textContent&&q.selectionStart===q.value.length){ q.value=termEl('termGhost').textContent; termGhostFn(); termAutoGrow(q); } }); }
   const fab=termEl('termFab'); if(fab) fab.addEventListener('click',termOpen);
   const mn=termEl('termMin'); if(mn) mn.addEventListener('click',termClose);

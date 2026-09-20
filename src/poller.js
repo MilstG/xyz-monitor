@@ -1,7 +1,7 @@
 "use strict";
 // Owns all Hyperliquid I/O. Polls the universe, backfills candle history, samples OI,
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
-const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket, createCoinalyze } = require("./hyperliquid");
+const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, candleWeight, fundingWeight, createUniverseSocket, createCoinalyze } = require("./hyperliquid");
 const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly, closedDailyCloses } = require("./compute");
 const { claimGeometryOk, clusterDays, evMeta, capPerUniverse, detectCascExhaust, latestCascade, tradeableNow } = require("./compute");
 const { sectorAuditDecide, mergeSectorAudit, sectorAuditDue } = require("./compute");
@@ -23,7 +23,7 @@ const { featuresFromHourly, bucketOpens, oiDeltaPct, fundingAvg, fundingHeat, FU
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
 const { pdfTextRuns, ptrRows, parsePtr, pdfImages, ccittTiff, ocrPtrRows } = require("./compute");
-const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, scrubPlaceholderActuals, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, topicHit, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings, pickXbrlFacts, parseNportHoldings } = require("./compute");
+const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, scrubPlaceholderActuals, earnReactionsFor, earnReactionCurve, overnightSplit, FINE_TOL, etWallToUtc, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, topicHit, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings, pickXbrlFacts, parseNportHoldings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
 const { closedBars, closedLadder, emaLast, emaCrossOutcomes, emaCrossStudy, emaAlertState } = require("./compute");
 const { momPair, spearmanIC, duelStats, epResolve, epScore } = require("./compute");
@@ -45,7 +45,13 @@ const OI_FULL_RES = 31 * DAY;         // full ~5-min resolution window; older sa
 const HOURLY_STALE = 10 * 60 * 1000;  // refresh hourly features every 10 min
 const HOURLY_HISTORY_DAYS = 180;      // rolling hourly-OHLCV window (API serves ~5000 most-recent candles = ~208d hard cap; 180d fits one call and triples the gap-study samples)
 const HOURLY_FEAT_DAYS = 31;          // window actually fed to featuresFromHourly (keep features identical to before)
-const HOURLY_FETCH_WEIGHT = 130;      // rate-limit weight for the cold 180d hourly pull (one-time per market)
+// ---- request weights ---------------------------------------------------------------------------
+// Every candle / funding pull is charged from the span it actually requests, through the documented
+// formulas in hyperliquid.js (candleWeight / fundingWeight). The flat per-lane constants that used
+// to live here (35 for a 90d hourly pull that really costs 56, 20 for a 60d funding pull that costs
+// 92, 20 for the 17d 5m seed that costs 102) were set when the windows were shallow and never
+// followed them deeper, so the limiter's ledger under-counted the heaviest calls by 2-4x.
+const spanWeight = (fromMs, toMs, ivMs) => candleWeight((toMs - fromMs) / ivMs);
 // ---- red-tape resilience + RVOL (tunables) ---------------------------------------------------
 const RED_LOOKBACK = 31 * DAY;        // fixed 31d sample on BOTH scopes so "DownCap 31d" means the same thing everywhere
 const RED_BREADTH = 0.70;             // a 4h bar is "red tape" when >=70% of the scope's reporting names printed red...
@@ -75,9 +81,6 @@ const MAIN_DAILY_PAYLOAD = 92;        // crypto DAILY bars ON THE WIRE (/api/dai
                                       // AI chart read 90d — retention deepened for the detectors, not to
                                       // quadruple every client's payload. Server-side consumers read the
                                       // full dailyRaw depth directly.
-const MAIN_HOURLY_WEIGHT = 35;        // 90d spine pull (-17): one candleSnapshot, same request weight
-const MAIN_DAILY_WEIGHT = 8;          // 370d daily pull (same request weight — one candleSnapshot either way)
-const HOURLY_TAIL_WEIGHT = 20;        // steady-state refresh only pulls the last ~48h and merges — cheaper than the old full-window re-pull
 // ---- Coinalyze derivatives context (crypto universe only) -------------------------------------
 // Aggregated CEX liquidations + OI as CONTEXT for the Hyperliquid names — a different venue
 // population than our book, permanently labeled as such in every payload. External dependency is
@@ -93,7 +96,6 @@ const CZ_BATCH = 20;                  // symbols per batched request (their max)
 const CZ_VENUES = ["Binance", "Bybit", "OKX"];   // deterministic single-venue preference per base asset
 const CZ_QUOTES = new Set(["USDT", "USD", "USDC"]);
 const FUNDING_HISTORY_DAYS = 60;      // rolling hourly funding-rate window (aligned with the price spine)
-const FUNDING_FETCH_WEIGHT = 20;      // rate-limit weight for a fundingHistory pull
 const FUNDING_PROBE_MIN = 8;          // if the first N (highest-vol) backfills all return nothing, treat
 const DAILY_STALE = 6 * 3600 * 1000;  // refresh daily candles every 6 h
 const UNIVERSE_MS = 30 * 1000;        // poll price/funding/vol/OI + detect new markets
@@ -112,8 +114,17 @@ const PX_RING_TOL_MS = 90 * 1000;          // max gap between the lookback targe
 const FIVE_MIN = 5 * 60 * 1000;
 const M5_RETENTION_DAYS = 370;        // rolling 5m archive; 370 (not 365) buys a few days of slack so a "1y" chart is never short
 const M5_SEED_DAYS = 17;              // native candleSnapshot window at 5m (5000 * 5min ~= 17.36d) — the most one pull can return
-const M5_STALE = 5 * 60 * 1000;       // capture each market's freshly CLOSED 5m bars about once per bar
-const M5_FETCH_WEIGHT = 20;           // rate-limit weight per 5m tail pull (steady state returns only the last few bars)
+// Capture cadence per market: ONE bar (5 min) when the roster is small enough, stretched so the lane's
+// steady-state demand stays under half the limiter budget. Arithmetic: a tail pull returns 2-3 bars
+// and costs candleWeight(≈3) = 21; N markets on a cadence of S ms spend N × 21 × 60000 / S weight per
+// minute; capping that at 50% of the 1150/min budget (M5_BUDGET_SHARE) gives S ≥ N × 21 × 60000 / 575,
+// i.e. 5 min up to ~137 markets, ~5.5 min at 150 and ~7.7 min at 210. Before this the lane wanted
+// 210 × 21 / 5 = 882 weight/min against a total budget of 1150 — every other lane starved, and the
+// picker (volume-desc, no age tier) let the tail names miss capture after capture; past the 17d
+// native window that hole in the archive was permanent. See m5StaleMs() in createPoller.
+const M5_STALE_MIN = 5 * 60 * 1000;   // never faster than once per bar
+const M5_TAIL_WEIGHT = candleWeight(3);   // the steady-state tail pull (a few closed bars): 21
+const M5_BUDGET_SHARE = 0.5;          // the 5m lane's ceiling as a share of the limiter budget
 const M5_SNAPSHOT_MS = 24 * 3600 * 1000;   // VACUUM-INTO off-copy of the archive once a day (it's the sole copy past the native window)
 // ---- deep-history 12h/1d archive (build 2026.08.21-01) ---------------------------------------
 // The native 5000-bar candleSnapshot window is ~2.3y at 4h, ~6.8y at 12h and ~13.7y at 1d, so unlike the 5m
@@ -125,9 +136,7 @@ const M5_SNAPSHOT_MS = 24 * 3600 * 1000;   // VACUUM-INTO off-copy of the archiv
 // 24/7 perp IS a UTC day, and re-cutting it here would invent a series the exchange never printed.
 const DEEP_IVS = { "4h": 4 * HOUR, "12h": 12 * HOUR, "1d": 24 * HOUR };   // 4h joined -03: ~2.3y native window; the CHARTS 4H pane needs EMA200 depth the 20d intraday base cannot hold
 const DEEP_STALE = 4 * HOUR;          // tail-pull cadence per (market, interval): a few closed bars/day exist at most
-const DEEP_SEED_BARS = 4900;          // just under the native 5000-bar cap — the seed pull asks for everything servable
-const DEEP_SEED_WEIGHT = 60;          // one-time cold pull per (market, interval): up to ~5000 bars in one response
-const DEEP_TAIL_WEIGHT = 15;          // steady state returns a handful of bars
+const DEEP_SEED_BARS = 4900;          // just under the native 5000-bar cap — the seed pull asks for everything servable (charged candleWeight(4900) = 102)
 const SWEEP_LOOK_MS = 4 * HOUR;            // 5m tail scanned for a prior-session-level stop-run (~48 bars; detector needs >=12)
 const RECLAIM_MIN_DIP_PCT = 0.35;          // min peak→trough depth (% of peak) before a dip-reclaim claim exists — below it the "dip" is xyz bar noise. Rides the sweep tail; crypto would need its own (much higher) floor when it gets a lane.
 const SWEEP_FRAC = 0.25;                   // min wick pierce past the swept level, as a fraction of the window's median 5m range
@@ -595,8 +604,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       seen.add(coin);
     });
     if (crypto) await pollMainUniverse(seen, hourNow, (n) => { newCount += n; });
+    // A market that vanished from the reply loses its ROW, not its OI history: one short-but-plausible
+    // reply (above the half-roster guard) used to erase a year of sampled OI/funding in memory, and
+    // the next reply that listed the coin again started it from nothing. The history is keyed by
+    // coin, sampleOI re-attaches to it on reappearance, and the maintenance sweep drops it only
+    // once it is row-less AND older than the delisted GC window — the same clock a delisting runs on.
     let removed = 0;
-    for (const k of [...rows.keys()]) if (!seen.has(k)) { rows.delete(k); hist.delete(k); removed++; }
+    for (const k of [...rows.keys()]) if (!seen.has(k)) { rows.delete(k); removed++; }
     if (newCount || removed || benchCoin == null) benchCoin = detectBenchmark();
     sampleOI();
     lastPoll = Date.now();
@@ -711,6 +725,17 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     sampleOI();
     lastPoll = now; lastWsApply = now; wsApplied++;
   }
+  // "The socket is carrying the board" = a batch was actually APPLIED recently, not merely that the
+  // socket is healthy. applyWsCtxs returns early whenever our dex's tuple is absent or its length
+  // disagrees with `order` (a listing landed between REST polls), and healthy() only knows that
+  // ctxs events arrive — so a healthy socket could be skipping every batch while REST, trusting
+  // healthy(), dropped to one poll in five and the board sat 150s stale. lastWsApply moves only
+  // on an applied batch; past WS_APPLY_FRESH_MS without one, REST resumes its full 30s cadence.
+  const WS_APPLY_FRESH_MS = 90000;
+  function wsCarrying(now, healthy) {
+    const h = healthy == null ? !!(sock && sock.enabled && sock.healthy()) : !!healthy;
+    return h && lastWsApply > 0 && now - lastWsApply < WS_APPLY_FRESH_MS;
+  }
 
   async function refreshHourly(coin) {
     const r = rows.get(coin);
@@ -731,12 +756,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const deep = spine && spine.length > 48
       && (r.hourlyFull === true || firstT <= now - (histDays - (r.uni === "main" ? 14 : 30)) * DAY);
     if (!deep) {
-      const wide = await fetchCandles(coin, "1h", now - histDays * DAY, now, r.uni === "main" ? MAIN_HOURLY_WEIGHT : HOURLY_FETCH_WEIGHT);
+      const wide = await fetchCandles(coin, "1h", now - histDays * DAY, now, spanWeight(now - histDays * DAY, now, HOUR));   // 180d = 92, 90d = 56
       if (Array.isArray(wide)) { r.hourlyRaw = packHours(wide); r.hourlyFull = r.hourlyRaw.length > 48; }
       else if (!spine) r.hourlyRaw = null;           // keep a shallow spine over nothing if the wide pull fails
     } else {
       const lastT = spine.length ? +spine[spine.length - 1][0] : 0;
-      const tail = await fetchCandles(coin, "1h", Math.max(lastT - 2 * HOUR, now - 2 * DAY), now, HOURLY_TAIL_WEIGHT);
+      const tailFrom = Math.max(lastT - 2 * HOUR, now - 2 * DAY);
+      const tail = await fetchCandles(coin, "1h", tailFrom, now, spanWeight(tailFrom, now, HOUR));   // ≤ 48 bars = 21
       const packedTail = packHours(tail);
       if (packedTail.length) {
         const firstNew = packedTail[0][0];
@@ -756,14 +782,29 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const r = rows.get(coin);
     if (!r) return;
     const now = Date.now();
-    const c = r.uni === "main"
-      ? await fetchCandles(coin, "1d", now - MAIN_DAILY_DAYS * DAY, now, MAIN_DAILY_WEIGHT)
-      : await fetchCandles(coin, "1d", now - 370 * DAY, now, 27);
+    const dFrom = r.uni === "main" ? now - MAIN_DAILY_DAYS * DAY : now - 370 * DAY;
+    const c = await fetchCandles(coin, "1d", dFrom, now, spanWeight(dFrom, now, DAY));   // 370 bars = 27 on both universes
     // A non-array body (an upstream error page with a 200) must not replace a warm 370d spine:
     // needDaily would see a truthy value with a fresh stamp and not retry for six hours.
     if (!Array.isArray(c)) throw new Error("daily candles: non-array reply");
     r.dailyRaw = c; r.dailyTs = Date.now(); r.isNew = false;
-    buildDaily();
+    scheduleBuildDaily();
+  }
+  // The daily payload rebuild is a full pass over every market (closes, β, correlation matrix, the
+  // content signature). Running it once per refreshed MARKET meant the cold backfill — two workers
+  // draining ~200 names — rebuilt it ~200 times in a few minutes, each rebuild costlier than the
+  // fetch it followed. Trailing-edge debounce: the first refresh arms a 1s timer, later refreshes
+  // inside that second ride the same rebuild, and the payload is at most one second behind the
+  // last fetch. Unref'd so a pending rebuild never holds the process open; the harness keeps its
+  // synchronous buildDailyNow, which is the same buildDaily called directly.
+  let buildDailyT = null;
+  function scheduleBuildDaily() {
+    if (buildDailyT) return;
+    buildDailyT = setTimeout(() => {
+      buildDailyT = null;
+      try { buildDaily(); } catch (e) { log("daily build (debounced) failed: " + (e && e.message)); }
+    }, 1000);
+    if (buildDailyT.unref) buildDailyT.unref();
   }
 
   // Prioritise newly listed markets, then highest 24h volume. Skips coins already being
@@ -775,7 +816,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // coverageScan alerts on: one predicate, one code path), and everything past the age outranks
   // fresh-ish names stalest-first, so no market can starve indefinitely just for being small.
   // Under a healthy budget nothing ever reaches the escalation age and the ordering is
-  // byte-for-byte the historical one. Non-hourly lanes stay tier 0 always, untouched.
+  // byte-for-byte the historical one.
+  // 5m lane: the same age escalation (no claim tier — claims are an hourly-spine concept), against
+  // its own roster-aware cadence. Without it the lane was volume-desc forever: under budget
+  // pressure the same tail names lost their capture every pass, and once a gap fell out of the
+  // 17d native window it was a permanent hole in the sole-copy archive.
+  // Daily / funding / deep lanes stay tier 0 always, untouched.
   const CLAIM_PRIORITY_AGE = 3 * HOURLY_STALE;   // past this spine age, staleness outranks volume
   const isOpenAnnounced = (e) => e.vi == null && e.alo === 1;   // shared with coverageScan — same set, one predicate
   function openClaimCoins() {
@@ -786,13 +832,14 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   function pick(needsFetch, prefix) {
     const now = Date.now();
     const claims = prefix === "h:" ? openClaimCoins() : null;
+    const m5Esc = prefix === "m5:" ? 3 * m5StaleMs() : 0;   // past 3x the lane's cadence, stalest-first outranks volume
     let best = null, bestKey = null;
     for (const r of rows.values()) {
       if (r.delisted || !needsFetch(r)) continue;
       if (prefix && inflight.has(prefix + r.coin)) continue;
       if (r.coin === benchCoin) return r.coin;   // benchmark first, always: RS, β, leaders and every correlation panel gate on its history
-      const age = claims ? now - (r.hourlyTs || 0) : 0;
-      const key = { tier: claims ? hourlyPickTier(age, claims.has(r.coin), CLAIM_PRIORITY_AGE) : 0,
+      const age = claims ? now - (r.hourlyTs || 0) : (m5Esc ? now - (r.m5Ts || 0) : 0);
+      const key = { tier: claims ? hourlyPickTier(age, claims.has(r.coin), CLAIM_PRIORITY_AGE) : (m5Esc ? hourlyPickTier(age, false, m5Esc) : 0),
         age, isNew: r.isNew, vol: r.vol };
       if (hourlyPickBetter(key, bestKey)) { best = r; bestKey = key; }
     }
@@ -892,7 +939,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // Resolve the cursor from disk once (survives redeploys), then track it in memory.
     if (!r.m5SeededCursor) { const cov = store.candleCoverage(coin); r.m5LastTs = cov.max || 0; r.m5SeededCursor = true; }
     const from = r.m5LastTs ? r.m5LastTs - FIVE_MIN : now - M5_SEED_DAYS * DAY;
-    const raw = await fetchCandles(coin, "5m", from, now, M5_FETCH_WEIGHT);
+    const raw = await fetchCandles(coin, "5m", from, now, spanWeight(from, now, FIVE_MIN));   // 17d seed = 102, steady tail = 21
     if (!Array.isArray(raw) || !raw.length) { r.m5Ts = now; return; }
     const closed = m5FilterClosed(raw, now);
     if (closed.length) { store.insertCandles(coin, closed); r.m5LastTs = Math.max(r.m5LastTs, closed[closed.length - 1][0]); }
@@ -914,7 +961,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const r = rows.get(coin);
     if (!r || r.delisted || r.px == null) return 0;
     const now = Date.now();
-    const raw = await fetchCandles(coin, "1m", from, Math.min(to, now), M5_FETCH_WEIGHT);
+    const raw = await fetchCandles(coin, "1m", from, Math.min(to, now), spanWeight(from, Math.min(to, now), 60000));   // ≤ 70 bars = 22
     if (!Array.isArray(raw) || !raw.length) return 0;
     // The FORMING bar is never written — same closed-vs-fresh guard the 5m lane uses, so a bar
     // lands exactly once, when final, and a re-pull absorbs the overlap through the upsert.
@@ -966,7 +1013,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     let d = r.deep[iv];
     if (!d) { const cov = store.candleCoverageDeep(iv, coin); d = r.deep[iv] = { last: cov.max || 0, ts: 0, fail: 0, failUntil: 0 }; }
     const from = d.last ? d.last - w : now - DEEP_SEED_BARS * w;
-    const raw = await fetchCandles(coin, iv, from, now, d.last ? DEEP_TAIL_WEIGHT : DEEP_SEED_WEIGHT);
+    const raw = await fetchCandles(coin, iv, from, now, spanWeight(from, now, w));   // seed (4900 bars) = 102, tail = 21
     if (!Array.isArray(raw) || !raw.length) { d.ts = now; return; }
     const closed = deepFilterClosed(iv, raw, now);
     if (closed.length) { store.insertCandlesDeep(iv, coin, closed); d.last = Math.max(d.last, closed[closed.length - 1][0]); }
@@ -997,9 +1044,24 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
   }
 
+  // Roster-aware 5m cadence (arithmetic at M5_STALE_MIN): the lane's steady-state demand is
+  // capped at M5_BUDGET_SHARE of the limiter budget, so the cadence stretches with the roster
+  // instead of the roster's tail silently losing its capture. Memoized on the roster size: pick()
+  // calls it once per pass and need5m once per row, and the count only moves when the roster does.
+  let m5StaleMemo = 0, m5StaleN = -1;
+  function m5StaleMs() {
+    if (rows.size === m5StaleN) return m5StaleMemo;
+    let n = 0;
+    for (const r of rows.values()) if (!r.delisted && r.px != null) n++;
+    const budgetPerMin = limiterUsage().max * M5_BUDGET_SHARE;              // 575 weight/min
+    const demandAtMin = (n * M5_TAIL_WEIGHT * 60000) / M5_STALE_MIN;       // what the floor cadence would spend
+    m5StaleMemo = demandAtMin <= budgetPerMin ? M5_STALE_MIN : Math.ceil((n * M5_TAIL_WEIGHT * 60000) / budgetPerMin);
+    m5StaleN = rows.size;
+    return m5StaleMemo;
+  }
   const need5m = (r) => store.candlesEnabled && store.candlesEnabled() && r.px != null &&
-    Date.now() - (r.m5Ts || 0) > M5_STALE && Date.now() >= (r.m5FailUntil || 0);
-  // One worker suffices: ~150 markets x a tiny tail pull spread over 5 min is well under 1 req/s.
+    Date.now() - (r.m5Ts || 0) > m5StaleMs() && Date.now() >= (r.m5FailUntil || 0);
+  // One worker suffices: the roster-aware cadence keeps the lane under half the budget by construction.
   // Mirrors hourlyWorker's inflight guard + per-coin exponential fail backoff.
   async function fiveMinWorker() {
     for (;;) {
@@ -1023,14 +1085,18 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const r = rows.get(coin); if (!r) return 0;
     const now = Date.now();
     const days = r && r.uni === "main" ? MAIN_HIST_DAYS : FUNDING_HISTORY_DAYS;
-    const data = await fetchFundingHistory(coin, now - days * DAY, now, FUNDING_FETCH_WEIGHT);
+    const data = await fetchFundingHistory(coin, now - days * DAY, now, fundingWeight(days * 24));   // hourly rows: 60d = 92, 31d = 58
     let n = 0;
     if (Array.isArray(data)) for (const e of data) {
       const t = num(e && (e.time ?? e.t)), rate = num(e && (e.fundingRate ?? e.funding));
       if (t != null && rate != null) { r.fundH.set(Math.floor(t / HOUR) * HOUR, rate); n++; }
     }
     if (n) r._fVer = (r._fVer || 0) + 1;   // invalidate this row's getFunding memo
-    r.fundBackfilled = true;      // don't re-pull a coin that legitimately returned nothing
+    // Don't re-pull a coin that legitimately returned nothing. The stamp rides the features cache
+    // (persistFeatures `fb`) so a redeploy is not a cold 60d funding pull for every market: at 92
+    // weight each, ~210 markets is ~17 minutes of the WHOLE budget. fundH itself is re-seeded from
+    // oi.log at boot (seedFundingFromOI: hourly-thinned to a year), so nothing is lost by not re-pulling.
+    r.fundBackfilled = true;
     return n;
   }
   const needFunding = (r) => fundingHistoryEnabled && !r.fundBackfilled && Date.now() >= (r.fFailUntil || 0);
@@ -1069,7 +1135,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       .sort((a, b) => (b.vol || 0) - (a.vol || 0))
       .slice(0, REGIME_TOPN);
     if (top.length < 3) return { corr: null, n: top.length };
-    const { corr } = meanPairwiseCorr(top.map((r) => r.dailyRaw), REGIME_LOOKBACK);
+    const { corr } = meanPairwiseCorr(top.map((r) => r.dailyRaw), REGIME_LOOKBACK, Date.now());   // the still-open day's partial return is not a return
     return { corr, n: top.length };
   }
   function percentileOf(v) {
@@ -1289,7 +1355,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           // clock hour rolls (rvolEndH changes) — otherwise it recomputes the same ~4k-entry notional
           // Map every 15s tick for nothing. Memoize on exactly those two keys.
           if (r._rvRaw === r.hourlyRaw && r._rvEndH === rvolEndH && r._rv !== undefined) rvol = r._rv;
-          else { rvol = rvolMulti(hs, RVOL_WINS, nowMs); r._rvRaw = r.hourlyRaw; r._rvEndH = rvolEndH; r._rv = rvol; }
+          else { rvol = rvolMulti(hs, RVOL_WINS, nowMs, undefined, r.uni === "xyz" ? "ET" : undefined); r._rvRaw = r.hourlyRaw; r._rvEndH = rvolEndH; r._rv = rvol; }   // equities: "usual volume at this hour" keyed on the ET clock so DST does not shift the baseline
         }
       } catch (_) {}
       // Cascade flag (crypto only): the latest server-computed cascade within 24h, shipped as the
@@ -1620,19 +1686,50 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
     return out.length >= 10 ? out : null;
   }
+  // Sparse 5-minute series for anchor resolution: the archive rows that closed within FINE_TOL
+  // before each anchor (session open/close and the 08:30 ET split), read as one tiny PK-range
+  // query per anchor and merged. The studies only ever look up the bar closing ON an anchor
+  // (anchorPrice/asOfRow binary-search the last close at or before t), so the neighbourhoods are
+  // all they need — a 180-day span at 5m would be ~50k rows per market held for nothing. Runs
+  // only where an archive exists (equities; crypto anchors sit on the hour and the hourly close is
+  // already exact) and only when the studies recompute (the memo below, once per hourly spine).
+  function fineAround(r, wins) {
+    if (r.uni !== "xyz" || !store.candlesEnabled || !store.candlesEnabled() || !store.readCandles) return null;
+    const times = new Set();
+    for (const w of wins) {
+      if (!(w && w.enter > 0 && w.exit > 0)) continue;
+      times.add(w.enter); times.add(w.exit);
+      const et = etParts(w.exit), tSplit = etWallToUtc(et.y, et.mo, et.d, 8, 30);   // overnightSplit's 08:30 ET leg boundary
+      if (tSplit > w.enter && tSplit < w.exit) times.add(tSplit);
+    }
+    const seen = new Set(), out = [];
+    for (const t of times) {
+      let rows5;
+      try { rows5 = store.readCandles(r.coin, t - FINE_TOL - FIVE_MIN, t); } catch (_) { rows5 = null; }
+      if (!Array.isArray(rows5)) continue;
+      for (const k of rows5) if (!seen.has(k[0])) { seen.add(k[0]); out.push(k); }
+    }
+    if (!out.length) return null;
+    out.sort((a, b) => a[0] - b[0]);
+    return out;
+  }
   function studiesFor(r, closes, dayFunding) {
     const oiArr = hist.get(r.coin);
-    const sig = (r.hourlyTs || 0) + ":" + (closes ? closes.length : 0) + ":" + (dayFunding ? dayFunding.length : 0) + ":" + (oiArr ? oiArr.length : 0);
+    // Hourly funding feeds the net-of-funding R (medNet) beside every daily study's gross median:
+    // a 1x position held over the horizon pays it, so a base rate that ignores it overstates the
+    // edge on names whose funding runs against the event direction.
+    const fundH = getFunding(r.coin);
+    const sig = (r.hourlyTs || 0) + ":" + (closes ? closes.length : 0) + ":" + (dayFunding ? dayFunding.length : 0) + ":" + (oiArr ? oiArr.length : 0) + ":" + fundH.length;
     if (r._stSig === sig && r._st) return r._st;
     const st = {};
     if (closes && closes.length >= 40) {
-      st.bigmove = studyBigMove(closes);
-      st.breakout = studyBreakout(closes);
-      st.breakdown = studyBreakdown(closes);
+      st.bigmove = studyBigMove(closes, fundH);
+      st.breakout = studyBreakout(closes, fundH);
+      st.breakdown = studyBreakdown(closes, fundH);
       st.oiflush = studyOIFlush(closes, oiDailySeries(r.coin));
       st.coil = closes.length >= 140 ? compressionNow(closes) : null;
       st.fpdiv = studyFPDiv(closes, dayFunding);
-      if (closes.length >= 140) st.volshift = studyVolShift(closes);
+      if (closes.length >= 140) st.volshift = studyVolShift(closes, fundH);
     }
     const hs = getHourly(r.coin);
     if (hs.length > 48) {
@@ -1642,10 +1739,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       const wins = hmk
         ? homeOvernightAnchors(hmk, hs[0][0], hs[hs.length - 1][0]).concat(homeWeekendAnchors(hmk, hs[0][0], hs[hs.length - 1][0]))
         : overnightAnchors(hs[0][0], hs[hs.length - 1][0]).concat(weekendAnchors(hs[0][0], hs[hs.length - 1][0]));
-      st.gap = studyGapFade(hs, wins, 3 * HOUR);
-      st.ondrift = offDriftStats(hs, wins, 3 * HOUR);
+      // The 5m archive resolves the 09:30 ET open to its bar (hourly alone reads the 09:00 close —
+      // the studies stamp `approx` when that fallback was taken).
+      const fine = fineAround(r, wins);
+      st.gap = studyGapFade(hs, wins, 3 * HOUR, fine);
+      st.ondrift = offDriftStats(hs, wins, 3 * HOUR, fine);
+      // Overnight split (after-hours vs pre-open at 08:30 ET) is a US-session concept: a home-
+      // market name's overnight runs KRX close -> KRX open, where 08:30 New York means nothing.
+      if (!hmk && r.uni === "xyz") { const ov = overnightSplit(hs, fine, wins); st.ovsplit = ov ? { n: ov.n, medAh: ov.medAh, medPre: ov.medPre, medTotal: ov.medTotal, shareAh: ov.shareAh, sharePre: ov.sharePre, approx: ov.approx } : null; }
     }
-    if (dayFunding && dayFunding.length >= 8 && closes && closes.length >= 10) st.fundflip = studyFundFlip(dayFunding, closes);
+    if (dayFunding && dayFunding.length >= 8 && closes && closes.length >= 10) st.fundflip = studyFundFlip(dayFunding, closes, fundH);
     r._stSig = sig; r._st = st;
     return st;
   }
@@ -1826,8 +1929,22 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         variantState[ev] = { inc: d.variants[ev].inc, hist: Array.isArray(d.variants[ev].hist) ? d.variants[ev].hist.slice(-20) : [] };
     recomputeRecord();
   }
-  function persistLedger() {
+  // The ledger is a config-grade file (saveConfig: write, fsync, rename, fsync the directory), so each
+  // persist is two fsyncs of a multi-MB blob. The level-alert path used to call it once PER ALERT on
+  // the 2s socket tick — a busy open could fsync the same blob a dozen times in a minute. Non-forced
+  // calls now coalesce on a ~2s trailing timer; `force` (the shutdown / crash export and the end of
+  // a signals pass, which is the natural batch boundary) writes synchronously and cancels the timer.
+  let ledgerT = null;
+  const LEDGER_BATCH_MS = 2000;
+  function persistLedger(force) {
     if (!ledgerDirty) return;
+    if (!force) {
+      if (ledgerT) return;
+      ledgerT = setTimeout(() => { ledgerT = null; try { persistLedger(true); } catch (e) { log("ledger persist (batched) failed: " + (e && e.message)); } }, LEDGER_BATCH_MS);
+      if (ledgerT.unref) ledgerT.unref();
+      return;
+    }
+    if (ledgerT) { clearTimeout(ledgerT); ledgerT = null; }
     store.saveLedger({ ts: Date.now(), open: [...ledgerOpen.values()], closed: ledgerClosed.slice(-4000), variants: variantState, rearm: [...rearm],
       present: [...presentSince].map(([k, v]) => [k, v.t]),   // presence timelines survive restarts — a deploy is not a lapse
       board: { since: boardEpSince, dropped: boardEpDropped, open: [...boardEp.values()], closed: boardEpClosed.slice(-BOARD_EP_KEEP),
@@ -2571,7 +2688,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       evp: evd.pts,   // raw evidence points — internal handle for the earnings guard, deleted before the payload ships
       unproven: !!evd.unproven, noedge: !!evd.noedge, negexp: !!evd.negexp,
       liveW: evd.liveW || null,
-      study: evd.st ? { n: evd.st.n, med: evd.st.med, hit: evd.st.hit, avg: evd.st.avg, unit: evd.unit } : null,
+      study: evd.st ? { n: evd.st.n, med: evd.st.med, hit: evd.st.hit, avg: evd.st.avg, unit: evd.unit, medNet: evd.st.medNet != null ? evd.st.medNet : undefined } : null,
       pooled: evd.pooled ? { n: evd.pooled.n, med: evd.pooled.med, hit: evd.pooled.hit, avg: evd.pooled.avg, unit: evd.unit } : null,
     }, extra || {});
   }
@@ -2931,7 +3048,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           // detector enforces completeness, freshness and the 1.5σ magnitude floor)
           if (r.uni === "xyz" && r.dailyRaw && r.dailyRaw.length >= 25) {
             const prints = earnPrintsByTk.get(r.ticker);
-            const pd = prints ? detectPead(prints, r.dailyRaw, r.px, sd30) : null;
+            const pd = prints ? detectPead(prints, r.dailyRaw, r.px, sd30, r.hourlyRaw, now) : null;
             if (pd && stopGeometryOk(pd.side, r.px, pd.stop))
               openLedger(r, "pead", { score: 0, reading: "" }, pd.side === "long" ? 1 : -1,
                 { sd0: +sd30.toFixed(3), psd: pd.side, pn: 1, stp: pd.stop,
@@ -3308,7 +3425,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           const dir = d30 > 0 ? 1 : -1;
           const evd = evidence(null, "ondrift", null, "%", r.uni);
           const sig = mkSignal(r, "ondrift", `${d30 >= 0 ? "+" : ""}${d30.toFixed(1)}% off-hours drift over ~21 windows (${z.toFixed(1)}\u03c3 vs universe)`,
-            (Math.abs(z) - 2) * 16 + 18, evd, { horizon: evMeta("ondrift", r.uni).horizon });
+            (Math.abs(z) - 2) * 16 + 18, evd, { horizon: evMeta("ondrift", r.uni).horizon, split: r._st.ovsplit || null });
           sig.play = playbook("ondrift", { dir });
           out.push(sig); openLedger(r, "ondrift", sig, dir);
         }
@@ -3508,7 +3625,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       shown: top.length, signals: top,
       record: recordCache || {}, confluence: confCache || null, recordX: recordXCache,
       records: recordSets, variants, shadows, recent: rs0 ? rs0.recent : [], earnSplit };
-    persistLedger();
+    persistLedger(true);   // the end of a signals pass is the batch boundary: claims opened this pass are on disk when it returns
     // Event-driven board rebuild (2026.08.03-07): claims opened THIS pass reach the board on the
     // chained build that follows, not the next ACT_MS/poll tick — the pure-cadence half of the
     // fire->shown cost, deleted. Debounced to one chained rebuild per signals pass, floor-limited
@@ -4272,6 +4389,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (m.feat) r.feat = m.feat;
       if (typeof m.hourlyTs === "number") r.hourlyTs = m.hourlyTs;
       if (typeof m.dailyTs === "number") r.dailyTs = m.dailyTs;
+      if (m.fb === 1) r.fundBackfilled = true;   // the 60d fundingHistory pull is one-time per market, not per deploy (see backfillFunding)
       if (Array.isArray(m.daily) && m.daily.length) r.dailyRaw = m.daily.map(([t, c, h, v]) => ({ t, c, h: h == null ? undefined : h, v: v == null ? undefined : v }));   // pre--06 warm files are 2-tuples — h/v hydrate undefined and the spine overlay covers them
       if (Array.isArray(m.ph) && m.ph.length) { const cut = Date.now() - 7 * DAY; r.premH = m.ph.filter((x) => Array.isArray(x) && x[0] >= cut); }
       r.isNew = false;
@@ -4351,6 +4469,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // once ~10 min after boot when the daily backfill has had time to land opens. Bumps the ETag
   // only when the stats actually changed.
   function refreshEarnStudy(bump) {
+    const now = Date.now();
     const byTicker = new Map();
     for (const p of earnPrints) { let a = byTicker.get(p.t); if (!a) { a = []; byTicker.set(p.t, a); } a.push(p); }
     const next = {};
@@ -4358,8 +4477,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       let row = null;
       for (const r of rows.values()) if (r.uni === "xyz" && !r.delisted && r.ticker === tk) { row = r; break; }
       if (!row || !Array.isArray(row.dailyRaw) || row.dailyRaw.length < 3) continue;
-      const st = earnReactionsFor(prints, row.dailyRaw);
-      if (st) next[tk] = st;
+      // The hourly spine anchors AMC prints at 16:00 ET (the daily UTC bar's close is four hours
+      // after the print); the curve adds the +1h/+4h/+24h medians for the prints it covers.
+      const st = earnReactionsFor(prints, row.dailyRaw, now, row.hourlyRaw);
+      if (!st) continue;
+      const cv = Array.isArray(row.hourlyRaw) && row.hourlyRaw.length ? earnReactionCurve(prints, row.hourlyRaw, { now }) : null;
+      if (cv) st.curve = { n: cv.n, agg: cv.agg, approx: cv.approx };
+      next[tk] = st;
     }
     const sigS = JSON.stringify(next);
     const changed = sigS !== JSON.stringify(earnStudy);
@@ -7443,15 +7567,28 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       refreshEarnStudy(true);
       log(`Earnings history backfill (forced, ${days}d): ${hist.length} past print(s) retrieved, history ${before} -> ${earnPrints.length}`);
       // Republish through the ordinary path rather than hand-rolling the persist and the ETag
-      // signature here: one place decides what a served earnings payload looks like.
-      await fetchEarnings();
+      // signature here: one place decides what a served earnings payload looks like. If a tick is
+      // mid-flight the republish is skipped; zeroing the last-good stamp makes the 30-min staleness
+      // check refire it rather than waiting out the 6h cadence.
+      if (!(await fetchEarnings())) lastEarnOk = 0;
       return { ok: true, days, retrieved: hist.length, printsBefore: before, printsAfter: earnPrints.length,
         study: Object.keys(earnStudy).length };
     } catch (e) {
       return { ok: false, error: (e && e.message) || "backfill failed" };
     } finally { earnHistBusy = false; }
   }
+  // In-flight guard, same shape as the news lanes (newsCompanyTick / newsCompanyTickBody): the 30-min
+  // staleness check re-fires the tick, and the chunked walk inside can outlast 30 minutes when
+  // Finnhub is slow — two walks then interleaved their merges and doubled the call budget. A re-fire
+  // while busy is skipped and logged ONCE (not every half hour). Returns false when skipped so the
+  // operator-forced backfill can tell that its republish did not happen.
+  let earnBusy = false, earnBusyLogged = false;
   async function fetchEarnings() {
+    if (earnBusy) { if (!earnBusyLogged) { earnBusyLogged = true; log("earnings: refresh already in flight — tick skipped (logged once)"); } return false; }
+    earnBusy = true;
+    try { await fetchEarningsBody(); return true; } finally { earnBusy = false; }
+  }
+  async function fetchEarningsBody() {
     const token = process.env.FINNHUB_TOKEN || "";
     const now = Date.now();
     if (!token) {
@@ -7584,7 +7721,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       return out;
     });
   }
+  // In-flight guard (see fetchEarnings): the release-crossing refire can land while a slow FRED walk
+  // is still running; a second walk buys nothing and doubles the calls. Skipped and logged once.
+  let macroBusy = false, macroBusyLogged = false;
   async function fetchMacro() {
+    if (macroBusy) { if (!macroBusyLogged) { macroBusyLogged = true; log("macro: refresh already in flight — tick skipped (logged once)"); } return false; }
+    macroBusy = true;
+    try { await fetchMacroBody(); return true; } finally { macroBusy = false; }
+  }
+  async function fetchMacroBody() {
     const now = Date.now();
     const key = process.env.FRED_KEY || "";
     const fget = async (path, params) => {
@@ -7688,6 +7833,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       markets[r.coin] = {
         ref: r.ref || null, feat: r.feat || null,
         hourlyTs: r.hourlyTs || 0, dailyTs: r.dailyTs || 0,
+        fb: r.fundBackfilled ? 1 : 0,   // funding-backfill stamp: memory-only before, so every redeploy re-pulled 60d of funding for the whole roster
         daily: r.dailyRaw ? r.dailyRaw.map((k) => [k.t, k.c, Number.isFinite(k.h) ? k.h : null, Number.isFinite(k.v) ? k.v : null]) : null,   // h/v round-trip (-06) so a redeploy no longer strips the level columns; o/l stay unpersisted, so dailyLacksOHLC still queues the real backfill
         ph,   // downsampled 7d premium baseline, so redeploys keep the dislocation z-scores warm
       };
@@ -7960,9 +8106,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // and no boundary bucket to protect — just drop what aged out.
     if (store.candlesEnabled && store.candlesEnabled()) {
       try {
+        // No COUNT(*) here: on a ~15M-row table it is a full scan on the event loop, once a day, for a
+        // log line. The deleted-row count is free (it comes back from the DELETE) and says what happened.
         const dropped = store.evictCandles(Date.now() - M5_RETENTION_DAYS * DAY);
-        const kept = store.candleCount ? store.candleCount() : 0;
-        log(`5m archive: ${kept} bar(s) retained, ${dropped} evicted past ${M5_RETENTION_DAYS}d`);
+        log(`5m archive: ${dropped} bar(s) evicted past ${M5_RETENTION_DAYS}d`);
       } catch (e) { log("5m evict failed: " + (e && e.message)); }
       // 1m opening-hour archive: 30d is plenty — its only consumers are today's forming reads and
       // the chart's opening-hour base for lists still on the board.
@@ -7986,7 +8133,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         swept++;
       }
     }
-    if (swept) log(`Freed cached history for ${swept} market(s) delisted > 7d`);
+    // Row-less history (a market that dropped out of the universe reply entirely — see pollUniverse)
+    // is kept while it could still re-attach and dropped on the same 7d clock as a delisting.
+    let orphaned = 0;
+    for (const [coin, arr] of hist) {
+      if (rows.has(coin)) continue;
+      const last = Array.isArray(arr) && arr.length ? +arr[arr.length - 1][0] : 0;
+      if (last < dcut) { hist.delete(coin); orphaned++; }
+    }
+    if (swept || orphaned) log(`Freed cached history for ${swept} market(s) delisted > 7d${orphaned ? `, ${orphaned} row-less OI series idle > 7d` : ""}`);
     const total = activeMarkets().filter((r) => !r.delisted).length;
     const pending = activeMarkets().filter((r) => !r.delisted && !r.dailyRaw).length;
     const hc = hourlyCoverage();
@@ -8228,7 +8383,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     sock = createUniverseSocket({ onCtxs: applyWsCtxs, log });
     setInterval(() => {
       universeTick++;
-      if (sock && sock.enabled && sock.healthy() && universeTick % 5 !== 0) return;
+      if (wsCarrying(Date.now()) && universeTick % 5 !== 0) return;
       pollUniverse().catch(() => {});
     }, UNIVERSE_MS);
     hourlyWorker(); hourlyWorker();
@@ -8604,7 +8759,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (!e.retest) continue;
       try {
         const W = TREND_TF_MS[e.retest];
-        const rv = W ? rvolMulti(getHourly(e.coin), { w: W }, now) : null;
+        const er = rows.get(e.coin);
+        const rv = W ? rvolMulti(getHourly(e.coin), { w: W }, now, undefined, er && er.uni === "xyz" ? "ET" : undefined) : null;
         e.rrv = rv && rv.w != null ? rv.w : null;
       } catch (_) { e.rrv = null; }
       e.swing = null;
@@ -9675,13 +9831,26 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     marks.sort((a, b) => a.t - b.t);
     return { marks: marks.slice(-20), suppressed };
   }
+  // Anthropic request body. `effort` is only attached to model lines that accept output_config
+  // (Haiku 4.5 does not); "medium" is the API default, so it is omitted rather than sent — the
+  // wire stays identical to the pre-effort body for the default surface.
+  function anthropicEffortOk(model) { return /^claude-(fable|opus-4-8|sonnet-5|mythos)/.test(String(model || "")); }
+  function anthropicBody(model, sys, ctx, maxTok, effort) {
+    const body = { model, max_tokens: maxTok,
+      system: [{ type: "text", text: sys, cache_control: { type: "ephemeral" } }],
+      messages: [{ role: "user", content: "Context:\n" + JSON.stringify(ctx) }] };
+    if (effort && effort !== "medium" && anthropicEffortOk(model)) body.output_config = { effort };
+    return body;
+  }
   async function callModel(model, ctx, opts) {
     // opts.system / opts.maxTokens let lightweight tasks (sector classification) reuse this
     // exact transport — provider switch, refusal handling, timeout — without inheriting the
     // report prompt or its token budget. Absent opts = the report path, byte-identical.
     const sys = (opts && opts.system) || AI_SYSTEM, maxTok = (opts && opts.maxTokens) || AI_MAX_TOKENS;
-    // opts.effort maps to OpenAI's reasoning_effort (low|medium|high) and is silently ignored
-    // on the Anthropic path — Fable's adaptive thinking must not be steered.
+    // opts.effort maps to OpenAI's reasoning_effort (low|medium|high). On Anthropic it becomes
+    // output_config.effort for the models that accept it (Fable 5 / Opus 4.8 / Sonnet 5 lines —
+    // Haiku 4.5 rejects the field, so it is never sent there): reports get the deep pass, the
+    // classifier the cheap one, exactly as on OpenAI.
     const effort = (opts && opts.effort) || null;
     const doFetch = aiFetch || fetch;
     const ctrl = new AbortController();
@@ -9716,9 +9885,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         headers: { "content-type": "application/json", "x-api-key": AI_KEY(),
           "anthropic-version": "2023-06-01" },
         // Deliberately minimal body: Fable rejects some sampling params other models accept, and
-        // its adaptive thinking must be left alone (an explicit thinking:disabled is a 400).
-        body: JSON.stringify({ model, max_tokens: maxTok, system: sys,
-          messages: [{ role: "user", content: "Context:\n" + JSON.stringify(ctx) }] }),
+        // its adaptive thinking must be left alone (an explicit thinking:disabled is a 400). The
+        // system prompt rides as a cache_control block: it is identical across every call of a
+        // surface (the ~4k-token report prompt most of all), so the second call within the cache
+        // window reads it at a tenth of the price; a prompt too short to cache is simply not cached.
+        body: JSON.stringify(anthropicBody(model, sys, ctx, maxTok, effort)),
         signal: ctrl.signal,
       });
       if (!res.ok) { let msg = "HTTP " + res.status; try { const j = await res.json(); if (j && j.error && j.error.message) msg += " — " + j.error.message; } catch (_) {} return { ok: false, error: msg }; }
@@ -9729,6 +9900,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       const text = data && Array.isArray(data.content)
         ? data.content.filter((b) => b && b.type === "text").map((b) => b.text).join("\n") : "";
       if (!text) return { ok: false, error: "empty model response" };
+      // Output cut at max_tokens is never a usable answer here: every consumer parses the whole
+      // body (JSON reports, the brief's sections, the terminal's line protocol), and a truncated
+      // JSON object fails validation in a way that reads like a bad model instead of a small budget.
+      if (data.stop_reason === "max_tokens")
+        return { ok: false, error: "output truncated at max_tokens (" + maxTok + ") — raise the budget for this surface" };
       return { ok: true, text, usage: data.usage || null };
     } catch (e) {
       return { ok: false, error: e && e.name === "AbortError" ? "model call timed out" : ("fetch failed: " + (e && e.message)) };
@@ -10259,20 +10435,29 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // returned. Constant-time compare so a right-length guess can't be timed; only FAILURES
   // count toward a sliding-window lockout, so online brute force over the group's shared
   // endpoint is infeasible while legitimate resets stay free. Fails closed when unconfigured.
-  const ADMIN_WINDOW_MS = 5 * 60 * 1000, ADMIN_MAX_FAILS = 8;
-  const adminFails = [];
-  // Constant-time ADMIN_PASSWORD check with a shared sliding-window lockout. Used by BOTH the
+  const ADMIN_WINDOW_MS = 5 * 60 * 1000, ADMIN_MAX_FAILS = 8, ADMIN_MAX_FAILS_GLOBAL = 40;
+  // Failures are keyed by caller (the client IP the route passes in) so one stranger hammering
+  // the endpoint cannot lock the operator out of their own reset — the old single shared list was
+  // a five-minute denial of service for the price of eight wrong guesses. A global backstop still
+  // caps the aggregate guess rate across every source, so a distributed attacker gains nothing.
+  const adminFails = new Map(), adminFailsAll = [];
+  const adminTrim = (arr, now) => { while (arr.length && arr[0] < now - ADMIN_WINDOW_MS) arr.shift(); return arr; };
+  // Constant-time ADMIN_PASSWORD check with a sliding-window lockout. Used by BOTH the
   // report-budget reset and the AI unlock, so brute-force attempts against either count together.
-  function checkAdminPassword(password) {
+  function checkAdminPassword(password, who) {
     const admin = process.env.ADMIN_PASSWORD || "";
     if (!admin) return { ok: false, error: "not-configured" };
-    const now = Date.now();
-    while (adminFails.length && adminFails[0] < now - ADMIN_WINDOW_MS) adminFails.shift();
-    if (adminFails.length >= ADMIN_MAX_FAILS)
-      return { ok: false, error: "rate", retryMs: ADMIN_WINDOW_MS - (now - adminFails[0]) };
+    const now = Date.now(), key = String(who || "?");
+    adminTrim(adminFailsAll, now);
+    for (const [k, arr] of adminFails) if (!adminTrim(arr, now).length) adminFails.delete(k);
+    const mine = adminFails.get(key) || [];
+    if (mine.length >= ADMIN_MAX_FAILS)
+      return { ok: false, error: "rate", retryMs: ADMIN_WINDOW_MS - (now - mine[0]) };
+    if (adminFailsAll.length >= ADMIN_MAX_FAILS_GLOBAL)
+      return { ok: false, error: "rate", retryMs: ADMIN_WINDOW_MS - (now - adminFailsAll[0]) };
     const a = Buffer.from(String(password || ""), "utf8"), b = Buffer.from(admin, "utf8");
     const okPw = a.length === b.length && require("crypto").timingSafeEqual(a, b);
-    if (!okPw) { adminFails.push(now); return { ok: false, error: "bad-password" }; }
+    if (!okPw) { mine.push(now); adminFails.set(key, mine); adminFailsAll.push(now); return { ok: false, error: "bad-password" }; }
     return { ok: true };
   }
   // ===== feature visibility state (admin panel) =================================================
@@ -10391,8 +10576,8 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (r.ok) r.view = view, r.group = group;
     return r;
   }
-  function resetAiDay(password) {
-    const chk = checkAdminPassword(password);
+  function resetAiDay(password, who) {
+    const chk = checkAdminPassword(password, who);
     if (!chk.ok) return chk;
     aiDayRoll(); aiDay.count = 0; persistAiReports();
     log("AI daily report budget reset by admin");
@@ -12017,7 +12202,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         }
       }
     }
-    if (fired) { persistTriggers(); persistLedger(); log(`ledger alerts: ${fired} level event(s)`); }
+    if (fired) { persistTriggers(); persistLedger(); log(`ledger alerts: ${fired} level event(s)`); }   // ledger write is batched (~2s): this runs on the 2s socket tick
     return fired;
   }
 
@@ -12878,7 +13063,14 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
       mom: mAgo ? { v: mAgo[1], pct: pct(last, mAgo) } : null,
       lo: { d: lo[0], v: lo[1] }, hi: { d: hi[0], v: hi[1] } };
   }
+  // In-flight guard (see fetchEarnings): one FRED walk at a time, a re-fire is skipped and logged once.
+  let housingBusy = false, housingBusyLogged = false;
   async function fetchHousing() {
+    if (housingBusy) { if (!housingBusyLogged) { housingBusyLogged = true; log("housing: refresh already in flight — tick skipped (logged once)"); } return false; }
+    housingBusy = true;
+    try { await fetchHousingBody(); return true; } finally { housingBusy = false; }
+  }
+  async function fetchHousingBody() {
     const now = Date.now();
     const key = process.env.FRED_KEY || "";
     let err = null;
@@ -12991,7 +13183,14 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
     if (raw.sofr && raw.iorb) { const I = raw.iorb; sofrIorb = raw.sofr.filter((p) => p[0] >= I[0][0]).map((p) => { const i = liqAt(I, p[0]); return i ? [p[0], +((p[1] - i[1]) * 100).toFixed(0)] : null; }).filter(Boolean); }
     return { net, last: { d: last[0], v: last[1], pctGdp: last[2] }, prev: prev ? { d: prev[0], v: prev[1] } : null, peak: { d: peak[0], pctGdp: peak[2], v: peak[1] }, ytd, qtEnd, sofrIorb };
   }
+  // In-flight guard (see fetchEarnings): one FRED walk at a time, a re-fire is skipped and logged once.
+  let liqBusy = false, liqBusyLogged = false;
   async function fetchLiquidity() {
+    if (liqBusy) { if (!liqBusyLogged) { liqBusyLogged = true; log("liquidity: refresh already in flight — tick skipped (logged once)"); } return false; }
+    liqBusy = true;
+    try { await fetchLiquidityBody(); return true; } finally { liqBusy = false; }
+  }
+  async function fetchLiquidityBody() {
     const now = Date.now();
     const key = process.env.FRED_KEY || "";
     let err = null; const raw = {}, levels = {}, missing = [];
@@ -13210,6 +13409,7 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
       // The live mark, so a print whose reaction candle has not closed still yields a number
       // instead of a dash. This is the whole fix for "every AMC print dashes every morning".
       const pxFor = (tk) => { const r = byT.get(String(tk).toUpperCase()); return r && Number.isFinite(r.px) ? r.px : null; };
+      const hourlyFor = (tk) => { const r = byT.get(String(tk).toUpperCase()); return r && Array.isArray(r.hourlyRaw) ? r.hourlyRaw : null; };
       const e = { printed: [], today: [], tomorrow: [] };
       const seen = new Set();
       // Today's already-reported rows first — they are the freshest thing on the page.
@@ -13218,12 +13418,12 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
         if (d !== 0 || earnEntryState(en, t) !== "reported") continue;
         if (e.printed.length >= BRIEF_EARN_N) break;
         seen.add(en.t + "|" + en.d);
-        e.printed.push(earnPrintRow(en, dailyFor(en.t), pxFor(en.t)));
+        e.printed.push(earnPrintRow(en, dailyFor(en.t), pxFor(en.t), hourlyFor(en.t), t));
       }
       for (const p of (earnCache && earnCache.recent) || []) {
         if (e.printed.length >= BRIEF_EARN_N) break;
         if (seen.has(p.t + "|" + p.d)) continue;
-        e.printed.push(earnPrintRow(p, dailyFor(p.t), pxFor(p.t)));
+        e.printed.push(earnPrintRow(p, dailyFor(p.t), pxFor(p.t), hourlyFor(p.t), t));
       }
       for (const en of (earnCache && earnCache.entries) || []) {
         const d = earnDayDiff(en.d, t);
@@ -14460,6 +14660,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     askBoard,   // terminal Tier-3: NL question -> planner query or grounded analyst answer
     resetAiDay,   // terminal admin command: zero the daily report budget (ADMIN_PASSWORD-gated)
     checkAdminPassword,   // shared ADMIN_PASSWORD verify (+ lockout) — backs the AI unlock route
+    anthropicEffortOk,    // which Anthropic model lines accept output_config.effort (test seam)
     getFlags, getFeatures, setFlag,   // feature-visibility state (admin panel)
     getNavGroups, setNavGroupLabel, setNavViewGroup,   // ribbon menus: rename, and move a tab between them
     getHousing: () => housingCache,   // Housing tab board (FRED-fed, 6h refresh)
@@ -14624,6 +14825,12 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       trendBuilt = Number.MAX_SAFE_INTEGER / 2;
     },
     pollUniverseNow: pollUniverse,     // harness: one universe poll through the injected metaFetch
+    applyWsCtxsNow: applyWsCtxs,       // harness: fold one socket batch (index-aligned against the last REST roster)
+    wsCarryingNow: (healthy) => wsCarrying(Date.now(), healthy),   // harness: the REST-skip gate with the socket's health injected
+    histNow: (coin) => hist.get(coin), // harness: the in-memory OI/funding history a row attaches to
+    rowNow: (coin) => rows.get(coin),  // harness: read a live row's per-lane stamps (read-only by convention)
+    pick5mNow: () => pick(need5m, "m5:"),   // harness: the 5m lane's next candidate (age-escalated ordering)
+    m5StaleNow: () => m5StaleMs(),     // harness: the roster-aware 5m cadence
     lastPollAt: () => lastPoll,        // /api/health: the stale flag reads this
     aliasOkNow: aliasOk,               // harness: the learned-alias guard
     orderNow: () => order.slice(),     // harness: the live roster
@@ -14736,7 +14943,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     buildSnapshotNow: buildSnapshot, // harness: run one snapshot build synchronously (content-sig identity test)
     buildAnalyticsNow: buildAnalytics, // harness: run one analytics build synchronously (regime aggregate path)
     persistFeatures,
-    persistLedger: () => { ledgerDirty = true; persistLedger(); },
+    persistLedger: () => { ledgerDirty = true; persistLedger(true); },   // shutdown / crash path: synchronous, cancels any pending batch
     // Final-flush surface for the shutdown and crash paths: everything that otherwise persists
     // on a timer gets one more write on the way out. Each is idempotent, cheap, and safe to
     // call at any moment; persistHourly is the only async one (NDJSON stream) and shutdown

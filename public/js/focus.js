@@ -2,7 +2,7 @@
 // declarations; side-effecting top-level statements run from __boot_* in the original source
 // order once every module has evaluated (see app.js). Shared cross-module mutable state lives
 // on G (core.js).
-import { el, esc, fmtUsd, liveMark, store } from "./core.js";
+import { el, esc, fmtUsd, liveMark, overlayPop, overlayPush, store } from "./core.js";
 import { fetchJSON } from "./data.js";
 
 
@@ -442,7 +442,7 @@ function focChartEnsureDom(){
   d.querySelectorAll('[data-foctf]').forEach(b=>b.onclick=()=>{ FOCCH.tf=+b.dataset.foctf; FOCCH.agg=null;
     d.querySelectorAll('[data-foctf]').forEach(x=>x.classList.toggle('on',x===b));
     focChartResetView(); focChartDraw(); });
-  document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&el('focmodal')&&!el('focmodal').hidden) focChartClose(); });
+  // Escape: overlay stack (core.js) — registered on open below
   // ---- viewport interactions (build 2026.08.17-02) --------------------------------------------
   // One fetch, everything else is viewport math over the cached 72h base: wheel (or pinch) zooms
   // about the cursor time, dragging pans, double-click resets to the timeframe's default window.
@@ -515,7 +515,7 @@ async function focChartOpen(ticker){
   focChartEnsureDom();
   FOCCH.p=p; FOCCH.day=day; FOCCH.base=null; FOCCH.agg=null; FOCCH.hover=null; FOCCH.tf=15;
   const mySeq=(FOCCH.seq=(FOCCH.seq||0)+1);   // a slower earlier fetch must not paint over a newer name's chart
-  const m=el('focmodal'); m.hidden=false;
+  const m=el('focmodal'); m.hidden=false; overlayPush('focchart', focChartClose);
   m.querySelectorAll('[data-foctf]').forEach(x=>x.classList.toggle('on',x.dataset.foctf==='15'));
   el('focch-t').textContent=ticker;
   el('focch-sub').textContent='loading 72h from the 5m archive…';
@@ -536,7 +536,7 @@ async function focChartOpen(ticker){
     focChartDraw();
   }catch(e){ el('focch-sub').textContent='archive fetch failed — '+((e&&e.message)||'network error'); }
 }
-function focChartClose(){ const m=el('focmodal'); if(m) m.hidden=true; FOCCH.p=null; FOCCH.base=null; FOCCH.agg=null; FOCCH._geom=null; }
+function focChartClose(){ overlayPop('focchart'); const m=el('focmodal'); if(m) m.hidden=true; FOCCH.p=null; FOCCH.base=null; FOCCH.agg=null; FOCCH._geom=null; }
 // ---- viewport state (build 2026.08.17-02) ------------------------------------------------------
 // Per-timeframe default windows: dropping to 5m IS the detail view (last 12h), 15m opens on 36h,
 // 1h/4h show the whole base. Zoom clamps at FOCCH_MIN_SPAN so detail can never become mush; pan

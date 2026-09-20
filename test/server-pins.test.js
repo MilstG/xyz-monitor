@@ -581,7 +581,12 @@ test("AI access model: open to authenticated users with per-user caps; xyzai is 
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   // The unlock machinery still exists — as the admin exemption — and stays password-derived,
   // fail-closed, HttpOnly, and browser-only.
-  assert.ok(srv.includes("xyzmon-ai-unlock|") && /const AI_UNLOCK_SECRET/.test(srv), "AI unlock secret must derive from ADMIN_PASSWORD");
+  // Pin updated 2026.09.20: the key is an HMAC of the random accounts secret under the password
+  // label (rotate-to-revoke kept, offline dictionary attack on a captured cookie closed), so it is
+  // assigned after ACCOUNTS opens rather than declared const at the top.
+  assert.ok(srv.includes("xyzmon-ai-unlock|") && /let AI_UNLOCK_SECRET = null/.test(srv)
+    && /AI_UNLOCK_SECRET = ACCOUNTS\.deriveKey\(`xyzmon-ai-unlock\|\$\{ADMIN_PASSWORD\}`\)/.test(srv), "AI unlock secret must derive from ADMIN_PASSWORD through the random accounts secret");
+  assert.ok(!/createHash\("sha256"\)\.update\(`xyzmon-(ai-unlock|admin-view)\|/.test(srv), "never sha256(password) alone — no random material means a captured cookie is a dictionary attack");
   assert.ok(srv.includes("function signAiUnlock") && srv.includes("function aiUnlockOk"), "AI unlock signer/verifier missing");
   assert.ok(/aiUnlockOk[\s\S]{0,120}!ADMIN_PASSWORD/.test(srv), "aiUnlockOk must reject when ADMIN_PASSWORD is unset (fail closed)");
   assert.ok(srv.includes("function setAiUnlockCookie") && srv.includes("function clearAiUnlockCookie"), "xyzai cookie set/clear helpers missing");
@@ -621,7 +626,7 @@ test("AI access model: open to authenticated users with per-user caps; xyzai is 
   assert.equal(srv.split('fastify.get("/api/ai-status"').length - 1, 1, "GET /api/ai-status registered exactly once");
   assert.ok(srv.includes("poller.checkAdminPassword"), "unlock route must verify via poller.checkAdminPassword");
   assert.ok(/function checkAdminPassword/.test(pol) && /checkAdminPassword,/.test(pol), "poller.checkAdminPassword missing or not exported");
-  assert.ok(/function resetAiDay[\s\S]{0,160}checkAdminPassword\(password\)/.test(pol), "resetAiDay must route through checkAdminPassword (shared lockout)");
+  assert.ok(/function resetAiDay[\s\S]{0,160}checkAdminPassword\(password, who\)/.test(pol), "resetAiDay must route through checkAdminPassword with the caller key (per-caller lockout, 2026.09.20)");
 });
 
 test("trend leaderboard integrity: client, markup and server carry the tab end to end", () => {
@@ -1181,8 +1186,11 @@ test("server: admin-view lease is a distinct secret from the AI unlock, fails cl
   assert.ok(srv.includes("function adminPwOk"), "login needs its own constant-time admin compare");
   assert.ok(/adminPwOk[\s\S]{0,220}timingSafeEqual/.test(srv), "adminPwOk must be constant-time");
   assert.ok(/if \(adminPwOk\(pw\)\)[\s\S]{0,400}setAdminCookies/.test(srv), "login must mint the admin lease when the admin password is used");
-  assert.ok(/fastify\.get\("\/logout"[\s\S]{0,400}setAdminCookies\(reply, req, 0, null\)[\s\S]{0,200}clearAiUnlockCookie/.test(srv),
+  // Pin updated 2026.09.20: /logout is one handler on two verbs (POST for the state change, GET
+  // for the nav button's same-origin navigation), so the cookie drops live in `logout`.
+  assert.ok(/const logout = async \(req, reply\) => \{[\s\S]{0,700}setAdminCookies\(reply, req, 0, null\)[\s\S]{0,200}clearAiUnlockCookie/.test(srv),
     "logout must drop the admin lease AND the AI unlock — never leave a stale elevation behind");
+  assert.ok(srv.includes('fastify.get("/logout", logout)') && srv.includes('fastify.post("/logout", logout)'), "both verbs share the one handler");
   // Terminal escalation grants the view too, so `admin unlock` and admin-password login agree.
   assert.ok(/setAiUnlockCookie\(reply, req, signAiUnlock[\s\S]{0,400}setAdminCookies/.test(srv), "the terminal unlock must also grant the admin view");
 });
@@ -2669,8 +2677,12 @@ test("server: the reset flow binds its two steps and does not enumerate handles"
   // code does: it keeps step two bound to step one, so nobody can request a code for their own
   // account and then verify against somebody else's.
   assert.ok(/xyzotp=[\s\S]{0,120}HttpOnly/.test(srv), "the handle is carried in an HttpOnly cookie");
-  assert.ok(/const handle = decodeURIComponent\(getCookie\(req, "xyzotp"\) \|\| ""\)/.test(block),
+  // Pin updated 2026.09.20: the cookie is signed (handle + expiry under an accounts-derived key),
+  // so the verify step reads it through otpHandleOf — a hand-set xyzotp=<victim> reads as none.
+  assert.ok(/const handle = otpHandleOf\(getCookie\(req, "xyzotp"\)\)/.test(block),
     "the verify step reads the handle from that cookie, never from the form");
+  assert.ok(/const OTP_SECRET = ACCOUNTS\.deriveKey\("otp-step"\)/.test(block) && /crypto\.timingSafeEqual/.test(block.slice(block.indexOf("const otpHandleOf"), block.indexOf('fastify.get("/reset"'))),
+    "and the cookie's MAC is keyed off the random secret and compared in constant time");
   assert.ok(!/b\.handle/.test(block.slice(block.indexOf('fastify.post("/reset/code"'))),
     "the verify step must not trust a handle in its own body");
 

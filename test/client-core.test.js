@@ -2294,3 +2294,163 @@ test("positions client: P&L derives off the live mark, signed with the side; the
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const id of ["posAddr", "posLink", "posUnlink", "posOnly", "posStat"]) assert.ok(html.includes('id="' + id + '"'), id + " in the filter popover");
 });
+
+// ===== ordering, focus, overlays, DM window (2026.09.20) =========================================
+function _clientRig(extra) {
+  // The -05 harness pattern: the whole client evaluated against a stub DOM, so the functions under
+  // test are the real ones with their real neighbours, not string pins.
+  const app = require("./_client").clientSource();
+  const { els, mk } = _sessDomStub();
+  const saved = { si: global.setInterval, st: global.setTimeout, raf: global.requestAnimationFrame,
+    doc: global.document, win: global.window, ls: global.localStorage, f: global.fetch, css: global.CSS };
+  global.setInterval = () => 0; global.setTimeout = () => 0; global.requestAnimationFrame = () => 0;
+  const mkEl = (tag) => { const e = mk(tag); e.querySelector = () => mk("child"); return e; };   // a built toast wires its own buttons
+  global.document = { getElementById: (id) => (els[id] = els[id] || mk(id)), querySelectorAll: () => [], querySelector: () => null,
+    createElement: mkEl, addEventListener() {}, body: mk("body"), documentElement: mk("html"), hidden: false, activeElement: null };
+  global.window = { addEventListener() {}, location: { reload() {}, href: "/" }, matchMedia: () => ({ matches: false, addEventListener() {} }) };
+  global.localStorage = { _d: {}, getItem(k) { return this._d[k] ?? null; }, setItem(k, v) { this._d[k] = String(v); }, removeItem(k) { delete this._d[k]; } };
+  global.fetch = () => new Promise(() => {}); global.CSS = { escape: (s) => String(s) };
+  let H = null;
+  eval(app + "\n; H={state, applySnapshot, loadSnapshot" + (extra ? "," + extra : "") + "};");
+  return { H, els, restore() { global.setInterval = saved.si; global.setTimeout = saved.st; global.requestAnimationFrame = saved.raf;
+    global.document = saved.doc; global.window = saved.win; global.localStorage = saved.ls; global.fetch = saved.f; global.CSS = saved.css; } };
+}
+
+test("snapshot ordering: an older payload never moves the board backwards, a redeploy's restarted clock still lands, and only the newest in-flight pull is applied", async () => {
+  const rig = _clientRig();
+  try {
+    const { H } = rig;
+    const snap = (px, dataTs, v) => ({ markets: [{ coin: "xyz:AAPL", ticker: "AAPL", uni: "xyz", px, prevDay: 99, vol: 1e8, oi: 5e7 }], mainMarkets: [], dataTs, v });
+    H.applySnapshot(snap(100, 10)); assert.equal(H.state.rows.get("xyz:AAPL").px, 100); assert.equal(H.state.dataTs, 10);
+    H.applySnapshot(snap(90, 9));
+    assert.equal(H.state.rows.get("xyz:AAPL").px, 100, "a payload older than the painted one is dropped");
+    assert.equal(H.state.dataTs, 10, "and cannot move the content clock backwards");
+    H.applySnapshot(snap(95, 11)); assert.equal(H.state.rows.get("xyz:AAPL").px, 95, "newer still applies");
+    H.applySnapshot(snap(96, 12, "b1")); assert.equal(H.state.build, "b1");
+    H.applySnapshot(snap(97, 3, "b2"));
+    assert.equal(H.state.rows.get("xyz:AAPL").px, 97, "a redeploy restarts the counter: the new build's first snapshot lands whatever its dataTs");
+    assert.equal(H.state.dataTs, 3);
+    H.applySnapshot(snap(98, 2, "b2")); assert.equal(H.state.rows.get("xyz:AAPL").px, 97, "…and the gate is back on for the same build");
+    // Two pulls in flight; the FIRST one answers LAST with a higher dataTs. The sequence guard drops
+    // it: the newest pull is the one that reflects what the operator asked for.
+    const pend = [];
+    global.fetch = () => new Promise((res) => pend.push((body) => res({ ok: true, status: 200, json: () => Promise.resolve(body) })));
+    const p1 = H.loadSnapshot(), p2 = H.loadSnapshot();
+    assert.equal(pend.length, 2);
+    pend[1](snap(50, 20, "b2")); await p2;
+    assert.equal(H.state.rows.get("xyz:AAPL").px, 50);
+    pend[0](snap(40, 21, "b2")); await p1;
+    assert.equal(H.state.rows.get("xyz:AAPL").px, 50, "the superseded pull's answer is ignored even though its clock reads later");
+    assert.equal(H.state.dataTs, 20);
+  } finally { rig.restore(); }
+});
+
+test("overlay stack: one Escape closes only the top layer; every modal registers on open and leaves on close; a view change clears the stack", () => {
+  const app = require("./_client").clientSource();
+  const i0 = app.indexOf("const _overlays=[];"), i1 = app.indexOf("function overlayCloseAll(){");
+  assert.ok(i0 > 0 && i1 > i0, "overlay stack lives in core.js");
+  const src = app.slice(i0, app.indexOf("\n", i1));
+  const O = new Function(src + "; return {overlayPush, overlayPop, overlayTop, overlayCloseTop, overlayCloseAll};")();
+  const closed = [];
+  O.overlayPush("drawer", () => closed.push("drawer")); O.overlayPush("help", () => closed.push("help"));
+  assert.equal(O.overlayTop(), "help");
+  assert.equal(O.overlayCloseTop(), true);
+  assert.deepEqual(closed, ["help"], "only the top layer closes"); assert.equal(O.overlayTop(), "drawer");
+  O.overlayPush("cmdk", () => closed.push("cmdk")); O.overlayPush("drawer", () => closed.push("drawer2"));
+  assert.equal(O.overlayTop(), "drawer", "re-pushing an open id moves it to the top, never duplicates it");
+  O.overlayPop("drawer"); assert.equal(O.overlayTop(), "cmdk");
+  O.overlayCloseAll(); assert.equal(O.overlayTop(), null); assert.deepEqual(closed, ["help", "cmdk"]);
+  assert.equal(O.overlayCloseTop(), false, "nothing to close is not an error");
+  // ONE document Escape handler, in core's boot, consuming the event; the per-layer listeners are gone.
+  assert.ok(app.includes("if(e.key!=='Escape'||e.defaultPrevented||!_overlays.length) return; e.preventDefault(); overlayCloseTop();"), "the single Escape handler");
+  for (const gone of ["if(e.key==='Escape' && state.detail) closeDetail();", "const m=el('helpmodal'); if(m&&!m.hidden) closeHelp(); }",
+    "const m=el('tchartmodal'); if(m&&!m.hidden) closeTrendChart();", "if(e.key==='Escape'&&!d.hidden) whlModalClose();",
+    "if(e.key==='Escape'&&el('focmodal')&&!el('focmodal').hidden) focChartClose();", "if(e.key==='Escape'){ e.preventDefault(); closeCmdk(); return; }",
+    "q.addEventListener('keydown',(e)=>{ if(e.key==='Escape'){ dmState.q=''; dmState.results=null; dmRender(); } });"])
+    assert.ok(!app.includes(gone), "per-layer Escape listener must be gone: " + gone);
+  for (const pin of ["overlayPush('drawer', closeDetail)", "overlayPop('drawer')", "overlayPush('help', closeHelp)", "overlayPop('help')",
+    "overlayPush('cmdk', closeCmdk)", "overlayPop('cmdk')", "overlayPush('tchart', closeTrendChart)", "overlayPop('tchart')",
+    "overlayPush('whl', whlModalClose)", "overlayPop('whl')", "overlayPush('focchart', focChartClose)", "overlayPop('focchart')",
+    "overlayPush('dm-search',", "overlayPop('dm-search')"])
+    assert.ok(app.includes(pin), "layer registration missing: " + pin);
+  // Downstream document handlers yield a consumed Escape instead of acting on it as well.
+  assert.ok(app.includes("if(e.key==='Escape'&&e.defaultPrevented) return;"), "the j/k handler yields");
+  assert.ok(app.includes("if(e.defaultPrevented) return;   // the overlay stack already spent this Escape"), "dmKeys yields");
+  assert.ok(app.includes("if(state.view!=='markets'||overlayTop()||mktGrp()!=='names') return;"), "j/k/Enter respect every open layer, not just the drawer");
+  // A view change dismisses the drawer and anything over it — unless nothing changed.
+  assert.ok(app.includes("const switching=v!==state.view;\n  state.view=v;\n  if(switching) overlayCloseAll();"), "showView closes the stack on a real switch");
+  // Fields that consume Escape for themselves stop it before the stack sees it.
+  assert.ok(app.includes("if(e.key==='Escape'){ e.stopPropagation(); termClose(); return; }"), "terminal");
+});
+
+test("keyboard focus survives the row patch and returns from the drawer", () => {
+  const app = require("./_client").clientSource();
+  const grab = (name) => { const i = app.indexOf("function " + name + "("); assert.ok(i >= 0, name + " missing");
+    let dep = 0; for (let k = app.indexOf("{", i); k < app.length; k++) { if (app[k] === "{") dep++; if (app[k] === "}") { dep--; if (!dep) return app.slice(i, k + 1); } } };
+  const focused = [];
+  const oldTr = { dataset: { coin: "xyz:AAPL" }, isConnected: false, closest: (s) => s === "tr[data-coin]" ? oldTr : null };
+  const oldPit = { dataset: { pit: "xyz:AAPL" }, isConnected: false, closest: (s) => s === "tr[data-coin]" ? oldTr : null };
+  const newPit = { focus: () => focused.push("pit") };
+  const newTr = { querySelector: (q) => /\.pit\[data-pit="xyz:AAPL"\]/.test(q) ? newPit : null, focus: () => focused.push("tr") };
+  const body = { contains: () => true, querySelector: (q) => /tr\[data-coin="xyz:AAPL"\]/.test(q) ? newTr : null };
+  const document = { activeElement: oldPit };
+  const F = new Function("document", "CSS", grab("rowFocus") + "\n" + grab("rowRefocus") + "; return {rowFocus,rowRefocus};")(document, { escape: (s) => s });
+  const had = F.rowFocus(body);
+  assert.deepEqual({ coin: had.coin, inner: had.inner }, { coin: "xyz:AAPL", inner: '.pit[data-pit="xyz:AAPL"]' }, "remembers the row AND the control inside it");
+  F.rowRefocus(body, had); assert.deepEqual(focused, ["pit"], "the replacement control gets focus back");
+  document.activeElement = oldTr; F.rowRefocus(body, F.rowFocus(body)); assert.deepEqual(focused, ["pit", "tr"], "a focused row re-focuses the replacement row");
+  oldTr.isConnected = true; F.rowRefocus(body, F.rowFocus(body)); assert.deepEqual(focused, ["pit", "tr"], "an untouched row keeps its focus — no write");
+  document.activeElement = { closest: () => null }; assert.equal(F.rowFocus(body), null, "focus outside the table is nobody's business");
+  assert.ok(app.includes("const had=rowFocus(body);") && app.includes("rowRefocus(body, had);\n  applyKsel();"), "wired around BOTH write paths, before the ring is re-pinned");
+  // Drawer: the opener is recorded on EVERY open and focus goes back to it (or to the row that now carries the coin).
+  assert.ok(app.includes("state._drawerFrom={el:ae, coin:tr?tr.dataset.coin:null}"), "opener recorded per open");
+  assert.ok(!app.includes("if(!state._drawerFrom) state._drawerFrom=document.activeElement;"), "the record-once line is gone");
+  assert.ok(app.includes("const f=state._drawerFrom; state._drawerFrom=null; if(!f) return;") && app.includes("let t=f.el&&f.el.isConnected?f.el:null;"), "closeDetail restores and clears");
+});
+
+test("DM log: windowed to the newest 100, cache capped at 500 (the open thread keeps what the pager walked to), in-place patches, one paint per frame", () => {
+  const app = require("./_client").clientSource();
+  const i0 = app.indexOf("const DM_WINDOW=100, DM_CACHE=500;"), i1 = app.indexOf("function dmMerge(list){");
+  assert.ok(i0 > 0 && i1 > i0);
+  let dep = 0, end = 0; for (let k = app.indexOf("{", i1); k < app.length; k++) { if (app[k] === "{") dep++; if (app[k] === "}") { dep--; if (!dep) { end = k + 1; break; } } }
+  const dmState = { sel: 1, msgs: new Map(), info: new Map([[1, { more: false }], [2, { more: false }]]) };
+  const M = new Function("dmState", "function dmMsgs(id){ let a=dmState.msgs.get(id); if(!a){ a=[]; dmState.msgs.set(id,a); } return a; }\n"
+    + app.slice(i0, end) + "; return {dmMerge, setWin(n){ _dmWin=n; }, win(){ return _dmWin; }};")(dmState);
+  const msgs = (thread, from, n) => Array.from({ length: n }, (_, i) => ({ id: from + i, thread, body: "m" + (from + i) }));
+  let r = M.dmMerge(msgs(2, 1, 600));
+  assert.equal(r.added, 600); assert.equal(dmState.msgs.get(2).length, 500, "a background thread keeps the newest 500");
+  assert.equal(dmState.msgs.get(2)[0].id, 101, "…the NEWEST 500"); assert.equal(dmState.info.get(2).more, true, "and knows the rest is on the server");
+  r = M.dmMerge(msgs(1, 1, 600)); assert.equal(dmState.msgs.get(1).length, 500, "the open thread at the default window: same cap");
+  M.setWin(700); r = M.dmMerge(msgs(1, 1, 700));
+  assert.equal(dmState.msgs.get(1).length, 700, "the pager walked to 700: nothing it fetched is trimmed");
+  r = M.dmMerge([{ id: 650, thread: 1, body: "edited" }, { id: 5, thread: 2, body: "x" }]);
+  assert.deepEqual(r, { added: 1, updated: [650] }, "an edit reports the id (open thread only); a re-fetched older row on another thread counts as added");
+  assert.equal(dmState.msgs.get(1).find((m) => m.id === 650).body, "edited");
+  // Wiring pins: the window, the local-first pager, the in-place patches, the throttle, the idle guard.
+  for (const pin of ["const all=dmMsgs(t.id), arr=all.length>_dmWin?all.slice(-_dmWin):all;", "(((info&&info.more)||all.length>arr.length)&&arr.length)",
+    "if(arr.length>_dmWin){ _dmWin=Math.min(arr.length,_dmWin+DM_WINDOW); dmRenderNow(); keepTop(); return; }", "_dmWin+=(d.messages||[]).length;",
+    "dmState.mode='chat'; _dmWin=DM_WINDOW;", "function dmPatchTyping(id){", "dmPatchTyping(t.thread);", '<div id="dm-typing">',
+    "function dmPatchMsg(id){", "function dmPatchReceipt(){", "else { for(const id of chg.updated) dmPatchMsg(id); dmPatchReceipt(); }",
+    "function dmRenderNow(){", "if(_dmRaf){ _dmDirty=true; return; }", "_dmRaf=requestAnimationFrame(", "if(document.hidden||!dmSignedIn()||state.view!=='dm') return;"])
+    assert.ok(app.includes(pin), "DM pin missing: " + pin);
+  assert.ok(!app.includes("if(state.view==='dm'&&dmState.sel===t.thread) dmRender();"), "a typing frame no longer rebuilds the panel");
+});
+
+test("small fixes: escaped terminal sink, capped scrollback, total-order comparators, dead pollMs gone, idle ticks sleep, sw click posts a message", () => {
+  const fs = require("fs"), path = require("path");
+  const app = require("./_client").clientSource();
+  const sw = fs.readFileSync(path.join(__dirname, "..", "public", "sw.js"), "utf8");
+  assert.ok(app.includes('data-tcmd="${tesc(r.ticker)}"') && !app.includes('data-tcmd="${r.ticker}"'), "the screen row's attribute sink is escaped");
+  assert.ok(app.includes("const TERM_MAX_BLOCKS=200;") && app.includes("while(s.children.length>TERM_MAX_BLOCKS) s.removeChild(s.firstChild);"), "terminal scrollback is capped");
+  for (const gone of ["a.ticker<b.ticker?-1:1", "a.tk<b.tk?-1:1", "(a.tEt||'')>(b.tEt||'')?-1:1"]) assert.ok(!app.includes(gone), "non-total comparator must be gone: " + gone);
+  for (const pin of ["String(a.ticker).localeCompare(String(b.ticker))", "String(a.tk).localeCompare(String(b.tk))", "String(b.d).localeCompare(String(a.d))||String(b.tEt||'').localeCompare(String(a.tEt||''))"])
+    assert.ok(app.includes(pin), "comparator: " + pin);
+  assert.ok(!app.includes("state.pollMs") && !app.includes("pollMs:30000"), "state.pollMs was written and never read — gone");
+  assert.ok(app.includes("refreshMs2:state.refreshMs,") && app.includes("if(typeof p.refreshMs2==='number'&&p.refreshMs2>0) state.refreshMs=p.refreshMs2;"), "prefs persist and migrate into refreshMs alone");
+  assert.ok(app.includes("setInterval(()=>{ if(document.hidden) return;   // a background tab"), "the 500ms countdown tick sleeps while hidden");
+  assert.ok(app.includes("if(title===_freshLast) return; _freshLast=title;") && app.includes("if(c&&txt!==_cdText){ _cdText=txt; c.textContent=txt; }"), "freshness dot and countdown only write the DOM on change");
+  assert.ok(sw.includes('t.postMessage({ go: "dm" })') && !sw.includes('t.navigate("/#dm")'), "an open client is asked to switch tabs, not navigated");
+  assert.ok(sw.includes('self.clients.openWindow("/#dm")'), "no client open: a real navigation remains the fallback");
+  assert.ok(sw.includes("(build 2026.09.16-80)"), "sw header build stamp updated");
+  assert.ok(app.includes("navigator.serviceWorker.addEventListener('message',e=>{ const d=e&&e.data; if(d&&d.go==='dm') showView('dm'); });"), "the page answers the message");
+});

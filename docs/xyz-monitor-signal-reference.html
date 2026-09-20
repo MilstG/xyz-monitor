@@ -352,7 +352,7 @@
 
 <div class="sig-card" id="pead"><h4>Post-earnings drift <span class="id">pead</span> <span class="pill both">DIRECTIONAL</span><span class="pill sh">SHADOW</span><span class="pill eq">XYZ ONLY</span></h4>
 <div class="grid">
-<span class="lb">Trigger</span><span>An earnings reaction <b>≥1.5σ</b> of the name's own daily vol; entered only <b>after the reaction session completes</b> (≥1 bar past the reaction index), within <b>3 sessions</b> of it, drifting WITH the move. AMC prints book the next bar as the reaction — same convention as <code>earnReactionsFor</code>.</span>
+<span class="lb">Trigger</span><span>An earnings reaction <b>≥1.5σ</b> of the name's own daily vol; entered only <b>after the reaction session completes</b> (≥1 bar past the reaction index), within <b>3 sessions</b> of it, drifting WITH the move. The print day's own bar is the reaction bar for BMO and AMC alike (an AMC print is measured against the pre-print reference, and with the hourly spine anchored at 16:00 ET, +24h) — same convention as <code>earnReactionsFor</code>.</span>
 <span class="lb">Measure</span><span>Horizon <b>10d</b>, R. Stop = 1σ back through the reaction close against the drift; target = <b>half the reaction magnitude</b> further from the mark — drift scales with the surprise, mechanically. <code>emv</code> stamps the frozen reaction move %. Accrues at earnings-season pace.</span>
 </div></div>
 

@@ -6,7 +6,7 @@ import { attachLineHover, hoverChart, lcTicks } from "./admin.js";
 import { showView } from "./backtest.js";
 import { nowChip } from "./base.js";
 import { earnBadge, loadTgChannels, saveTgChannels, scopeGuard, secShort, tgChans } from "./calendar.js";
-import { G, el, esc, fmtPrice, safeHref, state } from "./core.js";
+import { G, el, esc, fmtPrice, overlayPop, overlayPush, safeHref, state } from "./core.js";
 import { fetchJSON } from "./data.js";
 import { openDetail } from "./drawer.js";
 import { whlOpenFund } from "./funds.js";
@@ -339,14 +339,13 @@ function openTrendChart(coin,side){
   if(!e) return;   // board re-ranked under the click \u2014 nothing honest to show
   _tc={coin,side,entry:e,ema:(_trend&&_trend.params&&_trend.params.ema)||[13,21],inflight:false,seq:_tc.seq,
     tf:(e.retest&&(TC_TFS.find(t=>t.lad===e.retest)||{}).api)||'4h'};   // open on the retesting rung when one fires
-  bg.hidden=false; m.hidden=false;
+  bg.hidden=false; m.hidden=false; overlayPush('tchart', closeTrendChart);
   loadTrendChart();
 }
-function closeTrendChart(){ const bg=el('tchartbg'), m=el('tchartmodal'); if(bg)bg.hidden=true; if(m){m.hidden=true;m.innerHTML='';} _tc.coin=null; _tc.entry=null; }
+function closeTrendChart(){ overlayPop('tchart'); const bg=el('tchartbg'), m=el('tchartmodal'); if(bg)bg.hidden=true; if(m){m.hidden=true;m.innerHTML='';} _tc.coin=null; _tc.entry=null; }
 
 export function __boot_trend_8880() {
-{ const bg=el('tchartbg'); if(bg) bg.addEventListener('click',closeTrendChart);
-  document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ const m=el('tchartmodal'); if(m&&!m.hidden) closeTrendChart(); } }); }
+{ const bg=el('tchartbg'); if(bg) bg.addEventListener('click',closeTrendChart); }   // Escape: overlay stack (core.js)
 }
 
 
@@ -662,14 +661,22 @@ function sigCardHtml(gr, rank, collapsible){
     const ownOk = g.study && g.study.n>=8;
     const U = (st)=>st&&st.unit==='R'?'R':'%';   // R = sigma units (outcome / the market's own vol at event time) \u2014 apples-to-apples across names
     const exp = (st)=>st&&st.avg!=null?` \u00b7 <span data-tip="expectancy: the MEAN direction-signed outcome per event \u2014 hit rate and payoff sizes folded into one number. ${st.unit==='R'?'Measured in R (sigma units \u2014 the outcome divided by the market\u2019s own volatility at event time), so it compares fairly across quiet and wild names and pools cleanly. ':''}This, not the R/R screen, is what decides whether the setup pays over many occurrences.">exp <b class="${st.avg>=0?'pos':'neg'}">${st.avg>=0?'+':''}${st.avg}${U(st)}</b>/ev</span>`:'';
-    const stLine=(st,scope)=>`<i class="sig-scope">${scope}</i> n=${st.n} \u00b7 med <b class="${st.med>=0?'pos':'neg'}">${st.med>=0?'+':''}${st.med}${U(st)}</b> \u00b7 ${Math.round(st.hit*100)}% hit${exp(st)} \u00b7 ${esc(g.horizon||'')}`;
+    // medNet: the same median after the funding a 1x position paid over the horizon (only where the
+    // hourly funding history covered the events) — the number a perp holder actually keeps.
+    const net = (st)=>st&&st.medNet!=null&&st.medNet!==st.med?` <span class="sec" data-tip="median outcome net of the funding a 1x position paid (or received) over the horizon, signed with the event direction — the gross median beside it ignores the carry">net <b class="${st.medNet>=0?'pos':'neg'}">${st.medNet>=0?'+':''}${st.medNet}${U(st)}</b></span>`:'';
+    const stLine=(st,scope)=>`<i class="sig-scope">${scope}</i> n=${st.n} \u00b7 med <b class="${st.med>=0?'pos':'neg'}">${st.med>=0?'+':''}${st.med}${U(st)}</b>${net(st)} \u00b7 ${Math.round(st.hit*100)}% hit${exp(st)} \u00b7 ${esc(g.horizon||'')}`;
+    // Overnight split (ondrift only): how much of this name's overnight move is priced in the
+    // after-hours leg (close → 08:30 ET) versus the pre-open half hour (08:30 → 09:30 ET).
+    const split = g.ev==='ondrift'&&g.split&&g.split.n>=5
+      ? ` \u00b7 <span class="sec" data-tip="overnight split over ${g.split.n} closed windows: median after-hours leg (cash close \u2192 08:30 ET) ${g.split.medAh>=0?'+':''}${g.split.medAh}%, median pre-open leg (08:30 \u2192 09:30 ET) ${g.split.medPre>=0?'+':''}${g.split.medPre}%; ${Math.round((g.split.shareAh||0)*100)}% of the absolute overnight move lands before 08:30.${g.split.approx?' Some anchors resolved on hourly closes (5m archive incomplete) \u2014 the 09:30 leg then reads the 09:00 close.':''}">split AH ${g.split.medAh>=0?'+':''}${g.split.medAh}% / pre ${g.split.medPre>=0?'+':''}${g.split.medPre}% \u00b7 ${Math.round((g.split.shareAh||0)*100)}% before 08:30${g.split.approx?' \u2248':''}</span>`
+      : '';
     const hist = ownOk
       ? stLine(g.study,'own base rate')
       : (g.pooled
         ? `${g.study?`own n=${g.study.n} \u00b7 `:''}${stLine(g.pooled,'class-pooled')}`
         : (g.study
           ? stLine(g.study,'own \u00b7 thin')
-          : `${esc(g.horizon||'no historical study yet')}`));
+          : `${esc(g.horizon||'no historical study yet')}`))+split;
     const flags=(g.unproven&&!g.pooled?' <i class="sig-unp" data-tip="fewer than 8 historical occurrences and no usable pooled sample \u2014 a flag, not an edge">unproven</i>':'')
       +(g.negexp?' <i class="sig-unp bad" data-tip="this base rate has NEGATIVE expectancy \u2014 past occurrences of this event lost money on average under its own sign convention. Evidence score zeroed; shown for awareness, ranked as noise.">neg exp</i>':'')
       +(g.noedge?' <i class="sig-unp bad" data-tip="the LIVE out-of-sample record for this event type shows no edge (\u226510 resolved, <50% hit) \u2014 evidence score capped">no live edge</i>':'')

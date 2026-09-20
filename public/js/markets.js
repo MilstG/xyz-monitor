@@ -321,6 +321,17 @@ function rowHtml(r, vc, bScope){
 // Split out for the execution-smoke harness: given aligned old/new row strings and a children-like
 // list, rewrite ONLY the slots whose strings differ. Returns the write count — the perf claim is
 // "unchanged rows cost zero DOM writes", and the test asserts the number, not the vibe.
+// Keyboard focus lives on a row (Tab / j-k-Enter) or on a control inside it (the note marker, the
+// star). Both write paths rebuild that element, and a rebuilt element is not the one the browser
+// was focused on: focus fell to <body> on every tick that moved a price. Remember what held it
+// before the write and put it back on the replacement afterwards — same coin, same inner control.
+function rowFocus(body){ const ae=document.activeElement; if(!ae||!ae.closest||!body.contains(ae)) return null;
+  const tr=ae.closest('tr[data-coin]'); if(!tr) return null;
+  const inner=ae!==tr?(ae.dataset&&ae.dataset.pit!=null?`.pit[data-pit="${CSS.escape(ae.dataset.pit)}"]`:(ae.dataset&&ae.dataset.star!=null?`.star[data-star="${CSS.escape(ae.dataset.star)}"]`:null)):null;
+  return {el:ae, coin:tr.dataset.coin, inner}; }
+function rowRefocus(body, had){ if(!had||had.el.isConnected) return;   // untouched rows keep their focus by themselves
+  const tr=body.querySelector(`tr[data-coin="${CSS.escape(had.coin)}"]`); if(!tr) return;
+  const t=(had.inner&&tr.querySelector(had.inner))||tr; try{ t.focus({preventScroll:true}); }catch(_){} }
 function patchRowsInto(children, oldHtml, newHtml){
   let writes=0;
   for(let i=0;i<newHtml.length;i++){ if(oldHtml[i]!==newHtml[i]){ children[i].outerHTML=newHtml[i]; writes++; } }
@@ -757,6 +768,7 @@ function render(){
   // Structural signature: row identity+order, visible columns, bench. \u0001/\u0002 separators can
   // never appear in a coin or column key, so the signature is collision-free by construction.
   const struct=coins.join('\u0001')+'\u0002'+vc.map(c=>c.key).join('\u0001')+'\u0002'+(bScope||'');
+  const had=rowFocus(body);   // a row (or a control in it) holding keyboard focus is about to be replaced
   if(_rowCache && struct===_rowStruct && body.children.length===out.length){
     const oldHtml=coins.map(c=>_rowCache.get(c));
     patchRowsInto(body.children, oldHtml, out);
@@ -766,6 +778,7 @@ function render(){
     _rowCache=new Map(); for(let i=0;i<coins.length;i++) _rowCache.set(coins[i], out[i]);
     _rowStruct=struct;
   }
+  rowRefocus(body, had);
   applyKsel();   // rebuild wipes the j/k highlight; a patch may have replaced the selected row — re-pin either way
   renderActionLists();   // the rate-of-change lists under the table describe exactly what it just rendered
 }

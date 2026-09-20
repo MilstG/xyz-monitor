@@ -3,7 +3,7 @@
 // order once every module has evaluated (see app.js). Shared cross-module mutable state lives
 // on G (core.js).
 import { IS_ADMIN } from "./admin.js";
-import { el, esc, safeHref, state } from "./core.js";
+import { el, esc, overlayPop, overlayPush, safeHref, state } from "./core.js";
 import { fetchJSON } from "./data.js";
 import { openDetail } from "./drawer.js";
 import { tcount, termErr, termOut, termThinking, tesc, tmoney, tpad } from "./terminal.js";
@@ -370,13 +370,12 @@ function whlModalEnsure(){
   d.innerHTML=`<div id="whlwin"><button type="button" class="whl-x" id="whl-x" data-tip="close (Esc)">\u2715</button><div id="whlbody"></div></div>`;
   document.body.appendChild(d);
   d.addEventListener('click',(e)=>{ if(e.target===d) whlModalClose(); });
-  el('whl-x').onclick=whlModalClose;
-  document.addEventListener('keydown',(e)=>{ if(e.key==='Escape'&&!d.hidden) whlModalClose(); });
+  el('whl-x').onclick=whlModalClose;   // Escape: overlay stack (core.js)
 }
-function whlModalClose(){ const d=el('whlmodal'); if(d) d.hidden=true; }
+function whlModalClose(){ overlayPop('whl'); const d=el('whlmodal'); if(d) d.hidden=true; }
 async function whlOpenFund(key,full){
   whlModalEnsure();
-  const d=el('whlmodal'); d.hidden=false;
+  const d=el('whlmodal'); d.hidden=false; overlayPush('whl', whlModalClose);
   el('whlbody').innerHTML='<div class="msg">Loading the book\u2026</div>';
   whlPost({op:'seen',key}).then(()=>whlFetch());   // clears the badge for everyone — seen is group state, like the rest of the app
   let f;

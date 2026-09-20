@@ -2554,3 +2554,165 @@ test("positions lane: polls only wanted wallets, pokes on structure not on P&L, 
     fs.rmSync(dir2, { recursive: true, force: true });
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+// ===== reliability pass: weights, picker fairness, WS gate, OI history retention, lane guards =====
+
+const relStore = (extra) => Object.assign({ loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+  insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {} }, extra || {});
+const relMeta = (names) => async () => [{ universe: names.map((n) => ({ name: n })) }, names.map(() => ({ markPx: "10", funding: "0.0001", openInterest: "5" }))];
+
+// One short-but-plausible universe reply deleted the row AND its in-memory OI/funding history; the
+// next reply that listed the coin again started it from nothing.
+test("reliability: a market that drops out of one universe reply keeps its OI history and re-attaches on return", async () => {
+  const { createPoller } = require("../src/poller");
+  let reply = relMeta(["A", "B", "C", "D"]);
+  const p = createPoller({ dex: "xyz", store: relStore(), log: () => {}, version: "test", crypto: false, metaFetch: (...a) => reply(...a) });
+  await p.pollUniverseNow();
+  const old = Date.now() - 3600e3;
+  p.seedHistNow("B", [[old, 42, 0.0002]]);
+  reply = relMeta(["A", "C", "D"]);   // above the half-roster guard: applied
+  await p.pollUniverseNow();
+  assert.deepEqual(p.orderNow(), ["A", "C", "D"]);
+  assert.equal(p.rowNow("B"), undefined, "the row is gone");
+  assert.deepEqual(p.histNow("B"), [[old, 42, 0.0002]], "its history is not");
+  reply = relMeta(["A", "B", "C", "D"]);
+  await p.pollUniverseNow();
+  assert.ok(p.rowNow("B"), "the row is back");
+  const h = p.histNow("B");
+  assert.ok(h.length === 2 && h[0][0] === old && h[1][1] === 5, "the new sample (oiBase) landed on the OLD series — the row re-attached to its history");
+  const pol = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(!pol.includes("rows.delete(k); hist.delete(k)"), "the removal sweep no longer erases history");
+  assert.ok(/if \(rows\.has\(coin\)\) continue;[\s\S]{0,200}if \(last < dcut\) \{ hist\.delete\(coin\); orphaned\+\+; \}/.test(pol), "row-less history is GC'd on the same 7d clock as a delisting, in maintenance");
+});
+
+// applyWsCtxs skips a batch whenever the dex tuple is absent or misaligned; healthy() only knows that
+// events arrive. REST must gate its slow cadence on an APPLIED batch, not on health.
+test("reliability: the REST universe skip is gated on a recently APPLIED socket batch, not on socket health", async () => {
+  const { createPoller } = require("../src/poller");
+  const p = createPoller({ dex: "xyz", store: relStore(), log: () => {}, version: "test", crypto: false, metaFetch: relMeta(["A", "B", "C"]) });
+  await p.pollUniverseNow();
+  assert.equal(p.wsCarryingNow(true), false, "healthy but nothing applied yet: REST keeps its full cadence");
+  p.applyWsCtxsNow([["xyz", [{ markPx: "11" }, { markPx: "12" }]]]);   // length 2 vs a 3-market roster: skipped
+  assert.equal(p.wsCarryingNow(true), false, "a misaligned batch is not an applied batch");
+  p.applyWsCtxsNow([["", [{ markPx: "1" }]]]);   // wrong dex only
+  assert.equal(p.wsCarryingNow(true), false, "a batch without our dex tuple is not an applied batch");
+  p.applyWsCtxsNow([["xyz", [{ markPx: "11" }, { markPx: "12" }, { markPx: "13" }]]]);
+  assert.equal(p.rowNow("B").px, 12, "aligned batch applied");
+  assert.equal(p.wsCarryingNow(true), true, "now the socket is carrying the board");
+  assert.equal(p.wsCarryingNow(false), false, "...but never while it is unhealthy");
+  const pol = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes("if (wsCarrying(Date.now()) && universeTick % 5 !== 0) return;"), "the universe interval reads the gate");
+  assert.ok(/now - lastWsApply < WS_APPLY_FRESH_MS/.test(pol) && pol.includes("const WS_APPLY_FRESH_MS = 90000;"), "90s since the last applied batch");
+});
+
+// The 5m lane was volume-desc with no age tier and a flat 5-minute cadence: under budget pressure the
+// same tail names lost their capture every pass, and past the 17d native window the hole was permanent.
+test("reliability: the 5m lane escalates stalest-first past 3x its cadence, and the cadence stretches with the roster", () => {
+  const { createPoller } = require("../src/poller");
+  const p = createPoller({ dex: "xyz", store: relStore({ candlesEnabled: () => true, candleCoverage: () => ({ min: null, max: null, count: 0 }) }), log: () => {}, version: "test", crypto: false });
+  const now = Date.now(), MIN = 60000;
+  assert.equal(p.m5StaleNow(), 5 * MIN, "an empty roster: the floor cadence, once per bar");
+  p.seedRowNow("xyz:BIG", { ticker: "BIG", px: 10, vol: 1e9, m5Ts: now - 6 * MIN });
+  p.seedRowNow("xyz:TAIL", { ticker: "TAIL", px: 10, vol: 1, m5Ts: now - 10 * MIN });
+  assert.equal(p.pick5mNow(), "xyz:BIG", "both merely stale (< 3x cadence): volume order, the historical ordering");
+  p.seedRowNow("xyz:TAIL", { m5Ts: now - 16 * MIN });
+  assert.equal(p.pick5mNow(), "xyz:TAIL", "past 3x the cadence the tail name outranks volume — it cannot starve");
+  p.seedRowNow("xyz:MID", { ticker: "MID", px: 10, vol: 5e8, m5Ts: now - 20 * MIN });
+  assert.equal(p.pick5mNow(), "xyz:MID", "among the escalated, stalest first");
+  // Roster-aware cadence: N x 21 weight per pull x (60000 / S) per minute <= 50% of 1150.
+  for (let i = 0; i < 210; i++) p.seedRowNow("xyz:R" + i, { ticker: "R" + i, px: 1, vol: 1, m5Ts: now });
+  const s = p.m5StaleNow();
+  assert.ok(s >= 460000 && s <= 470000, "213 markets -> ~7.7 min so the lane's demand stays under half the budget (" + s + "ms)");
+  assert.ok((213 * 21 * 60000) / s <= 0.5 * 1150 + 1, "the arithmetic holds: steady-state demand <= 575 weight/min");
+  const pol = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes('const m5Esc = prefix === "m5:" ? 3 * m5StaleMs() : 0;'), "escalation age derives from the live cadence");
+  assert.ok(pol.includes("Date.now() - (r.m5Ts || 0) > m5StaleMs() &&"), "need5m reads the roster-aware cadence");
+});
+
+test("reliability: request weights are computed from the requested span at every call site; the funding stamp survives a redeploy", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const c of ["MAIN_HOURLY_WEIGHT", "MAIN_DAILY_WEIGHT", "HOURLY_FETCH_WEIGHT", "HOURLY_TAIL_WEIGHT", "FUNDING_FETCH_WEIGHT", "M5_FETCH_WEIGHT", "DEEP_SEED_WEIGHT", "DEEP_TAIL_WEIGHT"])
+    assert.ok(!pol.includes(c), c + " — the flat per-lane constant is gone");
+  assert.ok(pol.includes('spanWeight(now - histDays * DAY, now, HOUR)'), "wide hourly pull charged from its span");
+  assert.ok(pol.includes('spanWeight(tailFrom, now, HOUR)'), "hourly tail charged from its span");
+  assert.ok(pol.includes('fetchCandles(coin, "1d", dFrom, now, spanWeight(dFrom, now, DAY))'), "daily pull charged from its span");
+  assert.ok(pol.includes('fetchCandles(coin, "5m", from, now, spanWeight(from, now, FIVE_MIN))'), "5m seed/tail charged from its span (17d seed = 102, not 20)");
+  assert.ok(pol.includes('spanWeight(from, Math.min(to, now), 60000)'), "1m opening-hour pull charged from its span");
+  assert.ok(pol.includes('fetchCandles(coin, iv, from, now, spanWeight(from, now, w))'), "deep seed/tail charged from its span (4900 bars = 102, not 60)");
+  assert.ok(pol.includes('fetchFundingHistory(coin, now - days * DAY, now, fundingWeight(days * 24))'), "funding charged per item (60d = 92, not 20)");
+  assert.ok(pol.includes("const spanWeight = (fromMs, toMs, ivMs) => candleWeight((toMs - fromMs) / ivMs);"), "one helper, from the documented formula");
+  // fundBackfilled round-trips through the features cache.
+  const { createPoller } = require("../src/poller");
+  let saved = null;
+  const p = createPoller({ dex: "xyz", store: relStore({ saveFeatures: (d) => { saved = d; }, loadFeatures: () => null }), log: () => {}, version: "test", crypto: false });
+  p.seedRowNow("xyz:F1", { ticker: "F1", px: 10, feat: { a: 1 }, fundBackfilled: true });
+  p.seedRowNow("xyz:F2", { ticker: "F2", px: 10, feat: { a: 1 } });
+  p.persistFeatures();
+  assert.equal(saved.markets["xyz:F1"].fb, 1); assert.equal(saved.markets["xyz:F2"].fb, 0);
+  const p2 = createPoller({ dex: "xyz", store: relStore({ loadFeatures: () => saved }), log: () => {}, version: "test", crypto: false });
+  p2.hydrateFeaturesNow();
+  assert.equal(p2.rowNow("xyz:F1").fundBackfilled, true, "a redeploy does not re-pull 60d of funding for a market that already has it");
+  assert.equal(p2.rowNow("xyz:F2").fundBackfilled, false, "and does not invent the stamp for one that does not");
+});
+
+test("reliability: calendar lanes carry in-flight guards, the daily rebuild is debounced, the ledger write is batched off the alert path", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const [fn, flag] of [["fetchEarnings", "earnBusy"], ["fetchMacro", "macroBusy"], ["fetchHousing", "housingBusy"], ["fetchLiquidity", "liqBusy"]]) {
+    const body = pol.slice(pol.indexOf("async function " + fn + "()"), pol.indexOf("async function " + fn + "Body()"));
+    assert.ok(new RegExp("if \\(" + flag + "\\) \\{ if \\(!" + flag + "Logged\\) \\{ " + flag + "Logged = true; log\\(").test(body), fn + " skips a re-fire while busy and logs it once");
+    assert.ok(new RegExp("finally \\{ " + flag + " = false; \\}").test(body), fn + " releases the flag on every exit");
+  }
+  assert.ok(pol.includes("if (!(await fetchEarnings())) lastEarnOk = 0;"), "the operator-forced backfill notices a skipped republish and arms the staleness retry");
+  assert.equal(pol.match(/async function fetchMacro\(\)/g).length, 1, "still exactly one fetch engine per lane");
+  // refreshDaily -> one buildDaily per second (trailing edge); the harness's buildDailyNow stays the synchronous buildDaily.
+  assert.ok(/r\.dailyRaw = c; r\.dailyTs = Date\.now\(\); r\.isNew = false;\s*\n\s*scheduleBuildDaily\(\);/.test(pol), "refreshDaily schedules the rebuild");
+  assert.ok(/function scheduleBuildDaily\(\) \{\s*\n\s*if \(buildDailyT\) return;\s*\n\s*buildDailyT = setTimeout\(/.test(pol) && /\}, 1000\);\s*\n\s*if \(buildDailyT\.unref\) buildDailyT\.unref\(\);/.test(pol), "one trailing 1s timer, unref'd");
+  assert.ok(pol.includes("buildDailyNow: buildDaily,"), "the harness entry is still the synchronous rebuild");
+  // persistLedger: the alert path batches (~2s trailing), the signals pass and the shutdown export force.
+  assert.ok(/function persistLedger\(force\) \{\s*\n\s*if \(!ledgerDirty\) return;\s*\n\s*if \(!force\) \{/.test(pol), "non-forced calls coalesce");
+  assert.ok(pol.includes("const LEDGER_BATCH_MS = 2000;"), "2s trailing batch");
+  assert.ok(pol.includes("if (fired) { persistTriggers(); persistLedger(); log(`ledger alerts:"), "the level-alert path is the batched caller");
+  assert.ok(pol.includes("persistLedger(true);   // the end of a signals pass is the batch boundary"), "the signals pass forces");
+  assert.ok(pol.includes("persistLedger: () => { ledgerDirty = true; persistLedger(true); }"), "the shutdown/crash export is synchronous");
+});
+
+test("study wiring 2026.09.20: hourly funding nets the daily base rates, the 5m archive resolves the anchors, ondrift carries the overnight split", async () => {
+  const { createPoller } = require("../src/poller");
+  const reads = [];
+  const FIVE = 5 * 60e3;
+  // A store with a live 5m archive: every read returns the bars closing inside the asked range at
+  // a price the hourly spine never prints, so an anchor resolved on 5m is distinguishable.
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    candlesEnabled: () => true,
+    readCandles: (coin, from, to) => { reads.push({ coin, from, to }); const out = []; for (let t = Math.ceil(from / FIVE) * FIVE; t + FIVE <= to; t += FIVE) out.push([t, 100, 100, 100, 100, 10]); return out; } };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const DAY_ = 86400e3, HOUR_ = 3600e3, now = Date.now();
+  const mkD = () => { const d = []; for (let i = 61; i >= 1; i--) d.push({ t: now - i * DAY_, c: 100 * Math.pow(1.0005, 61 - i), o: 100, h: 103, l: 98, v: 1e6 }); return d; };
+  const mkH = () => { const h = []; for (let i = 400; i >= 0; i--) { const c = 100 + Math.sin(i / 9); h.push({ t: now - i * HOUR_, o: c, h: c + 0.7, l: c - 0.7, c, v: 1e5 }); } return h; };
+  // 60 days of hourly funding, a steady 0.01%/h paid by longs — enough carry to move a 1-3d median
+  const fundH = new Map(); for (let i = 60 * 24; i >= 0; i--) fundH.set(Math.floor((now - i * HOUR_) / HOUR_) * HOUR_, 1e-4);
+  p.seedRowNow("xyz:NVDA", { px: 112, ticker: "NVDA", uni: "xyz", vol: 1e7, dailyRaw: mkD(), hourlyRaw: mkH(), dailyTs: now, hourlyTs: now, isNew: false, prevDay: 100, d1: 12, funding: 1e-4, fundH });
+  p.buildDailyNow();
+  await p.buildSignalsNow();
+  const d = p.getSignals(true);
+  const withStudy = d.signals.filter((s0) => s0.uni === "xyz" && s0.study && s0.study.n > 0);
+  assert.ok(withStudy.length > 0, "an equity condition with an own base rate fires on the seeded tape");
+  for (const s0 of withStudy) assert.ok(typeof s0.study.medNet === "number", `${s0.ev}: the card's study carries medNet once hourly funding covers the events (got ${s0.study.medNet})`);
+  // the anchors were resolved through the archive: one narrow PK-range read per anchor, never a span read
+  // (the sweep detector's own 4h tail read shares the archive; the anchor reads are the narrow ones)
+  const narrow = reads.filter((r) => r.coin === "xyz:NVDA" && r.to - r.from <= 4 * FIVE);
+  assert.ok(narrow.length >= 10, "the gap/drift studies read the 5m archive in FINE_TOL neighbourhoods before their anchors, never as a span");
+  assert.ok(!reads.some((r) => r.coin === "xyz:NVDA" && r.to - r.from > 24 * HOUR_), "no read pulls more than a day of 5m bars");
+  // the ondrift card ships the split when the study has it
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes("split: r._st.ovsplit || null"), "the ondrift card carries the overnight split");
+  assert.ok(pol.includes("st.gap = studyGapFade(hs, wins, 3 * HOUR, fine);") && pol.includes("st.ondrift = offDriftStats(hs, wins, 3 * HOUR, fine);"), "gap and drift studies take the fine series");
+  assert.ok(pol.includes("earnReactionsFor(prints, row.dailyRaw, now, row.hourlyRaw)") && pol.includes("earnReactionCurve(prints, row.hourlyRaw, { now })"), "the earnings study anchors on the hourly spine and ships the curve");
+  assert.ok(pol.includes("detectPead(prints, r.dailyRaw, r.px, sd30, r.hourlyRaw, now)"), "PEAD reads the print anchor off the hourly spine");
+  assert.ok(pol.includes("meanPairwiseCorr(top.map((r) => r.dailyRaw), REGIME_LOOKBACK, Date.now())"), "the regime correlation excludes the open day");
+  assert.ok(/rvolMulti\(hs, RVOL_WINS, nowMs, undefined, r\.uni === "xyz" \? "ET" : undefined\)/.test(pol), "equity rvol is keyed on the ET clock");
+});
