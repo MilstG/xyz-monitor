@@ -6,7 +6,7 @@ import { attachLineHover, hoverChart, lcTicks } from "./admin.js";
 import { showView } from "./backtest.js";
 import { nowChip } from "./base.js";
 import { earnBadge, loadTgChannels, saveTgChannels, scopeGuard, secShort, tgChans } from "./calendar.js";
-import { G, el, esc, fmtPrice, safeHref, state } from "./core.js";
+import { G, el, esc, fmtPrice, overlayPop, overlayPush, safeHref, state } from "./core.js";
 import { fetchJSON } from "./data.js";
 import { openDetail } from "./drawer.js";
 import { whlOpenFund } from "./funds.js";
@@ -339,14 +339,13 @@ function openTrendChart(coin,side){
   if(!e) return;   // board re-ranked under the click \u2014 nothing honest to show
   _tc={coin,side,entry:e,ema:(_trend&&_trend.params&&_trend.params.ema)||[13,21],inflight:false,seq:_tc.seq,
     tf:(e.retest&&(TC_TFS.find(t=>t.lad===e.retest)||{}).api)||'4h'};   // open on the retesting rung when one fires
-  bg.hidden=false; m.hidden=false;
+  bg.hidden=false; m.hidden=false; overlayPush('tchart', closeTrendChart);
   loadTrendChart();
 }
-function closeTrendChart(){ const bg=el('tchartbg'), m=el('tchartmodal'); if(bg)bg.hidden=true; if(m){m.hidden=true;m.innerHTML='';} _tc.coin=null; _tc.entry=null; }
+function closeTrendChart(){ overlayPop('tchart'); const bg=el('tchartbg'), m=el('tchartmodal'); if(bg)bg.hidden=true; if(m){m.hidden=true;m.innerHTML='';} _tc.coin=null; _tc.entry=null; }
 
 export function __boot_trend_8880() {
-{ const bg=el('tchartbg'); if(bg) bg.addEventListener('click',closeTrendChart);
-  document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ const m=el('tchartmodal'); if(m&&!m.hidden) closeTrendChart(); } }); }
+{ const bg=el('tchartbg'); if(bg) bg.addEventListener('click',closeTrendChart); }   // Escape: overlay stack (core.js)
 }
 
 

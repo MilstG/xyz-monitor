@@ -7,7 +7,7 @@ import { IS_ADMIN, attachLineHover, featureOn, hoverChart, lcGrid, lcTicks, load
 import { pushToast, setHash } from "./alerts.js";
 import { openEarnings, openNews, openSignals, setSigTabBadge } from "./calendar.js";
 import { openCharts } from "./charts.js";
-import { DAY, activeRows, clamp, el, esc, inScope, momColor, scopeBench, state } from "./core.js";
+import { DAY, activeRows, clamp, el, esc, inScope, momColor, overlayCloseAll, scopeBench, state } from "./core.js";
 import { BASKETS, basketScopeList, basketVirtualRow, compgAuto, dailyFunding, dailyLevels, dailyOI, dailyReturns, loadBaskets, openCorr, overnightReturns, renderCorr, syncCorrLookback } from "./corr.js";
 import { fetchJSON, loadDaily, updateAggregates } from "./data.js";
 import { openFocus } from "./focus.js";
@@ -866,7 +866,12 @@ function showView(v){
     if(v!=='markets'&&tb) pushToast(lbl+' is not available in '+(state.scope==='crypto'?'Crypto':'this')+' scope');
     v='markets'; }
   { const hm=el('helpmodal'); if(hm&&!hm.hidden) closeHelp(); }   // help is per-tab — never leave a stale explainer open across a switch
+  // The drawer (and anything stacked over it) belongs to the tab it was opened on: it used to
+  // survive a switch and sit over the Report tab. openDetail never calls showView, so a
+  // "switch then open" sequence (palette, focus chip) still lands with the drawer open.
+  const switching=v!==state.view;
   state.view=v;
+  if(switching) overlayCloseAll();
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
   syncTabScroll();
   if(typeof syncTabGroups==='function') syncTabGroups(v);            // underline the group that owns it

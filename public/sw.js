@@ -1,4 +1,4 @@
-/* Service worker for the Milst Screener PWA (build 2026.09.11-66).
+/* Service worker for the Milst Screener PWA (build 2026.09.16-80).
    Deliberately thin: no offline cache (the app is a live terminal — stale markets are worse
    than no markets), just the two things a page cannot do for itself: make the app installable,
    and receive web push while every tab is closed. Payloads are built server-side by the same
@@ -22,9 +22,11 @@ self.addEventListener("push", (e) => {
 
 self.addEventListener("notificationclick", (e) => {
   e.notification.close();
-  // Focus an open terminal if one exists, else open one — landing on the Messages tab.
+  // Focus an open terminal if one exists and ASK it to switch to Messages (the page listens for
+  // {go:'dm'} — a navigate() reloaded the whole app and dropped a half-typed message); only a
+  // window that isn't open gets a real navigation.
   e.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((tabs) => {
-    for (const t of tabs) { if ("focus" in t) { t.focus(); try { t.navigate("/#dm"); } catch (_) {} return; } }
+    for (const t of tabs) { if ("focus" in t) { t.focus(); try { t.postMessage({ go: "dm" }); } catch (_) {} return; } }
     return self.clients.openWindow ? self.clients.openWindow("/#dm") : null;
   }));
 });

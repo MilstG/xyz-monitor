@@ -692,7 +692,7 @@ function renderEarnings(){
     }
   }
   { const mrep=macroList().filter(e=>{const df=earnDiffC(e.d);return df!=null&&df<0&&df>=-2&&macroStateC(e)==='released';})
-      .sort((a,b)=>a.d>b.d?-1:a.d<b.d?1:((a.tEt||'')>(b.tEt||'')?-1:1));
+      .sort((a,b)=>String(b.d).localeCompare(String(a.d))||String(b.tEt||'').localeCompare(String(a.tEt||'')));   // total order: equal keys return 0, never 1
     if(mrep.length){ let mh=''; let lastD=null;
       for(const e of mrep){ if(e.d!==lastD){ lastD=e.d; const df=earnDiffC(e.d);
           mh+=`<div class="earn-day">MACRO \u00b7 REPORTED \u00b7 ${df===-1?'YESTERDAY \u00b7 ':''}${macroDayLbl(e.d).toUpperCase()}</div>`; }

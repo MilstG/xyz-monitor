@@ -5,8 +5,23 @@
 
 
 export function __boot_core_1() {
+// ONE Escape handler for every modal layer. Each layer used to own a document listener, so one
+// keypress fell through them all: the palette closed AND the drawer under it. The stack closes only
+// the top layer and marks the event consumed (preventDefault) so the other document-level key
+// handlers (j/k ring, DM levels) leave the rest alone.
+document.addEventListener('keydown',e=>{ if(e.key!=='Escape'||e.defaultPrevented||!_overlays.length) return; e.preventDefault(); overlayCloseTop(); });
 }
 const G = {};   // shared mutable state written from more than one module (ES module bindings are read-only for importers)
+// ===== overlay stack =====
+// Every layer that sits over the page (drawer, help, palette, trend chart, fund modal, DM search)
+// registers on open and unregisters on close; re-pushing an open id moves it to the top.
+const _overlays=[];
+function overlayPush(id, close){ overlayPop(id); _overlays.push({id, close}); }
+function overlayPop(id){ const i=_overlays.findIndex(o=>o.id===id); if(i>=0) _overlays.splice(i,1); }
+function overlayTop(){ return _overlays.length?_overlays[_overlays.length-1].id:null; }
+function overlayCloseTop(){ const o=_overlays[_overlays.length-1]; if(!o) return false; overlayPop(o.id); try{ o.close(); }catch(_){} return true; }
+// A view change dismisses every layer, top-down — a drawer over the wrong tab is the bug this exists for.
+function overlayCloseAll(){ while(_overlays.length) overlayCloseTop(); }
 // Data now comes from this app's own backend (/api/snapshot + /api/daily), which fetches
 // Hyperliquid once and serves a pre-computed, cached payload. All rendering, correlation,
 // alerts, drawer and column logic is unchanged from the original client.
@@ -51,7 +66,7 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
   pos:new Map(), posOnly:false, posMeta:null,   // positions overlay (build 2026.09.16-79): coin -> held position, the ⬡ held filter, the last /api/positions envelope
   actOpen:true,   // action lists under the markets table: OPEN by default (-03), collapse persisted
   filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'30', ctf:'1d', topN:40, selected:null, search:'', topPairs:10, pair:null, showBuiltins:false},
-  colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN), pollMs:30000,
+  colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN),
   sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30', grp:'sector' }, dataTs:0, connOk:true, view:'markets', regimeSrv:null,
   backtest:{ signal:'mom', lookback:20, cadence:5, quantile:0.2, cost:5, universe:'all', split:0.6,
     direction:'high', structure:'ls', weighting:'eq', reqSign:false, holdWindow:'cc', vsBasket:'',
@@ -255,4 +270,4 @@ function detectBenchmark(){
   for(const a of SP_ALIASES){ for(const r of state.rows.values()) if(r.uni!=='main'&&!r.delisted&&r.ticker.toUpperCase()===a) return r.coin; }
   for(const r of state.rows.values()){ if(r.uni!=='main'&&!r.delisted&&/(?:^|[^A-Z])(SPX|SP500|S&P)/i.test(r.ticker)) return r.coin; }
   return null; }
-export { COL_BY_KEY, DAY, DEFAULT_HIDDEN, DEFAULT_ORDER, G, HOUR, LAYOUT_V, LKEY, PKEY, RG_COLOR, RG_STORY, SCROLL_B, TF_MAP, TF_MS, activeRows, brkBar, claimDelta, clamp, detectBenchmark, el, esc, fmtFunding, fmtPct, fmtPrice, fmtUsd, inScope, isoUtc, lerp, liq24Cell, liveMark, maCell, median, mktGrp, momColor, parseAmount, pctTxt, recomputeChanges, regimeDetail, regimeMeter, regimeReadout, regimeTip, safeHref, scopeBench, setPrice, state, stdev, store, turnCell, vwapCell };
+export { COL_BY_KEY, DAY, DEFAULT_HIDDEN, DEFAULT_ORDER, G, HOUR, LAYOUT_V, LKEY, PKEY, RG_COLOR, RG_STORY, SCROLL_B, TF_MAP, TF_MS, activeRows, brkBar, claimDelta, clamp, detectBenchmark, el, esc, fmtFunding, fmtPct, fmtPrice, fmtUsd, inScope, isoUtc, lerp, liq24Cell, liveMark, maCell, median, mktGrp, momColor, overlayCloseAll, overlayCloseTop, overlayPop, overlayPush, overlayTop, parseAmount, pctTxt, recomputeChanges, regimeDetail, regimeMeter, regimeReadout, regimeTip, safeHref, scopeBench, setPrice, state, stdev, store, turnCell, vwapCell };
