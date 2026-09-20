@@ -1103,7 +1103,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     return { closed: false };
   }
   // Per-HOME-market open/closed state (build 2026.08.14-01): the same shape as computeOffHours
-  // but anchored to KRX/TSE/HKEX for the foreign-home names. `nextT` is the next state change
+  // but anchored to KRX/TSE/HKEX/SSE for the foreign-home names. `nextT` is the next state change
   // either way (closed -> its open, open -> its close) so the client's countdown microline is a
   // single server-computed number — the client never re-derives calendars. `approx` flips when
   // `now` is past the curated holiday table's horizon (weekend-only degrade): the state is still
@@ -1384,7 +1384,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         nm: displayName(r.ticker, r.uni) || undefined,
         mlane: macroLane(r.ticker, r.uni) || undefined,
         // Home-market classification (build 2026.08.14-01): hm = the exchange whose session the
-        // machinery is anchored to for this name (KR/JP/HK; absent = US, the default). hadr is
+        // machinery is anchored to for this name (KR/JP/HK/CN; absent = US, the default). hadr is
         // ADR context ONLY — a US-listed line whose home line leads it overnight; it never
         // changes anchoring. Both from the curated sectors table — one producer, never re-derived.
         hm: homeMkt(r.ticker, r.uni) || undefined,
@@ -1396,7 +1396,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // (tabs, studies, treemap, leaders) is untouched until the scope switcher lands in Build B.
     const mainMkts = crypto ? mainMarkets().map(mapMarket) : [];
     const offHours = computeOffHours(Date.now());
-    const homeState = homeStateAll(Date.now());   // KRX/TSE/HKEX open/closed + next flip, for chips/countdowns/live-gap mode on foreign-home rows
+    const homeState = homeStateAll(Date.now());   // KRX/TSE/HKEX/SSE open/closed + next flip, for chips/countdowns/live-gap mode on foreign-home rows
     // live warmup counts: h = markets without hourly features yet, d = markets with no daily
     // closes servable at all (no 370d backfill AND no hourly spine to derive from) — lets the
     // client show "N still backfilling" instead of a mystery placeholder, and poll accordingly
@@ -1417,7 +1417,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     csig += "#" + (offHours.closed ? 1 : 0) + ":" + (offHours.closeT || 0) + ":" + (offHours.openT || 0)
       // Home-market flips ride the signature for the same reason the US one does: a KRX open at
       // 20:00 ET must flip SMSN's chip/live-gap on the next poll, even while the US board idles.
-      + "#" + ["KR", "JP", "HK"].map((k) => (homeState[k].closed ? 1 : 0) + ":" + (homeState[k].nextT || 0)).join(",")
+      + "#" + Object.keys(HOME_MKTS).map((k) => (homeState[k].closed ? 1 : 0) + ":" + (homeState[k].nextT || 0)).join(",")
       + "#" + warmH + "," + warmD
       + "#" + sig(curCorr, 6) + "," + curCorrPct + "," + curCorrN + "," + regimeHist.length
       + "#" + tapeXyz.redBars + "," + (crypto ? tapeMain.redBars : 0)
@@ -1545,7 +1545,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         if (oh.closed) { const pc = priceAsOf(hs, oh.closeT, 3 * HOUR); if (pc > 0) liveClose[r.coin] = +pc.toFixed(8); }  // price at the last close, for the live in-progress gap
       }
     }
-    const sig = coins + ":" + lens + ":" + (offHours.closed ? 1 : 0) + ":" + ["KR", "JP", "HK"].map((k) => (offHoursBy[k].closed ? 1 : 0)).join("") + ":" + ohlcN + ":" + oiN;   // session flips bust it — the US one AND each home market's (a KRX close must refresh SMSN's liveClose even while NYSE is open)
+    const sig = coins + ":" + lens + ":" + (offHours.closed ? 1 : 0) + ":" + Object.keys(HOME_MKTS).map((k) => (offHoursBy[k].closed ? 1 : 0)).join("") + ":" + ohlcN + ":" + oiN;   // session flips bust it — the US one AND each home market's (a KRX close must refresh SMSN's liveClose even while NYSE is open)
     if (dailyCache && sig === dailySig) return;   // unchanged — keep the OBJECT so serialize/gzip caches stay warm + 304s flow
     dailySig = sig; dailyVer = Math.max(Date.now(), dailyVer + 1);   // content changed -> new ETag + fresh object; monotonic: two content changes in one ms must not share an ETag
     if (crypto) buildDailyMain(daily, funding, oi);

@@ -502,7 +502,7 @@ function closedWindows(startMs, endMs) {
 function overnightAnchors(startMs, endMs) { return closedWindows(startMs, endMs).filter((a) => a.tag === "overnight"); }
 function weekendAnchors(startMs, endMs) { return closedWindows(startMs, endMs).filter((a) => a.tag === "weekend"); }
 
-// ---- home-market calendars: KRX / TSE / HKEX (build 2026.08.14-01) --------------------------
+// ---- home-market calendars: KRX / TSE / HKEX / SSE (build 2026.08.14-01, SSE 2026.09.20) -----
 // The xyz universe carries foreign listings with no US symbol (SMSN, SKHX, HYUNDAI on KRX;
 // SOFTBANK, KIOXIA, IBIDEN on TSE; ZHIPU, MINIMAX on HKEX). Their reference line discovers
 // price in the ASIAN session — the mirror image of everything the ET machinery assumes — so
@@ -513,14 +513,19 @@ function weekendAnchors(startMs, endMs) { return closedWindows(startMs, endMs).f
 // closures are a CURATED STATIC TABLE per year (sources: KRX / JPX / HKEX published calendars).
 // Outside the table's horizon the engine degrades to weekend-only and homeCalCovered() reports
 // it, so consumers can FLAG the approximation instead of shipping a wrong anchor as truth.
-// Lunch halts (TSE 11:30-12:30, HKEX 12:00-13:00 local) are deliberately NOT modeled in the
+// Lunch halts (TSE 11:30-12:30, HKEX 12:00-13:00, SSE 11:30-13:00 local) are deliberately NOT modeled in the
 // hold anchors: the hourly spine cannot resolve a 60-minute intra-day gap, and a session split
 // in two would double every overnight window. One day = one session, open -> close.
-// KST/JST/HKT observe no DST — the fixed utcOff is exact, not an approximation.
+// KST/JST/HKT/CST observe no DST — the fixed utcOff is exact, not an approximation.
+// SSE (2026.09.20): the STAR-listed memory and robotics names (CXMT, YMTC, GigaDevice, Unitree)
+// discover price in Shanghai. Shenzhen keeps the same hours and the same calendar, so one row
+// covers both. Closures follow the State Council holiday notice; the exchange never opens on the
+// notice's make-up weekend working days, so weekends stay closed regardless.
 const HOME_MKTS = {
   KR: { ex: "KRX",  utcOff: 9, o: [9, 0],  c: [15, 30], half: null,    lunch: null },
   JP: { ex: "TSE",  utcOff: 9, o: [9, 0],  c: [15, 30], half: null,    lunch: [[11, 30], [12, 30]] },
   HK: { ex: "HKEX", utcOff: 8, o: [9, 30], c: [16, 0],  half: [12, 0], lunch: [[12, 0], [13, 0]] },
+  CN: { ex: "SSE",  utcOff: 8, o: [9, 30], c: [15, 0],  half: null,    lunch: [[11, 30], [13, 0]] },
 };
 // Curated closures, LOCAL calendar dates. status 2 = closed, 1 = half day (close at `half`).
 // 2026 per the exchanges' published calendars (KRX incl. Jun 3 election + Dec 31 year-end;
@@ -531,6 +536,9 @@ const HOME_CAL = {
   KR: { 2026: { closed: ["1-1", "2-16", "2-17", "2-18", "3-2", "5-1", "5-5", "5-25", "6-3", "7-17", "8-17", "9-24", "9-25", "10-5", "10-9", "12-25", "12-31"], half: [] } },
   JP: { 2026: { closed: ["1-1", "1-2", "1-12", "2-11", "2-23", "3-20", "4-29", "5-4", "5-5", "5-6", "7-20", "8-11", "9-21", "9-22", "9-23", "10-12", "11-3", "11-23", "12-31"], half: [] } },
   HK: { 2026: { closed: ["1-1", "2-17", "2-18", "2-19", "4-3", "4-6", "4-7", "5-1", "5-25", "6-19", "7-1", "10-1", "10-19", "12-25"], half: ["12-24", "12-31"] } },
+  // SSE 2026 per the State Council notice: New Year Jan 1-3, Spring Festival Feb 15-23, Qingming
+  // Apr 4-6, Labour Day May 1-5, Dragon Boat Jun 19-21, Mid-Autumn Sep 25-27, National Day Oct 1-7.
+  CN: { 2026: { closed: ["1-1", "1-2", "2-16", "2-17", "2-18", "2-19", "2-20", "2-23", "4-6", "5-1", "5-4", "5-5", "6-19", "9-25", "10-1", "10-2", "10-5", "10-6", "10-7"], half: [] } },
 };
 function homeCalCovered(mk, y) { const c = HOME_CAL[mk]; return !!(c && c[y]); }
 function homeCalHorizon(mk) { const c = HOME_CAL[mk]; if (!c) return null; let hi = null; for (const y of Object.keys(c)) { const n = +y; if (hi == null || n > hi) hi = n; } return hi; }

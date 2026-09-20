@@ -15,7 +15,7 @@ import { fmtAge } from "./trend.js";
 const COLS=[
   {key:'ticker', label:'Ticker', type:'str', def:'asc', hideable:false,
     td:r=>`<td class="tkc">${railHtml(r)}<span class="star${state.watch.has(r.coin)?' on':''}" data-star="${esc(r.coin)}" role="button" tabindex="0" title="${state.watch.has(r.coin)?'remove from watchlist':'add to watchlist'}">${state.watch.has(r.coin)?'★':'☆'}</span><span class="tk" title="${esc(r.nm?r.nm+' \u00b7 '+r.coin:r.coin)}">${esc(r.ticker)}</span>${earnBadge(r)}${noteBadge(r)}${posBadge(r)}${cdsHtml(r)}</td>`},
-  {key:'sess', label:'Sess', type:'str', def:'asc', tip:'Home market of the reference line under the perp \u2014 KR (KRX), JP (TSE), HK (HKEX) for foreign listings with no US symbol; US for everything else. Lit dot = that exchange is OPEN right now (server-computed, holiday-aware). US\u00b7TW etc. on ADRs = US-listed line (full ET machinery applies) with the home line leading it overnight \u2014 context, never anchoring. Stocks scope only.',
+  {key:'sess', label:'Sess', type:'str', def:'asc', tip:'Home market of the reference line under the perp \u2014 KR (KRX), JP (TSE), HK (HKEX), CN (SSE) for foreign listings with no US symbol; US for everything else. Lit dot = that exchange is OPEN right now (server-computed, holiday-aware). US\u00b7TW etc. on ADRs = US-listed line (full ET machinery applies) with the home line leading it overnight \u2014 context, never anchoring. Stocks scope only.',
     td:r=>sessCell(r)},
   {key:'px', label:'Price', type:'num',
     td:r=>`<td class="px${r.flash?' flash-'+r.flash:''}">${fmtPrice(r.px)}</td>`},

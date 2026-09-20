@@ -813,7 +813,7 @@ function clockScaffold(cx,cy,ri,ro,cash){
   }
   return s;
 }
-// Home-session arc(s) for a foreign-home ticker (build 2026.08.14-01): the KRX/TSE/HKEX window
+// Home-session arc(s) for a foreign-home ticker (build 2026.08.14-01): the KRX/TSE/HKEX/SSE window
 // converted to ET hours (fixed home offset from the wire, ET offset via Intl), wrap-safe, lunch
 // halts drawn as separate arcs. Amber to contrast the blue US cash arc.
 function homeArcSvg(cx,cy,ri,ro,mk){
