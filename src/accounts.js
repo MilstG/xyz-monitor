@@ -61,23 +61,51 @@ function handleError(raw) {
 // ---- passwords ---------------------------------------------------------------------------------
 // scrypt, per-password salt, stored as scrypt$N$salt$hash. No dependency, and the cost parameter
 // travels with the hash so it can be raised later without stranding existing rows.
+// ASYNC on purpose: crypto.scrypt runs on libuv's threadpool, so a sign-in attempt no longer holds
+// the event loop for the ~30-50ms the derivation costs. The sync version did — and /login is the
+// one route an unauthenticated caller can drive as fast as they like, so every wrong password was
+// 30-50ms in which no snapshot, no SSE frame and no other request moved. The on-disk format is
+// byte-for-byte the same, so every existing row verifies unchanged (pinned by a test that hashes
+// with the sync path and verifies with this one).
 const SCRYPT_N = 16384, SCRYPT_KEYLEN = 64;
 const PW_MIN = 12;
-function hashPw(pw) {
+const scryptAsync = require("util").promisify(crypto.scrypt);
+// The pre-async hasher. Kept for exactly two callers: the decoy hashed once at open (openAccounts
+// is synchronous, and one derivation at boot is not a latency problem) and the format-compat
+// test. Not a hot path, and never called with a caller-supplied password from a route.
+function hashPwSync(pw) {
   const salt = crypto.randomBytes(16).toString("base64url");
   const h = crypto.scryptSync(String(pw), salt, SCRYPT_KEYLEN, { N: SCRYPT_N, r: 8, p: 1 }).toString("base64url");
   return "scrypt$" + SCRYPT_N + "$" + salt + "$" + h;
 }
-function verifyPw(pw, stored) {
+async function hashPw(pw) {
+  const salt = crypto.randomBytes(16).toString("base64url");
+  const h = (await scryptAsync(String(pw), salt, SCRYPT_KEYLEN, { N: SCRYPT_N, r: 8, p: 1 })).toString("base64url");
+  return "scrypt$" + SCRYPT_N + "$" + salt + "$" + h;
+}
+async function verifyPw(pw, stored) {
   try {
     const p = String(stored || "").split("$");
     if (p.length !== 4 || p[0] !== "scrypt") return false;
     const N = Number(p[1]);
     if (!Number.isFinite(N) || N < 1024) return false;
     const want = Buffer.from(p[3], "base64url");
-    const got = crypto.scryptSync(String(pw), p[2], want.length, { N, r: 8, p: 1 });
+    const got = await scryptAsync(String(pw), p[2], want.length, { N, r: 8, p: 1 });
     return want.length === got.length && crypto.timingSafeEqual(want, got);
   } catch (_) { return false; }
+}
+// The uid a redeem/claim/bootstrap may ADOPT from the caller's prior signed alert-owner handle.
+// ensureOwner mints randomBytes(12).base64url — 16 chars of [A-Za-z0-9_-] — and that is the only
+// shape a handle has ever had. Anything else is a forged cookie: the legacy owner MAC is derived
+// from SITE_PASSWORD, which every shared-password member knows, so before this check an invitee
+// could sign any string they liked and CHOOSE their uid — "legacy-admin" (the audit attribution
+// for break-glass reads), a `|`-bearing string that lands inside another derivation label, or an
+// id that collides with a row some other table already keys. A rejected handle just means a
+// fresh uid: nothing is refused, only the adoption.
+const UID_ADOPT_RE = /^[A-Za-z0-9_-]{12,32}$/;
+const UID_RESERVED = new Set(["legacy-admin"]);
+function adoptableUid(v) {
+  return typeof v === "string" && UID_ADOPT_RE.test(v) && !UID_RESERVED.has(v) ? v : "";
 }
 function pwError(pw) {
   const s = String(pw == null ? "" : pw);
@@ -598,12 +626,12 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   // unknown handle took twice as long as a wrong password), and a disabled account is verified and
   // then refused with the same words as a wrong password rather than short-circuiting with a
   // distinct message in microseconds. Tell a disabled member out of band; the door must not.
-  const DECOY_PW = hashPw(crypto.randomBytes(24).toString("base64url"));
-  function login(handle, password) {
+  const DECOY_PW = hashPwSync(crypto.randomBytes(24).toString("base64url"));
+  async function login(handle, password) {
     const u = getUserByHandle(handle);
     const bad = { ok: false, error: "wrong handle or password" };
-    if (!u) { verifyPw(String(password || ""), DECOY_PW); return bad; }
-    const okPw = verifyPw(password, u.pw);
+    if (!u) { await verifyPw(String(password || ""), DECOY_PW); return bad; }
+    const okPw = await verifyPw(password, u.pw);
     if (!okPw || u.disabledAt) return bad;
     try { S.userSeen.run(Date.now(), u.uid); u.lastSeen = Date.now(); } catch (_) {}
     return { ok: true, user: pub(u), token: tokenFor(u, options.sessionDays || 30) };
@@ -636,12 +664,14 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     return { ok: true, user: pub(users.get(uid)) };
   }
 
-  function setPassword(uid, password) {
+  async function setPassword(uid, password) {
     const bad = pwError(password);
     if (bad) return { ok: false, error: bad };
-    const u = users.get(uid);
-    if (!u) return { ok: false, error: "no such account" };
-    S.userPw.run(hashPw(password), uid);
+    if (!users.get(uid)) return { ok: false, error: "no such account" };
+    const hash = await hashPw(password);
+    // Re-read after the await: the row may have been removed while the hash ran.
+    if (!users.get(uid)) return { ok: false, error: "no such account" };
+    S.userPw.run(hash, uid);
     hydrate();
     const nu = users.get(uid);
     return { ok: true, user: pub(nu), token: tokenFor(nu, options.sessionDays || 30) };
@@ -735,7 +765,9 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   //
   // priorOwner is the caller's existing signed xyzown handle, if they have one. Using it as the uid
   // is what carries their alert recipients and rules across for free.
-  function redeem(rawCode, handle, password, priorOwner) {
+  // Every hash is computed BEFORE the transaction opens: an await inside BEGIN IMMEDIATE would let
+  // any other request's write interleave with the half-done invite burn.
+  async function redeem(rawCode, handle, password, priorOwner) {
     const code = normCode(rawCode);
     if (!code) return { ok: false, error: "that invite code isn't valid" };
     const inv0 = S.invByCode.get(code);
@@ -750,11 +782,12 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       if (bad) return { ok: false, error: bad };
       const target = users.get(inv0.targetUid);
       if (!target) return { ok: false, error: "that account no longer exists" };
+      const newHash = await hashPw(password);
       db.exec("BEGIN IMMEDIATE");
       try {
         if (S.invBurn.run(target.uid, Date.now(), code).changes !== 1)
           throw new Error("raced");
-        S.userPw.run(hashPw(password), target.uid);
+        S.userPw.run(newHash, target.uid);
         db.exec("COMMIT");
       } catch (e) {
         try { db.exec("ROLLBACK"); } catch (_) {}
@@ -773,9 +806,11 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const lc = display.toLowerCase();
     if (getUserByHandle(lc)) return { ok: false, error: "that handle is taken — pick another", field: "handle" };
 
-    // Reuse the caller's signed alert-owner handle as the uid when they have one and it is free.
-    let uid = (priorOwner && typeof priorOwner === "string" && !users.get(priorOwner)) ? priorOwner : "";
+    // Reuse the caller's signed alert-owner handle as the uid when they have one, it has the
+    // minted shape, and it is free.
+    let uid = adoptableUid(priorOwner) && !users.get(priorOwner) ? priorOwner : "";
     if (!uid) uid = crypto.randomBytes(12).toString("base64url");
+    const pwHash = await hashPw(password);
     const now = Date.now();
     const first = countUsers() === 0;
 
@@ -787,7 +822,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       if (S.userByHandle.get(lc)) throw new Error("handle-taken");
       // The first account minted is the operator — otherwise a fresh deployment has invites but
       // nobody with the authority to issue the next one.
-      S.userIns.run(uid, lc, display, hashPw(password), first ? 1 : 0, now, inv.createdBy || null, now);
+      S.userIns.run(uid, lc, display, pwHash, first ? 1 : 0, now, inv.createdBy || null, now);
       if (S.invBurn.run(uid, now, code).changes !== 1) throw new Error("raced");
       db.exec("COMMIT");
     } catch (e) {
@@ -829,7 +864,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     S.otpPut.run(u.uid, code, now, now + OTP_TTL_MS, sends, windowStart);
     return { ok: true, sent: true, uid: u.uid, code, display: u.display, ttlMin: Math.round(OTP_TTL_MS / 60000) };
   }
-  function otpVerify(handle, code, password) {
+  async function otpVerify(handle, code, password) {
     const u = getUserByHandle(handle);
     const bad = { ok: false, error: "that code is wrong or has expired" };
     if (!u || u.disabledAt) return bad;
@@ -851,20 +886,20 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const pwBad = pwError(password);
     if (pwBad) return { ok: false, error: pwBad, field: "password", codeOk: true };
     S.otpBurn.run(u.uid);
-    return setPassword(u.uid, password);   // bumps the epoch, so every other device signs out
+    return await setPassword(u.uid, password);   // bumps the epoch, so every other device signs out
   }
 
   // Bootstrap: the operator holding ADMIN_PASSWORD creates account #1 with no invite, because there
   // is nobody yet who could have issued one. Refuses the moment any account exists.
-  function bootstrap(handle, password, priorOwner) {
+  async function bootstrap(handle, password, priorOwner) {
     if (countUsers() > 0) return { ok: false, error: "accounts already exist — sign in instead" };
     const hBad = handleError(handle); if (hBad) return { ok: false, error: hBad, field: "handle" };
     const pBad = pwError(password); if (pBad) return { ok: false, error: pBad, field: "password" };
     const display = String(handle).trim().slice(0, 24), lc = display.toLowerCase();
-    let uid = (priorOwner && typeof priorOwner === "string" && !users.get(priorOwner)) ? priorOwner : "";
+    let uid = adoptableUid(priorOwner) && !users.get(priorOwner) ? priorOwner : "";
     if (!uid) uid = crypto.randomBytes(12).toString("base64url");
     const now = Date.now();
-    const pw = hashPw(password);
+    const pw = await hashPw(password);
     // The count and the insert are one transaction: two concurrent bootstraps must not both win.
     try {
       db.exec("BEGIN IMMEDIATE");
@@ -882,19 +917,20 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   // Claim: an existing member arriving with a valid legacy shared-password session. Same account
   // creation as redeem, no invite required, available only while the operator leaves the legacy
   // door open. This is what stops the accounts migration logging the whole group out for good.
-  function claim(handle, password, priorOwner) {
+  async function claim(handle, password, priorOwner) {
     const hBad = handleError(handle); if (hBad) return { ok: false, error: hBad, field: "handle" };
     const pBad = pwError(password); if (pBad) return { ok: false, error: pBad, field: "password" };
     const display = String(handle).trim().slice(0, 24), lc = display.toLowerCase();
     if (getUserByHandle(lc)) return { ok: false, error: "that handle is taken — pick another", field: "handle" };
-    let uid = (priorOwner && typeof priorOwner === "string" && !users.get(priorOwner)) ? priorOwner : "";
+    const pwHash = await hashPw(password);
+    let uid = adoptableUid(priorOwner) && !users.get(priorOwner) ? priorOwner : "";
     if (!uid) uid = crypto.randomBytes(12).toString("base64url");
     // NEVER admin: account #1 is the operator's, minted through /bootstrap with ADMIN_PASSWORD.
     // "First to claim becomes operator" handed the panel to whichever shared-password holder
     // posted first on the deploy that introduced accounts, and two concurrent claims could both
     // read a zero count.
     const now = Date.now();
-    try { S.userIns.run(uid, lc, display, hashPw(password), 0, now, null, now); }
+    try { S.userIns.run(uid, lc, display, pwHash, 0, now, null, now); }
     catch (_) { return { ok: false, error: "that handle is taken — pick another", field: "handle" }; }
     hydrate();
     const nu = users.get(uid);
@@ -1933,5 +1969,5 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   };
 }
 
-module.exports = { openAccounts, mintCode, normCode, handleError, pwError, hashPw, verifyPw,
+module.exports = { openAccounts, mintCode, normCode, handleError, pwError, hashPw, hashPwSync, verifyPw, adoptableUid,
   cleanBody, firstTickerRef, CODE_ALPHABET, DM_MAX_LEN, PW_MIN, FILE_MAX: 8 * 1024 * 1024 };

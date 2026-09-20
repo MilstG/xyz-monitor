@@ -39,7 +39,12 @@ function jar() {
 }
 
 let app;
-test.before(async () => { app = await buildServer(); });
+test.before(async () => {
+  app = await buildServer();
+  // A route that fails the way a driver failure does — registered on the TEST instance only, so
+  // the error handler's contract (no driver text on the wire) is pinned as behaviour.
+  app.get("/__test/throw", () => { throw new Error("Provided value cannot be bound to SQLite parameter"); });
+});
 test.after(async () => { await app.close(); });
 
 const post = (url, body, j, extra) => app.inject({ method: "POST", url, headers: Object.assign({}, JSONH, j ? { cookie: j.header() } : {}, extra || {}), payload: body == null ? undefined : JSON.stringify(body) });
@@ -152,9 +157,11 @@ test("health carries a stale flag; /reset has its own per-IP allowance", async (
 test("lows: health hides diagnostics from signed-out callers; operator-only writes answer 403 to members", async () => {
   const anon = JSON.parse((await get("/api/health")).body);
   assert.equal(anon.ok, true); assert.equal(anon.volume, undefined, "the volume path is not for the open internet");
+  // gus is the operator (account #1): the volume path is admin-only since 2026.09.20 — the member
+  // view is pinned in the security batch below.
   const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
   const rich = JSON.parse((await get("/api/health", gus)).body);
-  assert.ok(rich.volume && rich.loop, "a signed-in caller gets the diagnostics");
+  assert.ok(rich.volume && rich.loop, "an operator gets the diagnostics");
   const bob = jar(); bob.absorb(await post("/login", { handle: "bob", password: "another-long-pw-12" }));
   // bob was disabled by the admin-lease test; a disabled member is 401, an enabled non-admin would be 403 — either way, never 200.
   const v = await post("/api/earnings/void", { t: "AAPL", d: "2026-01-01" }, bob);
@@ -304,4 +311,194 @@ test("modules: the entry is a module, every /js module is served stamped, precom
   const raw = require("fs").readFileSync(require("path").join(__dirname, "..", "public", "js", "markets.js"), "utf8");
   assert.ok(/from "\.\/core\.js"/.test(raw), "on disk the modules stay unstamped");
   assert.ok((await get("/js/markets.js", gus)).body.includes(`from "./core.js?v=${VERSION}"`), "and stamped on the wire");
+});
+
+// ===== security batch 2026.09.20 ===============================================================
+test("security -20: JSON inside inline scripts is HTML-safe — ?next= and a renamed display cannot close the script tag", async () => {
+  // The login page: a ?next= that used to pass safeNext (no whitespace) and land raw inside
+  // window.__AUTH. Now refused by the character allow-list AND, belt to braces, escaped on the way in.
+  const evil = "/x</script><script>alert(1)</script>";
+  const r = await get("/login?next=" + encodeURIComponent(evil));
+  assert.equal(r.statusCode, 200);
+  assert.ok(!r.body.includes("</script><script>alert"), "no raw </script> from the query survives into the page");
+  assert.ok(r.body.includes('window.__AUTH={"action":"/login","mode":"signin","next":null}'), "the tightened safeNext drops it");
+  // A legitimate next round-trips, with the JSON-legal escapes a browser parses back to the same characters.
+  const ok = await get("/login?next=" + encodeURIComponent("/?tab=markets&t=NVDA#x"));
+  assert.ok(ok.body.includes('"next":"/?tab=markets\\u0026t=NVDA#x"'), ok.body.slice(ok.body.indexOf("window.__AUTH"), ok.body.indexOf("window.__AUTH") + 120));
+  for (const bad of ["//evil.example", "/x y", "/x\\y", "http://evil", "/" + "a".repeat(200), "/x<y"])
+    assert.ok(!(await get("/login?next=" + encodeURIComponent(bad))).body.includes('"next":"' + bad.slice(0, 5)), "refused: " + bad);
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  assert.deepEqual(JSON.parse((await post("/login", { handle: "gus", password: "a-long-password-12", next: evil })).body), { ok: true, next: "/" });
+  // The shell: a display name is member text the operator can set, and it rides window.__ME.
+  const members = JSON.parse((await get("/api/access", gus)).body).members;
+  const cara = members.find((m) => m.handle === "cara");
+  assert.ok(cara, "cara exists from the chat test above");
+  const ren = JSON.parse((await post("/api/access", { op: "rename", uid: cara.uid, handle: "</script><script>x" }, gus)).body);
+  assert.equal(ren.ok, true, JSON.stringify(ren));
+  const cj = jar(); cj.absorb(await post("/login", { handle: "cara", password: "yet-another-long-pw" }));
+  const shell = await get("/", cj);
+  assert.equal(shell.statusCode, 200);
+  assert.ok(!shell.body.includes("</script><script>x"), "the renamed display cannot break out of the boot script");
+  assert.ok(shell.body.includes('\\u003c/script\\u003e\\u003cscript\\u003ex'), "it is escaped in place, so the client still reads the name");
+  assert.ok(shell.body.includes("window.__ME={"), "and identity still rides the shell");
+  assert.equal(JSON.parse((await post("/api/access", { op: "rename", uid: cara.uid, handle: "cara" }, gus)).body).ok, true);
+  // Every JSON-in-HTML site goes through the helper: grep the source for the pattern this test guards.
+  const srv = require("fs").readFileSync(require("path").join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(/function jsonForScript\(v\)/.test(srv) && /\\u003c/.test(srv) && /\\u2028/.test(srv));
+  for (const site of ["window.__AUTH=' + jsonForScript(", '"window.__FLAGS=" + jsonForScript(', '";window.__NAVGROUPS=" + jsonForScript(', '";window.__ME=" + jsonForScript('])
+    assert.ok(srv.includes(site), "inline-script JSON site missing or not through jsonForScript: " + site);
+  assert.ok(!/window\.__(AUTH|FLAGS|NAVGROUPS|ME)=" \+ JSON\.stringify\(/.test(srv) && !/window\.__AUTH=' \+ JSON\.stringify\(/.test(srv), "no JSON.stringify lands in an inline script");
+});
+
+test("security -20: HTTP Basic spends the same per-IP damper as /login, counted once per request, keyed on the LAST forwarded hop", async () => {
+  const basic = (pw) => ({ authorization: "Basic " + Buffer.from("friend:" + pw).toString("base64") });
+  const IP = "198.51.100.7";
+  // Seven wrong pairs through the AI-cost path, which asks reqAuthed TWICE per request (its own
+  // hook and the site gate) — a per-hook count would lock after four. A spoofed first XFF element
+  // changes nothing: the key is the element the edge appended.
+  for (let i = 0; i < 7; i++) {
+    const r = await post("/api/ask", { q: "hi" }, null, Object.assign({ "x-forwarded-for": "10.0.0." + i + ", " + IP }, basic("nope-" + i)));
+    assert.equal(r.statusCode, 401, "wrong pair #" + (i + 1) + ": " + r.body);
+  }
+  // The eighth wrong pair is a plain 401 — a locked address would already answer 429 — which is
+  // what proves the seven above were counted once each, not once per hook. (A CORRECT pair here
+  // would clear the counter, exactly as a successful /login does.)
+  assert.equal((await get("/api/snapshot", null, Object.assign({ "x-forwarded-for": IP }, basic("nope-8")))).statusCode, 401, "the eighth wrong pair: not locked before it");
+  const locked = await get("/api/snapshot", null, Object.assign({ "x-forwarded-for": IP }, basic("shared-door-pw")));
+  assert.equal(locked.statusCode, 429, "eight wrong: the RIGHT password is refused from that address");
+  assert.ok(Number(locked.headers["retry-after"]) >= 60, "with a Retry-After");
+  assert.match(JSON.parse(locked.body).error, /too many attempts/);
+  assert.equal(JSON.parse((await get("/api/health", null, Object.assign({ "x-forwarded-for": IP }, basic("shared-door-pw")))).body).loop, undefined, "locked: not even health's member view");
+  const other = await get("/api/health", null, Object.assign({ "x-forwarded-for": "198.51.100.8" }, basic("shared-door-pw")));
+  assert.ok(JSON.parse(other.body).loop, "another address is unaffected");
+  assert.equal((await get("/api/snapshot", null, basic("shared-door-pw"))).statusCode, 401, "the socket address (no XFF) is a third key: 401 claim-account, not 429");
+});
+
+test("security -20: at most eight scrypt derivations are in flight; the rest answer 503 with Retry-After", async () => {
+  const many = await Promise.all(Array.from({ length: 16 }, () => post("/login", { handle: "gus", password: "a-long-password-12" }, null, { "x-forwarded-for": "198.51.100.9" })));
+  const codes = many.map((r) => r.statusCode);
+  assert.ok(codes.filter((c) => c === 200).length >= 8, "the first eight are served: " + codes.join(","));
+  assert.ok(codes.includes(503), "beyond the cap the caller is told to retry: " + codes.join(","));
+  const busy = many.find((r) => r.statusCode === 503);
+  assert.equal(busy.headers["retry-after"], "2");
+  assert.match(JSON.parse(busy.body).error, /busy/);
+  assert.equal((await post("/login", { handle: "gus", password: "a-long-password-12" })).statusCode, 200, "the gate releases: a later sign-in is served");
+});
+
+test("security -20: uid-less streams are capped per client IP; members are counted by uid", async () => {
+  const http = require("http");
+  await app.listen({ port: 0, host: "127.0.0.1" });
+  const port = app.server.address().port;
+  // Break-glass is the uid-less caller: authenticated by the admin lease, identified by nobody.
+  const bg = jar(); bg.absorb(await post("/login", { password: "break-glass-pw-1" }));
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const open = (j, ip) => new Promise((resolve, reject) => {
+    const req = http.get({ host: "127.0.0.1", port, path: "/api/events", headers: { cookie: j.header(), "x-forwarded-for": ip } }, (res) => {
+      if (res.statusCode === 200) return resolve({ req, res, body: "" });
+      let body = ""; res.on("data", (d) => { body += d; }); res.on("end", () => resolve({ req, res, body }));
+    });
+    req.on("error", reject);
+  });
+  const held = [];
+  try {
+    for (let i = 0; i < 4; i++) { const c = await open(bg, "198.51.100.20"); assert.equal(c.res.statusCode, 200, "stream #" + (i + 1)); held.push(c); }
+    const fifth = await open(bg, "198.51.100.20");
+    assert.equal(fifth.res.statusCode, 503); assert.deepEqual(JSON.parse(fifth.body), { error: "sse-per-ip-full" });
+    const elsewhere = await open(bg, "198.51.100.21"); assert.equal(elsewhere.res.statusCode, 200, "another address has its own four"); held.push(elsewhere);
+    const member = await open(gus, "198.51.100.20"); assert.equal(member.res.statusCode, 200, "a member from the crowded address is counted by uid, not IP"); held.push(member);
+    held[0].req.destroy();
+    await new Promise((r) => setTimeout(r, 150));   // the server learns of the close from the socket, one turn later
+    const again = await open(bg, "198.51.100.20"); assert.equal(again.res.statusCode, 200, "a closed stream frees its slot"); held.push(again);
+  } finally { for (const c of held) c.req.destroy(); await new Promise((r) => setTimeout(r, 150)); }
+});
+
+test("security -20: a 5xx never carries the driver's words; repeated query keys reach no bind; 4xx keep their shape", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const boom = await get("/__test/throw", gus);
+  assert.equal(boom.statusCode, 500);
+  const b = JSON.parse(boom.body);
+  assert.equal(b.error, "internal"); assert.match(b.id, /^[0-9a-f]{12}$/, "a log-correlation id, nothing else");
+  assert.ok(!/SQLite|bound|Provided value/.test(boom.body), boom.body);
+  assert.equal(boom.headers["cache-control"], "no-store");
+  const dup = await get("/api/dm/calls?by=a&by=b&limit=5&limit=6", gus);
+  assert.equal(dup.statusCode, 200, dup.body);
+  assert.ok(!/SQLite|bound/.test(dup.body) && Array.isArray(JSON.parse(dup.body).calls), "an array never reaches a statement");
+  assert.equal((await get("/api/dm/search?q=hi&q=there&thread=1&thread=2", gus)).statusCode, 200);
+  assert.equal((await get("/api/access/dm/search?q=hi&q=there", gus)).statusCode, 200);
+  const arr = await post("/api/dm", { thread: [999999, 1], body: "x", fileId: ["a"], replyTo: [1] }, gus);
+  assert.equal(arr.statusCode, 400, "coerced to the first value, then refused by the domain rule — never a 500: " + arr.body);
+  assert.match(JSON.parse(arr.body).error, /no such conversation/);
+  // 4xx errors keep Fastify's own shape: the client reads these messages.
+  const badJson = await app.inject({ method: "POST", url: "/login", headers: JSONH, payload: "{not json" });
+  assert.equal(badJson.statusCode, 400); assert.ok(JSON.parse(badJson.body).message, badJson.body);
+  assert.equal((await post("/api/notes", { coin: "xyz:AAPL", body: "x".repeat(20000) }, gus)).statusCode, 413);
+});
+
+test("security -20: /api/health is three views — open, member, operator", async () => {
+  const anon = JSON.parse((await get("/api/health")).body);
+  assert.deepEqual(Object.keys(anon).sort(), ["ok", "stale", "ts", "version"]);
+  const cara = jar(); cara.absorb(await post("/login", { handle: "cara", password: "yet-another-long-pw" }));
+  const member = JSON.parse((await get("/api/health", cara)).body);
+  assert.ok(member.ok && member.version && member.loop && "lastPollAgoMs" in member && "stale" in member, "the base fields");
+  for (const k of ["volume", "csp", "backup", "rate", "derivs", "spines", "ws", "hourly", "funding", "ledger"])
+    assert.equal(member[k], undefined, "a member never sees " + k);
+  assert.ok("lastPoll" in member && "failing" in member && "ticks" in member && "earnings" in member && "news" in member, "the freshness tray's inputs");
+  assert.deepEqual(Object.keys(member.ai).sort(), ["askDayLeft", "askPerDay", "dayLeft", "enabled", "perDay"], "the ask-budget chip's inputs, no provider or model name");
+  assert.deepEqual(Object.keys(member.earnings).sort(), ["asOf", "error"]);
+  assert.deepEqual(Object.keys(member.news).sort(), ["error", "fetchedAt", "filings"]);
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const op = JSON.parse((await get("/api/health", gus)).body);
+  assert.ok(op.volume && op.volume.dataDir && op.csp && "provider" in op.ai && "backup" in op && "rate" in op, "the operator gets the deployment");
+});
+
+test("security -20: the reset step-2 cookie is signed — a hand-set handle spends nobody's guesses", async () => {
+  const { DatabaseSync } = require("node:sqlite");
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const caraUid = JSON.parse((await get("/api/access", gus)).body).members.find((m) => m.handle === "cara").uid;
+  const tries = () => { const db = new DatabaseSync(require("path").join(DATA, "accounts.db"), { readOnly: true });
+    try { const r = db.prepare("SELECT tries FROM otp WHERE uid = ?").get(caraUid); return r ? r.tries : null; } finally { db.close(); } };
+  const j = jar();
+  const ask = j.absorb(await post("/reset", { handle: "cara" }, null, { "x-forwarded-for": "198.51.100.30" }));
+  assert.equal(ask.statusCode, 200);
+  assert.equal(tries(), 0, "a code was issued for cara");
+  const tok = j.get("xyzotp");
+  assert.ok(tok && tok.split(".").length >= 3 && !/^cara$/.test(tok), "the cookie is handle.expiry.mac, not the raw handle");
+  // Forged: the raw handle, as the old cookie was. Refused before any account is consulted.
+  const forged = await post("/reset/code", { code: "000000", password: "brand-new-password-1" }, null, { cookie: "xyzotp=cara", "x-forwarded-for": "198.51.100.31" });
+  assert.equal(forged.statusCode, 400); assert.match(JSON.parse(forged.body).error, /start again/);
+  assert.equal(tries(), 0, "cara's attempts are untouched");
+  // Tampered: a real cookie with the handle swapped, or the mac damaged, or a mac of the wrong length.
+  const parts = tok.split(".");
+  for (const bad of ["gus." + parts.slice(1).join("."), parts.slice(0, -1).join(".") + "." + parts[parts.length - 1].replace(/./g, "A"), encodeURIComponent("cara") + "." + (Date.now() + 9e5) + ".AAAA"])
+    assert.equal((await post("/reset/code", { code: "000000", password: "brand-new-password-1" }, null, { cookie: "xyzotp=" + bad })).statusCode, 400);
+  assert.equal(tries(), 0);
+  assert.equal((await get("/reset/code", null, { cookie: "xyzotp=cara" })).statusCode, 302, "the page bounces a forged cookie back to /reset");
+  assert.equal((await get("/reset/code", j)).statusCode, 200, "and renders for the real one");
+  // The legitimate cookie still verifies, and a wrong code through it still counts.
+  const wrong = await post("/reset/code", { code: "000000", password: "brand-new-password-1" }, j, { "x-forwarded-for": "198.51.100.32" });
+  assert.equal(wrong.statusCode, 400); assert.match(JSON.parse(wrong.body).error, /wrong or has expired/);
+  assert.equal(tries(), 1, "the real flow spends a try");
+});
+
+test("security -20: cross-site writes are refused at the door; /logout answers POST and same-origin GET only", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const xs = await post("/api/prefs", { key: "watch", value: ["xyz:NVDA"], ts: 9000 }, gus, { "sec-fetch-site": "cross-site" });
+  assert.equal(xs.statusCode, 403); assert.deepEqual(JSON.parse(xs.body), { error: "cross-site request refused" });
+  assert.equal((await post("/api/prefs", { key: "watch", value: ["xyz:NVDA"], ts: 9000 }, gus, { "sec-fetch-site": "same-origin" })).statusCode, 200);
+  assert.equal((await post("/api/prefs", { key: "watch", value: ["xyz:NVDA"], ts: 9001 }, gus)).statusCode, 200, "no header (scripts, old browsers): the cookie rule decides");
+  assert.equal((await get("/api/prefs", gus, { "sec-fetch-site": "cross-site" })).statusCode, 200, "reads are untouched");
+  // GET /logout from another site: refused, and no cookie is dropped.
+  const x = await get("/logout", gus, { "sec-fetch-site": "cross-site" });
+  assert.equal(x.statusCode, 403); assert.equal(x.headers["set-cookie"], undefined);
+  assert.equal((await get("/logout", gus, { "sec-fetch-site": "same-site" })).statusCode, 403, "a sibling site is not this origin");
+  assert.equal((await get("/api/access", gus)).statusCode, 200, "still signed in");
+  // The nav button's navigation (same-origin), a typed URL (none), and a POST all sign out.
+  for (const [method, headers] of [["GET", { "sec-fetch-site": "same-origin" }], ["GET", { "sec-fetch-site": "none" }], ["GET", {}], ["POST", { "sec-fetch-site": "same-origin" }], ["POST", {}]]) {
+    const j = jar(); j.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+    const out = j.absorb(await app.inject({ method, url: "/logout", headers: Object.assign({ cookie: j.header() }, headers) }));
+    assert.equal(out.statusCode, 303, method + " " + JSON.stringify(headers));
+    assert.equal(out.headers.location, "/");
+    assert.equal(j.get("xyzsess"), null, "session dropped"); assert.equal(j.get("xyzadm"), null, "lease dropped");
+  }
+  assert.equal((await app.inject({ method: "POST", url: "/logout", headers: { cookie: gus.header(), "sec-fetch-site": "cross-site" } })).statusCode, 403, "a cross-site POST is stopped by the gate");
 });
