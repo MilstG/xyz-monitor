@@ -7,10 +7,13 @@ const { median, studyBreakdown, playbook, studyOIFlush, studyFPDiv, HOUR, DAY, C
 
 test("event studies: continuation series shows continuation; sample sizes honest", () => {
   const DAYMS = 86400 * 1000, t0 = Date.UTC(2025, 0, 1);
-  // trending series with occasional 3-sigma up-thrusts that keep running
+  // trending series with occasional 3-sigma up-thrusts that keep running. Re-baselined (first-cross
+  // fix): a -1.5% pullback every 7th day, because a series that makes a new 30d high EVERY day has
+  // no FIRST cross at all once the guard works — the breakout study now measures the day price
+  // re-takes the trailing high after yesterday sat below it, not every day of a monotone run.
   const closes = []; let px = 100;
   for (let i = 0; i < 200; i++) {
-    px *= 1 + (i % 25 === 0 && i > 30 ? 0.06 : 0.004) + (i % 2 ? 0.002 : -0.002);
+    px *= 1 + (i % 25 === 0 && i > 30 ? 0.06 : i % 7 === 0 ? -0.015 : 0.006) + (i % 2 ? 0.002 : -0.002);
     closes.push([t0 + i * DAYMS, px]);
   }
   const bm = C.studyBigMove(closes);
@@ -39,18 +42,27 @@ test("playbook: explicit sides and mechanical levels", () => {
 });
 
 test("study overlap F10: the d5 window guard spaces accepted events ~5 apart on a daily-breakout run", () => {
-  // A monotonic staircase makes a NEW 30d high every single day for a stretch — a breakout fires
-  // daily. Without the guard, d5 counts nearly every day (heavily overlapping 5d windows); WITH the
-  // guard, accepted d5 events sit >=5 days apart, so d5.n collapses to roughly d1.n / 5. This is the
-  // pseudo-replication the guard exists to kill, made explicit.
+  // Re-baselined (first-cross fix): the original monotonic staircase made a new 30d high every day,
+  // which the no-op "first cross" guard booked daily; with the guard working, a monotone run has
+  // exactly ONE first cross. A saw-tooth — new high, one-day pullback below it, new high — is the
+  // shape that legitimately fires a FIRST cross every second day. Without the overlap guard, d5
+  // counts every one of them (5d windows overlapping 3 deep); WITH it, accepted d5 events sit >=5
+  // days apart, so d5.n collapses to roughly d1.n / 3. This is the pseudo-replication the guard
+  // exists to kill, made explicit.
   const closes = [];
   for (let i = 0; i < 80; i++) closes.push([Date.now() - (120 - i) * DAY, 100]);        // flat base -> 30d high = 100
-  for (let i = 0; i < 40; i++) closes.push([Date.now() - (40 - i) * DAY, 100 + i * 2]); // rising daily -> a new high every day
+  for (let i = 0; i < 40; i++) closes.push([Date.now() - (40 - i) * DAY, i % 2 === 0 ? 100 + i + 2 : 100 + i - 0.5]);   // even days: new high; odd: back below it
   const bo = C.studyBreakout(closes);
-  assert.ok(bo.d1.n >= 25, "the staircase fires a breakout nearly every day (d1 counts them)");
-  assert.ok(bo.d5.n * 4 <= bo.d1.n, "d5 accepted events are spaced ~5 apart -> far fewer than d1 (the guard fired)");
+  assert.ok(bo.d1.n >= 15, "the saw-tooth fires a first cross every second day (d1 counts them), got " + bo.d1.n);
+  assert.ok(bo.d5.n * 2 <= bo.d1.n, "d5 accepted events are spaced ~5 apart -> far fewer than d1 (the guard fired)");
   assert.ok(bo.d5.n >= 5, "the guard thins, it does not empty");
   assert.equal(bo.d5.n, bo.raw.d5.length, "raw d5 array and summarized n agree — no double counting");
+  // The first-cross guard itself: a 20-day monotone run of new highs is ONE breakout, not twenty.
+  const mono = [];
+  for (let i = 0; i < 40; i++) mono.push([Date.now() - (60 - i) * DAY, 100 + (i % 2) * 0.5]);
+  for (let i = 40; i < 60; i++) mono.push([Date.now() - (60 - i) * DAY, 100 + (i - 39) * 2]);
+  assert.equal(C.studyBreakout(mono).d1.n, 1, "only the day that first crossed counts; yesterday-already-above days are continuation, not a cross");
+  assert.equal(C.studyBreakdown(mono.map(([t, c]) => [t, 200 - c])).d1.n, 1, "breakdown mirrors the rule");
 });
 
 test("gap study F-gap: the forward session uses the TRUE close, honoring early-close half-days", () => {
