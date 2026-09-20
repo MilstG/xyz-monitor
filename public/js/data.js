@@ -2,6 +2,7 @@
 // declarations; side-effecting top-level statements run from __boot_* in the original source
 // order once every module has evaluated (see app.js). Shared cross-module mutable state lives
 // on G (core.js).
+import { fhLiveRefresh } from "./admin.js";
 import { notifyNewBuild } from "./alerts.js";
 import { updateBenchNote } from "./backtest.js";
 import { COLS } from "./base.js";
@@ -128,6 +129,7 @@ function applySnapshot(s){
     seen.add(m.coin);
   }
   for(const k of [...state.rows.keys()]) if(!seen.has(k)) state.rows.delete(k);
+  fhLiveRefresh();   // the funding board's now column reads these rows; repaint it only if a rate rolled
   state.benchCoin=s.benchCoin||detectBenchmark();
   if(s.dataTs) state.dataTs=s.dataTs;
   if(s.regime) state.regimeSrv=s.regime;

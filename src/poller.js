@@ -3932,7 +3932,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     "24h": { bucketHours: 24, buckets: 30 },   // 30 days — the whole spine, one cell per day
   };
   const FUNDHEAT_DEFAULT_TF = "8h";
-  const FUNDHEAT_ROWS = 60;        // grid cap: rows beyond this are a scrollbar, not a signal. Ranked by notional OI.
+  // Row ceiling. It shipped at 60 ("rows beyond this are a scrollbar, not a signal"), and the client's
+  // "all rows" then showed 60 of a 108-market book wearing the word "all" (build 2026.09.20-81). The
+  // client owns the trim now (top 25 / 50 / all); the server ships every market with a spine and
+  // keeps this only as a safety ceiling against a roster that outgrows what a browser should paint.
+  const FUNDHEAT_ROWS = 400;
   const FUNDHEAT_MIN_MKTS = 5;     // below this the "cross-section" is a handful of rows — stay pending and say so
   const FUNDHEAT_MIN_CELLS = 3;    // a row needs this many known cells in SOME timeframe, or it is all gap
   const FUNDHEAT_CAP_PCTL = 0.98;  // color cap = this percentile of |cell| — a single blowout must not flatten the grid
