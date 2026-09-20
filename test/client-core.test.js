@@ -1204,12 +1204,12 @@ test("-05 regression: applySnapshot carries `ind` into state.rows and the indust
     const wire = (t) => { const c = S.classify(t); return { coin: "xyz:" + t, ticker: t, uni: "xyz",
       sector: c.sector, assetClass: c.assetClass, ind: c.ind !== c.sector ? c.ind : undefined,
       px: 100, prevDay: 99, vol: 1e8, oi: 5e7, feat: { volBase: 9e7 } }; };
-    const mkts = ["SNDK", "SKHX", "MU", "NVDA", "MSFT", "CAT"].map(wire);
+    const mkts = ["SNDK", "SKHX", "MU", "NVDA", "MSFT", "PLD"].map(wire);
     H.applySnapshot({ markets: mkts, mainMarkets: [], dataTs: 7 });
     // 1) the field SURVIVES ingestion — this is the exact line that was missing in -04
     assert.equal(H.state.rows.get("xyz:SNDK").ind, "Memory/Storage", "ind must survive the explicit merge");
     assert.equal(H.state.rows.get("xyz:NVDA").ind, "Semiconductors");
-    assert.equal(H.state.rows.get("xyz:CAT").ind, undefined, "absent-on-the-wire stays absent — absence IS the fallback");
+    assert.equal(H.state.rows.get("xyz:PLD").ind, undefined, "absent-on-the-wire stays absent — absence IS the fallback");
     // 2) lockstep self-heal: a later payload with sector but no ind must CLEAR a stale group
     H.applySnapshot({ markets: mkts.map(m => m.ticker === "SNDK" ? Object.assign({}, m, { ind: undefined }) : m),
       mainMarkets: [], dataTs: 8 });
@@ -1218,7 +1218,7 @@ test("-05 regression: applySnapshot carries `ind` into state.rows and the indust
     H.applySnapshot({ markets: mkts, mainMarkets: [], dataTs: 9 });
     H.state.scope = "stocks"; H.state.tf = "1d"; H.state.sect.grp = "ind";
     const names = H.computeSectors().map(g => g.name);
-    assert.ok(names.includes("Memory/Storage") && names.includes("Semiconductors") && names.includes("Industrials"),
+    assert.ok(names.includes("Memory/Storage") && names.includes("Semiconductors") && names.includes("Real Estate"),
       "industry grouping splits the ingested rows: " + names.join(", "));
     H.state.sect.grp = "sector";
     assert.ok(!H.computeSectors().map(g => g.name).includes("Memory/Storage"), "sector grouping stays GICS-only");

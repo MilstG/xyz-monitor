@@ -3,23 +3,24 @@
 // Equities map to a GICS sector from a curated table; ETFs, indices, FX, commodities and
 // crypto get an asset-class label. Unknown tickers return "Unclassified" — never guessed.
 // Tuned to the live `xyz` HIP-3 universe (foreign chipmakers, 2025 IPOs, sector/region ETFs,
-// bare FX codes, the XYZ100 dex index, and commodity CME codes like CL=WTI).
+// bare FX codes, the XYZ100 dex index, and commodity CME codes like CL=WTI). Last full roster
+// audit against both dexes: 2026-09-20 (see the roster snapshot test in test/sectors.test.js).
 
 const SECTOR_TICKERS = {
-  "Information Technology": ["AAPL","MSFT","NVDA","AVGO","ORCL","CRM","ADBE","AMD","INTC","CSCO","ACN","TXN","QCOM","IBM","NOW","INTU","AMAT","MU","ADI","LRCX","KLAC","SNPS","CDNS","PANW","ANET","MRVL","FTNT","ON","DELL","HPQ","HPE","NXPI","MCHP","ROP","TEL","GLW","SMCI","WDC","STX","ZS","CRWD","DDOG","SNOW","NET","PLTR","TEAM","WDAY","ADSK","APH","MPWR","FSLR","KEYS","CTSH","IT","GRMN","TER","ZBRA","TYL","PTC","ANSS","EPAM","ZM","TSM","ASML","ARM","MSTR","BB","NBIS","CRWV","CBRS","LITE","SNDK","SKHX","SMSN","KIOXIA","IBIDEN","ZHIPU","MINIMAX"],
-  "Communication Services": ["GOOGL","GOOG","META","NFLX","DIS","CMCSA","T","VZ","TMUS","CHTR","EA","TTWO","WBD","OMC","LYV","MTCH","PINS","SNAP","RBLX","SPOT","ROKU","IPG","NWSA","FOXA","PARA","WMG","SOFTBANK"],
+  "Information Technology": ["AAPL","MSFT","NVDA","AVGO","ORCL","CRM","ADBE","AMD","INTC","CSCO","ACN","TXN","QCOM","IBM","NOW","INTU","AMAT","MU","ADI","LRCX","KLAC","SNPS","CDNS","PANW","ANET","MRVL","FTNT","ON","DELL","HPQ","HPE","NXPI","MCHP","ROP","TEL","GLW","SMCI","WDC","STX","ZS","CRWD","DDOG","SNOW","NET","PLTR","TEAM","WDAY","ADSK","APH","MPWR","FSLR","KEYS","CTSH","IT","GRMN","TER","ZBRA","TYL","PTC","ANSS","EPAM","ZM","TSM","ASML","ARM","MSTR","BB","NBIS","CRWV","CBRS","LITE","SNDK","SKHX","SMSN","KIOXIA","IBIDEN","ZHIPU","MINIMAX","IREN","AAOI","GIGADEV","CXMT","YMTC","SKHY"],
+  "Communication Services": ["GOOGL","GOOG","META","NFLX","DIS","CMCSA","T","VZ","TMUS","CHTR","EA","TTWO","WBD","OMC","LYV","MTCH","PINS","SNAP","RBLX","SPOT","ROKU","IPG","NWSA","FOXA","PARA","WMG","SOFTBANK","RDDT"],
   "Consumer Discretionary": ["AMZN","TSLA","HD","MCD","NKE","LOW","SBUX","BKNG","TJX","ORLY","CMG","MAR","GM","F","HLT","ROST","AZO","YUM","LULU","DHI","LEN","EBAY","ETSY","ABNB","DRI","RCL","CCL","NCLH","EXPE","APTV","RIVN","LCID","DKNG","PHM","BBY","DPZ","TSCO","ULTA","LVS","WYNN","MGM","GPC","KMX","POOL","NVR","BABA","GME","HYUNDAI","BIRD"],
   "Consumer Staples": ["PG","KO","PEP","COST","WMT","PM","MO","MDLZ","TGT","KMB","GIS","KHC","SYY","STZ","KDP","MNST","HSY","KR","ADM","DG","DLTR","CLX","CHD","MKC","K","HRL","TSN","CAG","CPB","EL","KVUE","BG","TAP"],
   "Health Care": ["UNH","JNJ","LLY","ABBV","MRK","PFE","TMO","ABT","DHR","AMGN","BMY","GILD","CVS","MDT","ISRG","ELV","VRTX","REGN","CI","ZTS","BSX","HCA","SYK","BDX","HUM","MRNA","BIIB","IDXX","DXCM","IQV","MCK","CNC","GEHC","EW","A","RMD","WST","BAX","ZBH","MTD","COR","ALGN","HOLX","STE","HIMS"],
-  "Financials": ["BRK.B","BRKB","JPM","V","MA","BAC","WFC","GS","MS","SPGI","AXP","BLK","C","SCHW","CB","PGR","MMC","PNC","USB","TFC","AON","ICE","CME","COF","MET","AIG","PRU","TRV","ALL","BK","AFL","MSCI","PYPL","SQ","COIN","HOOD","FIS","FI","GPN","DFS","SYF","MCO","AJG","NDAQ","STT","FITB","HBAN","RF","CFG","KEY","AMP","TROW","CRCL","BX","STRC"],
-  "Industrials": ["CAT","HON","UPS","BA","GE","RTX","UNP","DE","LMT","ADP","GD","NOC","ETN","MMM","ITW","EMR","CSX","FDX","NSC","WM","GEV","PH","TDG","CTAS","PCAR","CARR","OTIS","CMI","ROK","IR","FAST","ODFL","LUV","DAL","UAL","AAL","PAYX","VRSK","URI","LHX","RSG","GWW","AME","DOV","HWM","WAB","EFX","XYL","FTV","PWR","BLDR","J","RKLB","BE","SPCX"],
+  "Financials": ["BRK.B","BRKB","JPM","V","MA","BAC","WFC","GS","MS","SPGI","AXP","BLK","C","SCHW","CB","PGR","MMC","PNC","USB","TFC","AON","ICE","CME","COF","MET","AIG","PRU","TRV","ALL","BK","AFL","MSCI","PYPL","SQ","COIN","HOOD","FIS","FI","GPN","DFS","SYF","MCO","AJG","NDAQ","STT","FITB","HBAN","RF","CFG","KEY","AMP","TROW","CRCL","BX","STRC","BMNR"],
+  "Industrials": ["CAT","HON","UPS","BA","GE","RTX","UNP","DE","LMT","ADP","GD","NOC","ETN","MMM","ITW","EMR","CSX","FDX","NSC","WM","GEV","PH","TDG","CTAS","PCAR","CARR","OTIS","CMI","ROK","IR","FAST","ODFL","LUV","DAL","UAL","AAL","PAYX","VRSK","URI","LHX","RSG","GWW","AME","DOV","HWM","WAB","EFX","XYL","FTV","PWR","BLDR","J","RKLB","BE","SPCX","UNITREE"],
   "Energy": ["XOM","CVX","COP","SLB","EOG","MPC","PSX","VLO","WMB","OKE","HES","OXY","KMI","HAL","DVN","BKR","FANG","TRGP","CTRA","MRO","APA","EQT","LNG","OVV","MTDR","DINO"],
   "Materials": ["LIN","APD","SHW","ECL","FCX","NEM","DOW","DD","NUE","CTVA","VMC","MLM","PPG","ALB","IFF","LYB","STLD","CF","MOS","CE","EMN","IP","PKG","AMCR","BALL","AVY","FMC","USAR"],
   "Utilities": ["NEE","DUK","SO","D","AEP","SRE","EXC","XEL","ED","PEG","WEC","AWK","PCG","EIX","DTE","AEE","ETR","ES","FE","PPL","CMS","CNP","NRG","VST","LNT","EVRG","ATO","NI","PNW"],
   "Real Estate": ["PLD","AMT","EQIX","CCI","PSA","O","SPG","WELL","DLR","VICI","SBAC","AVB","EQR","EXR","INVH","VTR","ARE","MAA","ESS","KIM","UDR","HST","BXP","IRM","CBRE","CPT","REG","DOC","WY"],
 };
 
-const SECTOR_ETF = { XLE:"Energy", XOP:"Energy", SMH:"Information Technology", SOXX:"Information Technology", XLK:"Information Technology", XLF:"Financials", XLV:"Health Care", XLI:"Industrials", XLP:"Consumer Staples", XLY:"Consumer Discretionary", XLB:"Materials", XLU:"Utilities", XLRE:"Real Estate", XLC:"Communication Services", URNM:"Materials", URA:"Materials" };
+const SECTOR_ETF = { SOXL:"Information Technology", MAGS:"Information Technology", XBI:"Health Care", XLE:"Energy", XOP:"Energy", SMH:"Information Technology", SOXX:"Information Technology", XLK:"Information Technology", XLF:"Financials", XLV:"Health Care", XLI:"Industrials", XLP:"Consumer Staples", XLY:"Consumer Discretionary", XLB:"Materials", XLU:"Utilities", XLRE:"Real Estate", XLC:"Communication Services", URNM:"Materials", URA:"Materials" };
 // Pre-IPO synthetic perps (track a private company's implied valuation before listing).
 // GRADUATION IS A CURATED EDIT, NEVER AUTO-DETECTED: several synthetic tickers collide with
 // real listed symbols (RAMP is LiveRamp on NYSE; FIGURE, DISCORD are plausible future
@@ -29,15 +30,18 @@ const SECTOR_ETF = { XLE:"Energy", XOP:"Energy", SMH:"Information Technology", S
 // DISPLAY_NAMES label (the "pre-IPO synthetic" disclosure must go), and add a COMPANY_NAMES
 // alias — earnings-calendar eligibility then follows automatically from assetClass "Equity".
 // Graduated: SPCX (SpaceX, Nasdaq listing 2026-06-12).
-const PREIPO = { OPENAI:"Information Technology", ANTHROPIC:"Information Technology", CURSOR:"Information Technology", XAI:"Information Technology", DATABRICKS:"Information Technology", STRIPE:"Financials", REVOLUT:"Financials", DISCORD:"Communication Services", CANVA:"Information Technology", RAMP:"Financials", ANDURIL:"Industrials", FIGURE:"Industrials" };
+const PREIPO = { OPENAI:"Information Technology", ANTHROPIC:"Information Technology", CURSOR:"Information Technology", XAI:"Information Technology", DATABRICKS:"Information Technology", STRIPE:"Financials", REVOLUT:"Financials", DISCORD:"Communication Services", CANVA:"Information Technology", RAMP:"Financials", ANDURIL:"Industrials", FIGURE:"Industrials", SHEIN:"Consumer Discretionary" };
 // Thematic / synthetic price indices that don't map to a single company.
 const THEMATIC = new Set(["DRAM","H100","BOT","GPU","HBM","WAFER","COMPUTE","NAND","MEMORY"]);
-const REGION_ETF = new Set(["EWY","EWJ","EWZ","EWT","EWG","EWU","EWH","EWA","EWW","EWC","FXI","MCHI","INDA","EEM","VEA","VWO","SPY","QQQ","IWM","DIA","VOO"]);
+const REGION_ETF = new Set(["KORU","EWY","EWJ","EWZ","EWT","EWG","EWU","EWH","EWA","EWW","EWC","FXI","MCHI","INDA","EEM","VEA","VWO","SPY","QQQ","IWM","DIA","VOO"]);
 
 const INDEX = new Set(["SPX","SP500","US500","USSPX500","SP500USD","SPXUSD","GSPC","US500USD","SPX500","ES","NDX","NAS100","US100","USTECH100","NQ","DJI","US30","DOW","DJIA","YM","RUT","US2000","RTY","RUSSELL2000","VIX","VOL","FTSE","FTSE100","UK100","DAX","DAX40","DE40","GER40","NIKKEI","NIKKEI225","N225","JP225","HSI","HK50","CAC","CAC40","FR40","ESTX50","EU50","STOXX50","ASX200","AUS200","SMI","IBEX35","AEX","KR200","KOSPI","KOSPI200","NIFTY","NIFTY50","IBOV","BOVESPA","XYZ100"]);
 const CRYPTO = new Set(["BTC","XBT","ETH","SOL","XRP","DOGE","ADA","AVAX","LINK","DOT","MATIC","POL","BNB","LTC","BCH","ATOM","UNI","ETC","FIL","APT","ARB","OP","SUI","SEI","TIA","INJ","NEAR","TRX","TON","SHIB","PEPE","WIF","BONK","AAVE","MKR","LDO","RNDR","IMX","ORDI","JUP","PYTH","JTO","WLD","ENA","ONDO","HYPE","PURR","QNT","PURRDAT"]);
-const COMMOD = new Set(["XAU","GOLD","XAUUSD","XAG","SILVER","XAGUSD","WTI","OIL","USOIL","CL","CRUDE","BRENT","UKOIL","BRENTOIL","NATGAS","NGAS","NG","XNG","TTF","COPPER","XCU","HG","XPT","PLATINUM","XPD","PALLADIUM","URANIUM","ALUMINIUM","ALUMINUM","CORN","WHEAT","SOYBEAN","SOYBEANS","COCOA","COFFEE","SUGAR","COTTON"]);
+const COMMOD = new Set(["XAU","GOLD","XAUUSD","XAG","SILVER","XAGUSD","WTI","OIL","USOIL","CL","CRUDE","BRENT","UKOIL","BRENTOIL","NATGAS","NGAS","NG","XNG","TTF","COPPER","XCU","HG","XPT","PLATINUM","XPD","PALLADIUM","URANIUM","ALUMINIUM","ALUMINUM","CORN","WHEAT","SOYBEAN","SOYBEANS","COCOA","COFFEE","SUGAR","COTTON","HO","HEATINGOIL"]);
 const FX = new Set(["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","USDCAD","NZDUSD","EURGBP","EURJPY","GBPJPY","EURCHF","AUDJPY","CADJPY","CHFJPY","NZDJPY","EURAUD","EURCAD","GBPAUD","GBPCAD","AUDNZD","AUDCAD","DXY","USDX","USDCNH","USDMXN","USDZAR","USDTRY","USDSGD","USDHKD","USDSEK","USDNOK","EURNOK","EURSEK","USDCNY"]);
+// Duration / credit ETFs (TLT listed 2026-09-17). Their own asset class, sector "Rates": neither a
+// sector fund nor a region fund — what they price is the curve, and the tape groups them that way.
+const RATES_ETF = new Set(["TLT","IEF","SHY","TMF","TBT","HYG","LQD","BND","AGG","TLH"]);
 const CCY = new Set(["USD","EUR","GBP","JPY","CHF","AUD","CAD","NZD","CNH","CNY","MXN","ZAR","TRY","SGD","HKD","SEK","NOK","DKK","PLN","KRW","INR","BRL"]);
 
 const EQ = {};
@@ -90,7 +94,7 @@ const HOME_MKT = { SMSN: "KR", SKHX: "KR", HYUNDAI: "KR", SOFTBANK: "JP", KIOXIA
 // for the listed line; the home code is context (the overseas line leads it overnight), and it
 // must NEVER route a name into the home-anchored machinery. Kept in a separate table so the two
 // meanings cannot be conflated by a future edit.
-const HOME_ADR = { TSM: "TW", ASML: "NL", ARM: "GB", BABA: "HK" };
+const HOME_ADR = { TSM: "TW", ASML: "NL", ARM: "GB", BABA: "HK", SKHY: "KR" };
 function homeMkt(t, uni) { if (uni === "main") return null; return HOME_MKT[norm(t)] || null; }
 function homeAdr(t) { return HOME_ADR[norm(t)] || null; }
 
@@ -112,22 +116,21 @@ function homeAdr(t) { return HOME_ADR[norm(t)] || null; }
 //     asset-class scoping stay on the untouched 11-sector GICS map.
 const IND_TICKERS = {
   // -- Info Tech splits (plus the deliberate cross-sector groups) --
-  "Mega Platforms": ["AAPL","MSFT","GOOGL","GOOG","META","AMZN"],
-  "Semiconductors": ["NVDA","AMD","AVGO","INTC","TXN","QCOM","ADI","NXPI","MCHP","ON","MRVL","MPWR","TSM","ARM","CBRS","SMH","SOXX"],
+  "Mega Platforms": ["AAPL","MSFT","GOOGL","GOOG","META","AMZN","MAGS"],
+  "Semiconductors": ["NVDA","AMD","AVGO","INTC","TXN","QCOM","ADI","NXPI","MCHP","ON","MRVL","MPWR","TSM","ARM","CBRS","SMH","SOXX","SOXL"],
   "Semi Equipment": ["AMAT","LRCX","KLAC","ASML","TER","KEYS","IBIDEN","WAFER"],
-  "Memory/Storage": ["MU","WDC","STX","SNDK","SKHX","KIOXIA","SMSN","DRAM","HBM","NAND","MEMORY"],
-  "AI Infra":       ["NBIS","CRWV","SMCI","SOFTBANK","GPU","H100","COMPUTE"],
+  "Memory/Storage": ["MU","WDC","STX","SNDK","SKHX","KIOXIA","SMSN","DRAM","HBM","NAND","MEMORY","GIGADEV","CXMT","YMTC","SKHY"],
+  "AI Infra":       ["NBIS","CRWV","SMCI","SOFTBANK","GPU","H100","COMPUTE","IREN"],
   "AI Software":    ["PLTR","ZHIPU","MINIMAX","OPENAI","ANTHROPIC","XAI","CURSOR","DATABRICKS"],
   "Software":       ["ORCL","CRM","ADBE","NOW","INTU","SNPS","CDNS","TEAM","WDAY","ADSK","TYL","PTC","ANSS","ZM","IBM","DDOG","SNOW","CANVA"],
   "Cybersecurity":  ["PANW","CRWD","ZS","FTNT","NET"],
   "IT Services":    ["ACN","CTSH","IT","EPAM"],
-  "Hardware":       ["DELL","HPQ","HPE","APH","TEL","GLW","ZBRA","GRMN","LITE","BB","CSCO","ANET"],
+  "Hardware":       ["DELL","HPQ","HPE","APH","TEL","GLW","ZBRA","GRMN","LITE","BB","CSCO","ANET","AAOI"],
   "Clean Energy":   ["FSLR","BE"],
   // -- Communication Services splits --
   "Media/Streaming": ["NFLX","DIS","CMCSA","CHTR","WBD","PARA","FOXA","NWSA","WMG","LYV","SPOT","ROKU","OMC","IPG"],
   "Telecom":         ["T","VZ","TMUS"],
-  "Social/Gaming":   ["PINS","SNAP","MTCH","RBLX","EA","TTWO","DISCORD"],
-  // -- Consumer Discretionary splits --
+  "Social/Gaming":   ["PINS","SNAP","MTCH","RBLX","EA","TTWO","DISCORD","RDDT"],   // -- Consumer Discretionary splits --
   "Autos/EV":        ["TSLA","GM","F","RIVN","LCID","APTV","HYUNDAI"],
   "E-Commerce":      ["BABA","EBAY","ETSY"],
   "Retail":          ["HD","LOW","TJX","ROST","AZO","ORLY","BBY","GPC","KMX","TSCO","ULTA","GME"],
@@ -135,29 +138,30 @@ const IND_TICKERS = {
   "Travel/Leisure":  ["BKNG","MAR","HLT","ABNB","EXPE","RCL","CCL","NCLH"],
   "Casinos/Betting": ["LVS","WYNN","MGM","DKNG"],
   "Home/Building":   ["DHI","LEN","PHM","NVR","BLDR","POOL"],
-  "Apparel":         ["NKE","LULU","BIRD"],
-  // -- Consumer Staples splits --
+  "Apparel":         ["NKE","LULU","BIRD","SHEIN"],   // -- Consumer Staples splits --
   "Staples Retail":  ["WMT","COST","TGT","KR","DG","DLTR"],
   "Bev/Tobacco":     ["KO","PEP","PM","MO","STZ","KDP","MNST","TAP"],
   "Food":            ["MDLZ","GIS","KHC","SYY","HSY","ADM","K","HRL","TSN","CAG","CPB","BG","MKC"],
   "Household":       ["PG","KMB","CLX","CHD","EL","KVUE"],
   // -- Health Care splits --
   "Pharma":          ["JNJ","LLY","ABBV","MRK","PFE","AMGN","BMY","GILD","ZTS"],
-  "Biotech":         ["VRTX","REGN","MRNA","BIIB"],
-  "MedTech":         ["MDT","ISRG","BSX","SYK","BDX","EW","ZBH","ALGN","HOLX","STE","DXCM","IDXX","RMD","WST","BAX","A","MTD","TMO","DHR","GEHC"],
+  "Biotech":         ["VRTX","REGN","MRNA","BIIB","XBI"],
+  "MedTech":         ["MDT","ISRG","BSX","SYK","BDX","EW","ZBH","ALGN","HOLX","STE","DXCM","IDXX","RMD","WST","BAX","A","MTD","TMO","DHR","GEHC","ABT"],
   "Health Services": ["UNH","ELV","CI","HUM","CNC","CVS","MCK","COR","HCA","IQV","HIMS"],
   // -- Financials splits --
   "Banks":           ["JPM","BAC","WFC","C","USB","PNC","TFC","FITB","HBAN","RF","CFG","KEY"],
   "Capital Markets": ["GS","MS","SCHW","BLK","BX","TROW","AMP","STT","BK"],
   "Exchanges/Data":  ["ICE","CME","NDAQ","SPGI","MCO","MSCI"],
   "Payments/Credit": ["V","MA","AXP","PYPL","SQ","FIS","FI","GPN","DFS","SYF","COF","STRIPE","RAMP","REVOLUT"],
-  "Crypto-Fi":       ["COIN","HOOD","MSTR","CRCL","STRC"],
+  "Crypto-Fi":       ["COIN","HOOD","MSTR","CRCL","STRC","BMNR"],
   "Insurance":       ["BRK.B","BRKB","CB","PGR","MMC","AON","MET","AIG","PRU","TRV","ALL","AFL","AJG"],
   // -- Industrials splits (rest of the sector falls back visibly) --
   "Aero/Defense":    ["BA","GE","RTX","LMT","GD","NOC","LHX","TDG","HWM","RKLB","ANDURIL","SPCX"],
   "Transport":       ["UNP","CSX","NSC","UPS","FDX","ODFL","LUV","DAL","UAL","AAL","PCAR","WAB"],
   "Power/Grid":      ["GEV","VST","NRG","PWR"],
-  "Robotics":        ["FIGURE","BOT"],
+  "Machinery":       ["CAT","DE","ETN","HON","MMM"],   // the conglomerate/machinery cluster that fell back to the bare sector until 2026.09.20
+  "Robotics":        ["FIGURE","BOT","UNITREE"],   // -- Utilities split (the rest of the sector falls back visibly) --
+  "Regulated Power": ["NEE","DUK","SO","ES"],
   // -- Energy splits --
   "E&P/Majors":      ["XOM","CVX","COP","EOG","OXY","DVN","FANG","CTRA","MRO","APA","EQT","OVV","MTDR","HES"],
   "Refiners":        ["MPC","PSX","VLO","DINO"],
@@ -191,14 +195,26 @@ const CRYPTO_SECTORS = {
   WLD: "AI", FET: "AI", RENDER: "AI", TAO: "AI", AI16Z: "AI", VIRTUAL: "AI", GRIFFAIN: "AI", ARC: "AI",
   FIL: "Infra", AR: "Infra", GRT: "Infra", PYTH: "Infra", W: "Infra", JTO: "Infra", ICP: "Infra",
   STX: "Infra", IMX: "Infra", GALA: "Gaming", SAND: "Gaming", AXS: "Gaming", APE: "Gaming",
+  // 2026-09-20 roster audit: what the top-60 and the next thirty actually carried.
+  ZEC: "Privacy", XMR: "Privacy", DASH: "Privacy", ZEN: "Privacy", AZTEC: "Privacy",
+  XPL: "L1", MON: "L1", HBAR: "L1", BERA: "L1", ALGO: "L1", XLM: "L1", SAGA: "L1", S: "L1",
+  MEGA: "L2", HEMI: "L2",
+  PUMP: "Meme", CASHCAT: "Meme", USELESS: "Meme", GRAM: "Meme", PURR: "Meme", PENGU: "Meme",
+  ASTER: "DeFi", PONS: "DeFi", CAKE: "DeFi", RESOLV: "DeFi", SYRUP: "DeFi",
+  VVV: "AI", "0G": "AI", GRASS: "AI",
+  LIT: "Infra", ZRO: "Infra", NIL: "Infra", ORDI: "Infra", QNT: "Infra",
+  ACE: "Gaming",
 };
 // Every branch now also carries `ind`, the industry group. For anything without a curated
 // industry (crypto sub-sectors, indices, FX, commodities, unsplit equities) ind === sector —
 // the fallback is part of the contract, so a consumer can always group on `ind` safely.
 function classify(ticker, uni) {
   if (uni === "main") {
-    const T = String(ticker || "").toUpperCase();
-    const sec = CRYPTO_SECTORS[T] || "Other";
+    const raw = String(ticker || ""), T = raw.toUpperCase();
+    // Hyperliquid lists 1000x-denominated memecoins under a lowercase k (kPEPE, kBONK, kSHIB):
+    // the unit is the listing's, the coin is the rest of the symbol.
+    const base = /^k[A-Z0-9]+$/.test(raw) ? T.slice(1) : null;
+    const sec = CRYPTO_SECTORS[T] || (base && CRYPTO_SECTORS[base]) || "Other";
     return { assetClass: "Crypto", sector: sec, ind: sec };   // crypto sectors ARE the fine grouping
   }
   const T = norm(ticker), Td = T.replace(/\./g, "");
@@ -212,6 +228,7 @@ function classify(ticker, uni) {
   if (PREIPO[T]) return { assetClass: "Pre-IPO", sector: PREIPO[T], ind: indOf(T, Td, PREIPO[T]) };
   if (THEMATIC.has(T)) return { assetClass: "Thematic", sector: "Thematic", ind: indOf(T, Td, "Thematic") };
   if (SECTOR_ETF[T]) return { assetClass: "ETF", sector: SECTOR_ETF[T], ind: indOf(T, Td, SECTOR_ETF[T]) };
+  if (RATES_ETF.has(T)) return { assetClass: "Rates", sector: "Rates", ind: "Rates" };
   if (REGION_ETF.has(T)) return { assetClass: "ETF", sector: "Index", ind: "Index" };
   if (INDEX.has(T) || INDEX.has(Td)) return { assetClass: "Index", sector: "Index", ind: "Index" };
   if (CRYPTO.has(T) || CRYPTO.has(Td)) return { assetClass: "Crypto", sector: "Crypto", ind: "Crypto" };
@@ -231,6 +248,9 @@ function classify(ticker, uni) {
 // deterministic floor, not the ceiling. Aliases are substrings, so "Apple" covers
 // "Apple Inc." and "Apple's".
 const COMPANY_NAMES = {
+  SKHY:["SK Hynix","SK hynix"], GIGADEV:["GigaDevice"], CXMT:["CXMT","ChangXin"], YMTC:["YMTC","Yangtze Memory"],
+  UNITREE:["Unitree"], IREN:["IREN","Iris Energy"], RDDT:["Reddit"], AAOI:["Applied Optoelectronics"],
+  BMNR:["Bitmine","BitMine"], SHEIN:["Shein"],
   AAPL:["Apple"], MSFT:["Microsoft"], NVDA:["Nvidia"], AMZN:["Amazon"], GOOGL:["Google","Alphabet"], GOOG:["Google","Alphabet"],
   META:["Meta","Facebook","Instagram"], TSLA:["Tesla"], NFLX:["Netflix"], AMD:["AMD","Advanced Micro"], INTC:["Intel"],
   MU:["Micron"], AVGO:["Broadcom"], QCOM:["Qualcomm"], TXN:["Texas Instruments"], ORCL:["Oracle"], CRM:["Salesforce"],
@@ -267,6 +287,13 @@ function companyName(t) { const a = COMPANY_NAMES[String(t || "").toUpperCase()]
 // filled. Unseeded tickers return null and the ticker stands alone: a wrong name is worse than
 // no name, and there is no confident-sounding guess available here.
 const DISPLAY_NAMES = {
+  // 2026-09-20 roster audit — listings since the last pass
+  SKHY:"SK hynix (US ADR)", GIGADEV:"GigaDevice Semiconductor", CXMT:"ChangXin Memory Technologies",
+  YMTC:"Yangtze Memory Technologies", UNITREE:"Unitree Robotics", IREN:"IREN Ltd.", RDDT:"Reddit Inc.",
+  AAOI:"Applied Optoelectronics", BMNR:"Bitmine Immersion Technologies", SHEIN:"Shein (pre-IPO synthetic)",
+  KORU:"Direxion Daily South Korea Bull 3x ETF", SOXL:"Direxion Daily Semiconductor Bull 3x ETF",
+  MAGS:"Roundhill Magnificent Seven ETF", XBI:"SPDR S&P Biotech ETF", TLT:"iShares 20+ Year Treasury Bond ETF",
+  KR200:"KOSPI 200 index", BRENTOIL:"Brent crude oil", HO:"Heating oil (NY Harbor ULSD)",
   AAPL:"Apple Inc.", MSFT:"Microsoft Corp.", NVDA:"NVIDIA Corp.", AMZN:"Amazon.com Inc.",
   GOOGL:"Alphabet Inc. (class A)", GOOG:"Alphabet Inc. (class C)", META:"Meta Platforms Inc.",
   TSLA:"Tesla Inc.", NFLX:"Netflix Inc.", AMD:"Advanced Micro Devices", INTC:"Intel Corp.",
@@ -356,7 +383,7 @@ const DISPLAY_NAMES = {
   SPX:"S&P 500 index", SP500:"S&P 500 index", US500:"S&P 500 index", ES:"S&P 500 futures",
   NDX:"Nasdaq-100 index", NAS100:"Nasdaq-100 index", US100:"Nasdaq-100 index", NQ:"Nasdaq-100 futures",
   DJI:"Dow Jones Industrial Average", US30:"Dow Jones Industrial Average",
-  RUT:"Russell 2000 index", US2000:"Russell 2000 index", VIX:"CBOE volatility index (VIX)",
+  RUT:"Russell 2000 index", US2000:"Russell 2000 index", VIX:"CBOE volatility index (VIX)", VOL:"CBOE volatility index (VIX proxy)",
   FTSE:"FTSE 100 index", UK100:"FTSE 100 index", DAX:"DAX 40 index", DE40:"DAX 40 index",
   NIKKEI:"Nikkei 225 index", N225:"Nikkei 225 index", JP225:"Nikkei 225 index", HSI:"Hang Seng index",
   HK50:"Hang Seng index", CAC:"CAC 40 index", CAC40:"CAC 40 index", ESTX50:"Euro Stoxx 50 index",
@@ -386,6 +413,12 @@ const DISPLAY_NAMES = {
 };
 // Main-dex coin names. Same rule: seeded or null, never derived from the symbol.
 const CRYPTO_NAMES = {
+  // 2026-09-20 roster audit
+  ZEC:"Zcash", XMR:"Monero", DASH:"Dash", ZEN:"Horizen", AZTEC:"Aztec", XPL:"Plasma", MON:"Monad",
+  HBAR:"Hedera", BERA:"Berachain", ALGO:"Algorand", XLM:"Stellar", SAGA:"Saga", S:"Sonic", MEGA:"MegaETH",
+  HEMI:"Hemi", PUMP:"Pump.fun", CASHCAT:"Cashcat", USELESS:"Useless Coin", GRAM:"Gram", PENGU:"Pudgy Penguins",
+  ASTER:"Aster", PONS:"Pons", CAKE:"PancakeSwap", RESOLV:"Resolv", SYRUP:"Maple Finance", VVV:"Venice Token",
+  "0G":"0G", GRASS:"Grass", LIT:"Lit Protocol", ZRO:"LayerZero", NIL:"Nillion", ACE:"Fusionist",
   BTC:"Bitcoin", ETH:"Ethereum", SOL:"Solana", XRP:"XRP (Ripple)", BNB:"BNB Chain", DOGE:"Dogecoin",
   ADA:"Cardano", AVAX:"Avalanche", SUI:"Sui", APT:"Aptos", SEI:"Sei", TIA:"Celestia", NEAR:"NEAR Protocol",
   TON:"Toncoin", DOT:"Polkadot", ATOM:"Cosmos", TRX:"TRON", LTC:"Litecoin", BCH:"Bitcoin Cash",
@@ -405,7 +438,12 @@ const CRYPTO_NAMES = {
 function displayName(t, uni) {
   const T = String(t || "").toUpperCase();
   if (!T) return null;
-  if (uni === "main") return CRYPTO_NAMES[T] || null;
+  if (uni === "main") {
+    if (CRYPTO_NAMES[T]) return CRYPTO_NAMES[T];
+    const raw = String(t || "");
+    if (/^k[A-Z0-9]+$/.test(raw) && CRYPTO_NAMES[T.slice(1)]) return CRYPTO_NAMES[T.slice(1)] + " (1000\u00d7 unit)";
+    return null;
+  }
   return DISPLAY_NAMES[T] || DISPLAY_NAMES[T.replace(/\./g, "")] || null;
 }
 
@@ -423,6 +461,7 @@ function displayName(t, uni) {
 // kept, "copper" is kept — both are overwhelmingly the commodity in a financial tape, and a false
 // positive here costs one wrong row, not a wrong signal).
 const MACRO_LANES = {
+  TLT:{label:"Treasuries",topics:["Treasury","Treasuries","yields","10-year","30-year","long bond","bond market","duration","term premium"]},
   SP500:{broad:true}, SPX:{broad:true}, US500:{broad:true}, ES:{broad:true}, SPY:{broad:true},
   VOO:{broad:true}, XYZ100:{broad:true}, VIX:{broad:true}, DXY:{broad:true}, USDX:{broad:true}, USD:{broad:true},
   NDX:{label:"Nasdaq",topics:["Nasdaq","Nasdaq-100","tech stocks","megacap","mega-cap"]},
