@@ -101,7 +101,9 @@ instant, and the per-IP rate limit stops being a per-user problem.
   `/api/csp-report`, are counted and summarized on the signed-in `/api/health`, and logged at most
   once a minute. Report-only on purpose: the client renders through innerHTML in hundreds of places
   and members type prose into notes and messages; the operator flips to enforcing once the report
-  stays quiet.
+  stays quiet — `CSP_ENFORCE=1` sends the same policy as `Content-Security-Policy` (the health
+  ledger then reads `mode: "enforce"`). The Playwright sweep passes under enforcement with zero
+  violations, which is the necessary condition, not the sufficient one.
 - **Note markers on Markets** — a post-it in the ticker cell of any name you have written on. No new
   column (same reasoning as the E badge: that cell is the only one always on screen), and *absent*
   entirely when there is no note, so it never competes with the ☆ beside it. The glyph encodes three

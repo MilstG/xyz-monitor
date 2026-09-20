@@ -626,7 +626,7 @@ test("AI access model: open to authenticated users with per-user caps; xyzai is 
   assert.equal(srv.split('fastify.get("/api/ai-status"').length - 1, 1, "GET /api/ai-status registered exactly once");
   assert.ok(srv.includes("poller.checkAdminPassword"), "unlock route must verify via poller.checkAdminPassword");
   assert.ok(/function checkAdminPassword/.test(pol) && /checkAdminPassword,/.test(pol), "poller.checkAdminPassword missing or not exported");
-  assert.ok(/function resetAiDay[\s\S]{0,160}checkAdminPassword\(password\)/.test(pol), "resetAiDay must route through checkAdminPassword (shared lockout)");
+  assert.ok(/function resetAiDay[\s\S]{0,160}checkAdminPassword\(password, who\)/.test(pol), "resetAiDay must route through checkAdminPassword with the caller key (per-caller lockout, 2026.09.20)");
 });
 
 test("trend leaderboard integrity: client, markup and server carry the tab end to end", () => {

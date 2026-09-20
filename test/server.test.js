@@ -225,7 +225,12 @@ test("csp: every HTML page carries a report-only policy whose nonce is stamped o
   for (const res of [await get("/"), await get("/", gus)]) {
     const csp = res.headers["content-security-policy-report-only"];
     assert.ok(csp, "report-only header present");
-    assert.equal(res.headers["content-security-policy"], undefined, "report-only: nothing is enforced yet");
+    assert.equal(res.headers["content-security-policy"], undefined, "report-only: nothing is enforced by default");
+    // CSP_ENFORCE=1 sends the SAME policy text as Content-Security-Policy (one policy, two headers),
+    // so what was observed clean under report-only is exactly what enforcement blocks.
+    const srvSrc = require("fs").readFileSync(require("path").join(__dirname, "..", "server.js"), "utf8");
+    assert.ok(srvSrc.includes('const CSP_HEADER = CSP_ENFORCE ? "content-security-policy" : "content-security-policy-report-only";'), "the enforce switch picks the header, never a second policy");
+    assert.ok(srvSrc.includes("reply.header(CSP_HEADER, cspPolicy(nonce));"), "one header site, driven by the switch");
     const nonce = (csp.match(/'nonce-([^']+)'/) || [])[1];
     assert.ok(nonce && nonce.length >= 16, "the policy names a nonce");
     assert.ok(!res.body.includes("{{csp-nonce}}"), "no slot survives to the browser");

@@ -23,7 +23,7 @@ const { featuresFromHourly, bucketOpens, oiDeltaPct, fundingAvg, fundingHeat, FU
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
 const { pdfTextRuns, ptrRows, parsePtr, pdfImages, ccittTiff, ocrPtrRows } = require("./compute");
-const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, scrubPlaceholderActuals, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, topicHit, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings, pickXbrlFacts, parseNportHoldings } = require("./compute");
+const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, scrubPlaceholderActuals, earnReactionsFor, earnReactionCurve, overnightSplit, FINE_TOL, etWallToUtc, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, topicHit, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings, pickXbrlFacts, parseNportHoldings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
 const { closedBars, closedLadder, emaLast, emaCrossOutcomes, emaCrossStudy, emaAlertState } = require("./compute");
 const { momPair, spearmanIC, duelStats, epResolve, epScore } = require("./compute");
@@ -1135,7 +1135,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       .sort((a, b) => (b.vol || 0) - (a.vol || 0))
       .slice(0, REGIME_TOPN);
     if (top.length < 3) return { corr: null, n: top.length };
-    const { corr } = meanPairwiseCorr(top.map((r) => r.dailyRaw), REGIME_LOOKBACK);
+    const { corr } = meanPairwiseCorr(top.map((r) => r.dailyRaw), REGIME_LOOKBACK, Date.now());   // the still-open day's partial return is not a return
     return { corr, n: top.length };
   }
   function percentileOf(v) {
@@ -1355,7 +1355,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           // clock hour rolls (rvolEndH changes) — otherwise it recomputes the same ~4k-entry notional
           // Map every 15s tick for nothing. Memoize on exactly those two keys.
           if (r._rvRaw === r.hourlyRaw && r._rvEndH === rvolEndH && r._rv !== undefined) rvol = r._rv;
-          else { rvol = rvolMulti(hs, RVOL_WINS, nowMs); r._rvRaw = r.hourlyRaw; r._rvEndH = rvolEndH; r._rv = rvol; }
+          else { rvol = rvolMulti(hs, RVOL_WINS, nowMs, undefined, r.uni === "xyz" ? "ET" : undefined); r._rvRaw = r.hourlyRaw; r._rvEndH = rvolEndH; r._rv = rvol; }   // equities: "usual volume at this hour" keyed on the ET clock so DST does not shift the baseline
         }
       } catch (_) {}
       // Cascade flag (crypto only): the latest server-computed cascade within 24h, shipped as the
@@ -1686,19 +1686,50 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
     return out.length >= 10 ? out : null;
   }
+  // Sparse 5-minute series for anchor resolution: the archive rows that closed within FINE_TOL
+  // before each anchor (session open/close and the 08:30 ET split), read as one tiny PK-range
+  // query per anchor and merged. The studies only ever look up the bar closing ON an anchor
+  // (anchorPrice/asOfRow binary-search the last close at or before t), so the neighbourhoods are
+  // all they need — a 180-day span at 5m would be ~50k rows per market held for nothing. Runs
+  // only where an archive exists (equities; crypto anchors sit on the hour and the hourly close is
+  // already exact) and only when the studies recompute (the memo below, once per hourly spine).
+  function fineAround(r, wins) {
+    if (r.uni !== "xyz" || !store.candlesEnabled || !store.candlesEnabled() || !store.readCandles) return null;
+    const times = new Set();
+    for (const w of wins) {
+      if (!(w && w.enter > 0 && w.exit > 0)) continue;
+      times.add(w.enter); times.add(w.exit);
+      const et = etParts(w.exit), tSplit = etWallToUtc(et.y, et.mo, et.d, 8, 30);   // overnightSplit's 08:30 ET leg boundary
+      if (tSplit > w.enter && tSplit < w.exit) times.add(tSplit);
+    }
+    const seen = new Set(), out = [];
+    for (const t of times) {
+      let rows5;
+      try { rows5 = store.readCandles(r.coin, t - FINE_TOL - FIVE_MIN, t); } catch (_) { rows5 = null; }
+      if (!Array.isArray(rows5)) continue;
+      for (const k of rows5) if (!seen.has(k[0])) { seen.add(k[0]); out.push(k); }
+    }
+    if (!out.length) return null;
+    out.sort((a, b) => a[0] - b[0]);
+    return out;
+  }
   function studiesFor(r, closes, dayFunding) {
     const oiArr = hist.get(r.coin);
-    const sig = (r.hourlyTs || 0) + ":" + (closes ? closes.length : 0) + ":" + (dayFunding ? dayFunding.length : 0) + ":" + (oiArr ? oiArr.length : 0);
+    // Hourly funding feeds the net-of-funding R (medNet) beside every daily study's gross median:
+    // a 1x position held over the horizon pays it, so a base rate that ignores it overstates the
+    // edge on names whose funding runs against the event direction.
+    const fundH = getFunding(r.coin);
+    const sig = (r.hourlyTs || 0) + ":" + (closes ? closes.length : 0) + ":" + (dayFunding ? dayFunding.length : 0) + ":" + (oiArr ? oiArr.length : 0) + ":" + fundH.length;
     if (r._stSig === sig && r._st) return r._st;
     const st = {};
     if (closes && closes.length >= 40) {
-      st.bigmove = studyBigMove(closes);
-      st.breakout = studyBreakout(closes);
-      st.breakdown = studyBreakdown(closes);
+      st.bigmove = studyBigMove(closes, fundH);
+      st.breakout = studyBreakout(closes, fundH);
+      st.breakdown = studyBreakdown(closes, fundH);
       st.oiflush = studyOIFlush(closes, oiDailySeries(r.coin));
       st.coil = closes.length >= 140 ? compressionNow(closes) : null;
       st.fpdiv = studyFPDiv(closes, dayFunding);
-      if (closes.length >= 140) st.volshift = studyVolShift(closes);
+      if (closes.length >= 140) st.volshift = studyVolShift(closes, fundH);
     }
     const hs = getHourly(r.coin);
     if (hs.length > 48) {
@@ -1708,10 +1739,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       const wins = hmk
         ? homeOvernightAnchors(hmk, hs[0][0], hs[hs.length - 1][0]).concat(homeWeekendAnchors(hmk, hs[0][0], hs[hs.length - 1][0]))
         : overnightAnchors(hs[0][0], hs[hs.length - 1][0]).concat(weekendAnchors(hs[0][0], hs[hs.length - 1][0]));
-      st.gap = studyGapFade(hs, wins, 3 * HOUR);
-      st.ondrift = offDriftStats(hs, wins, 3 * HOUR);
+      // The 5m archive resolves the 09:30 ET open to its bar (hourly alone reads the 09:00 close —
+      // the studies stamp `approx` when that fallback was taken).
+      const fine = fineAround(r, wins);
+      st.gap = studyGapFade(hs, wins, 3 * HOUR, fine);
+      st.ondrift = offDriftStats(hs, wins, 3 * HOUR, fine);
+      // Overnight split (after-hours vs pre-open at 08:30 ET) is a US-session concept: a home-
+      // market name's overnight runs KRX close -> KRX open, where 08:30 New York means nothing.
+      if (!hmk && r.uni === "xyz") { const ov = overnightSplit(hs, fine, wins); st.ovsplit = ov ? { n: ov.n, medAh: ov.medAh, medPre: ov.medPre, medTotal: ov.medTotal, shareAh: ov.shareAh, sharePre: ov.sharePre, approx: ov.approx } : null; }
     }
-    if (dayFunding && dayFunding.length >= 8 && closes && closes.length >= 10) st.fundflip = studyFundFlip(dayFunding, closes);
+    if (dayFunding && dayFunding.length >= 8 && closes && closes.length >= 10) st.fundflip = studyFundFlip(dayFunding, closes, fundH);
     r._stSig = sig; r._st = st;
     return st;
   }
@@ -2651,7 +2688,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       evp: evd.pts,   // raw evidence points — internal handle for the earnings guard, deleted before the payload ships
       unproven: !!evd.unproven, noedge: !!evd.noedge, negexp: !!evd.negexp,
       liveW: evd.liveW || null,
-      study: evd.st ? { n: evd.st.n, med: evd.st.med, hit: evd.st.hit, avg: evd.st.avg, unit: evd.unit } : null,
+      study: evd.st ? { n: evd.st.n, med: evd.st.med, hit: evd.st.hit, avg: evd.st.avg, unit: evd.unit, medNet: evd.st.medNet != null ? evd.st.medNet : undefined } : null,
       pooled: evd.pooled ? { n: evd.pooled.n, med: evd.pooled.med, hit: evd.pooled.hit, avg: evd.pooled.avg, unit: evd.unit } : null,
     }, extra || {});
   }
@@ -3011,7 +3048,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           // detector enforces completeness, freshness and the 1.5σ magnitude floor)
           if (r.uni === "xyz" && r.dailyRaw && r.dailyRaw.length >= 25) {
             const prints = earnPrintsByTk.get(r.ticker);
-            const pd = prints ? detectPead(prints, r.dailyRaw, r.px, sd30) : null;
+            const pd = prints ? detectPead(prints, r.dailyRaw, r.px, sd30, r.hourlyRaw, now) : null;
             if (pd && stopGeometryOk(pd.side, r.px, pd.stop))
               openLedger(r, "pead", { score: 0, reading: "" }, pd.side === "long" ? 1 : -1,
                 { sd0: +sd30.toFixed(3), psd: pd.side, pn: 1, stp: pd.stop,
@@ -3388,7 +3425,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           const dir = d30 > 0 ? 1 : -1;
           const evd = evidence(null, "ondrift", null, "%", r.uni);
           const sig = mkSignal(r, "ondrift", `${d30 >= 0 ? "+" : ""}${d30.toFixed(1)}% off-hours drift over ~21 windows (${z.toFixed(1)}\u03c3 vs universe)`,
-            (Math.abs(z) - 2) * 16 + 18, evd, { horizon: evMeta("ondrift", r.uni).horizon });
+            (Math.abs(z) - 2) * 16 + 18, evd, { horizon: evMeta("ondrift", r.uni).horizon, split: r._st.ovsplit || null });
           sig.play = playbook("ondrift", { dir });
           out.push(sig); openLedger(r, "ondrift", sig, dir);
         }
@@ -4432,6 +4469,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // once ~10 min after boot when the daily backfill has had time to land opens. Bumps the ETag
   // only when the stats actually changed.
   function refreshEarnStudy(bump) {
+    const now = Date.now();
     const byTicker = new Map();
     for (const p of earnPrints) { let a = byTicker.get(p.t); if (!a) { a = []; byTicker.set(p.t, a); } a.push(p); }
     const next = {};
@@ -4439,8 +4477,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       let row = null;
       for (const r of rows.values()) if (r.uni === "xyz" && !r.delisted && r.ticker === tk) { row = r; break; }
       if (!row || !Array.isArray(row.dailyRaw) || row.dailyRaw.length < 3) continue;
-      const st = earnReactionsFor(prints, row.dailyRaw);
-      if (st) next[tk] = st;
+      // The hourly spine anchors AMC prints at 16:00 ET (the daily UTC bar's close is four hours
+      // after the print); the curve adds the +1h/+4h/+24h medians for the prints it covers.
+      const st = earnReactionsFor(prints, row.dailyRaw, now, row.hourlyRaw);
+      if (!st) continue;
+      const cv = Array.isArray(row.hourlyRaw) && row.hourlyRaw.length ? earnReactionCurve(prints, row.hourlyRaw, { now }) : null;
+      if (cv) st.curve = { n: cv.n, agg: cv.agg, approx: cv.approx };
+      next[tk] = st;
     }
     const sigS = JSON.stringify(next);
     const changed = sigS !== JSON.stringify(earnStudy);
@@ -8716,7 +8759,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (!e.retest) continue;
       try {
         const W = TREND_TF_MS[e.retest];
-        const rv = W ? rvolMulti(getHourly(e.coin), { w: W }, now) : null;
+        const er = rows.get(e.coin);
+        const rv = W ? rvolMulti(getHourly(e.coin), { w: W }, now, undefined, er && er.uni === "xyz" ? "ET" : undefined) : null;
         e.rrv = rv && rv.w != null ? rv.w : null;
       } catch (_) { e.rrv = null; }
       e.swing = null;
@@ -13365,6 +13409,7 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
       // The live mark, so a print whose reaction candle has not closed still yields a number
       // instead of a dash. This is the whole fix for "every AMC print dashes every morning".
       const pxFor = (tk) => { const r = byT.get(String(tk).toUpperCase()); return r && Number.isFinite(r.px) ? r.px : null; };
+      const hourlyFor = (tk) => { const r = byT.get(String(tk).toUpperCase()); return r && Array.isArray(r.hourlyRaw) ? r.hourlyRaw : null; };
       const e = { printed: [], today: [], tomorrow: [] };
       const seen = new Set();
       // Today's already-reported rows first — they are the freshest thing on the page.
@@ -13373,12 +13418,12 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
         if (d !== 0 || earnEntryState(en, t) !== "reported") continue;
         if (e.printed.length >= BRIEF_EARN_N) break;
         seen.add(en.t + "|" + en.d);
-        e.printed.push(earnPrintRow(en, dailyFor(en.t), pxFor(en.t)));
+        e.printed.push(earnPrintRow(en, dailyFor(en.t), pxFor(en.t), hourlyFor(en.t), t));
       }
       for (const p of (earnCache && earnCache.recent) || []) {
         if (e.printed.length >= BRIEF_EARN_N) break;
         if (seen.has(p.t + "|" + p.d)) continue;
-        e.printed.push(earnPrintRow(p, dailyFor(p.t), pxFor(p.t)));
+        e.printed.push(earnPrintRow(p, dailyFor(p.t), pxFor(p.t), hourlyFor(p.t), t));
       }
       for (const en of (earnCache && earnCache.entries) || []) {
         const d = earnDayDiff(en.d, t);

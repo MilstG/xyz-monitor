@@ -472,6 +472,13 @@ function loginFail(ip) {
 // what fired — the operator flips to enforcing once the report stays quiet. The nonce is stamped in
 // the onSend hook, so a page author only has to write the slot into a <script> tag.
 const CSP_NONCE_SLOT = "{{csp-nonce}}";
+// CSP_ENFORCE=1 flips the same policy from report-only to enforced. Report-only stays the default
+// because the client's surface is large (23 tabs, chart rasters, blob workers) and the operator
+// should watch /api/health's csp ledger stay at zero through a few days of real use before turning
+// a violation from a diagnostic into a broken page. The policy text is shared, so what was
+// observed clean under report-only is exactly what enforcement blocks.
+const CSP_ENFORCE = String(process.env.CSP_ENFORCE || "0") === "1";
+const CSP_HEADER = CSP_ENFORCE ? "content-security-policy" : "content-security-policy-report-only";
 const cspPolicy = (nonce) => [
   "default-src 'self'",
   `script-src 'self' 'nonce-${nonce}'`,
@@ -1778,7 +1785,7 @@ async function buildServer() {
     // in the hook on purpose: returning a payload ends it, and every header above must still land.
     if (typeof payload === "string" && /^text\/html/i.test(String(reply.getHeader("content-type") || ""))) {
       const nonce = crypto.randomBytes(16).toString("base64");
-      reply.header("content-security-policy-report-only", cspPolicy(nonce));
+      reply.header(CSP_HEADER, cspPolicy(nonce));
       reply.header("reporting-endpoints", 'csp="/api/csp-report"');
       if (payload.includes(CSP_NONCE_SLOT)) return payload.split(CSP_NONCE_SLOT).join(nonce);
     }
@@ -2798,7 +2805,7 @@ async function buildServer() {
       stale: poller.lastPollAt() > 0 && Date.now() - poller.lastPollAt() > STALE_MS, lastPollAgoMs: poller.lastPollAt() > 0 ? Date.now() - poller.lastPollAt() : null,
       volume: { boots: HEARTBEAT.boots, firstBoot: HEARTBEAT.firstBoot, dataDir: DATA_DIR },
       loop: { ...loopSample(), sinceMs: Date.now() - loopResetAt, windowMs: LOOP_WINDOW, maxEver: loopMaxEver, hist: loopRing },
-      csp: { mode: "report-only", reports: CSP_REPORTS.n, dropped: CSP_REPORTS.dropped, recent: CSP_REPORTS.recent.map(({ key, ...r }) => r) },
+      csp: { mode: CSP_ENFORCE ? "enforce" : "report-only", reports: CSP_REPORTS.n, dropped: CSP_REPORTS.dropped, recent: CSP_REPORTS.recent.map(({ key, ...r }) => r) },
       ...poller.stats(), ts: Date.now() };
     // Railway's healthcheck needs {ok} and nothing else. The full picture — the volume path, the
     // AI provider and model names, the backup repo, limiter usage, per-coin failure state, the

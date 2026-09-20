@@ -581,8 +581,14 @@ function earnStudyHtml(t){
   if(!st) return '<span class="earn-study sec" data-tip="no reaction history yet — the study needs past print dates matched to retained daily candles; it accrues automatically as prints pass">no history</span>';
   const gap=st.gapN>0?` · gapped ${st.gapUp}/${st.gapN} up, ${st.gapHeld}/${st.gapN} held to close`:'';
   const x=st.xMed!=null?` · median ${st.xMed}x the usual daily move (n=${st.xN})`:'';
-  const tip=`this name's own earnings reaction base rate over ${st.n} print(s): avg |${st.avgAbs}%| next-session move (median |${st.medAbs}%|), ${st.up}/${st.n} up${gap}${x}. Reaction = BMO/DMH prints score their own UTC daily candle, AMC prints the next one; the perp trades through weekends so Friday AMC lands on Saturday's candle. Gap stats need opens — they cover the live-fetched candle window only. A base rate, not a prediction.`;
-  return `<span class="earn-study" data-tip="${esc(tip)}">${st.n} print${st.n===1?'':'s'} · avg |${st.avgAbs}%| · ${st.up}↑${st.n-st.up}↓${st.xMed!=null?' · '+st.xMed+'x':''}</span>`;
+  // Reaction curve: the move from the print anchor itself (16:00 ET for AMC, 06:00 for BMO, read
+  // off the hourly spine) to +1h / +4h / +24h — the intraday shape the daily bar cannot show.
+  const cv=st.curve&&st.curve.agg, cvH=(k)=>cv&&cv[k]&&cv[k].n>0?`+${k.slice(1)}h |${cv[k].medAbs}%| (${cv[k].up}/${cv[k].n} up)`:null;
+  const curveParts=cv?['h1','h4','h24'].map(cvH).filter(Boolean):[];
+  const curve=curveParts.length?` · from the print anchor: ${curveParts.join(', ')}${st.curve.approx?' (some anchors read off an hourly close)':''}`:'';
+  const tip=`this name's own earnings reaction base rate over ${st.n} print(s): avg |${st.avgAbs}%| next-session move (median |${st.medAbs}%|), ${st.up}/${st.n} up${gap}${x}${curve}. Reaction = the print day's own bar (BMO/DMH prints against the prior close, AMC prints against the pre-print reference; with the hourly spine the AMC leg is anchored at 16:00 ET, +24h). Gap stats need opens — they cover the live-fetched candle window only. A base rate, not a prediction.`;
+  const cv24=cv&&cv.h24&&cv.h24.n>0?` · +24h |${cv.h24.medAbs}%|`:'';
+  return `<span class="earn-study" data-tip="${esc(tip)}">${st.n} print${st.n===1?'':'s'} · avg |${st.avgAbs}%| · ${st.up}↑${st.n-st.up}↓${st.xMed!=null?' · '+st.xMed+'x':''}${cv24}</span>`;
 }
 // Drawer line: upcoming print inside the window + the study one-liner.
 function earnDrawerHtml(r){

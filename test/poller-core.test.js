@@ -2677,3 +2677,42 @@ test("reliability: calendar lanes carry in-flight guards, the daily rebuild is d
   assert.ok(pol.includes("persistLedger(true);   // the end of a signals pass is the batch boundary"), "the signals pass forces");
   assert.ok(pol.includes("persistLedger: () => { ledgerDirty = true; persistLedger(true); }"), "the shutdown/crash export is synchronous");
 });
+
+test("study wiring 2026.09.20: hourly funding nets the daily base rates, the 5m archive resolves the anchors, ondrift carries the overnight split", async () => {
+  const { createPoller } = require("../src/poller");
+  const reads = [];
+  const FIVE = 5 * 60e3;
+  // A store with a live 5m archive: every read returns the bars closing inside the asked range at
+  // a price the hourly spine never prints, so an anchor resolved on 5m is distinguishable.
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    candlesEnabled: () => true,
+    readCandles: (coin, from, to) => { reads.push({ coin, from, to }); const out = []; for (let t = Math.ceil(from / FIVE) * FIVE; t + FIVE <= to; t += FIVE) out.push([t, 100, 100, 100, 100, 10]); return out; } };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const DAY_ = 86400e3, HOUR_ = 3600e3, now = Date.now();
+  const mkD = () => { const d = []; for (let i = 61; i >= 1; i--) d.push({ t: now - i * DAY_, c: 100 * Math.pow(1.0005, 61 - i), o: 100, h: 103, l: 98, v: 1e6 }); return d; };
+  const mkH = () => { const h = []; for (let i = 400; i >= 0; i--) { const c = 100 + Math.sin(i / 9); h.push({ t: now - i * HOUR_, o: c, h: c + 0.7, l: c - 0.7, c, v: 1e5 }); } return h; };
+  // 60 days of hourly funding, a steady 0.01%/h paid by longs — enough carry to move a 1-3d median
+  const fundH = new Map(); for (let i = 60 * 24; i >= 0; i--) fundH.set(Math.floor((now - i * HOUR_) / HOUR_) * HOUR_, 1e-4);
+  p.seedRowNow("xyz:NVDA", { px: 112, ticker: "NVDA", uni: "xyz", vol: 1e7, dailyRaw: mkD(), hourlyRaw: mkH(), dailyTs: now, hourlyTs: now, isNew: false, prevDay: 100, d1: 12, funding: 1e-4, fundH });
+  p.buildDailyNow();
+  await p.buildSignalsNow();
+  const d = p.getSignals(true);
+  const withStudy = d.signals.filter((s0) => s0.uni === "xyz" && s0.study && s0.study.n > 0);
+  assert.ok(withStudy.length > 0, "an equity condition with an own base rate fires on the seeded tape");
+  for (const s0 of withStudy) assert.ok(typeof s0.study.medNet === "number", `${s0.ev}: the card's study carries medNet once hourly funding covers the events (got ${s0.study.medNet})`);
+  // the anchors were resolved through the archive: one narrow PK-range read per anchor, never a span read
+  // (the sweep detector's own 4h tail read shares the archive; the anchor reads are the narrow ones)
+  const narrow = reads.filter((r) => r.coin === "xyz:NVDA" && r.to - r.from <= 4 * FIVE);
+  assert.ok(narrow.length >= 10, "the gap/drift studies read the 5m archive in FINE_TOL neighbourhoods before their anchors, never as a span");
+  assert.ok(!reads.some((r) => r.coin === "xyz:NVDA" && r.to - r.from > 24 * HOUR_), "no read pulls more than a day of 5m bars");
+  // the ondrift card ships the split when the study has it
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes("split: r._st.ovsplit || null"), "the ondrift card carries the overnight split");
+  assert.ok(pol.includes("st.gap = studyGapFade(hs, wins, 3 * HOUR, fine);") && pol.includes("st.ondrift = offDriftStats(hs, wins, 3 * HOUR, fine);"), "gap and drift studies take the fine series");
+  assert.ok(pol.includes("earnReactionsFor(prints, row.dailyRaw, now, row.hourlyRaw)") && pol.includes("earnReactionCurve(prints, row.hourlyRaw, { now })"), "the earnings study anchors on the hourly spine and ships the curve");
+  assert.ok(pol.includes("detectPead(prints, r.dailyRaw, r.px, sd30, r.hourlyRaw, now)"), "PEAD reads the print anchor off the hourly spine");
+  assert.ok(pol.includes("meanPairwiseCorr(top.map((r) => r.dailyRaw), REGIME_LOOKBACK, Date.now())"), "the regime correlation excludes the open day");
+  assert.ok(/rvolMulti\(hs, RVOL_WINS, nowMs, undefined, r\.uni === "xyz" \? "ET" : undefined\)/.test(pol), "equity rvol is keyed on the ET clock");
+});
