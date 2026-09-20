@@ -1814,7 +1814,7 @@ test("audit ack: clears the row, keeps the overlay, resurfaces on re-apply, rout
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   try {
     p.auditSeedNow([{ k: "apply", ts: 1, ticker: "KLARNA", action: "classify", sector: "Financials", ind: "Fintech", ev: {}, by: "auto" },
-      { k: "flag", ts: 2, ticker: "UNITREE", action: "classify", reason: "no-data", ev: {} }]);
+      { k: "flag", ts: 2, ticker: "NEWBOTCO", action: "classify", reason: "no-data", ev: {} }]);
     assert.ok(!p.sectorAuditAck("NOPE").ok, "ack requires an applied entry");
     assert.ok(p.sectorAuditAck("KLARNA").ok, "ack applies");
     assert.ok(p.sectorAuditAck("KLARNA").ok, "ack is idempotent");
@@ -1822,10 +1822,10 @@ test("audit ack: clears the row, keeps the overlay, resurfaces on re-apply, rout
     assert.strictEqual(S.classify("KLARNA", "xyz").sector, "Financials", "board classification untouched by ack");
     // the no-data manual path: same apply verb, admin-stamped, full machinery — now WITH an
     // optional industry group (sanitized, capped, sector fallback when blank)
-    assert.ok(p.sectorAuditApply("UNITREE", "Industrials", " Robotics<b> ").ok, "no-data flag resolves via manual apply");
-    const u = S.classify("UNITREE", "xyz");
+    assert.ok(p.sectorAuditApply("NEWBOTCO", "Industrials", " Robotics<b> ").ok, "no-data flag resolves via manual apply");
+    const u = S.classify("NEWBOTCO", "xyz");
     assert.deepStrictEqual([u.sector, u.ind, u.auto], ["Industrials", "Roboticsb", "cls"], "manually classified with sanitized industry + provenance");
-    assert.ok(p.sectorAuditRevert("UNITREE").ok && S.classify("UNITREE", "xyz").assetClass === "Unclassified",
+    assert.ok(p.sectorAuditRevert("NEWBOTCO").ok && S.classify("NEWBOTCO", "xyz").assetClass === "Unclassified",
       "and revertable like every overlay entry");
   } finally { S.setSectorOverlay([]); p.stop && p.stop(); }
 });

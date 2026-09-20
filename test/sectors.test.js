@@ -148,7 +148,8 @@ test("-04 classify(): the industry layer rides on top of GICS, fallback ind===se
   assert.equal(S.classify("OPENAI").ind, "AI Software");
   assert.equal(S.classify("SPCX").ind, "Aero/Defense");
   // Fallbacks: an unsplit equity, an index, FX, a commodity, the unknown — ind ALWAYS === sector.
-  for (const t of ["CAT", "SPX", "EURUSD", "XAU", "TOTALLYUNKNOWN"]) {
+  // (CAT joined the Machinery group in the 2026-09-20 audit; PLD is the unsplit-equity example now.)
+  for (const t of ["PLD", "SPX", "EURUSD", "XAU", "TOTALLYUNKNOWN"]) {
     const c = S.classify(t);
     assert.equal(c.ind, c.sector, t + ": no curated industry means ind falls back to sector, never undefined");
   }
@@ -188,4 +189,66 @@ test("-04 IND table integrity: derived from the table, not pinned to it", () => 
     const c = S.classify(t);
     assert.notEqual(c.ind, c.sector, t + " must carry a curated industry distinct from Info Tech");
   }
+});
+
+
+// ===== 2026-09-20 roster audit ===================================================================
+// Both live universes as fetched that day, frozen here so the tables are audited against the tape
+// rather than against themselves. When a name below moves to the unknown list, or a new listing
+// lands in Unclassified/Other on the board, this is the test to extend — with a curated entry, or
+// with the name added to the "could not identify" set on purpose, never with a guess.
+const ROSTER_XYZ_20260920 = ["XYZ100", "TSLA", "NVDA", "GOLD", "HOOD", "INTC", "PLTR", "COIN", "META", "AAPL", "MSFT", "ORCL", "GOOGL", "AMZN", "AMD", "MU", "SNDK", "MSTR", "CRCL", "NFLX", "COST", "LLY", "SKHX", "TSM", "JPY", "EUR", "SILVER", "RIVN", "BABA", "CL", "COPPER", "NATGAS", "URANIUM", "ALUMINIUM", "SMSN", "PLATINUM", "USAR", "CRWV", "URNM", "PALLADIUM", "DXY", "GME", "KR200", "SOFTBANK", "JP225", "HYUNDAI", "KIOXIA", "EWY", "EWJ", "BRENTOIL", "VIX", "HIMS", "SP500", "DKNG", "LITE", "CORN", "XLE", "WHEAT", "TTF", "BX", "PURRDAT", "MRVL", "RKLB", "BIRD", "VOL", "DRAM", "CBRS", "EWZ", "KRW", "ZM", "EBAY", "H100", "NIFTY", "ARM", "EWT", "GBP", "SPCX", "IBOV", "ASML", "MINIMAX", "BB", "QNT", "DELL", "IBM", "AVGO", "NOW", "NBIS", "WDC", "NOK", "SMH", "BE", "ZHIPU", "QCOM", "STRC", "BOT", "AMAT", "IBIDEN", "GIGADEV", "SHAZ", "SKHY", "KSTR", "CXMT", "GEV", "KORU", "UNITREE", "LYTE", "NCLD", "SOXL", "MAGS", "IREN", "NET", "CRWD", "RDDT", "AAOI", "MRNA", "XBI", "SHEIN", "YMTC", "BMNR", "SNXX", "CVX", "TLT", "HO"];
+const ROSTER_MAIN_TOP90_20260920 = ["BTC", "ETH", "ZEC", "HYPE", "SOL", "NEAR", "XRP", "ENA", "AVAX", "UNI", "LIT", "kPEPE", "CASHCAT", "XMR", "PUMP", "VVV", "ARB", "TAO", "PONS", "SUI", "FARTCOIN", "ONDO", "XPL", "DOGE", "INJ", "WLD", "STRK", "LINK", "CRV", "AAVE", "FIL", "BNB", "USELESS", "ADA", "JTO", "ETHFI", "TRUMP", "LTC", "MON", "HBAR", "AR", "MORPHO", "JUP", "AERO", "GRAM", "PENDLE", "ZRO", "TRX", "kBONK", "BERA", "ALGO", "WIF", "ICP", "ASTER", "CHIP", "APT", "DASH", "PURR", "BCH", "PENGU", "XLM", "LDO", "OP", "FET", "VIRTUAL", "SPX", "SAGA", "SEI", "ZEN", "kSHIB", "DOT", "MEGA", "CAKE", "ACE", "STX", "TIA", "S", "MNT", "ZK", "0G", "MET", "GRASS", "RENDER", "HEMI", "RESOLV", "AZTEC", "SYRUP", "EIGEN", "CC", "NIL"];
+// Names the audit could not identify with confidence. Left Unclassified/Other by design: the
+// weekly sector audit keeps flagging them, and the operator classifies them from the admin
+// panel (the overlay) once known. Do not "fix" this list by guessing.
+const UNKNOWN_XYZ_20260920 = new Set(["SHAZ", "KSTR", "LYTE", "NCLD", "SNXX"]);
+const UNKNOWN_MAIN_20260920 = new Set(["CHIP", "MET", "CC"]);
+
+test("roster 2026-09-20: every live xyz name classifies except the five the audit could not identify", () => {
+  const S = require("../src/sectors");
+  const un = ROSTER_XYZ_20260920.filter((t) => S.classify(t, "xyz").assetClass === "Unclassified");
+  assert.deepEqual(new Set(un), UNKNOWN_XYZ_20260920, "unclassified xyz names drifted: " + un.join(" "));
+  // Every classified live name also carries a label — a bare ticker in the drawer head is a gap.
+  const noName = ROSTER_XYZ_20260920.filter((t) => !UNKNOWN_XYZ_20260920.has(t) && !S.displayName(t, "xyz") && !["PURRDAT", "QNT"].includes(t));
+  assert.deepEqual(noName, [], "classified xyz names without a display name: " + noName.join(" "));
+  // The listings this audit added, checked one by one.
+  const c = (t) => S.classify(t, "xyz");
+  assert.deepEqual([c("SKHY").sector, c("SKHY").ind, S.homeAdr("SKHY")], ["Information Technology", "Memory/Storage", "KR"], "SK hynix's US ADR beside the KRX line");
+  for (const t of ["GIGADEV", "CXMT", "YMTC"]) assert.equal(c(t).ind, "Memory/Storage", t + " joins the memory complex");
+  assert.deepEqual([c("UNITREE").sector, c("UNITREE").ind], ["Industrials", "Robotics"]);
+  assert.deepEqual([c("IREN").sector, c("IREN").ind], ["Information Technology", "AI Infra"]);
+  assert.deepEqual([c("RDDT").sector, c("RDDT").ind], ["Communication Services", "Social/Gaming"]);
+  assert.deepEqual([c("AAOI").sector, c("AAOI").ind], ["Information Technology", "Hardware"]);
+  assert.deepEqual([c("BMNR").sector, c("BMNR").ind], ["Financials", "Crypto-Fi"]);
+  assert.deepEqual([c("SHEIN").assetClass, c("SHEIN").ind], ["Pre-IPO", "Apparel"], "listing status unconfirmed: synthetic until graduated");
+  assert.deepEqual([c("SOXL").assetClass, c("SOXL").ind], ["ETF", "Semiconductors"]);
+  assert.deepEqual([c("MAGS").assetClass, c("MAGS").ind], ["ETF", "Mega Platforms"]);
+  assert.deepEqual([c("XBI").sector, c("XBI").ind], ["Health Care", "Biotech"]);
+  assert.deepEqual([c("KORU").assetClass, c("KORU").sector], ["ETF", "Index"], "a leveraged region fund groups with the region funds");
+  assert.equal(c("HO").sector, "Commodity");
+  // Rates: a duration trade is neither an index nor a sector fund — its own class, like FX and Commodity.
+  assert.deepEqual(c("TLT"), { assetClass: "Rates", sector: "Rates", ind: "Rates" });
+  assert.ok(S.macroLane("TLT", "xyz"), "the long bond has a news lane");
+  // The fallback clusters the audit closed: machinery and regulated power.
+  for (const t of ["CAT", "DE", "ETN", "HON", "MMM"]) assert.equal(c(t).ind, "Machinery");
+  for (const t of ["NEE", "DUK", "SO", "ES"]) assert.equal(c(t).ind, "Regulated Power");
+  assert.equal(c("ABT").ind, "MedTech");
+});
+
+test("roster 2026-09-20: the crypto lane's top 90 by volume all carry a sector except the three unknowns; k-units resolve to their coin", () => {
+  const S = require("../src/sectors");
+  const other = ROSTER_MAIN_TOP90_20260920.filter((t) => S.classify(t, "main").sector === "Other");
+  assert.deepEqual(new Set(other), UNKNOWN_MAIN_20260920, "main-dex names in Other drifted: " + other.join(" "));
+  const noName = ROSTER_MAIN_TOP90_20260920.filter((t) => !UNKNOWN_MAIN_20260920.has(t) && !S.displayName(t, "main"));
+  assert.deepEqual(noName, [], "crypto names without a label: " + noName.join(" "));
+  // Privacy coins are a cluster of their own now (ZEC was #3 by volume on the audit day).
+  for (const t of ["ZEC", "XMR", "DASH", "ZEN", "AZTEC"]) assert.equal(S.classify(t, "main").sector, "Privacy");
+  // 1000x units: the listing's unit, the coin's sector and name.
+  assert.equal(S.classify("kPEPE", "main").sector, "Meme");
+  assert.equal(S.classify("kSHIB", "main").sector, "Meme");
+  assert.equal(S.displayName("kBONK", "main"), "Bonk (1000\u00d7 unit)");
+  assert.equal(S.classify("KAS", "main").sector, "L1", "a coin that merely starts with K is not a k-unit");
+  assert.equal(S.classify("kNOSUCH", "main").sector, "Other", "an unknown base stays Other");
+  assert.equal(S.displayName("kNOSUCH", "main"), null);
 });
