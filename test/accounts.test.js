@@ -2,34 +2,51 @@
 // accounts.js — identity, invites, messages. Split out of test.js (build 2026.09.16-80); order within the file is the original order.
 const test = require("node:test");
 const assert = require("node:assert");
-const { HOUR, C, freshAccounts, seedTwo, seedDesk } = require("./_shared");
+const { HOUR, C, freshAccounts } = require("./_shared");
+
+// The account-creating fixtures live here now, not in _shared.js: hashPw runs on the threadpool
+// (security batch 2026.09.20), so bootstrap/redeem/claim/login/setPassword/otpVerify are async and
+// every seed has to be awaited. TODO(_shared.js owner): seedTwo/seedDesk there are the pre-async
+// copies and nothing imports them any more — delete them or make them await these calls.
+async function seedTwo(A) {
+  const g = await A.bootstrap("gustavo", "correct-horse-battery");
+  const code = A.mintInvite(g.user.uid, "for lena", 7, "join").invite.code;
+  const l = await A.redeem(code, "lena", "another-long-password");
+  return { g: g.user, l: l.user, gTok: g.token, lTok: l.token };
+}
+async function seedDesk(marks) {
+  const A = freshAccounts(marks);
+  const g = (await A.bootstrap("gus", "correct-horse-battery")).user;
+  const mk = async (h) => (await A.redeem(A.mintInvite(g.uid, null, 7, "join").invite.code, h, "another-long-password")).user;
+  return { A, g, l: await mk("lena"), m: await mk("marco"), d: await mk("dan") };
+}
 
 
-test("accounts: the first account is the operator, and bootstrap closes behind it", () => {
+test("accounts: the first account is the operator, and bootstrap closes behind it", async () => {
   const A = freshAccounts();
   assert.equal(A.countUsers(), 0, "a fresh volume has no accounts");
-  const first = A.bootstrap("gustavo", "correct-horse-battery");
+  const first = await A.bootstrap("gustavo", "correct-horse-battery");
   assert.ok(first.ok && first.user.isAdmin, "account #1 is the operator — otherwise a fresh deploy has nobody who can invite");
-  assert.ok(!A.bootstrap("someone", "correct-horse-battery").ok, "bootstrap must refuse once any account exists");
+  assert.ok(!(await A.bootstrap("someone", "correct-horse-battery")).ok, "bootstrap must refuse once any account exists");
   // Handle rules: the identity is lowercase, the display keeps what was typed, reserved names are out.
   const code = A.mintInvite(first.user.uid, null, 7, "join").invite.code;
-  assert.ok(!A.redeem(code, "Admin", "another-long-password").ok, "reserved handles are refused — 'admin' in a DM list is a phishing surface");
-  assert.ok(!A.redeem(code, "x", "another-long-password").ok, "a one-character handle is refused");
-  assert.ok(!A.redeem(code, "lena", "short").ok, "a short password is refused");
+  assert.ok(!(await A.redeem(code, "Admin", "another-long-password")).ok, "reserved handles are refused — 'admin' in a DM list is a phishing surface");
+  assert.ok(!(await A.redeem(code, "x", "another-long-password")).ok, "a one-character handle is refused");
+  assert.ok(!(await A.redeem(code, "lena", "short")).ok, "a short password is refused");
   assert.equal(A.readInvite(code).state, "open", "a REFUSED attempt must not burn the invite — otherwise a typo costs a link");
-  const good = A.redeem(code, "Lena", "another-long-password");
+  const good = await A.redeem(code, "Lena", "another-long-password");
   assert.ok(good.ok && good.user.display === "Lena" && good.user.handle === "lena",
     "display keeps its case, the handle is the lowercase identity");
 });
 
-test("invites: single-use is enforced by the write, not the check", () => {
+test("invites: single-use is enforced by the write, not the check", async () => {
   const A = freshAccounts();
-  const g = A.bootstrap("gustavo", "correct-horse-battery");
+  const g = await A.bootstrap("gustavo", "correct-horse-battery");
   const code = A.mintInvite(g.user.uid, "for lena", 7, "join").invite.code;
   // Both callers read `usedBy IS NULL` before either writes — which is exactly the race the
   // transaction exists for. The second must lose, and must lose with a message, not a crash.
-  assert.ok(A.redeem(code, "lena", "another-long-password").ok);
-  const second = A.redeem(code, "marco", "another-long-password");
+  assert.ok((await A.redeem(code, "lena", "another-long-password")).ok);
+  const second = await A.redeem(code, "marco", "another-long-password");
   assert.ok(!second.ok && /already been used/.test(second.error), "the loser gets 'already used', not a duplicate account");
   assert.equal(A.countUsers(), 2, "exactly one account came out of one invite");
   assert.equal(A.readInvite(code).state, "used");
@@ -39,7 +56,7 @@ test("invites: single-use is enforced by the write, not the check", () => {
   const dead = A.mintInvite(g.user.uid, null, 7, "join").invite.code;
   assert.ok(A.revokeInvite(dead).ok);
   assert.equal(A.readInvite(dead).state, "revoked");
-  assert.ok(!A.redeem(dead, "zed", "another-long-password").ok, "a revoked link stops working immediately");
+  assert.ok(!(await A.redeem(dead, "zed", "another-long-password")).ok, "a revoked link stops working immediately");
   assert.ok(!A.revokeInvite(code).ok, "an already-spent invite cannot be revoked");
   assert.ok(A.listInvites().length >= 2, "spent and revoked rows are kept as the audit trail");
 });
@@ -54,28 +71,28 @@ test("invites: a code survives being read down a phone line", () => {
   assert.equal(normCode("nonsense"), "", "a malformed code is rejected, not guessed at");
 });
 
-test("accounts: an invite adopts the browser's existing alert handle as the uid", () => {
+test("accounts: an invite adopts the browser's existing alert handle as the uid", async () => {
   // This is the whole migration. Every alert recipient and every alert rule is keyed by the signed
   // xyzown handle; reusing it as the account id carries them across with no rewrite at all. Get
   // this wrong and every early member silently loses their Telegram links.
   const A = freshAccounts();
-  const g = A.bootstrap("gustavo", "correct-horse-battery");
+  const g = await A.bootstrap("gustavo", "correct-horse-battery");
   const code = A.mintInvite(g.user.uid, null, 7, "join").invite.code;
   const PRIOR = "aLegacyOwnerHandle";
-  const r = A.redeem(code, "lena", "another-long-password", PRIOR);
+  const r = await A.redeem(code, "lena", "another-long-password", PRIOR);
   assert.ok(r.ok && r.adopted, "redeem reports that it carried the handle over");
   assert.equal(r.user.uid, PRIOR, "the uid IS the old handle — nothing to migrate");
 
   // But never at the cost of colliding with an account that already holds it.
   const code2 = A.mintInvite(g.user.uid, null, 7, "join").invite.code;
-  const r2 = A.redeem(code2, "marco", "another-long-password", PRIOR);
+  const r2 = await A.redeem(code2, "marco", "another-long-password", PRIOR);
   assert.ok(r2.ok && r2.user.uid !== PRIOR, "a taken handle falls back to a fresh id instead of colliding");
 });
 
-test("sessions: the epoch field is the whole revocation story", () => {
+test("sessions: the epoch field is the whole revocation story", async () => {
   const A = freshAccounts();
-  const { l } = seedTwo(A);
-  const tok = A.login("lena", "another-long-password").token;
+  const { l } = await seedTwo(A);
+  const tok = (await A.login("lena", "another-long-password")).token;
   assert.ok(A.sessionUser(tok), "a fresh token verifies");
   assert.equal(A.sessionUser(tok.slice(0, -2) + "xy"), null, "a tampered mac is refused");
   assert.equal(A.sessionUser("nonsense"), null, "garbage is refused");
@@ -83,29 +100,29 @@ test("sessions: the epoch field is the whole revocation story", () => {
 
   A.signOutEverywhere(l.uid);
   assert.equal(A.sessionUser(tok), null, "signing out everywhere kills outstanding tokens — stateless, but revocable");
-  const tok2 = A.login("lena", "another-long-password").token;
+  const tok2 = (await A.login("lena", "another-long-password")).token;
   assert.ok(A.sessionUser(tok2), "and a fresh sign-in works immediately after");
 
   A.setDisabled(l.uid, true);
   assert.equal(A.sessionUser(tok2), null, "a disabled account's live sessions stop verifying");
-  assert.ok(!A.login("lena", "another-long-password").ok, "and it cannot sign back in");
+  assert.ok(!(await A.login("lena", "another-long-password")).ok, "and it cannot sign back in");
   A.setDisabled(l.uid, false);
-  assert.ok(A.login("lena", "another-long-password").ok, "re-enabling restores it");
+  assert.ok((await A.login("lena", "another-long-password")).ok, "re-enabling restores it");
 
   // Changing a password must invalidate everything else, or it is not a reset.
-  const before = A.login("lena", "another-long-password").token;
-  A.setPassword(l.uid, "brand-new-password-9");
+  const before = (await A.login("lena", "another-long-password")).token;
+  await A.setPassword(l.uid, "brand-new-password-9");
   assert.equal(A.sessionUser(before), null, "a password change signs out every other device");
-  assert.ok(!A.login("lena", "another-long-password").ok, "the old password is dead");
-  assert.ok(A.login("lena", "brand-new-password-9").ok, "the new one works");
+  assert.ok(!(await A.login("lena", "another-long-password")).ok, "the old password is dead");
+  assert.ok((await A.login("lena", "brand-new-password-9")).ok, "the new one works");
 });
 
-test("rename: display only — every surface follows, the sign-in handle never moves", () => {
+test("rename: display only — every surface follows, the sign-in handle never moves", async () => {
   const A = freshAccounts();
-  const { g, l } = seedTwo(A);
+  const { g, l } = await seedTwo(A);
   const T = A.threadFor(g.uid, l.uid, true).id;
   A.send(l.uid, null, "call me maybe", null, { thread: T });
-  const tok = A.login("lena", "another-long-password").token;
+  const tok = (await A.login("lena", "another-long-password")).token;
 
   assert.ok(!A.renameUser(l.uid, "admin").ok, "reserved names stay reserved, display or not");
   assert.ok(!A.renameUser(l.uid, "Gustavo").ok, "another member's handle is not available as a display");
@@ -122,25 +139,25 @@ test("rename: display only — every surface follows, the sign-in handle never m
   assert.equal(A.history(g.uid, T).messages.find((m) => !m.sys && !m.mine).sender, "El Vaquero 🤠",
     "old messages attribute to the new display — names resolve at read, never stored");
   assert.equal(A.threads(g.uid).find((t) => t.id === T).name, "El Vaquero 🤠", "the conversation retitles for the other side");
-  assert.ok(A.login("lena", "another-long-password").ok, "she still signs in as lena, same password");
+  assert.ok((await A.login("lena", "another-long-password")).ok, "she still signs in as lena, same password");
 });
 
-test("revocation costs nobody else anything", () => {
+test("revocation costs nobody else anything", async () => {
   // The point of the whole exercise. Under the shared password, removing one person meant rotating
   // SITE_PASSWORD — which also re-derived OWNER_SECRET and orphaned EVERY member's alert links.
   const A = freshAccounts();
-  const { g, l } = seedTwo(A);
-  const gTok = A.login("gustavo", "correct-horse-battery").token;
+  const { g, l } = await seedTwo(A);
+  const gTok = (await A.login("gustavo", "correct-horse-battery")).token;
   A.setDisabled(l.uid, true);
   assert.ok(A.sessionUser(gTok), "disabling one member leaves everyone else signed in");
   assert.equal(A.getUser(g.uid).epoch, 1, "and does not touch anybody else's epoch");
 });
 
-test("messages: a message carries the mark it was sent at", () => {
+test("messages: a message carries the mark it was sent at", async () => {
   // The one thing Telegram cannot do, and the reason this tab exists at all.
   const marks = { PLTR: 113.9 };
   const A = freshAccounts(marks);
-  const { g, l } = seedTwo(A);
+  const { g, l } = await seedTwo(A);
   const resolve = (sym) => (marks[sym] ? sym : null);
   const sent = A.send(g.uid, l.uid, "funding on $PLTR just flipped hard", resolve);
   assert.ok(sent.ok);
@@ -165,10 +182,10 @@ test("messages: a message carries the mark it was sent at", () => {
   assert.equal(A.send(g.uid, l.uid, "it cost $5", resolve).message.ref, null, "a dollar amount is not a ticker");
 });
 
-test("messages: a thread belongs to exactly two people and nobody else", () => {
+test("messages: a thread belongs to exactly two people and nobody else", async () => {
   const A = freshAccounts();
-  const { g, l } = seedTwo(A);
-  const m = A.redeem(A.mintInvite(g.uid, null, 7, "join").invite.code, "marco", "another-long-password").user;
+  const { g, l } = await seedTwo(A);
+  const m = (await A.redeem(A.mintInvite(g.uid, null, 7, "join").invite.code, "marco", "another-long-password")).user;
   const sent = A.send(g.uid, l.uid, "between us");
   const tid = sent.thread;
 
@@ -184,9 +201,9 @@ test("messages: a thread belongs to exactly two people and nobody else", () => {
   assert.ok(!A.send(g.uid, g.uid, "hello me").ok, "cannot message yourself");
 });
 
-test("messages: delete is a tombstone, because the id is the other side's cursor", () => {
+test("messages: delete is a tombstone, because the id is the other side's cursor", async () => {
   const A = freshAccounts();
-  const { g, l } = seedTwo(A);
+  const { g, l } = await seedTwo(A);
   const a = A.send(g.uid, l.uid, "first");
   const b = A.send(g.uid, l.uid, "second");
   A.drop(g.uid, a.id);
@@ -196,9 +213,9 @@ test("messages: delete is a tombstone, because the id is the other side's cursor
   assert.equal(seen[1].id, b.id);
 });
 
-test("messages: the sync cursor is authoritative, so a dropped frame costs nothing", () => {
+test("messages: the sync cursor is authoritative, so a dropped frame costs nothing", async () => {
   const A = freshAccounts();
-  const { g, l } = seedTwo(A);
+  const { g, l } = await seedTwo(A);
   A.send(g.uid, l.uid, "one"); A.send(g.uid, l.uid, "two");
   const first = A.sync(l.uid, 0);
   assert.equal(first.messages.length, 2);
@@ -208,9 +225,9 @@ test("messages: the sync cursor is authoritative, so a dropped frame costs nothi
   assert.equal(A.sync(l.uid, first.cursor).messages.length, 1, "a client that missed a push catches up from its own cursor");
 });
 
-test("messages: unread counting, and a read cursor that cannot run into the future", () => {
+test("messages: unread counting, and a read cursor that cannot run into the future", async () => {
   const A = freshAccounts();
-  const { g, l } = seedTwo(A);
+  const { g, l } = await seedTwo(A);
   A.send(g.uid, l.uid, "one"); A.send(g.uid, l.uid, "two");
   assert.equal(A.threads(l.uid)[0].unread, 2, "the recipient has two unread");
   assert.equal(A.threads(g.uid)[0].unread, 0, "your own messages are read by definition");
@@ -223,9 +240,9 @@ test("messages: unread counting, and a read cursor that cannot run into the futu
   assert.equal(A.threads(l.uid)[0].unread, 1, "a read receipt for the future must not suppress real messages");
 });
 
-test("messages: escalation waits, skips whoever is online, and never repeats", () => {
+test("messages: escalation waits, skips whoever is online, and never repeats", async () => {
   const A = freshAccounts();
-  const { g, l } = seedTwo(A);
+  const { g, l } = await seedTwo(A);
   A.send(g.uid, l.uid, "are you there");
   const nobodyOnline = () => false;
 
@@ -258,9 +275,9 @@ test("messages: bodies are cleaned at the write and never stored pre-escaped", (
   assert.equal(cleanBody("<b>not markup</b>"), "<b>not markup</b>", "markup is stored verbatim, escaped by the renderer");
 });
 
-test("topic boards: open threads anyone can discover, join and post in", () => {
+test("topic boards: open threads anyone can discover, join and post in", async () => {
   const A = freshAccounts({ "xyz:HOOD": 113.2 });
-  const { g, l } = seedTwo(A);
+  const { g, l } = await seedTwo(A);
 
   const b = A.createBoard(g.uid, "  HOOD   thesis  ");
   assert.ok(b.ok, "the operator opens a topic");
@@ -288,8 +305,8 @@ test("topic boards: open threads anyone can discover, join and post in", () => {
   assert.ok(!A.joinBoard(g.uid, dm.id).ok, "joinBoard refuses anything that is not a board");
 });
 
-test("groups: membership is a table, and it is the authorization", () => {
-  const { A, g, l, m, d } = seedDesk();
+test("groups: membership is a table, and it is the authorization", async () => {
+  const { A, g, l, m, d } = await seedDesk();
   const T = A.createGroup(g.uid, "  Desk   Chat ", [l.uid, m.uid]).thread;
   assert.equal(A.history(g.uid, T).info.title, "Desk Chat", "whitespace in a title is normalised at the write");
   assert.ok(!A.createGroup(g.uid, "alone", []).ok, "a group needs somebody else in it");
@@ -307,8 +324,8 @@ test("groups: membership is a table, and it is the authorization", () => {
   assert.ok(A.sync(m.uid, 0).messages.some((x) => x.id === sent.id), "every member receives it");
 });
 
-test("groups: only the owner manages, and ownership is never stranded", () => {
-  const { A, g, l, m, d } = seedDesk();
+test("groups: only the owner manages, and ownership is never stranded", async () => {
+  const { A, g, l, m, d } = await seedDesk();
   const T = A.createGroup(g.uid, "Desk", [l.uid, m.uid]).thread;
   assert.ok(!A.addMembers(l.uid, T, [d.uid]).ok, "a member cannot add");
   assert.ok(!A.removeMember(l.uid, T, m.uid).ok, "a member cannot remove");
@@ -337,8 +354,8 @@ test("groups: only the owner manages, and ownership is never stranded", () => {
   assert.ok(!A.renameGroup(g.uid, A.threadFor(g.uid, l.uid, true).id, "no").ok, "a direct message is not a group");
 });
 
-test("reactions: a fixed vocabulary, and it names who", () => {
-  const { A, g, l, m } = seedDesk();
+test("reactions: a fixed vocabulary, and it names who", async () => {
+  const { A, g, l, m } = await seedDesk();
   const s = A.send(g.uid, l.uid, "the print was ugly");
   const r = A.react(l.uid, s.id, "\u{1F44D}");
   assert.ok(r.ok, r.error);
@@ -353,8 +370,8 @@ test("reactions: a fixed vocabulary, and it names who", () => {
   assert.ok(!A.react(m.uid, s.id, "\u{1F44D}").ok, "somebody outside the thread cannot react to it");
 });
 
-test("attachments: the type comes from OUR sniff, and svg never renders inline", () => {
-  const { A, g, l, m } = seedDesk();
+test("attachments: the type comes from OUR sniff, and svg never renders inline", async () => {
+  const { A, g, l, m } = await seedDesk();
   const T = A.threadFor(g.uid, l.uid, true).id;
   const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4E, 0x47, 13, 10, 26, 10]), Buffer.alloc(32)]);
 
@@ -406,8 +423,8 @@ test("attachments: the type comes from OUR sniff, and svg never renders inline",
     "deleting a message takes its attachment off the wire with it");
 });
 
-test("search: the scope is the authorization", () => {
-  const { A, g, l, m } = seedDesk();
+test("search: the scope is the authorization", async () => {
+  const { A, g, l, m } = await seedDesk();
   A.send(g.uid, l.uid, "the funding print was ugly");
   A.send(g.uid, m.uid, "a different conversation entirely");
   assert.equal(A.search(l.uid, "funding").results.length, 1, "finds your own messages");
@@ -426,8 +443,8 @@ test("search: the scope is the authorization", () => {
   assert.equal(A.search(l.uid, "forget I said").results.length, 0, "a deleted message is not searchable");
 });
 
-test("the telegram bridge is command-only, and cannot reach a thread you left", () => {
-  const { A, g, l, m } = seedDesk();
+test("the telegram bridge is command-only, and cannot reach a thread you left", async () => {
+  const { A, g, l, m } = await seedDesk();
   const T = A.createGroup(g.uid, "Desk", [l.uid, m.uid]).thread;
   const dm = A.threadFor(g.uid, l.uid, true).id;
 
@@ -464,9 +481,10 @@ test("the pair schema migrates onto the membership table without losing a conver
     CREATE TABLE dm_read (thread INTEGER NOT NULL, uid TEXT NOT NULL, readMsgId INTEGER NOT NULL DEFAULT 0,
       muted INTEGER NOT NULL DEFAULT 0, notifiedMsgId INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (thread, uid)) STRICT, WITHOUT ROWID;`);
   const now = Date.now();
-  const { hashPw } = require("../src/accounts");
+  // Rows built the old way, hashed the old way: hashPwSync is the pre-async hasher, byte-identical.
+  const { hashPwSync } = require("../src/accounts");
   for (const [uid, h] of [["uidA", "ann"], ["uidB", "bo"]])
-    db.prepare("INSERT INTO user (uid, handle, display, pw, createdAt) VALUES (?,?,?,?,?)").run(uid, h, h, hashPw("another-long-password"), now);
+    db.prepare("INSERT INTO user (uid, handle, display, pw, createdAt) VALUES (?,?,?,?,?)").run(uid, h, h, hashPwSync("another-long-password"), now);
   db.prepare("INSERT INTO dm_thread (a, b, createdAt, lastMsgId, lastAt) VALUES (?,?,?,?,?)").run("uidB", "uidA", now, 1, now);
   db.prepare("INSERT INTO dm_msg (thread, sender, ts, body) VALUES (1,'uidA',?, 'said before the migration')").run(now);
   db.close();
@@ -486,10 +504,10 @@ test("the pair schema migrates onto the membership table without losing a conver
 // No mail server exists here and adding one for a ten-person desk is not worth it — but the
 // Telegram outbox already does delivery, with recipients, quiet hours and caps. These cover the
 // half that is ours: issuing, throttling, and refusing.
-test("reset codes: issued, single-use, and they sign out every other device", () => {
+test("reset codes: issued, single-use, and they sign out every other device", async () => {
   // Each concern gets its own account: three sends an hour is a real ceiling, and sharing one
   // account across the assertions would spend it before the interesting ones ran.
-  const { A, l, m, d } = seedDesk();
+  const { A, l, m, d } = await seedDesk();
   const r = A.otpRequest("lena");
   assert.ok(r.sent && /^\d{6}$/.test(r.code), "a six-digit code is issued");
   assert.equal(r.uid, l.uid, "bound to the account, not to whatever the form says later");
@@ -498,26 +516,26 @@ test("reset codes: issued, single-use, and they sign out every other device", ()
   // One live code per account: asking again replaces the last one, so a stale code sitting in
   // somebody's chat history stops working the moment a new one is requested.
   const first = A.otpRequest("dan"), second = A.otpRequest("dan");
-  assert.ok(!A.otpVerify("dan", first.code, "brand-new-password-1").ok, "the superseded code is dead");
-  const done = A.otpVerify("dan", second.code, "brand-new-password-1");
+  assert.ok(!(await A.otpVerify("dan", first.code, "brand-new-password-1")).ok, "the superseded code is dead");
+  const done = await A.otpVerify("dan", second.code, "brand-new-password-1");
   assert.ok(done.ok, done.error);
-  assert.ok(!A.login("dan", "another-long-password").ok, "the old password is gone");
-  assert.ok(A.login("dan", "brand-new-password-1").ok, "the new one works");
-  assert.ok(!A.otpVerify("dan", second.code, "brand-new-password-2").ok, "and the code is burned");
+  assert.ok(!(await A.login("dan", "another-long-password")).ok, "the old password is gone");
+  assert.ok((await A.login("dan", "brand-new-password-1")).ok, "the new one works");
+  assert.ok(!(await A.otpVerify("dan", second.code, "brand-new-password-2")).ok, "and the code is burned");
 
-  const tok = A.login("marco", "another-long-password").token;
+  const tok = (await A.login("marco", "another-long-password")).token;
   const again = A.otpRequest("marco");
   assert.ok(again.sent, "marco still has sends left");
-  A.otpVerify("marco", again.code, "brand-new-password-3");
+  await A.otpVerify("marco", again.code, "brand-new-password-3");
   assert.equal(A.sessionUser(tok), null, "a reset that leaves the old sessions alive is not a reset");
 });
 
-test("reset codes: a six-digit secret needs the ceilings around it", () => {
-  const { A } = seedDesk();
+test("reset codes: a six-digit secret needs the ceilings around it", async () => {
+  const { A } = await seedDesk();
   // 1e6 is small. The attempt ceiling is what makes it safe, not the length.
   const c = A.otpRequest("lena");
-  for (let i = 0; i < 5; i++) assert.ok(!A.otpVerify("lena", "000000", "brand-new-password-1").ok);
-  assert.ok(!A.otpVerify("lena", c.code, "brand-new-password-1").ok,
+  for (let i = 0; i < 5; i++) assert.ok(!(await A.otpVerify("lena", "000000", "brand-new-password-1")).ok);
+  assert.ok(!(await A.otpVerify("lena", c.code, "brand-new-password-1")).ok,
     "five wrong guesses kill the code, even though the sixth attempt is correct");
 
   let sent = 0;
@@ -531,37 +549,37 @@ test("reset codes: a six-digit secret needs the ceilings around it", () => {
     "an unknown handle answers exactly as a known one does");
   assert.ok(!ghost.code, "and no code comes back for it");
 
-  const dis = seedDesk().A; const disabled = dis.getUserByHandle("lena");
+  const dis = (await seedDesk()).A; const disabled = dis.getUserByHandle("lena");
   dis.setDisabled(disabled.uid, true);
   assert.ok(!dis.otpRequest("lena").sent, "a disabled account cannot request a code");
-  assert.ok(!dis.otpVerify("lena", "123456", "brand-new-password-1").ok, "nor verify one");
+  assert.ok(!(await dis.otpVerify("lena", "123456", "brand-new-password-1")).ok, "nor verify one");
 });
 
-test("reset codes: expiry, and a typo in the password does not cost you the code", () => {
-  const { A, l } = seedDesk();
+test("reset codes: expiry, and a typo in the password does not cost you the code", async () => {
+  const { A, l } = await seedDesk();
   const c = A.otpRequest("lena");
   A._db.prepare("UPDATE otp SET expiresAt = ? WHERE uid = ?").run(Date.now() - 1, l.uid);
-  assert.ok(!A.otpVerify("lena", c.code, "brand-new-password-1").ok, "an expired code is refused");
+  assert.ok(!(await A.otpVerify("lena", c.code, "brand-new-password-1")).ok, "an expired code is refused");
 
   // The password is checked only after the code is proved, so a weak-password error cannot be used
   // to confirm a guessed code — and the code survives, because a short password is the user's own
   // typo rather than an attack.
   const c2 = A.otpRequest("lena");
-  const weak = A.otpVerify("lena", c2.code, "short");
+  const weak = await A.otpVerify("lena", c2.code, "short");
   assert.ok(!weak.ok && weak.field === "password", "a weak password is refused on its own terms");
   assert.equal(weak.codeOk, true, "and the caller is told the code was fine");
-  assert.ok(A.otpVerify("lena", c2.code, "brand-new-password-9").ok, "so the same code still works");
+  assert.ok((await A.otpVerify("lena", c2.code, "brand-new-password-9")).ok, "so the same code still works");
 });
 
 // ===== messages v3: the deletion fix, the calls record, watch, receipts, read-through ==========
-test("deleting a message takes its attachment with it", () => {
+test("deleting a message takes its attachment with it", async () => {
   // The first version nulled fileId on the message and stopped there, leaving the row AND the bytes
   // behind — and because the download route authorizes on thread membership rather than on a live
   // reference, anyone in the thread who still held the id could keep fetching the attachment of a
   // "deleted" message. Deleting is not a rendering change.
   const fs = require("fs"), path = require("path");
   const A = freshAccounts();
-  const { g, l } = seedTwo(A);
+  const { g, l } = await seedTwo(A);
   const T = A.threadFor(g.uid, l.uid, true).id;
   const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4E, 0x47, 13, 10, 26, 10]), Buffer.alloc(16)]);
   const f = A.putFile(g.uid, T, "chart.png", png).file;
@@ -577,10 +595,10 @@ test("deleting a message takes its attachment with it", () => {
   assert.ok(row && row.deleted && row.file === null, "the row survives as a tombstone, carrying no attachment");
 });
 
-test("abandoned uploads are swept, referenced ones never are", () => {
+test("abandoned uploads are swept, referenced ones never are", async () => {
   const fs = require("fs"), path = require("path");
   const A = freshAccounts();
-  const { g, l } = seedTwo(A);
+  const { g, l } = await seedTwo(A);
   const T = A.threadFor(g.uid, l.uid, true).id;
   const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4E, 0x47, 13, 10, 26, 10]), Buffer.alloc(16)]);
   const orphan = A.putFile(g.uid, T, "changed-my-mind.png", png).file;
@@ -596,10 +614,10 @@ test("abandoned uploads are swept, referenced ones never are", () => {
   assert.ok(on(used.id) && A.readFile(l.uid, used.id).ok, "a referenced file is never touched");
 });
 
-test("a watched ticker jumps the queue and pierces mute", () => {
+test("a watched ticker jumps the queue and pierces mute", async () => {
   const marks = { PLTR: 113.9 };
   const A = freshAccounts(marks);
-  const { g, l } = seedTwo(A);
+  const { g, l } = await seedTwo(A);
   const T = A.threadFor(g.uid, l.uid, true).id;
   const resolve = (x) => (marks[x] ? x : null);
   const nobody = () => false;
@@ -620,9 +638,9 @@ test("a watched ticker jumps the queue and pierces mute", () => {
     "but somebody with the terminal open is still not interrupted");
 });
 
-test("replies quote one level, inside their own conversation only", () => {
+test("replies quote one level, inside their own conversation only", async () => {
   const A = freshAccounts();
-  const { g, l } = seedTwo(A);
+  const { g, l } = await seedTwo(A);
   const T = A.threadFor(g.uid, l.uid, true).id;
   const orig = A.send(g.uid, null, "entry at 113.90, stop under 110", null, { thread: T });
 
@@ -633,7 +651,7 @@ test("replies quote one level, inside their own conversation only", () => {
 
   // A replyTo pointing outside the conversation is dropped, never an error and never a leak.
   const code = A.mintInvite(g.uid, null, 7, "join").invite.code;
-  const m = A.redeem(code, "marco", "another-long-password").user;
+  const m = (await A.redeem(code, "marco", "another-long-password")).user;
   const T2 = A.threadFor(g.uid, m.uid, true).id;
   const secret = A.send(g.uid, null, "private to marco", null, { thread: T2 });
   const cross = A.send(l.uid, null, "quoting across", null, { thread: T, replyTo: secret.id });
@@ -646,9 +664,9 @@ test("replies quote one level, inside their own conversation only", () => {
   assert.equal(read.reply.body, "", "and carries none of the deleted text");
 });
 
-test("an @mention does not wait out the delay and pierces a mute, like a watched ticker", () => {
+test("an @mention does not wait out the delay and pierces a mute, like a watched ticker", async () => {
   const A = freshAccounts();
-  const { g, l } = seedTwo(A);
+  const { g, l } = await seedTwo(A);
   const T = A.threadFor(g.uid, l.uid, true).id;
   const nobody = () => false;
 
@@ -665,9 +683,9 @@ test("an @mention does not wait out the delay and pierces a mute, like a watched
     "the mention is lena's, not everyone's");
 });
 
-test("close hides a conversation for you until somebody writes; clear forgets it for you alone", () => {
+test("close hides a conversation for you until somebody writes; clear forgets it for you alone", async () => {
   const A = freshAccounts();
-  const { g, l } = seedTwo(A);
+  const { g, l } = await seedTwo(A);
   const T = A.threadFor(g.uid, l.uid, true).id;
   A.send(g.uid, null, "first", null, { thread: T });
   A.send(l.uid, null, "second", null, { thread: T });
@@ -699,7 +717,7 @@ test("close hides a conversation for you until somebody writes; clear forgets it
   assert.equal(A.exportThread(l.uid, T).messages.length, 1, "her export honors the clear too");
 });
 
-test("tweet links: the id is spotted, the oEmbed answer parses, and the card rides the wire", () => {
+test("tweet links: the id is spotted, the oEmbed answer parses, and the card rides the wire", async () => {
   const { tweetLinkId, tweetFromOembed } = require("../src/compute");
   assert.equal(tweetLinkId("look https://x.com/zerohedge/status/1833629471000000000 wild"), "1833629471000000000");
   assert.equal(tweetLinkId("https://twitter.com/a_b/statuses/12345678"), "12345678", "old-form twitter.com works");
@@ -722,7 +740,7 @@ test("tweet links: the id is spotted, the oEmbed answer parses, and the card rid
 
   // The wire attachment: injected source, exactly like the price mark.
   const A = freshAccounts();
-  const { g, l } = seedTwo(A);
+  const { g, l } = await seedTwo(A);
   const T = A.threadFor(g.uid, l.uid, true).id;
   A.setTweetSource((body) => tweetLinkId(body) ? { ok: true, author: "zh", handle: "zh", text: "hi", when: "", url: "https://x.com/zh/status/9" } : null);
   const withLink = A.send(g.uid, null, "see https://x.com/zh/status/900001", null, { thread: T });
@@ -731,8 +749,8 @@ test("tweet links: the id is spotted, the oEmbed answer parses, and the card rid
   assert.equal(plain.message.tweet, null, "a plain message carries none");
 });
 
-test("deleting a group removes it for everyone; close never does", () => {
-  const { A, g, l, m } = seedDesk();
+test("deleting a group removes it for everyone; close never does", async () => {
+  const { A, g, l, m } = await seedDesk();
   const T = A.createGroup(g.uid, "shreddable", [l.uid, m.uid]).thread;
   A.send(l.uid, null, "this will vanish", null, { thread: T });
 
@@ -749,11 +767,11 @@ test("deleting a group removes it for everyone; close never does", () => {
   assert.ok(A.adminAuditLog(10).some((e) => e.action === "delete-group"), "the shredding itself is on the record");
 });
 
-test("the terminal operator can manage a group they are in without owning it", () => {
+test("the terminal operator can manage a group they are in without owning it", async () => {
   const A = freshAccounts();
-  const { g, l } = seedTwo(A);
+  const { g, l } = await seedTwo(A);
   const code = A.mintInvite(g.uid, null, 7, "join").invite.code;
-  const m = A.redeem(code, "marco", "another-long-password").user;
+  const m = (await A.redeem(code, "marco", "another-long-password")).user;
   // lena (not an admin) creates the group; gustavo (admin flag, first account) is a member.
   const grp = A.createGroup(l.uid, "desk", [g.uid]);
   assert.ok(!A.addMembers(g.uid, grp.thread, [m.uid]).ok, "a plain member cannot add");
@@ -762,9 +780,9 @@ test("the terminal operator can manage a group they are in without owning it", (
   assert.ok(!A.addMembers(m.uid, grp.thread, [m.uid], true).ok, "but only from inside: a non-member stays refused even asAdmin");
 });
 
-test("retention: 30 days for a 1-to-1, 7 for groups and topics, pins and priced calls exempt", () => {
+test("retention: 30 days for a 1-to-1, 7 for groups and topics, pins and priced calls exempt", async () => {
   const marks = { "xyz:HOOD": 113.2 };
-  const { A, g, l, m } = seedDesk(marks);
+  const { A, g, l, m } = await seedDesk(marks);
   const DM = A.threadFor(g.uid, l.uid, true).id;
   const GR = A.createGroup(g.uid, "desk", [l.uid, m.uid]).thread;
   const dmsg = A.send(g.uid, null, "dm line", null, { thread: DM });
@@ -803,8 +821,8 @@ test("retention: 30 days for a 1-to-1, 7 for groups and topics, pins and priced 
 // history resurfaced through the calls record and reply quotes, an edit re-derived the stamp it
 // promises not to touch, the bridge stamped raw symbols as dead refs, tombstoned calls were
 // retained forever, and the calls by-filter ran after the LIMIT.
-test("messages -65: sync never advances past undelivered messages, and says when to come back", () => {
-  const { A, g, l } = seedDesk();
+test("messages -65: sync never advances past undelivered messages, and says when to come back", async () => {
+  const { A, g, l } = await seedDesk();
   const dm = A.threadFor(g.uid, l.uid, true).id;
   for (let i = 0; i < 31; i++) A.send(i % 2 ? l.uid : g.uid, null, "m" + i, null, { thread: dm });
   let cursor = 0, got = 0, rounds = 0;
@@ -818,9 +836,9 @@ test("messages -65: sync never advances past undelivered messages, and says when
   assert.ok(got >= 31, "every message arrived through sync alone (got " + got + " in " + (rounds + 1) + " rounds)");
 });
 
-test("messages -65: cleared history stays cleared — calls record and reply quotes included", () => {
+test("messages -65: cleared history stays cleared — calls record and reply quotes included", async () => {
   const marks = { "xyz:HOOD": 113.2 };
-  const { A, g, l } = seedDesk(marks);
+  const { A, g, l } = await seedDesk(marks);
   const resolve = (s) => (marks["xyz:" + s] ? "xyz:" + s : null);
   const dm = A.threadFor(g.uid, l.uid, true).id;
   const call = A.send(g.uid, null, "long $HOOD 113.20", resolve, { thread: dm });
@@ -837,9 +855,9 @@ test("messages -65: cleared history stays cleared — calls record and reply quo
   assert.ok(his.reply.body.includes("long $HOOD"), "and intact for everyone else");
 });
 
-test("messages -65: the stamp is immutable under edit, and the bridge never stamps raw symbols", () => {
+test("messages -65: the stamp is immutable under edit, and the bridge never stamps raw symbols", async () => {
   const marks = { "xyz:HOOD": 113.2 };
-  const { A, g, l } = seedDesk(marks);
+  const { A, g, l } = await seedDesk(marks);
   const resolve = (s) => (marks["xyz:" + s] ? "xyz:" + s : null);
   const dm = A.threadFor(g.uid, l.uid, true).id;
   const call = A.send(g.uid, null, "long $HOOD here", resolve, { thread: dm });
@@ -856,9 +874,9 @@ test("messages -65: the stamp is immutable under edit, and the bridge never stam
   assert.equal(br.message.ref, null, "the bridge has no resolver — a $WORD stays plain text, never a dead ref");
 });
 
-test("messages -66: the record is delete-proof — a dropped call loses its body, never its score", () => {
+test("messages -66: the record is delete-proof — a dropped call loses its body, never its score", async () => {
   const marks = { "xyz:HOOD": 113.2 };
-  const { A, g, l } = seedDesk(marks);
+  const { A, g, l } = await seedDesk(marks);
   const resolve = (s) => (marks["xyz:" + s] ? "xyz:" + s : null);
   const dm = A.threadFor(g.uid, l.uid, true).id;
   const call = A.send(g.uid, null, "long $HOOD", resolve, { thread: dm });
@@ -877,9 +895,9 @@ test("messages -66: the record is delete-proof — a dropped call loses its body
     "while an ordinary tombstone ages out with its window");
 });
 
-test("messages -66: call direction — parsed at send, immutable, and the scoreboard scores the CALL", () => {
+test("messages -66: call direction — parsed at send, immutable, and the scoreboard scores the CALL", async () => {
   const marks = { "xyz:HOOD": 100 };
-  const { A, g, l } = seedDesk(marks);
+  const { A, g, l } = await seedDesk(marks);
   const resolve = (s) => (marks["xyz:" + s] ? "xyz:" + s : null);
   const dm = A.threadFor(g.uid, l.uid, true).id;
   const sh = A.send(g.uid, null, "short $HOOD into the print", resolve, { thread: dm });
@@ -907,8 +925,8 @@ test("messages -66: call direction — parsed at send, immutable, and the scoreb
   assert.equal(me.n, 4, "all four calls counted");
 });
 
-test("messages -66: search takes an optional thread scope — membership still the only authorization", () => {
-  const { A, g, l, m } = seedDesk();
+test("messages -66: search takes an optional thread scope — membership still the only authorization", async () => {
+  const { A, g, l, m } = await seedDesk();
   const dm = A.threadFor(g.uid, l.uid, true).id;
   const gr = A.createGroup(g.uid, "desk", [l.uid]).thread;
   A.send(g.uid, null, "needle in the dm", null, { thread: dm });
@@ -918,8 +936,8 @@ test("messages -66: search takes an optional thread scope — membership still t
   assert.equal(A.search(m.uid, "needle", 50, gr).results.length, 0, "a non-member's scope hands them nothing — the JOIN is the gate");
 });
 
-test("messages -66: web push subscriptions — stored per account, validated, dead endpoints dropped", () => {
-  const { A, g, l } = seedDesk();
+test("messages -66: web push subscriptions — stored per account, validated, dead endpoints dropped", async () => {
+  const { A, g, l } = await seedDesk();
   assert.ok(!A.webPushAdd(g.uid, { endpoint: "http://insecure/x", keys: { p256dh: "a", auth: "b" } }, "").ok, "plain-http endpoints are refused");
   assert.ok(!A.webPushAdd(g.uid, { endpoint: "https://push/x" }, "").ok, "keys are required");
   assert.ok(A.webPushAdd(g.uid, { endpoint: "https://push.svc/one", keys: { p256dh: "a", auth: "b" } }, "ua").ok);
@@ -932,9 +950,9 @@ test("messages -66: web push subscriptions — stored per account, validated, de
   assert.equal(A.webPushFor(g.uid).length, 0, "owner-drop and dead-drop both land");
 });
 
-test("messages -65: the calls by-filter runs in SQL, before the LIMIT", () => {
+test("messages -65: the calls by-filter runs in SQL, before the LIMIT", async () => {
   const marks = { "xyz:HOOD": 113.2 };
-  const { A, g, l } = seedDesk(marks);
+  const { A, g, l } = await seedDesk(marks);
   const resolve = (s) => (marks["xyz:" + s] ? "xyz:" + s : null);
   const dm = A.threadFor(g.uid, l.uid, true).id;
   const hers = A.send(l.uid, null, "early $HOOD call", resolve, { thread: dm });
@@ -945,9 +963,9 @@ test("messages -65: the calls by-filter runs in SQL, before the LIMIT", () => {
   assert.ok(r.calls.every((c) => c.senderUid === l.uid), "and only hers");
 });
 
-test("boards are quiet on Telegram by default — digests are the opt-in, mentions always land", () => {
+test("boards are quiet on Telegram by default — digests are the opt-in, mentions always land", async () => {
   const A = freshAccounts();
-  const { g, l } = seedTwo(A);
+  const { g, l } = await seedTwo(A);
   const B = A.createBoard(g.uid, "macro week").thread;
   A.joinBoard(l.uid, B);
   const nobody = () => false;
@@ -968,9 +986,9 @@ test("boards are quiet on Telegram by default — digests are the opt-in, mentio
     "and now the digest reaches her like a group's would");
 });
 
-test("read receipts, pins and export", () => {
+test("read receipts, pins and export", async () => {
   const A = freshAccounts();
-  const { g, l, } = seedTwo(A);
+  const { g, l, } = await seedTwo(A);
   const T = A.threadFor(g.uid, l.uid, true).id;
   const sent = A.send(g.uid, null, "did this land", null, { thread: T });
 
@@ -983,7 +1001,7 @@ test("read receipts, pins and export", () => {
 
   assert.ok(A.pin(g.uid, sent.id, true).ok);
   assert.equal(A.threads(g.uid).find((t) => t.id === T).pins, 1, "the pin count rides the thread list");
-  const m = A.redeem(A.mintInvite(g.uid, null, 7, "join").invite.code, "marco", "another-long-password").user;
+  const m = (await A.redeem(A.mintInvite(g.uid, null, 7, "join").invite.code, "marco", "another-long-password")).user;
   assert.ok(!A.pin(m.uid, sent.id, true).ok, "somebody outside the thread cannot pin into it");
   A.pin(g.uid, sent.id, false);
   assert.equal(A.pinsOf(T, g.uid).length, 0);
@@ -993,10 +1011,10 @@ test("read receipts, pins and export", () => {
   assert.ok(!A.exportThread(m.uid, T).ok, "an outsider cannot");
 });
 
-test("the calls record scores what the price stamp was for", () => {
+test("the calls record scores what the price stamp was for", async () => {
   const marks = { PLTR: 100, CRCL: 200 };
   const A = freshAccounts(marks);
-  const { g, l } = seedTwo(A);
+  const { g, l } = await seedTwo(A);
   const T = A.threadFor(g.uid, l.uid, true).id;
   const resolve = (x) => (marks[x] ? x : null);
   A.send(g.uid, null, "long $PLTR", resolve, { thread: T });
@@ -1017,17 +1035,17 @@ test("the calls record scores what the price stamp was for", () => {
   assert.ok(rec.summary.find((x) => x.who === "lena"), "everyone in the thread is scored");
   assert.ok(A.calls(g.uid, { by: l.uid }).calls.every((c) => c.senderUid === l.uid), "filterable by author");
 
-  const m = A.redeem(A.mintInvite(g.uid, null, 7, "join").invite.code, "marco", "another-long-password").user;
+  const m = (await A.redeem(A.mintInvite(g.uid, null, 7, "join").invite.code, "marco", "another-long-password")).user;
   assert.equal(A.calls(m.uid, {}).calls.length, 0, "and it never reaches a conversation you are not in");
 });
 
-test("the operator can read every message, and every read is on the record", () => {
+test("the operator can read every message, and every read is on the record", async () => {
   // The owner of this deployment decided an operator may read everything. What makes that
   // defensible rather than merely permitted is that it is a separate surface, it is auditable, and
   // the people writing are told — all three are asserted here.
   const A = freshAccounts();
-  const { g, l } = seedTwo(A);
-  const m = A.redeem(A.mintInvite(g.uid, null, 7, "join").invite.code, "marco", "another-long-password").user;
+  const { g, l } = await seedTwo(A);
+  const m = (await A.redeem(A.mintInvite(g.uid, null, 7, "join").invite.code, "marco", "another-long-password")).user;
   const T = A.threadFor(l.uid, m.uid, true).id;
   A.send(l.uid, null, "something between the two of us", null, { thread: T });
 
@@ -1093,13 +1111,13 @@ test("audit -67: legacy secrets key off the random accounts secret and fail clos
 
 // accounts.db — users, password hashes, every message and attachment — had no backup path at all
 // (only the ledger is shipped). A VACUUM INTO copy is taken after boot and daily, rotated.
-test("audit -67: accounts.db backs up as a consistent rotated copy and closes cleanly", () => {
+test("audit -67: accounts.db backs up as a consistent rotated copy and closes cleanly", async () => {
   const fs = require("fs"), path = require("path"), os = require("os");
   const { openAccounts } = require("../src/accounts");
   const { DatabaseSync } = require("node:sqlite");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-acc-bk-"));
   const A = openAccounts(dir, { sessionDays: 1 });
-  const b = A.bootstrap("gus", "a-long-password-12");
+  const b = await A.bootstrap("gus", "a-long-password-12");
   assert.ok(b.ok, "fixture account");
   const r1 = A.backup(null, 2);
   assert.ok(r1.ok && r1.bytes > 0 && r1.file.startsWith(path.join(dir, "backups")), JSON.stringify(r1));
@@ -1122,40 +1140,42 @@ test("audit -67: accounts.db backs up as a consistent rotated copy and closes cl
 });
 
 // ===== build 2026.09.11-67: Medium findings ===================================================
-test("audit -67: /claim never mints an operator; bootstrap is transactional and one-shot", () => {
+test("audit -67: /claim never mints an operator; bootstrap is transactional and one-shot", async () => {
   const fs = require("fs"), path = require("path"), os = require("os");
   const { openAccounts } = require("../src/accounts");
   const A = openAccounts(fs.mkdtempSync(path.join(os.tmpdir(), "xyz-claim-")), { sessionDays: 1 });
-  const c = A.claim("first", "a-long-password-12", null);
+  const c = await A.claim("first", "a-long-password-12", null);
   assert.ok(c.ok && c.user.isAdmin === false, "first to claim is NOT admin");
   const A2 = openAccounts(fs.mkdtempSync(path.join(os.tmpdir(), "xyz-claim2-")), { sessionDays: 1 });
-  const b = A2.bootstrap("op", "a-long-password-12", null);
+  const b = await A2.bootstrap("op", "a-long-password-12", null);
   assert.ok(b.ok && b.user.isAdmin === true, "bootstrap still mints the operator");
-  assert.equal(A2.bootstrap("op2", "a-long-password-12", null).ok, false, "and closes");
+  assert.equal((await A2.bootstrap("op2", "a-long-password-12", null)).ok, false, "and closes");
   const src = fs.readFileSync(path.join(__dirname, "..", "src", "accounts.js"), "utf8");
   assert.ok(/db\.exec\("BEGIN IMMEDIATE"\);\s*\n\s*try \{\s*\n\s*if \(S\.userCount\.get\(\)\.n > 0\)/.test(src), "count and insert share a transaction");
 });
 
-test("audit -67: sign-in answers every failure with the same words and one scrypt", () => {
+test("audit -67: sign-in answers every failure with the same words and one scrypt", async () => {
   const fs = require("fs"), path = require("path"), os = require("os");
   const { openAccounts } = require("../src/accounts");
   const A = openAccounts(fs.mkdtempSync(path.join(os.tmpdir(), "xyz-login-")), { sessionDays: 1 });
-  A.bootstrap("gus", "a-long-password-12", null);
+  await A.bootstrap("gus", "a-long-password-12", null);
   const uid = A.getUserByHandle("gus").uid;
-  const e1 = A.login("nobody", "whatever-long-pw").error, e2 = A.login("gus", "wrong-long-pw-12").error;
+  const e1 = (await A.login("nobody", "whatever-long-pw")).error, e2 = (await A.login("gus", "wrong-long-pw-12")).error;
   A.setDisabled(uid, true);
-  const e3 = A.login("gus", "a-long-password-12").error;
+  const e3 = (await A.login("gus", "a-long-password-12")).error;
   assert.ok(e1 === e2 && e2 === e3 && /wrong handle or password/.test(e1), "unknown, wrong and disabled read identically");
   const src = fs.readFileSync(path.join(__dirname, "..", "src", "accounts.js"), "utf8");
-  assert.ok(/const DECOY_PW = hashPw\(crypto\.randomBytes\(24\)/.test(src), "the decoy is hashed once at open, not per attempt");
-  assert.ok(/if \(!u\) \{ verifyPw\(String\(password \|\| ""\), DECOY_PW\); return bad; \}/.test(src));
+  // Pin updated 2026.09.20: hashPw went async (threadpool scrypt); the decoy is the one boot-time
+  // derivation that stays sync, and the decoy verify is awaited like every other.
+  assert.ok(/const DECOY_PW = hashPwSync\(crypto\.randomBytes\(24\)/.test(src), "the decoy is hashed once at open, not per attempt");
+  assert.ok(/if \(!u\) \{ await verifyPw\(String\(password \|\| ""\), DECOY_PW\); return bad; \}/.test(src));
 });
 
-test("audit -67: reset codes still rotate on re-request; msgSeq matches stats", () => {
+test("audit -67: reset codes still rotate on re-request; msgSeq matches stats", async () => {
   const fs = require("fs"), path = require("path"), os = require("os");
   const { openAccounts } = require("../src/accounts");
   const A = openAccounts(fs.mkdtempSync(path.join(os.tmpdir(), "xyz-otp-")), { sessionDays: 1 });
-  A.bootstrap("gus", "a-long-password-12", null);
+  await A.bootstrap("gus", "a-long-password-12", null);
   // Replacement on re-request is a documented decision (an old code in a chat history dies the
   // moment a new one is asked for); the denial lever it opens is closed at /reset by the per-IP
   // allowance instead (see server.test.js).
@@ -1164,7 +1184,7 @@ test("audit -67: reset codes still rotate on re-request; msgSeq matches stats", 
   assert.equal(A.msgSeq(), A.stats().messages, "msgSeq is the cheap read of what stats().messages reported");
 });
 
-test("chat terminal -69: a command result is a message with cmd, no stamp, no edit; the AI half is admin-locked by default", () => {
+test("chat terminal -69: a command result is a message with cmd, no stamp, no edit; the AI half is admin-locked by default", async () => {
   const fs = require("fs"), path = require("path");
   const C = require("../src/compute");
   // Two switches in the manifest, both act keys, both routeless (the post rides /api/dm and the
@@ -1180,7 +1200,7 @@ test("chat terminal -69: a command result is a message with cmd, no stamp, no ed
 
   // Storage: the command travels as its own field; the body is the output.
   const A = freshAccounts({ "xyz:NVDA": 113.9 });
-  const { g, l } = seedTwo(A);
+  const { g, l } = await seedTwo(A);
   const T = A.threadFor(g.uid, l.uid, true).id;
   const resolve = (sym) => (sym === "NVDA" ? "xyz:NVDA" : null);
   const plain = A.send(l.uid, null, "long $NVDA here", resolve, { thread: T });
@@ -1333,10 +1353,10 @@ test("chat terminal -69: a command result is a message with cmd, no stamp, no ed
 });
 
 // ===== build 2026.09.16-78: account-synced prefs (watchlist + layouts) ==========================
-test("prefs: per-account, last-writer-wins on the client's stamp, shape-checked, size-capped", () => {
+test("prefs: per-account, last-writer-wins on the client's stamp, shape-checked, size-capped", async () => {
   const A = freshAccounts({});
   try {
-    const { g, l } = seedTwo(A);
+    const { g, l } = await seedTwo(A);
     assert.deepEqual(A.prefsGet(g.uid), {}, "nothing stored yet");
     const w1 = A.prefsPut(g.uid, "watch", ["xyz:NVDA", "xyz:AAPL"], 1000);
     assert.deepEqual(w1, { ok: true, stored: true, ts: 1000 });
@@ -1361,5 +1381,73 @@ test("prefs: per-account, last-writer-wins on the client's stamp, shape-checked,
     const big = {}; for (let i = 0; i < 40; i++) big["layout" + i] = { colOrder: Array.from({ length: 200 }, (_, k) => "col" + k + "x".repeat(20)) };
     assert.equal(A.prefsPut(g.uid, "layouts", { list: big }, 8).error, "too large");
     assert.equal(A.prefsGet(g.uid).layouts.ts, 5, "a refused write leaves the stored value alone");
+  } finally { A.close(); require("fs").rmSync(A._dir, { recursive: true, force: true }); }
+});
+
+// ===== security batch 2026.09.20 ===============================================================
+test("security -20: passwords hash on the threadpool, and every row hashed by the old sync code still verifies", async () => {
+  const { hashPw, hashPwSync, verifyPw } = require("../src/accounts");
+  const fs = require("fs"), path = require("path");
+  // The on-disk format is the contract: an operator's accounts.db is full of rows the sync code
+  // wrote, and a hash that stops verifying is every member locked out on the deploy.
+  const legacy = hashPwSync("a-long-password-12");
+  assert.match(legacy, /^scrypt\$16384\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{86}$/, "scrypt$N$salt$hash, base64url");
+  assert.equal(await verifyPw("a-long-password-12", legacy), true, "a sync-era hash verifies through the async path");
+  assert.equal(await verifyPw("a-long-password-13", legacy), false);
+  const fresh = await hashPw("a-long-password-12");
+  assert.ok(fresh instanceof Object === false && typeof fresh === "string", "hashPw resolves to the string, never returns a Promise into a row");
+  assert.match(fresh, /^scrypt\$16384\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{86}$/, "same shape from the async path");
+  assert.notEqual(fresh, legacy, "per-password salt");
+  assert.equal(await verifyPw("a-long-password-12", fresh), true);
+  assert.equal(await verifyPw("x", "scrypt$512$salt$hash"), false, "a cost below the floor is refused, never derived");
+  assert.equal(await verifyPw("x", "not-a-hash"), false);
+  // The hot path is the async one; scryptSync survives only for the boot-time decoy.
+  const src = fs.readFileSync(path.join(__dirname, "..", "src", "accounts.js"), "utf8");
+  assert.equal((src.match(/crypto\.scryptSync\(/g) || []).length, 1, "exactly one scryptSync call: the sync hasher");
+  assert.ok(/async function verifyPw\(/.test(src) && /async function hashPw\(/.test(src) && /await scryptAsync\(/.test(src));
+  for (const fn of ["login", "setPassword", "redeem", "otpVerify", "bootstrap", "claim"])
+    assert.ok(new RegExp("async function " + fn + "\\(").test(src), fn + " is async — a route must await it");
+  // No await inside a transaction: every hash is derived before BEGIN IMMEDIATE.
+  for (const m of src.matchAll(/db\.exec\("BEGIN IMMEDIATE"\);([\s\S]*?)db\.exec\("COMMIT"\)/g))
+    assert.ok(!/\bawait\b/.test(m[1]), "an await inside a transaction would interleave another request's writes");
+  // Behaviour: sign-in, reset and rotate all still work end to end through the async API.
+  const A = freshAccounts();
+  try {
+    const g = await A.bootstrap("gus", "a-long-password-12");
+    assert.ok(g.ok && A.sessionUser(g.token));
+    assert.ok((await A.login("gus", "a-long-password-12")).ok);
+    assert.ok(!(await A.login("gus", "a-long-password-13")).ok);
+    const set = await A.setPassword(g.user.uid, "a-long-password-14");
+    assert.ok(set.ok && A.sessionUser(set.token) && !A.sessionUser(g.token), "rotate bumps the epoch");
+    assert.ok((await A.login("gus", "a-long-password-14")).ok);
+  } finally { A.close(); fs.rmSync(A._dir, { recursive: true, force: true }); }
+});
+
+test("security -20: a prior owner handle is adopted as the uid only in the minted shape — never a chosen or reserved id", async () => {
+  const { adoptableUid } = require("../src/accounts");
+  const crypto = require("crypto");
+  const minted = crypto.randomBytes(12).toString("base64url");
+  assert.equal(minted.length, 16);
+  assert.equal(adoptableUid(minted), minted, "the shape ensureOwner mints is adopted");
+  assert.equal(adoptableUid("aLegacyOwnerHandle"), "aLegacyOwnerHandle", "12-32 chars of the alphabet");
+  for (const bad of ["legacy-admin", "short", "x".repeat(33), "a|b|c|d|e|f|g|h", "with.dots.in.it", "with spaces here", "", null, undefined, 42, ["a".repeat(16)]])
+    assert.equal(adoptableUid(bad), "", "refused: " + JSON.stringify(bad));
+  // Through the doors: a forged prior never becomes the uid, and the account is still created.
+  const A = freshAccounts();
+  try {
+    const g = await A.bootstrap("gus", "a-long-password-12", "legacy-admin");
+    assert.ok(g.ok && g.user.uid !== "legacy-admin" && /^[A-Za-z0-9_-]{16}$/.test(g.user.uid), "bootstrap: the reserved id is not adopted, a fresh uid is minted");
+    const code = (h) => A.mintInvite(g.user.uid, null, 7, "join").invite.code;
+    const r1 = await A.redeem(code(), "lena", "another-long-password", "admin|1");
+    assert.ok(r1.ok && !r1.adopted && r1.user.uid !== "admin|1", "redeem: a `|` id is a forged cookie, not a handle");
+    const r2 = await A.redeem(code(), "marco", "another-long-password", "legacy-admin");
+    assert.ok(r2.ok && !r2.adopted && r2.user.uid !== "legacy-admin");
+    const r3 = await A.redeem(code(), "dan", "another-long-password", minted);
+    assert.ok(r3.ok && r3.adopted && r3.user.uid === minted, "and the genuine minted handle still carries over — the migration promise holds");
+    const c = await A.claim("eve", "another-long-password", "x".repeat(40));
+    assert.ok(c.ok && !c.adopted && c.user.uid.length === 16, "claim: an over-long id is refused the same way");
+    const c2 = await A.claim("fay", "another-long-password", "legacy-admin");
+    assert.ok(c2.ok && c2.user.uid !== "legacy-admin");
+    assert.equal(A.listUsers().length, 6, "every account was still created — only the adoption was refused");
   } finally { A.close(); require("fs").rmSync(A._dir, { recursive: true, force: true }); }
 });

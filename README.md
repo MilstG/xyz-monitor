@@ -423,9 +423,13 @@ server then shows a dark-themed login page to anyone without a session; the corr
 password sets a signed 30-day cookie (`SESSION_DAYS` to change), and a `⎋` button appears
 in the nav to sign out (`/logout`). Changing `SITE_PASSWORD` invalidates every outstanding
 session; plain redeploys don't. Eight wrong passwords from one IP lock that IP out for
-15 minutes. Scripts and `curl` can skip the cookie and use HTTP Basic
-(`curl -u friend:PASSWORD .../api/snapshot`), which is still accepted. `/api/health` stays
-open for Railway's healthcheck. Leave `SITE_PASSWORD` unset to stay open.
+15 minutes — HTTP Basic attempts count against the same lock. Scripts and `curl` can skip
+the cookie and use HTTP Basic (`curl -u friend:PASSWORD .../api/snapshot`), which is still
+accepted. `/api/health` stays open for Railway's healthcheck. Leave `SITE_PASSWORD` unset
+to stay open. `TRUST_PROXY=1` (the default) keys that lock on the **last** `X-Forwarded-For`
+element, which assumes exactly one trusted proxy (Railway's edge) appends it — set
+`TRUST_PROXY=0` when the service is exposed directly or sits behind a proxy that does not,
+or every caller can pick its own key.
 
 ## Tuning (optional)
 

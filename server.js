@@ -65,11 +65,17 @@ function signOwnerWith(secret, id) {
   return id + "." + crypto.createHmac("sha256", secret).update("own|" + id).digest("base64url");
 }
 function signOwner(id) { return signOwnerWith(OWNER_SECRET, id); }
+// The id half must have the shape ensureOwner mints (randomBytes(12).base64url = 16 chars).
+// The legacy MAC key is derived from SITE_PASSWORD, which every shared-password member knows, so
+// without this a member could sign ANY id — and redeem/claim adopt the prior id as the account
+// uid. accounts.js re-checks the same shape (adoptableUid); this is the outer wall.
+const OWNER_ID_RE = /^[A-Za-z0-9_-]{12,32}$/;
 function ownerOf(tok) {
   if (!tok || typeof tok !== "string" || tok.length > 128) return null;
   const i = tok.indexOf(".");
   if (i <= 0) return null;
   const id = tok.slice(0, i);
+  if (!OWNER_ID_RE.test(id)) return null;
   const got = Buffer.from(tok);
   for (const secret of [OWNER_SECRET, OWNER_SECRET_LEGACY]) {
     if (!secret) continue;
@@ -97,7 +103,13 @@ function ensureOwner(req, reply) {
 // password mints no valid token, leaving the gate closed (fail-closed, never fail-open). There is
 // deliberately no header/Basic-auth bypass: scripts can't unlock, so AI stays browser+password only.
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
-const AI_UNLOCK_SECRET = crypto.createHash("sha256").update(`xyzmon-ai-unlock|${ADMIN_PASSWORD}`).digest();
+// Both admin-cookie keys are derived NEXT TO ACCOUNTS below (HMAC of the on-disk random secret
+// with the label `xyzmon-ai-unlock|<password>`), not sha256 of the password alone: the old
+// derivation had no random material, so a captured cookie was an offline dictionary attack on
+// ADMIN_PASSWORD — every candidate password gives a candidate key, and one HMAC check per
+// candidate tells you when you have it. Rotate-to-revoke is unchanged (the password is still in
+// the label); what changed is that the label alone no longer determines the key.
+let AI_UNLOCK_SECRET = null;
 const AI_UNLOCK_MS = 24 * 3600 * 1000;   // hard ceiling on an unlock's life, even if the browser restores its session
 // Admin VIEW is a separate, longer lease than the AI unlock above, and deliberately so: seeing the
 // admin tabs costs nothing, while generating a report spends real OpenAI budget. Merging them would
@@ -106,7 +118,7 @@ const AI_UNLOCK_MS = 24 * 3600 * 1000;   // hard ceiling on an unlock's life, ev
 // derived from ADMIN_PASSWORD (rotate it and every outstanding token of BOTH kinds dies).
 // The label in the secret differs from the AI one on purpose — with a shared secret an xyzai token
 // would validate as xyzadm and the short lease would silently become a long one.
-const ADMIN_VIEW_SECRET = crypto.createHash("sha256").update(`xyzmon-admin-view|${ADMIN_PASSWORD}`).digest();
+let ADMIN_VIEW_SECRET = null;   // `xyzmon-admin-view|<password>` label, derived below with the AI one
 const ADMIN_DAYS = Number(process.env.ADMIN_DAYS || 30);
 
 // XYZ_QUIET silences the boot narration when server.js is built by the test suite.
@@ -137,6 +149,8 @@ SESSION_SECRET = process.env.SESSION_SECRET
   ? crypto.createHash("sha256").update(String(process.env.SESSION_SECRET)).digest()
   : ACCOUNTS.deriveKey(`legacy-session|${SITE_USER}|${SITE_PASSWORD}`);
 OWNER_SECRET = ACCOUNTS.deriveKey("alert-owner");
+AI_UNLOCK_SECRET = ACCOUNTS.deriveKey(`xyzmon-ai-unlock|${ADMIN_PASSWORD}`);
+ADMIN_VIEW_SECRET = ACCOUNTS.deriveKey(`xyzmon-admin-view|${ADMIN_PASSWORD}`);
 // How long a DM sits unread before it is worth interrupting somebody's evening over. The delay IS
 // the feature: without it two people typing at each other generate a push per line.
 const DM_ESCALATE_MS = Number(process.env.DM_ESCALATE_MS || 5 * 60 * 1000);
@@ -404,7 +418,10 @@ function adminPwOk(pw) {
 // The IP a rate limiter may key on. X-Forwarded-For is client-writable except for the LAST
 // element, which the edge proxy in front of this service appends itself — taking the first
 // element (the old behavior) let any caller mint a fresh key per request and walk straight
-// past every damper below.
+// past every damper below. ASSUMPTION, stated: TRUST_PROXY=1 means exactly one trusted proxy
+// sits in front and it APPENDS its own element (Railway's edge does). Behind two proxies the
+// last element is the inner proxy's address and every caller shares one damper key — set
+// TRUST_PROXY=0 and key on the socket, or terminate at a single edge.
 // Behind Railway's edge the forwarded headers are trustworthy and the socket peer is the proxy;
 // exposed directly they are whatever the client typed. TRUST_PROXY=0 switches both the client-IP
 // damper key and the Secure-cookie decision to the socket's own view.
@@ -423,11 +440,15 @@ function loginLockedFor(ip) {
   return (e && e.until > Date.now()) ? Math.ceil((e.until - Date.now()) / 60e3) : 0;
 }
 function loginFail(ip) {
-  if (loginFails.size > 5000) loginFails.clear();
+  // Size cap: evict the OLDEST half rather than clear() — a spoofed-IP flood used to wipe every
+  // live lockout the moment it filled the table, which made the flood itself the way past the
+  // damper. A Map iterates in insertion order; the delete+set below moves a re-offending IP to
+  // the young end, so "oldest" means least recently failed, not first ever seen.
+  if (loginFails.size > 5000) { let i = 0; for (const k of loginFails.keys()) { loginFails.delete(k); if (++i >= 2500) break; } }
   const e = loginFails.get(ip) || { n: 0, until: 0 };
   e.n++;
   if (e.n >= LOCK_AFTER) { e.until = Date.now() + LOCK_MS; e.n = 0; }
-  loginFails.set(ip, e);
+  loginFails.delete(ip); loginFails.set(ip, e);
 }
 
 // ===== auth pages (sign in / join / reset / claim) ============================================
@@ -485,6 +506,16 @@ function cspRecord(body) {
   }
 }
 
+// JSON destined for the inside of an inline <script>. JSON.stringify is not HTML-safe: a string
+// value holding "</script>" ends the block early and whatever follows runs as markup — a ?next=
+// path on the login page, a renamed display name in the shell's window.__ME. The escapes are
+// valid JSON (the browser parses them back to the same characters), so the page reads exactly
+// what the server meant; U+2028/9 are line terminators in older engines and get the same care.
+// Every JSON.stringify whose output lands in HTML goes through this — grep before adding one.
+function jsonForScript(v) {
+  return JSON.stringify(v).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026")
+    .replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+}
 function authPage(o) {
   const mode = o.mode || "signin";
   const esc = (x) => String(x == null ? "" : x)
@@ -552,7 +583,7 @@ function authPage(o) {
     ? '<a class="alt" href="/login">Back to sign in</a>' : "") +
 '</div>' +
 '<script nonce="' + CSP_NONCE_SLOT + '">' + AUTH_JS + '</script>' +
-'<script nonce="' + CSP_NONCE_SLOT + '">window.__AUTH=' + JSON.stringify({ action, mode, next: o.next || null }) + ';authInit();</script>' +
+'<script nonce="' + CSP_NONCE_SLOT + '">window.__AUTH=' + jsonForScript({ action, mode, next: o.next || null }) + ';authInit();</script>' +
 '</body></html>';
 }
 function newAccountFoot(o) {
@@ -619,6 +650,22 @@ async function buildServer() {
   log(`Crypto (Hyperliquid main dex): ${CRYPTO ? "ENABLED — top-60 perps, 31d hourly / 90d daily retention" : "disabled via CRYPTO=0"}`);
   const fastify = Fastify({ logger: false });
 
+  // Fastify's default 500 body echoes err.message — for a SQLite bind failure that is "Provided
+  // value cannot be bound to SQLite parameter", i.e. which driver, which layer, and that the
+  // query shape reached a statement. Every 5xx now answers one fixed shape with a random id that
+  // is also written to the log, so the operator can find the stack from a screenshot without the
+  // stack ever leaving the process. 4xx errors (body limits, unsupported media types, bad JSON)
+  // keep Fastify's own shape: those messages are the contract the client reads.
+  const { STATUS_CODES } = require("http");
+  fastify.setErrorHandler((err, req, reply) => {
+    reply.header("cache-control", "no-store");
+    const sc = Number(err && err.statusCode) || 500;
+    if (sc < 500) return reply.code(sc).send({ statusCode: sc, code: err.code, error: STATUS_CODES[sc], message: err.message });
+    const id = crypto.randomBytes(6).toString("hex");
+    log(`ERROR ${id} ${req.method} ${String(req.url || "").split("?")[0]}: ${(err && err.stack) || err}`);   // path only — never a query string
+    return reply.code(sc).send({ error: "internal", id });
+  });
+
   // True when a request carries a valid session cookie or correct HTTP Basic creds. Shared by the
   // optional site gate below AND the always-on AI-cost guard, so "authenticated" means one thing.
   // The account session is checked FIRST and is the only path that carries a "who". The legacy
@@ -635,10 +682,17 @@ async function buildServer() {
     if (adminViewOk(getCookie(req, "xyzadm"))) return true;
     const hdr = req.headers.authorization || "";
     const [scheme, enc] = hdr.split(" ");
-    if (scheme === "Basic" && enc) {
+    if (scheme === "Basic" && enc && SITE_PASSWORD) {
+      // The same per-IP damper /login spends. Basic had none: the shared password could be
+      // guessed at wire speed through any /api route, cookie-free, while the login page locked
+      // after eight. A locked IP is refused without the compare; a wrong pair counts ONCE per
+      // request however many hooks ask (the raw request carries the mark).
+      const ip = clientIp(req);
+      if (loginLockedFor(ip)) { req.raw.xyzBasicLocked = true; return false; }   // the site gate answers 429 to this mark
       const s = Buffer.from(enc, "base64").toString();
       const i = s.indexOf(":");
-      if (i >= 0 && credsOk(s.slice(0, i), s.slice(i + 1))) return true;
+      if (i >= 0 && credsOk(s.slice(0, i), s.slice(i + 1))) { loginFails.delete(ip); return true; }
+      if (!req.raw.xyzBasicCounted) { req.raw.xyzBasicCounted = true; loginFail(ip); }
     }
     return false;
   };
@@ -756,6 +810,18 @@ async function buildServer() {
   // is a hard 401: the AI ask/report generation stays closed on the open web until a site password
   // exists. The terminal's local grammar is client-side and unaffected; only the AI fallback is gated.
   // Registered before the routes so it fires first; the optional full-site gate below still runs too.
+  // ---- cross-site writes ------------------------------------------------------------------------
+  // Every cookie here is SameSite=Lax, which already keeps a cross-site POST from carrying the
+  // session. This is the second lock: a browser that says the request came from another site
+  // (Sec-Fetch-Site: cross-site) gets 403 on any state-changing verb before a handler runs,
+  // whatever cookies it managed to attach. Reads are untouched; browsers that predate the header
+  // send nothing and fall through to the cookie rule; scripts and curl send nothing either.
+  // Registered first so it runs first.
+  fastify.addHook("onRequest", async (req, reply) => {
+    if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return;
+    if (String(req.headers["sec-fetch-site"] || "").toLowerCase() === "cross-site")
+      return reply.code(403).header("cache-control", "no-store").send({ error: "cross-site request refused" });
+  });
   const AI_COST_PATHS = new Set(["/api/ask", "/api/ai-report"]);
   fastify.addHook("onRequest", async (req, reply) => {
     const u = req.url.split("?")[0];
@@ -814,6 +880,14 @@ async function buildServer() {
       // corrupting the response into a body-less 401 that hangs the browser). Returning the
       // reply is what short-circuits. This exact bug shipped in the original Basic-auth gate
       // and lay dormant until the first deploy with SITE_PASSWORD actually set.
+      // A locked IP presenting Basic is told so, with a Retry-After, instead of a 401 it would
+      // keep retrying at wire speed. The mark, not a re-read of the lock: the attempt that trips
+      // the lock still answers 401, exactly as /login's eighth wrong password does.
+      if (req.raw.xyzBasicLocked) {
+        const min = loginLockedFor(clientIp(req)) || 1;
+        return reply.code(429).header("retry-after", String(min * 60)).header("cache-control", "no-store")
+          .send({ error: "too many attempts", lockedMin: min });
+      }
       if (u.startsWith("/api/")) return reply.code(401).send({ error: "unauthorized" });
       return reply.code(401).header("cache-control", "no-store").type("text/html; charset=utf-8").send(LOGIN_HTML);
     });
@@ -896,9 +970,28 @@ async function buildServer() {
     reply.header("set-cookie", "xyzinv=" + encodeURIComponent(code) + cookieAttrs(req, code ? 900 : 0) + "; HttpOnly");
   const htmlNoStore = (reply) => reply.header("cache-control", "no-store").type("text/html; charset=utf-8");
 
+  // ---- the scrypt admission gate ---------------------------------------------------------------
+  // Password hashing runs on libuv's threadpool now (accounts.js), which stops it stalling the
+  // event loop — but the pool is four threads shared with gzip, DNS and file reads, and a caller
+  // who can queue a thousand derivations still starves everything behind them. So at most
+  // PW_INFLIGHT_MAX derivations are in flight at once; the rest answer 503 + Retry-After and the
+  // login page shows the error text. Per-process, not per-IP: it is the pool being protected,
+  // not the caller being judged (the IP damper does that).
+  const PW_INFLIGHT_MAX = 8;
+  let pwInflight = 0;
+  const PW_BUSY = { ok: false, error: "the server is busy checking passwords — try again in a moment" };
+  const pwBusy = (reply) => {
+    if (pwInflight < PW_INFLIGHT_MAX) return false;
+    reply.code(503).header("retry-after", "2").header("cache-control", "no-store");
+    return true;
+  };
+  async function withPw(fn) { pwInflight++; try { return await fn(); } finally { pwInflight--; } }
+
   // ?next= carries the tab and ticker a session-expired banner was sitting on. Same-origin paths
-  // only — never a scheme, never a protocol-relative //host.
-  const safeNext = (v) => { v = String(v == null ? "" : v); return /^\/(?![\/\\])[^\s]{0,200}$/.test(v) ? v : null; };
+  // only — never a scheme, never a protocol-relative //host. An allow-list of characters, not a
+  // deny-list of whitespace: the value is echoed into the login page's inline script (through
+  // jsonForScript) and into a redirect, and "</script>" is not a path anybody needs to land on.
+  const safeNext = (v) => { v = String(v == null ? "" : v); return /^\/(?!\/)[A-Za-z0-9_\-./?=&%#]{0,199}$/.test(v) ? v : null; };
   fastify.get("/login", (req, reply) => {
     const next = safeNext(req.query && req.query.next);
     if (meOf(req)) return reply.redirect(next || "/", 302);
@@ -920,7 +1013,8 @@ async function buildServer() {
     const pw = String(b.password == null ? "" : b.password);
 
     if (handle) {
-      const r = ACCOUNTS.login(handle, pw);
+      if (pwBusy(reply)) return PW_BUSY;
+      const r = await withPw(() => ACCOUNTS.login(handle, pw));
       if (r.ok) {
         loginFails.delete(ip);
         signIn(reply, req, r.user, r.token);
@@ -1004,7 +1098,8 @@ async function buildServer() {
     // The prior signed handle is what makes the migration free: it becomes the new uid, so every
     // alert recipient and rule already keyed to it belongs to the account without being rewritten.
     const prior = ownerOf(getCookie(req, "xyzown"));
-    const r = ACCOUNTS.redeem(code, b.handle, b.password, prior);
+    if (pwBusy(reply)) return PW_BUSY;
+    const r = await withPw(() => ACCOUNTS.redeem(code, b.handle, b.password, prior));
     if (!r.ok) {
       if (r.state) loginFail(ip);
       reply.code(r.state ? 410 : 400);
@@ -1027,8 +1122,28 @@ async function buildServer() {
   // The handle travels in a short-lived HttpOnly cookie between the two steps rather than in a form
   // field, for the same reason the invite code does: it keeps the second step bound to the first,
   // so nobody can request a code for themselves and then verify against a different account.
-  const otpCookie = (reply, req, handle) =>
-    reply.header("set-cookie", "xyzotp=" + encodeURIComponent(handle || "") + cookieAttrs(req, handle ? 900 : 0) + "; HttpOnly");
+  // Signed, like xyzown. The raw handle in an unsigned cookie let anyone hand-set xyzotp=<victim>
+  // and spend the victim's five guesses — or, holding an intercepted code, reset their password —
+  // without that browser ever having asked for a code. The MAC covers the handle AND an expiry; a
+  // value that does not verify reads as no cookie at all, so the flow starts over.
+  const OTP_SECRET = ACCOUNTS.deriveKey("otp-step");
+  const OTP_STEP_MS = 15 * 60e3;
+  const otpSign = (enc, exp) => crypto.createHmac("sha256", OTP_SECRET).update("otp|" + enc + "|" + exp).digest("base64url");
+  const otpCookie = (reply, req, handle) => {
+    const enc = encodeURIComponent(handle || ""), exp = Date.now() + OTP_STEP_MS;
+    const val = handle ? enc + "." + exp + "." + otpSign(enc, exp) : "x";
+    reply.header("set-cookie", "xyzotp=" + val + cookieAttrs(req, handle ? Math.round(OTP_STEP_MS / 1000) : 0) + "; HttpOnly");
+  };
+  const otpHandleOf = (tok) => {
+    if (!tok || typeof tok !== "string" || tok.length > 400) return "";
+    const p = tok.split(".");
+    if (p.length < 3) return "";
+    const mac = p.pop(), exp = Number(p.pop()), enc = p.join(".");   // a handle may hold dots; the mac and expiry never do
+    if (!Number.isFinite(exp) || exp < Date.now()) return "";
+    const a = Buffer.from(mac), b = Buffer.from(otpSign(enc, exp));
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return "";
+    try { return decodeURIComponent(enc); } catch (_) { return ""; }
+  };
 
   fastify.get("/reset", (req, reply) => {
     if (meOf(req)) return reply.redirect("/", 302);
@@ -1067,16 +1182,17 @@ async function buildServer() {
   });
   fastify.get("/reset/code", (req, reply) => {
     if (meOf(req)) return reply.redirect("/", 302);
-    if (!getCookie(req, "xyzotp")) return reply.redirect("/reset", 302);
+    if (!otpHandleOf(getCookie(req, "xyzotp"))) return reply.redirect("/reset", 302);
     return htmlNoStore(reply).send(authPage({ mode: "otp" }));
   });
   fastify.post("/reset/code", { bodyLimit: 8 * 1024 }, async (req, reply) => {
     const ip = clientIp(req);
     if (loginLockedFor(ip)) { reply.code(429); return { ok: false, error: "too many attempts — try again shortly" }; }
-    const handle = decodeURIComponent(getCookie(req, "xyzotp") || "");
+    const handle = otpHandleOf(getCookie(req, "xyzotp"));   // signed: a hand-set cookie reads as none
     if (!handle) { reply.code(400); return { ok: false, error: "start again from the reset page" }; }
     const b = req.body || {};
-    const r = ACCOUNTS.otpVerify(handle, b.code, b.password);
+    if (pwBusy(reply)) return PW_BUSY;
+    const r = await withPw(() => ACCOUNTS.otpVerify(handle, b.code, b.password));
     if (!r.ok) {
       // A wrong password on a CORRECT code is the user's own typo, not an attack — spending the IP
       // damper on it would lock somebody out of their own reset for fifteen minutes.
@@ -1102,7 +1218,8 @@ async function buildServer() {
     if (meOf(req)) { reply.code(409); return { ok: false, error: "you already have an account" }; }
     if (!LEGACY_DOOR || !sessionOk(getCookie(req, "xyzsess"))) { reply.code(401); return { ok: false, error: "sign in first" }; }
     const b = req.body || {};
-    const r = ACCOUNTS.claim(b.handle, b.password, ownerOf(getCookie(req, "xyzown")));
+    if (pwBusy(reply)) return PW_BUSY;
+    const r = await withPw(() => ACCOUNTS.claim(b.handle, b.password, ownerOf(getCookie(req, "xyzown"))));
     if (!r.ok) { reply.code(400); return { ok: false, error: r.error, field: r.field || null }; }
     signIn(reply, req, r.user, r.token);
     log(`account claimed: ${r.user.handle}${r.adopted ? " (carried over existing alerts)" : ""}`);
@@ -1120,7 +1237,8 @@ async function buildServer() {
   fastify.post("/bootstrap", { bodyLimit: 8 * 1024 }, async (req, reply) => {
     if (!adminViewOk(getCookie(req, "xyzadm"))) { reply.code(403); return { ok: false, error: "forbidden" }; }
     const b = req.body || {};
-    const r = ACCOUNTS.bootstrap(b.handle, b.password, ownerOf(getCookie(req, "xyzown")));
+    if (pwBusy(reply)) return PW_BUSY;
+    const r = await withPw(() => ACCOUNTS.bootstrap(b.handle, b.password, ownerOf(getCookie(req, "xyzown"))));
     if (!r.ok) { reply.code(400); return { ok: false, error: r.error, field: r.field || null }; }
     signIn(reply, req, r.user, r.token);
     log(`operator account created: ${r.user.handle}`);
@@ -1135,14 +1253,15 @@ async function buildServer() {
       accounts: ACCOUNTS.countUsers(), pwMin: ACCOUNT_PW_MIN };
   });
   // Changing your own password bumps your epoch, which is what makes every other device sign out.
-  fastify.post("/api/account", { bodyLimit: 8 * 1024 }, (req, reply) => {
+  fastify.post("/api/account", { bodyLimit: 8 * 1024 }, async (req, reply) => {
     reply.header("cache-control", "no-store");
     const me = meOf(req);
     if (!me) return reply.code(401).send({ ok: false, error: "sign in first" });
     const b = req.body || {};
-    const r = ACCOUNTS.login(me.handle, String(b.current == null ? "" : b.current));
+    if (pwBusy(reply)) return PW_BUSY;
+    const r = await withPw(() => ACCOUNTS.login(me.handle, String(b.current == null ? "" : b.current)));
     if (!r.ok) return reply.code(403).send({ ok: false, error: "current password is wrong", field: "current" });
-    const set = ACCOUNTS.setPassword(me.uid, b.password);
+    const set = await withPw(() => ACCOUNTS.setPassword(me.uid, b.password));
     if (!set.ok) return reply.code(400).send({ ok: false, error: set.error, field: "password" });
     signIn(reply, req, set.user, set.token);   // keep THIS device signed in; the epoch bump drops the rest
     return { ok: true, signedOutOthers: true };
@@ -1204,6 +1323,11 @@ async function buildServer() {
     ACCOUNTS.touch(me.uid);
     return me;
   };
+  // Query keys repeat (?by=a&by=b) and a JSON body may carry an array where a scalar is expected;
+  // either used to reach a SQLite bind as an array and 500 with the driver's own message. The
+  // first value wins and the rest is dropped before anything can reach a statement.
+  const one = (v) => (Array.isArray(v) ? v[0] : v);
+  const str = (v) => (v == null ? null : String(one(v)));
 
   // Promote a price-stamped message into the notes book. The note KEEPS the message's own timestamp
   // and price: the whole point is that the claim was made then, at that mark — re-stamping it now
@@ -1313,13 +1437,13 @@ async function buildServer() {
     reply.header("cache-control", "no-store");
     const me = dmMe(req, reply); if (!me) return;
     const q = req.query || {};
-    return ACCOUNTS.sync(me.uid, q.since, q.limit);
+    return ACCOUNTS.sync(me.uid, one(q.since), one(q.limit));
   });
   fastify.get("/api/dm/search", (req, reply) => {
     reply.header("cache-control", "no-store");
     const me = dmMe(req, reply); if (!me) return;
     const q = req.query || {};
-    return ACCOUNTS.search(me.uid, q.q, q.limit, q.thread);
+    return ACCOUNTS.search(me.uid, str(q.q), one(q.limit), one(q.thread));
   });
 
   // ===== browser push (build 2026.09.11-66) =====================================================
@@ -1383,7 +1507,7 @@ async function buildServer() {
     let buf;
     try { buf = Buffer.from(String(b.data || ""), "base64"); }
     catch (_) { return reply.code(400).send({ ok: false, error: "that upload was malformed" }); }
-    const r = ACCOUNTS.putFile(me.uid, b.thread, b.name, buf);
+    const r = ACCOUNTS.putFile(me.uid, one(b.thread), str(b.name), buf);
     return reply.code(r.ok ? 200 : 400).send(r);
   });
   // Downloads are membership-checked, never id-checked: a forwarded link is not an access grant.
@@ -1417,7 +1541,7 @@ async function buildServer() {
     const q = req.query || {};
     // An operator can read the whole desk's record; everyone else sees the calls made in the
     // conversations they are actually in.
-    return ACCOUNTS.calls(me.uid, { by: q.by || null, limit: q.limit, all: isAdmin(req) && q.all === "1" });
+    return ACCOUNTS.calls(me.uid, { by: str(q.by) || null, limit: one(q.limit), all: isAdmin(req) && one(q.all) === "1" });
   });
   fastify.get("/api/dm/export/:id", (req, reply) => {
     reply.header("cache-control", "no-store");
@@ -1433,7 +1557,7 @@ async function buildServer() {
     reply.header("cache-control", "no-store");
     const me = dmMe(req, reply); if (!me) return;
     const q = req.query || {};
-    const r = ACCOUNTS.history(me.uid, (req.params || {}).id, q.before, q.limit);
+    const r = ACCOUNTS.history(me.uid, (req.params || {}).id, one(q.before), one(q.limit));
     if (!r.ok) return reply.code(404).send(r);
     r.typing = dmTypingOf(Number((req.params || {}).id), me.uid);
     return r;
@@ -1445,6 +1569,9 @@ async function buildServer() {
     reply.header("cache-control", "no-store");
     const me = dmMe(req, reply); if (!me) return;
     const b = req.body || {};
+    // The scalar fields, once, before the verb dispatch: every branch below binds one of these.
+    for (const k of ["id", "thread", "fileId", "replyTo", "to", "watch", "pin", "close", "reopen", "clearHistory", "deleteGroup", "joinBoard", "read", "uid"])
+      if (Array.isArray(b[k])) b[k] = b[k][0];
     let r;
     if (b.typing) {
       // Fire and forget: typing is a hint, and a hint that can fail loudly is worse than no hint.
@@ -1499,7 +1626,7 @@ async function buildServer() {
         if (closed) return reply.code(403).send({ ok: false, error: "feature-gated", feature: closed });
       }
       r = ACCOUNTS.send(me.uid, String(b.to || ""), b.body, coinForSymbol,
-        { thread: b.thread || null, fileId: b.fileId || null, replyTo: b.replyTo || null,
+        { thread: b.thread || null, fileId: b.fileId == null ? null : String(b.fileId), replyTo: b.replyTo || null,
           cmd: typeof b.cmd === "string" ? b.cmd : null, cmdAi: !!b.cmdAi });
     }
     if (!r.ok) return reply.code(r.retry ? 429 : 400).send(r);
@@ -1526,23 +1653,23 @@ async function buildServer() {
   fastify.get("/api/access/dm", (req, reply) => {
     reply.header("cache-control", "no-store");
     if (!adminOnly(req, reply)) return;
-    return { ok: true, threads: ACCOUNTS.adminThreads((req.query || {}).limit) };
+    return { ok: true, threads: ACCOUNTS.adminThreads(one((req.query || {}).limit)) };
   });
   fastify.get("/api/access/dm/search", (req, reply) => {
     reply.header("cache-control", "no-store");
     if (!adminOnly(req, reply)) return;
-    return ACCOUNTS.adminSearch(adminUid(req), (req.query || {}).q, (req.query || {}).limit);
+    return ACCOUNTS.adminSearch(adminUid(req), str((req.query || {}).q), one((req.query || {}).limit));
   });
   fastify.get("/api/access/dm/audit", (req, reply) => {
     reply.header("cache-control", "no-store");
     if (!adminOnly(req, reply)) return;
-    return { ok: true, entries: ACCOUNTS.adminAuditLog((req.query || {}).limit) };
+    return { ok: true, entries: ACCOUNTS.adminAuditLog(one((req.query || {}).limit)) };
   });
   fastify.get("/api/access/dm/:id", (req, reply) => {
     reply.header("cache-control", "no-store");
     if (!adminOnly(req, reply)) return;
     const q = req.query || {};
-    const r = ACCOUNTS.adminHistory(adminUid(req), (req.params || {}).id, q.before, q.limit);
+    const r = ACCOUNTS.adminHistory(adminUid(req), (req.params || {}).id, one(q.before), one(q.limit));
     if (!r.ok) return reply.code(404).send(r);
     log("operator " + (meOf(req) ? meOf(req).handle : "(break-glass)") + " read thread " + r.thread);
     return r;
@@ -1581,12 +1708,24 @@ async function buildServer() {
     return r.ok ? { ok: true, text: "Sent." } : { ok: false, error: r.error };
   });
 
-  fastify.get("/logout", async (req, reply) => {
+  // Sign-out is a state change, so it answers POST. GET stays for the nav button's plain
+  // navigation (location.href='/logout') — but only when the browser says the navigation came
+  // from this origin or from nowhere (typed URL, bookmark): a cross-site <img src="/logout"> or
+  // a link on somebody else's page used to sign the whole desk out at will. Non-browser callers
+  // send no Sec-Fetch-Site and are not what the check is for.
+  const logout = async (req, reply) => {
+    if (req.method === "GET") {
+      const site = String(req.headers["sec-fetch-site"] || "").toLowerCase();
+      if (site && site !== "same-origin" && site !== "none")
+        return reply.code(403).header("cache-control", "no-store").send({ error: "cross-site sign-out refused" });
+    }
     setSessionCookies(reply, req, 0, null);   // Max-Age=0 deletes both cookies
     setAdminCookies(reply, req, 0, null);     // signing out drops elevation — never leave a stale admin lease
     clearAiUnlockCookie(reply, req);          // and the AI unlock, which outlives nothing
     return reply.redirect("/", 303);   // v5-forward signature (url, code) — the old order is deprecated
-  });
+  };
+  fastify.get("/logout", logout);
+  fastify.post("/logout", logout);
 
   // ===== PWA shell: manifest + icon + service worker, all served inline (no new repo files) =====
   // The service worker deliberately caches NOTHING: it exists only to satisfy installability
@@ -1738,11 +1877,13 @@ async function buildServer() {
   // identity. Nav labels ride it because the ribbon must paint with the admin's names on the FIRST
   // frame, or every load flashes the defaults before a fetch could correct them; identity rides it
   // for the same reason, so the header never shows a signed-out state to a signed-in member.
+  // jsonForScript, not JSON.stringify: nav labels and display names are operator/member text,
+  // and "</script><script>" in either used to run in every member's shell.
   const bootScript = (admin, me) =>
-    "window.__FLAGS=" + JSON.stringify(resolveFeatures(poller.getFlags(), admin)) +
+    "window.__FLAGS=" + jsonForScript(resolveFeatures(poller.getFlags(), admin)) +
     ";window.__ADMIN=" + (admin ? "true" : "false") +
-    ";window.__NAVGROUPS=" + JSON.stringify(poller.getNavGroups()) +
-    ";window.__ME=" + JSON.stringify(me ? ACCOUNTS.pub(me) : null) + ";";
+    ";window.__NAVGROUPS=" + jsonForScript(poller.getNavGroups()) +
+    ";window.__ME=" + jsonForScript(me ? ACCOUNTS.pub(me) : null) + ";";
   const serveIndex = (req, reply) => {
     const admin = isAdmin(req);
     const boot = bootScript(admin, meOf(req));
@@ -2472,17 +2613,25 @@ async function buildServer() {
   // A per-member cap on top of the global one: without it a single person with a wall of tabs open
   // can eat the whole pool and lock everybody else onto the poll fallback.
   const SSE_PER_USER = 4;
+  // The uid-less entries (break-glass admin, legacy shared-password sessions, Basic auth) have no
+  // uid to count under, so they had no cap beyond the global one: one such caller could hold all
+  // 200 slots and lock every member onto the poll fallback. Keyed on the same client IP the
+  // damper trusts, and only for entries with no uid — a member is counted by uid, never twice.
+  const SSE_PER_IP = 4;
+  const sseByIp = new Map();             // ip -> Set(entry), uid-less entries only
   function sseAttach(entry) {
     sseClients.add(entry);
-    if (!entry.uid) return;
-    let set = sseByUid.get(entry.uid);
-    if (!set) { set = new Set(); sseByUid.set(entry.uid, set); }
+    const key = entry.uid || entry.ip, map = entry.uid ? sseByUid : sseByIp;
+    if (!key) return;
+    let set = map.get(key);
+    if (!set) { set = new Set(); map.set(key, set); }
     set.add(entry);
   }
   function sseDetach(entry) {
     sseClients.delete(entry);
-    const set = entry.uid && sseByUid.get(entry.uid);
-    if (set) { set.delete(entry); if (!set.size) sseByUid.delete(entry.uid); }
+    const key = entry.uid || entry.ip, map = entry.uid ? sseByUid : sseByIp;
+    const set = key && map.get(key);
+    if (set) { set.delete(entry); if (!set.size) map.delete(key); }
   }
   // Presence, deliberately in memory and nowhere else: a live stream IS the signal, so there is
   // nothing to persist, nothing to expire, and nothing to be wrong across a restart.
@@ -2535,6 +2684,10 @@ async function buildServer() {
     if (me && (sseByUid.get(me.uid) || { size: 0 }).size >= SSE_PER_USER) {
       reply.code(503).send({ error: "sse-per-user-full" }); return;
     }
+    const ip = me ? "" : clientIp(req);
+    if (!me && (sseByIp.get(ip) || { size: 0 }).size >= SSE_PER_IP) {
+      reply.code(503).send({ error: "sse-per-ip-full" }); return;
+    }
     reply.hijack();
     const res = reply.raw;
     res.writeHead(200, {
@@ -2548,7 +2701,7 @@ async function buildServer() {
     });
     // Identity is resolved ONCE, at connect. A session that expires mid-stream keeps delivering to
     // that connection until it drops, which is the same lifetime the browser tab already has.
-    const entry = { res, uid: me ? me.uid : "" };
+    const entry = { res, uid: me ? me.uid : "", ip };
     // Initial frame on connect: the client syncs immediately instead of waiting for the first
     // change — and a reconnect after a missed deploy sees the new `v` on its first byte.
     try { res.write(sseHelloFrame(me)); } catch (_) {}
@@ -2647,10 +2800,22 @@ async function buildServer() {
       loop: { ...loopSample(), sinceMs: Date.now() - loopResetAt, windowMs: LOOP_WINDOW, maxEver: loopMaxEver, hist: loopRing },
       csp: { mode: "report-only", reports: CSP_REPORTS.n, dropped: CSP_REPORTS.dropped, recent: CSP_REPORTS.recent.map(({ key, ...r }) => r) },
       ...poller.stats(), ts: Date.now() };
-    // Railway's healthcheck needs {ok} and nothing else; the volume path, the loop histogram
-    // (live sample + closed-window ring + worst-ever) and the poller internals are for a signed-in
-    // caller. The route stays open, the detail does not.
-    return reqAuthed(req) || isAdmin(req) ? full : { ok: full.ok, version: full.version, stale: full.stale, ts: full.ts };
+    // Railway's healthcheck needs {ok} and nothing else. The full picture — the volume path, the
+    // AI provider and model names, the backup repo, limiter usage, per-coin failure state, the
+    // CSP ledger — describes the deployment and is the operator's. A signed-in member gets what
+    // their own UI reads and no more: the freshness tray (public/js/data.js: lastPoll, failing
+    // counts, earnings/news/filings stamps, loop, ticks) and the ask-budget chip (ai.askDayLeft).
+    // Explicit allow-list, never a delete-list, so a field added to stats() later is admin-only
+    // until somebody decides otherwise here.
+    if (isAdmin(req)) return full;
+    if (!reqAuthed(req)) return { ok: full.ok, version: full.version, stale: full.stale, ts: full.ts };
+    const e = full.earnings || {}, n = full.news || {}, ff = (n.filings && n.filings.fetch) || {}, ai = full.ai || {};
+    return { ok: full.ok, version: full.version, stale: full.stale, lastPollAgoMs: full.lastPollAgoMs, loop: full.loop,
+      lastPoll: full.lastPoll, active: full.active, failing: full.failing, ticks: full.ticks,
+      earnings: { asOf: e.asOf, error: e.error },
+      news: { fetchedAt: n.fetchedAt, error: n.error, filings: { fetch: { lastOk: ff.lastOk, forbidden: ff.forbidden, netFail: ff.netFail } } },
+      ai: { enabled: ai.enabled, perDay: ai.perDay, dayLeft: ai.dayLeft, askPerDay: ai.askPerDay, askDayLeft: ai.askDayLeft },
+      ts: full.ts };
   });
 
   return fastify;
