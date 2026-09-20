@@ -1,7 +1,7 @@
 "use strict";
 // Owns all Hyperliquid I/O. Polls the universe, backfills candle history, samples OI,
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
-const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket, createCoinalyze } = require("./hyperliquid");
+const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, candleWeight, fundingWeight, createUniverseSocket, createCoinalyze } = require("./hyperliquid");
 const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly, closedDailyCloses } = require("./compute");
 const { claimGeometryOk, clusterDays, evMeta, capPerUniverse, detectCascExhaust, latestCascade, tradeableNow } = require("./compute");
 const { sectorAuditDecide, mergeSectorAudit, sectorAuditDue } = require("./compute");
@@ -45,7 +45,13 @@ const OI_FULL_RES = 31 * DAY;         // full ~5-min resolution window; older sa
 const HOURLY_STALE = 10 * 60 * 1000;  // refresh hourly features every 10 min
 const HOURLY_HISTORY_DAYS = 180;      // rolling hourly-OHLCV window (API serves ~5000 most-recent candles = ~208d hard cap; 180d fits one call and triples the gap-study samples)
 const HOURLY_FEAT_DAYS = 31;          // window actually fed to featuresFromHourly (keep features identical to before)
-const HOURLY_FETCH_WEIGHT = 130;      // rate-limit weight for the cold 180d hourly pull (one-time per market)
+// ---- request weights ---------------------------------------------------------------------------
+// Every candle / funding pull is charged from the span it actually requests, through the documented
+// formulas in hyperliquid.js (candleWeight / fundingWeight). The flat per-lane constants that used
+// to live here (35 for a 90d hourly pull that really costs 56, 20 for a 60d funding pull that costs
+// 92, 20 for the 17d 5m seed that costs 102) were set when the windows were shallow and never
+// followed them deeper, so the limiter's ledger under-counted the heaviest calls by 2-4x.
+const spanWeight = (fromMs, toMs, ivMs) => candleWeight((toMs - fromMs) / ivMs);
 // ---- red-tape resilience + RVOL (tunables) ---------------------------------------------------
 const RED_LOOKBACK = 31 * DAY;        // fixed 31d sample on BOTH scopes so "DownCap 31d" means the same thing everywhere
 const RED_BREADTH = 0.70;             // a 4h bar is "red tape" when >=70% of the scope's reporting names printed red...
@@ -75,9 +81,6 @@ const MAIN_DAILY_PAYLOAD = 92;        // crypto DAILY bars ON THE WIRE (/api/dai
                                       // AI chart read 90d — retention deepened for the detectors, not to
                                       // quadruple every client's payload. Server-side consumers read the
                                       // full dailyRaw depth directly.
-const MAIN_HOURLY_WEIGHT = 35;        // 90d spine pull (-17): one candleSnapshot, same request weight
-const MAIN_DAILY_WEIGHT = 8;          // 370d daily pull (same request weight — one candleSnapshot either way)
-const HOURLY_TAIL_WEIGHT = 20;        // steady-state refresh only pulls the last ~48h and merges — cheaper than the old full-window re-pull
 // ---- Coinalyze derivatives context (crypto universe only) -------------------------------------
 // Aggregated CEX liquidations + OI as CONTEXT for the Hyperliquid names — a different venue
 // population than our book, permanently labeled as such in every payload. External dependency is
@@ -93,7 +96,6 @@ const CZ_BATCH = 20;                  // symbols per batched request (their max)
 const CZ_VENUES = ["Binance", "Bybit", "OKX"];   // deterministic single-venue preference per base asset
 const CZ_QUOTES = new Set(["USDT", "USD", "USDC"]);
 const FUNDING_HISTORY_DAYS = 60;      // rolling hourly funding-rate window (aligned with the price spine)
-const FUNDING_FETCH_WEIGHT = 20;      // rate-limit weight for a fundingHistory pull
 const FUNDING_PROBE_MIN = 8;          // if the first N (highest-vol) backfills all return nothing, treat
 const DAILY_STALE = 6 * 3600 * 1000;  // refresh daily candles every 6 h
 const UNIVERSE_MS = 30 * 1000;        // poll price/funding/vol/OI + detect new markets
@@ -112,8 +114,17 @@ const PX_RING_TOL_MS = 90 * 1000;          // max gap between the lookback targe
 const FIVE_MIN = 5 * 60 * 1000;
 const M5_RETENTION_DAYS = 370;        // rolling 5m archive; 370 (not 365) buys a few days of slack so a "1y" chart is never short
 const M5_SEED_DAYS = 17;              // native candleSnapshot window at 5m (5000 * 5min ~= 17.36d) — the most one pull can return
-const M5_STALE = 5 * 60 * 1000;       // capture each market's freshly CLOSED 5m bars about once per bar
-const M5_FETCH_WEIGHT = 20;           // rate-limit weight per 5m tail pull (steady state returns only the last few bars)
+// Capture cadence per market: ONE bar (5 min) when the roster is small enough, stretched so the lane's
+// steady-state demand stays under half the limiter budget. Arithmetic: a tail pull returns 2-3 bars
+// and costs candleWeight(≈3) = 21; N markets on a cadence of S ms spend N × 21 × 60000 / S weight per
+// minute; capping that at 50% of the 1150/min budget (M5_BUDGET_SHARE) gives S ≥ N × 21 × 60000 / 575,
+// i.e. 5 min up to ~137 markets, ~5.5 min at 150 and ~7.7 min at 210. Before this the lane wanted
+// 210 × 21 / 5 = 882 weight/min against a total budget of 1150 — every other lane starved, and the
+// picker (volume-desc, no age tier) let the tail names miss capture after capture; past the 17d
+// native window that hole in the archive was permanent. See m5StaleMs() in createPoller.
+const M5_STALE_MIN = 5 * 60 * 1000;   // never faster than once per bar
+const M5_TAIL_WEIGHT = candleWeight(3);   // the steady-state tail pull (a few closed bars): 21
+const M5_BUDGET_SHARE = 0.5;          // the 5m lane's ceiling as a share of the limiter budget
 const M5_SNAPSHOT_MS = 24 * 3600 * 1000;   // VACUUM-INTO off-copy of the archive once a day (it's the sole copy past the native window)
 // ---- deep-history 12h/1d archive (build 2026.08.21-01) ---------------------------------------
 // The native 5000-bar candleSnapshot window is ~2.3y at 4h, ~6.8y at 12h and ~13.7y at 1d, so unlike the 5m
@@ -125,9 +136,7 @@ const M5_SNAPSHOT_MS = 24 * 3600 * 1000;   // VACUUM-INTO off-copy of the archiv
 // 24/7 perp IS a UTC day, and re-cutting it here would invent a series the exchange never printed.
 const DEEP_IVS = { "4h": 4 * HOUR, "12h": 12 * HOUR, "1d": 24 * HOUR };   // 4h joined -03: ~2.3y native window; the CHARTS 4H pane needs EMA200 depth the 20d intraday base cannot hold
 const DEEP_STALE = 4 * HOUR;          // tail-pull cadence per (market, interval): a few closed bars/day exist at most
-const DEEP_SEED_BARS = 4900;          // just under the native 5000-bar cap — the seed pull asks for everything servable
-const DEEP_SEED_WEIGHT = 60;          // one-time cold pull per (market, interval): up to ~5000 bars in one response
-const DEEP_TAIL_WEIGHT = 15;          // steady state returns a handful of bars
+const DEEP_SEED_BARS = 4900;          // just under the native 5000-bar cap — the seed pull asks for everything servable (charged candleWeight(4900) = 102)
 const SWEEP_LOOK_MS = 4 * HOUR;            // 5m tail scanned for a prior-session-level stop-run (~48 bars; detector needs >=12)
 const RECLAIM_MIN_DIP_PCT = 0.35;          // min peak→trough depth (% of peak) before a dip-reclaim claim exists — below it the "dip" is xyz bar noise. Rides the sweep tail; crypto would need its own (much higher) floor when it gets a lane.
 const SWEEP_FRAC = 0.25;                   // min wick pierce past the swept level, as a fraction of the window's median 5m range
@@ -595,8 +604,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       seen.add(coin);
     });
     if (crypto) await pollMainUniverse(seen, hourNow, (n) => { newCount += n; });
+    // A market that vanished from the reply loses its ROW, not its OI history: one short-but-plausible
+    // reply (above the half-roster guard) used to erase a year of sampled OI/funding in memory, and
+    // the next reply that listed the coin again started it from nothing. The history is keyed by
+    // coin, sampleOI re-attaches to it on reappearance, and the maintenance sweep drops it only
+    // once it is row-less AND older than the delisted GC window — the same clock a delisting runs on.
     let removed = 0;
-    for (const k of [...rows.keys()]) if (!seen.has(k)) { rows.delete(k); hist.delete(k); removed++; }
+    for (const k of [...rows.keys()]) if (!seen.has(k)) { rows.delete(k); removed++; }
     if (newCount || removed || benchCoin == null) benchCoin = detectBenchmark();
     sampleOI();
     lastPoll = Date.now();
@@ -711,6 +725,17 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     sampleOI();
     lastPoll = now; lastWsApply = now; wsApplied++;
   }
+  // "The socket is carrying the board" = a batch was actually APPLIED recently, not merely that the
+  // socket is healthy. applyWsCtxs returns early whenever our dex's tuple is absent or its length
+  // disagrees with `order` (a listing landed between REST polls), and healthy() only knows that
+  // ctxs events arrive — so a healthy socket could be skipping every batch while REST, trusting
+  // healthy(), dropped to one poll in five and the board sat 150s stale. lastWsApply moves only
+  // on an applied batch; past WS_APPLY_FRESH_MS without one, REST resumes its full 30s cadence.
+  const WS_APPLY_FRESH_MS = 90000;
+  function wsCarrying(now, healthy) {
+    const h = healthy == null ? !!(sock && sock.enabled && sock.healthy()) : !!healthy;
+    return h && lastWsApply > 0 && now - lastWsApply < WS_APPLY_FRESH_MS;
+  }
 
   async function refreshHourly(coin) {
     const r = rows.get(coin);
@@ -731,12 +756,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const deep = spine && spine.length > 48
       && (r.hourlyFull === true || firstT <= now - (histDays - (r.uni === "main" ? 14 : 30)) * DAY);
     if (!deep) {
-      const wide = await fetchCandles(coin, "1h", now - histDays * DAY, now, r.uni === "main" ? MAIN_HOURLY_WEIGHT : HOURLY_FETCH_WEIGHT);
+      const wide = await fetchCandles(coin, "1h", now - histDays * DAY, now, spanWeight(now - histDays * DAY, now, HOUR));   // 180d = 92, 90d = 56
       if (Array.isArray(wide)) { r.hourlyRaw = packHours(wide); r.hourlyFull = r.hourlyRaw.length > 48; }
       else if (!spine) r.hourlyRaw = null;           // keep a shallow spine over nothing if the wide pull fails
     } else {
       const lastT = spine.length ? +spine[spine.length - 1][0] : 0;
-      const tail = await fetchCandles(coin, "1h", Math.max(lastT - 2 * HOUR, now - 2 * DAY), now, HOURLY_TAIL_WEIGHT);
+      const tailFrom = Math.max(lastT - 2 * HOUR, now - 2 * DAY);
+      const tail = await fetchCandles(coin, "1h", tailFrom, now, spanWeight(tailFrom, now, HOUR));   // ≤ 48 bars = 21
       const packedTail = packHours(tail);
       if (packedTail.length) {
         const firstNew = packedTail[0][0];
@@ -756,14 +782,29 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const r = rows.get(coin);
     if (!r) return;
     const now = Date.now();
-    const c = r.uni === "main"
-      ? await fetchCandles(coin, "1d", now - MAIN_DAILY_DAYS * DAY, now, MAIN_DAILY_WEIGHT)
-      : await fetchCandles(coin, "1d", now - 370 * DAY, now, 27);
+    const dFrom = r.uni === "main" ? now - MAIN_DAILY_DAYS * DAY : now - 370 * DAY;
+    const c = await fetchCandles(coin, "1d", dFrom, now, spanWeight(dFrom, now, DAY));   // 370 bars = 27 on both universes
     // A non-array body (an upstream error page with a 200) must not replace a warm 370d spine:
     // needDaily would see a truthy value with a fresh stamp and not retry for six hours.
     if (!Array.isArray(c)) throw new Error("daily candles: non-array reply");
     r.dailyRaw = c; r.dailyTs = Date.now(); r.isNew = false;
-    buildDaily();
+    scheduleBuildDaily();
+  }
+  // The daily payload rebuild is a full pass over every market (closes, β, correlation matrix, the
+  // content signature). Running it once per refreshed MARKET meant the cold backfill — two workers
+  // draining ~200 names — rebuilt it ~200 times in a few minutes, each rebuild costlier than the
+  // fetch it followed. Trailing-edge debounce: the first refresh arms a 1s timer, later refreshes
+  // inside that second ride the same rebuild, and the payload is at most one second behind the
+  // last fetch. Unref'd so a pending rebuild never holds the process open; the harness keeps its
+  // synchronous buildDailyNow, which is the same buildDaily called directly.
+  let buildDailyT = null;
+  function scheduleBuildDaily() {
+    if (buildDailyT) return;
+    buildDailyT = setTimeout(() => {
+      buildDailyT = null;
+      try { buildDaily(); } catch (e) { log("daily build (debounced) failed: " + (e && e.message)); }
+    }, 1000);
+    if (buildDailyT.unref) buildDailyT.unref();
   }
 
   // Prioritise newly listed markets, then highest 24h volume. Skips coins already being
@@ -775,7 +816,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // coverageScan alerts on: one predicate, one code path), and everything past the age outranks
   // fresh-ish names stalest-first, so no market can starve indefinitely just for being small.
   // Under a healthy budget nothing ever reaches the escalation age and the ordering is
-  // byte-for-byte the historical one. Non-hourly lanes stay tier 0 always, untouched.
+  // byte-for-byte the historical one.
+  // 5m lane: the same age escalation (no claim tier — claims are an hourly-spine concept), against
+  // its own roster-aware cadence. Without it the lane was volume-desc forever: under budget
+  // pressure the same tail names lost their capture every pass, and once a gap fell out of the
+  // 17d native window it was a permanent hole in the sole-copy archive.
+  // Daily / funding / deep lanes stay tier 0 always, untouched.
   const CLAIM_PRIORITY_AGE = 3 * HOURLY_STALE;   // past this spine age, staleness outranks volume
   const isOpenAnnounced = (e) => e.vi == null && e.alo === 1;   // shared with coverageScan — same set, one predicate
   function openClaimCoins() {
@@ -786,13 +832,14 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   function pick(needsFetch, prefix) {
     const now = Date.now();
     const claims = prefix === "h:" ? openClaimCoins() : null;
+    const m5Esc = prefix === "m5:" ? 3 * m5StaleMs() : 0;   // past 3x the lane's cadence, stalest-first outranks volume
     let best = null, bestKey = null;
     for (const r of rows.values()) {
       if (r.delisted || !needsFetch(r)) continue;
       if (prefix && inflight.has(prefix + r.coin)) continue;
       if (r.coin === benchCoin) return r.coin;   // benchmark first, always: RS, β, leaders and every correlation panel gate on its history
-      const age = claims ? now - (r.hourlyTs || 0) : 0;
-      const key = { tier: claims ? hourlyPickTier(age, claims.has(r.coin), CLAIM_PRIORITY_AGE) : 0,
+      const age = claims ? now - (r.hourlyTs || 0) : (m5Esc ? now - (r.m5Ts || 0) : 0);
+      const key = { tier: claims ? hourlyPickTier(age, claims.has(r.coin), CLAIM_PRIORITY_AGE) : (m5Esc ? hourlyPickTier(age, false, m5Esc) : 0),
         age, isNew: r.isNew, vol: r.vol };
       if (hourlyPickBetter(key, bestKey)) { best = r; bestKey = key; }
     }
@@ -892,7 +939,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // Resolve the cursor from disk once (survives redeploys), then track it in memory.
     if (!r.m5SeededCursor) { const cov = store.candleCoverage(coin); r.m5LastTs = cov.max || 0; r.m5SeededCursor = true; }
     const from = r.m5LastTs ? r.m5LastTs - FIVE_MIN : now - M5_SEED_DAYS * DAY;
-    const raw = await fetchCandles(coin, "5m", from, now, M5_FETCH_WEIGHT);
+    const raw = await fetchCandles(coin, "5m", from, now, spanWeight(from, now, FIVE_MIN));   // 17d seed = 102, steady tail = 21
     if (!Array.isArray(raw) || !raw.length) { r.m5Ts = now; return; }
     const closed = m5FilterClosed(raw, now);
     if (closed.length) { store.insertCandles(coin, closed); r.m5LastTs = Math.max(r.m5LastTs, closed[closed.length - 1][0]); }
@@ -914,7 +961,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const r = rows.get(coin);
     if (!r || r.delisted || r.px == null) return 0;
     const now = Date.now();
-    const raw = await fetchCandles(coin, "1m", from, Math.min(to, now), M5_FETCH_WEIGHT);
+    const raw = await fetchCandles(coin, "1m", from, Math.min(to, now), spanWeight(from, Math.min(to, now), 60000));   // ≤ 70 bars = 22
     if (!Array.isArray(raw) || !raw.length) return 0;
     // The FORMING bar is never written — same closed-vs-fresh guard the 5m lane uses, so a bar
     // lands exactly once, when final, and a re-pull absorbs the overlap through the upsert.
@@ -966,7 +1013,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     let d = r.deep[iv];
     if (!d) { const cov = store.candleCoverageDeep(iv, coin); d = r.deep[iv] = { last: cov.max || 0, ts: 0, fail: 0, failUntil: 0 }; }
     const from = d.last ? d.last - w : now - DEEP_SEED_BARS * w;
-    const raw = await fetchCandles(coin, iv, from, now, d.last ? DEEP_TAIL_WEIGHT : DEEP_SEED_WEIGHT);
+    const raw = await fetchCandles(coin, iv, from, now, spanWeight(from, now, w));   // seed (4900 bars) = 102, tail = 21
     if (!Array.isArray(raw) || !raw.length) { d.ts = now; return; }
     const closed = deepFilterClosed(iv, raw, now);
     if (closed.length) { store.insertCandlesDeep(iv, coin, closed); d.last = Math.max(d.last, closed[closed.length - 1][0]); }
@@ -997,9 +1044,24 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
   }
 
+  // Roster-aware 5m cadence (arithmetic at M5_STALE_MIN): the lane's steady-state demand is
+  // capped at M5_BUDGET_SHARE of the limiter budget, so the cadence stretches with the roster
+  // instead of the roster's tail silently losing its capture. Memoized on the roster size: pick()
+  // calls it once per pass and need5m once per row, and the count only moves when the roster does.
+  let m5StaleMemo = 0, m5StaleN = -1;
+  function m5StaleMs() {
+    if (rows.size === m5StaleN) return m5StaleMemo;
+    let n = 0;
+    for (const r of rows.values()) if (!r.delisted && r.px != null) n++;
+    const budgetPerMin = limiterUsage().max * M5_BUDGET_SHARE;              // 575 weight/min
+    const demandAtMin = (n * M5_TAIL_WEIGHT * 60000) / M5_STALE_MIN;       // what the floor cadence would spend
+    m5StaleMemo = demandAtMin <= budgetPerMin ? M5_STALE_MIN : Math.ceil((n * M5_TAIL_WEIGHT * 60000) / budgetPerMin);
+    m5StaleN = rows.size;
+    return m5StaleMemo;
+  }
   const need5m = (r) => store.candlesEnabled && store.candlesEnabled() && r.px != null &&
-    Date.now() - (r.m5Ts || 0) > M5_STALE && Date.now() >= (r.m5FailUntil || 0);
-  // One worker suffices: ~150 markets x a tiny tail pull spread over 5 min is well under 1 req/s.
+    Date.now() - (r.m5Ts || 0) > m5StaleMs() && Date.now() >= (r.m5FailUntil || 0);
+  // One worker suffices: the roster-aware cadence keeps the lane under half the budget by construction.
   // Mirrors hourlyWorker's inflight guard + per-coin exponential fail backoff.
   async function fiveMinWorker() {
     for (;;) {
@@ -1023,14 +1085,18 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const r = rows.get(coin); if (!r) return 0;
     const now = Date.now();
     const days = r && r.uni === "main" ? MAIN_HIST_DAYS : FUNDING_HISTORY_DAYS;
-    const data = await fetchFundingHistory(coin, now - days * DAY, now, FUNDING_FETCH_WEIGHT);
+    const data = await fetchFundingHistory(coin, now - days * DAY, now, fundingWeight(days * 24));   // hourly rows: 60d = 92, 31d = 58
     let n = 0;
     if (Array.isArray(data)) for (const e of data) {
       const t = num(e && (e.time ?? e.t)), rate = num(e && (e.fundingRate ?? e.funding));
       if (t != null && rate != null) { r.fundH.set(Math.floor(t / HOUR) * HOUR, rate); n++; }
     }
     if (n) r._fVer = (r._fVer || 0) + 1;   // invalidate this row's getFunding memo
-    r.fundBackfilled = true;      // don't re-pull a coin that legitimately returned nothing
+    // Don't re-pull a coin that legitimately returned nothing. The stamp rides the features cache
+    // (persistFeatures `fb`) so a redeploy is not a cold 60d funding pull for every market: at 92
+    // weight each, ~210 markets is ~17 minutes of the WHOLE budget. fundH itself is re-seeded from
+    // oi.log at boot (seedFundingFromOI: hourly-thinned to a year), so nothing is lost by not re-pulling.
+    r.fundBackfilled = true;
     return n;
   }
   const needFunding = (r) => fundingHistoryEnabled && !r.fundBackfilled && Date.now() >= (r.fFailUntil || 0);
@@ -1826,8 +1892,22 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         variantState[ev] = { inc: d.variants[ev].inc, hist: Array.isArray(d.variants[ev].hist) ? d.variants[ev].hist.slice(-20) : [] };
     recomputeRecord();
   }
-  function persistLedger() {
+  // The ledger is a config-grade file (saveConfig: write, fsync, rename, fsync the directory), so each
+  // persist is two fsyncs of a multi-MB blob. The level-alert path used to call it once PER ALERT on
+  // the 2s socket tick — a busy open could fsync the same blob a dozen times in a minute. Non-forced
+  // calls now coalesce on a ~2s trailing timer; `force` (the shutdown / crash export and the end of
+  // a signals pass, which is the natural batch boundary) writes synchronously and cancels the timer.
+  let ledgerT = null;
+  const LEDGER_BATCH_MS = 2000;
+  function persistLedger(force) {
     if (!ledgerDirty) return;
+    if (!force) {
+      if (ledgerT) return;
+      ledgerT = setTimeout(() => { ledgerT = null; try { persistLedger(true); } catch (e) { log("ledger persist (batched) failed: " + (e && e.message)); } }, LEDGER_BATCH_MS);
+      if (ledgerT.unref) ledgerT.unref();
+      return;
+    }
+    if (ledgerT) { clearTimeout(ledgerT); ledgerT = null; }
     store.saveLedger({ ts: Date.now(), open: [...ledgerOpen.values()], closed: ledgerClosed.slice(-4000), variants: variantState, rearm: [...rearm],
       present: [...presentSince].map(([k, v]) => [k, v.t]),   // presence timelines survive restarts — a deploy is not a lapse
       board: { since: boardEpSince, dropped: boardEpDropped, open: [...boardEp.values()], closed: boardEpClosed.slice(-BOARD_EP_KEEP),
@@ -3508,7 +3588,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       shown: top.length, signals: top,
       record: recordCache || {}, confluence: confCache || null, recordX: recordXCache,
       records: recordSets, variants, shadows, recent: rs0 ? rs0.recent : [], earnSplit };
-    persistLedger();
+    persistLedger(true);   // the end of a signals pass is the batch boundary: claims opened this pass are on disk when it returns
     // Event-driven board rebuild (2026.08.03-07): claims opened THIS pass reach the board on the
     // chained build that follows, not the next ACT_MS/poll tick — the pure-cadence half of the
     // fire->shown cost, deleted. Debounced to one chained rebuild per signals pass, floor-limited
@@ -4272,6 +4352,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (m.feat) r.feat = m.feat;
       if (typeof m.hourlyTs === "number") r.hourlyTs = m.hourlyTs;
       if (typeof m.dailyTs === "number") r.dailyTs = m.dailyTs;
+      if (m.fb === 1) r.fundBackfilled = true;   // the 60d fundingHistory pull is one-time per market, not per deploy (see backfillFunding)
       if (Array.isArray(m.daily) && m.daily.length) r.dailyRaw = m.daily.map(([t, c, h, v]) => ({ t, c, h: h == null ? undefined : h, v: v == null ? undefined : v }));   // pre--06 warm files are 2-tuples — h/v hydrate undefined and the spine overlay covers them
       if (Array.isArray(m.ph) && m.ph.length) { const cut = Date.now() - 7 * DAY; r.premH = m.ph.filter((x) => Array.isArray(x) && x[0] >= cut); }
       r.isNew = false;
@@ -7443,15 +7524,28 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       refreshEarnStudy(true);
       log(`Earnings history backfill (forced, ${days}d): ${hist.length} past print(s) retrieved, history ${before} -> ${earnPrints.length}`);
       // Republish through the ordinary path rather than hand-rolling the persist and the ETag
-      // signature here: one place decides what a served earnings payload looks like.
-      await fetchEarnings();
+      // signature here: one place decides what a served earnings payload looks like. If a tick is
+      // mid-flight the republish is skipped; zeroing the last-good stamp makes the 30-min staleness
+      // check refire it rather than waiting out the 6h cadence.
+      if (!(await fetchEarnings())) lastEarnOk = 0;
       return { ok: true, days, retrieved: hist.length, printsBefore: before, printsAfter: earnPrints.length,
         study: Object.keys(earnStudy).length };
     } catch (e) {
       return { ok: false, error: (e && e.message) || "backfill failed" };
     } finally { earnHistBusy = false; }
   }
+  // In-flight guard, same shape as the news lanes (newsCompanyTick / newsCompanyTickBody): the 30-min
+  // staleness check re-fires the tick, and the chunked walk inside can outlast 30 minutes when
+  // Finnhub is slow — two walks then interleaved their merges and doubled the call budget. A re-fire
+  // while busy is skipped and logged ONCE (not every half hour). Returns false when skipped so the
+  // operator-forced backfill can tell that its republish did not happen.
+  let earnBusy = false, earnBusyLogged = false;
   async function fetchEarnings() {
+    if (earnBusy) { if (!earnBusyLogged) { earnBusyLogged = true; log("earnings: refresh already in flight — tick skipped (logged once)"); } return false; }
+    earnBusy = true;
+    try { await fetchEarningsBody(); return true; } finally { earnBusy = false; }
+  }
+  async function fetchEarningsBody() {
     const token = process.env.FINNHUB_TOKEN || "";
     const now = Date.now();
     if (!token) {
@@ -7584,7 +7678,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       return out;
     });
   }
+  // In-flight guard (see fetchEarnings): the release-crossing refire can land while a slow FRED walk
+  // is still running; a second walk buys nothing and doubles the calls. Skipped and logged once.
+  let macroBusy = false, macroBusyLogged = false;
   async function fetchMacro() {
+    if (macroBusy) { if (!macroBusyLogged) { macroBusyLogged = true; log("macro: refresh already in flight — tick skipped (logged once)"); } return false; }
+    macroBusy = true;
+    try { await fetchMacroBody(); return true; } finally { macroBusy = false; }
+  }
+  async function fetchMacroBody() {
     const now = Date.now();
     const key = process.env.FRED_KEY || "";
     const fget = async (path, params) => {
@@ -7688,6 +7790,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       markets[r.coin] = {
         ref: r.ref || null, feat: r.feat || null,
         hourlyTs: r.hourlyTs || 0, dailyTs: r.dailyTs || 0,
+        fb: r.fundBackfilled ? 1 : 0,   // funding-backfill stamp: memory-only before, so every redeploy re-pulled 60d of funding for the whole roster
         daily: r.dailyRaw ? r.dailyRaw.map((k) => [k.t, k.c, Number.isFinite(k.h) ? k.h : null, Number.isFinite(k.v) ? k.v : null]) : null,   // h/v round-trip (-06) so a redeploy no longer strips the level columns; o/l stay unpersisted, so dailyLacksOHLC still queues the real backfill
         ph,   // downsampled 7d premium baseline, so redeploys keep the dislocation z-scores warm
       };
@@ -7960,9 +8063,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // and no boundary bucket to protect — just drop what aged out.
     if (store.candlesEnabled && store.candlesEnabled()) {
       try {
+        // No COUNT(*) here: on a ~15M-row table it is a full scan on the event loop, once a day, for a
+        // log line. The deleted-row count is free (it comes back from the DELETE) and says what happened.
         const dropped = store.evictCandles(Date.now() - M5_RETENTION_DAYS * DAY);
-        const kept = store.candleCount ? store.candleCount() : 0;
-        log(`5m archive: ${kept} bar(s) retained, ${dropped} evicted past ${M5_RETENTION_DAYS}d`);
+        log(`5m archive: ${dropped} bar(s) evicted past ${M5_RETENTION_DAYS}d`);
       } catch (e) { log("5m evict failed: " + (e && e.message)); }
       // 1m opening-hour archive: 30d is plenty — its only consumers are today's forming reads and
       // the chart's opening-hour base for lists still on the board.
@@ -7986,7 +8090,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         swept++;
       }
     }
-    if (swept) log(`Freed cached history for ${swept} market(s) delisted > 7d`);
+    // Row-less history (a market that dropped out of the universe reply entirely — see pollUniverse)
+    // is kept while it could still re-attach and dropped on the same 7d clock as a delisting.
+    let orphaned = 0;
+    for (const [coin, arr] of hist) {
+      if (rows.has(coin)) continue;
+      const last = Array.isArray(arr) && arr.length ? +arr[arr.length - 1][0] : 0;
+      if (last < dcut) { hist.delete(coin); orphaned++; }
+    }
+    if (swept || orphaned) log(`Freed cached history for ${swept} market(s) delisted > 7d${orphaned ? `, ${orphaned} row-less OI series idle > 7d` : ""}`);
     const total = activeMarkets().filter((r) => !r.delisted).length;
     const pending = activeMarkets().filter((r) => !r.delisted && !r.dailyRaw).length;
     const hc = hourlyCoverage();
@@ -8228,7 +8340,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     sock = createUniverseSocket({ onCtxs: applyWsCtxs, log });
     setInterval(() => {
       universeTick++;
-      if (sock && sock.enabled && sock.healthy() && universeTick % 5 !== 0) return;
+      if (wsCarrying(Date.now()) && universeTick % 5 !== 0) return;
       pollUniverse().catch(() => {});
     }, UNIVERSE_MS);
     hourlyWorker(); hourlyWorker();
@@ -12017,7 +12129,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         }
       }
     }
-    if (fired) { persistTriggers(); persistLedger(); log(`ledger alerts: ${fired} level event(s)`); }
+    if (fired) { persistTriggers(); persistLedger(); log(`ledger alerts: ${fired} level event(s)`); }   // ledger write is batched (~2s): this runs on the 2s socket tick
     return fired;
   }
 
@@ -12878,7 +12990,14 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
       mom: mAgo ? { v: mAgo[1], pct: pct(last, mAgo) } : null,
       lo: { d: lo[0], v: lo[1] }, hi: { d: hi[0], v: hi[1] } };
   }
+  // In-flight guard (see fetchEarnings): one FRED walk at a time, a re-fire is skipped and logged once.
+  let housingBusy = false, housingBusyLogged = false;
   async function fetchHousing() {
+    if (housingBusy) { if (!housingBusyLogged) { housingBusyLogged = true; log("housing: refresh already in flight — tick skipped (logged once)"); } return false; }
+    housingBusy = true;
+    try { await fetchHousingBody(); return true; } finally { housingBusy = false; }
+  }
+  async function fetchHousingBody() {
     const now = Date.now();
     const key = process.env.FRED_KEY || "";
     let err = null;
@@ -12991,7 +13110,14 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
     if (raw.sofr && raw.iorb) { const I = raw.iorb; sofrIorb = raw.sofr.filter((p) => p[0] >= I[0][0]).map((p) => { const i = liqAt(I, p[0]); return i ? [p[0], +((p[1] - i[1]) * 100).toFixed(0)] : null; }).filter(Boolean); }
     return { net, last: { d: last[0], v: last[1], pctGdp: last[2] }, prev: prev ? { d: prev[0], v: prev[1] } : null, peak: { d: peak[0], pctGdp: peak[2], v: peak[1] }, ytd, qtEnd, sofrIorb };
   }
+  // In-flight guard (see fetchEarnings): one FRED walk at a time, a re-fire is skipped and logged once.
+  let liqBusy = false, liqBusyLogged = false;
   async function fetchLiquidity() {
+    if (liqBusy) { if (!liqBusyLogged) { liqBusyLogged = true; log("liquidity: refresh already in flight — tick skipped (logged once)"); } return false; }
+    liqBusy = true;
+    try { await fetchLiquidityBody(); return true; } finally { liqBusy = false; }
+  }
+  async function fetchLiquidityBody() {
     const now = Date.now();
     const key = process.env.FRED_KEY || "";
     let err = null; const raw = {}, levels = {}, missing = [];
@@ -14624,6 +14750,12 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       trendBuilt = Number.MAX_SAFE_INTEGER / 2;
     },
     pollUniverseNow: pollUniverse,     // harness: one universe poll through the injected metaFetch
+    applyWsCtxsNow: applyWsCtxs,       // harness: fold one socket batch (index-aligned against the last REST roster)
+    wsCarryingNow: (healthy) => wsCarrying(Date.now(), healthy),   // harness: the REST-skip gate with the socket's health injected
+    histNow: (coin) => hist.get(coin), // harness: the in-memory OI/funding history a row attaches to
+    rowNow: (coin) => rows.get(coin),  // harness: read a live row's per-lane stamps (read-only by convention)
+    pick5mNow: () => pick(need5m, "m5:"),   // harness: the 5m lane's next candidate (age-escalated ordering)
+    m5StaleNow: () => m5StaleMs(),     // harness: the roster-aware 5m cadence
     lastPollAt: () => lastPoll,        // /api/health: the stale flag reads this
     aliasOkNow: aliasOk,               // harness: the learned-alias guard
     orderNow: () => order.slice(),     // harness: the live roster
@@ -14736,7 +14868,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     buildSnapshotNow: buildSnapshot, // harness: run one snapshot build synchronously (content-sig identity test)
     buildAnalyticsNow: buildAnalytics, // harness: run one analytics build synchronously (regime aggregate path)
     persistFeatures,
-    persistLedger: () => { ledgerDirty = true; persistLedger(); },
+    persistLedger: () => { ledgerDirty = true; persistLedger(true); },   // shutdown / crash path: synchronous, cancels any pending batch
     // Final-flush surface for the shutdown and crash paths: everything that otherwise persists
     // on a timer gets one more write on the way out. Each is idempotent, cheap, and safe to
     // call at any moment; persistHourly is the only async one (NDJSON stream) and shutdown

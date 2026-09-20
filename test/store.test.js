@@ -456,3 +456,145 @@ test("audit -67: config-grade files fsync, keep a .bak, and quarantine a corrupt
   for (const fn of ["saveRules", "saveBaskets", "saveLedger", "saveNotes"]) assert.ok(new RegExp(fn + "\\(data\\) \\{\\n\\s*try \\{ saveConfig\\(").test(fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8")), fn + " goes through saveConfig");
   assert.ok(/fs\.fsyncSync\(fd\)/.test(fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8")), "the data is fsynced before the rename");
 });
+
+// ===== reliability pass: config-grade routing, archive maintenance, shutdown, torn tails ==========
+
+// The push recipients, the announced-trigger set, the Telegram channel list and the 13F watchlist
+// all bypassed saveConfig — a zero-length alertpush.json after a kill read as "first boot".
+test("reliability: push / triggers / tgchannels / whale are config-grade — a zero-length file loads the .bak, not first boot", () => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const { openStore } = require("../src/store");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-cfg2-"));
+  const st = openStore(dir);
+  st.savePush({ ts: 1, recipients: [{ chat: "111" }] });
+  st.savePush({ ts: 2, recipients: [{ chat: "111" }, { chat: "222" }] });
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "alertpush.json.bak"), "utf8")).recipients.length, 1, "the previous version survives as .bak");
+  fs.writeFileSync(path.join(dir, "alertpush.json"), "");   // the overlay-volume kill shape: rename landed, data did not
+  const got = openStore(dir).loadPush();
+  assert.ok(got && got.recipients.length === 1, "a zero-length file falls back to the .bak instead of reading as first boot");
+  assert.ok(fs.readdirSync(dir).some((f) => /^alertpush\.json\.corrupt-\d+$/.test(f)), "and the empty file is quarantined for forensics");
+  // The other three ride the same path; the public method names are unchanged.
+  const pairs = [["saveTriggers", "loadTriggers", "triggers.json"], ["saveTgChannels", "loadTgChannels", "tgchannels.json"], ["saveWhale", "loadWhale", "whale.json"]];
+  for (const [save, load, file] of pairs) {
+    const d2 = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-cfg3-")), s2 = openStore(d2);
+    s2[save]({ v: 1 }); s2[save]({ v: 2 });
+    assert.deepEqual(s2[load](), { v: 2 }, load + " reads the latest");
+    fs.writeFileSync(path.join(d2, file), "");
+    assert.deepEqual(openStore(d2)[load](), { v: 1 }, load + ": a zero-length " + file + " loads the .bak");
+  }
+  const src = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
+  for (const fn of ["savePush", "saveTriggers", "saveTgChannels", "saveWhale"]) assert.ok(new RegExp(fn + "\\(data\\) \\{\\n\\s*try \\{ saveConfig\\(").test(src), fn + " goes through saveConfig");
+  for (const fn of ["loadPush", "loadTriggers", "loadTgChannels", "loadWhale"]) assert.ok(new RegExp(fn + "\\(\\) \\{\\n\\s*return loadConfig\\(").test(src), fn + " goes through loadConfig");
+});
+
+test("reliability: the archive snapshot lands via .bak.tmp + rename, and a failed VACUUM leaves the previous .bak intact", (t) => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const { openStore } = require("../src/store");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-snap-"));
+  const st = openStore(dir);
+  if (!st.candlesEnabled()) return t.skip("node:sqlite unavailable in this runtime");
+  const t0 = Math.floor(Date.now() / 300000) * 300000 - 100 * 300000;
+  st.insertCandles("xyz:A", [[t0, 1, 2, 0.5, 1.5, 10], [t0 + 300000, 1.5, 2, 1, 1.2, 11]]);
+  const bak = path.join(dir, "candles.db.bak");
+  assert.equal(st.snapshotCandles(), true);
+  assert.ok(fs.existsSync(bak) && !fs.existsSync(bak + ".tmp"), ".bak exists, the .tmp was renamed away");
+  const { DatabaseSync } = require("node:sqlite");
+  const copy = new DatabaseSync(bak, { readOnly: true });
+  assert.equal(copy.prepare("SELECT COUNT(*) n FROM candles_5m").get().n, 2, "the .bak is a valid sqlite file with the archive in it");
+  copy.close();
+  const before = fs.readFileSync(bak);
+  // Make the NEXT VACUUM fail: the .tmp target is a directory, which SQLite cannot open as a
+  // database. The previous .bak must survive untouched — the old code unlinked it first.
+  fs.mkdirSync(bak + ".tmp");
+  assert.equal(st.snapshotCandles(), false, "a failing VACUUM reports failure");
+  assert.ok(fs.existsSync(bak) && Buffer.compare(fs.readFileSync(bak), before) === 0, "the previous .bak is byte-identical after the failed run");
+  fs.rmSync(bak + ".tmp", { recursive: true });
+  st.close();
+});
+
+test("reliability: evict runs per coin through the PK and stays exact; the daily log no longer COUNT(*)s the table", (t) => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const { openStore } = require("../src/store");
+  const st = openStore(fs.mkdtempSync(path.join(os.tmpdir(), "xyz-evict-")));
+  if (!st.candlesEnabled()) return t.skip("node:sqlite unavailable in this runtime");
+  const base = 1_700_000_000_000;
+  for (const coin of ["xyz:A", "xyz:B", "xyz:C"]) st.insertCandles(coin, [0, 1, 2, 3, 4].map((i) => [base + i * 300000, 1, 1, 1, 1, 1]));
+  assert.equal(st.evictCandles(base + 2 * 300000), 6, "two bars per coin fall below the line — 6 rows, counted from the DELETEs");
+  for (const coin of ["xyz:A", "xyz:B", "xyz:C"]) assert.deepEqual(st.candleCoverage(coin), { min: base + 2 * 300000, max: base + 4 * 300000, count: 3 }, coin + " keeps exactly its tail");
+  assert.equal(st.evictCandles(0), 0, "nothing below zero");
+  const src = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
+  assert.ok(src.includes('DELETE FROM candles_5m WHERE coin = ? AND ts < ?'), "the evict is a PK range per coin, not an unindexed scan on ts");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(!/const kept = store\.candleCount/.test(pol), "the daily maintenance log does not COUNT(*) the archive");
+  st.close();
+});
+
+test("reliability: close() closes every SQLite handle (no -wal left behind) and appends past a mid-flight prune", async (t) => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const { openStore } = require("../src/store");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-close-"));
+  const st = openStore(dir);
+  if (!st.candlesEnabled()) return t.skip("node:sqlite unavailable in this runtime");
+  // Touch every lazily opened database so each has a live WAL handle, then close.
+  assert.ok(st.open13F() && st.openInsiders() && st.openCongress(), "all three lazy handles open");
+  st.open13F().exec("INSERT OR REPLACE INTO meta(k, v) VALUES ('x', '1')");
+  st.openInsiders().exec("INSERT OR REPLACE INTO meta(k, v) VALUES ('x', '1')");
+  st.openCongress().exec("INSERT OR REPLACE INTO meta(k, v) VALUES ('x', '1')");
+  st.insertCandles("xyz:A", [[1_700_000_000_000, 1, 1, 1, 1, 1]]);
+  for (const f of ["candles.db", "whale13f.db", "insiders.db", "congress.db"]) assert.ok(fs.existsSync(path.join(dir, f + "-wal")), f + " has a WAL while open");
+  // The buffered OI samples must reach the LIVE file even while a prune is streaming: close() precedes
+  // process.exit, so the prune's rename never lands and the live file is the one that survives.
+  const now = Date.now();
+  fs.writeFileSync(path.join(dir, "oi.log"), `xyz:A\t${now - 5000}\t100\t0.01\n`);
+  const pruneP = st.prune(0);            // streams oi.log -> oi.log.tmp; appends are held meanwhile
+  st.insert("xyz:A", now, 101, 0.02);    // buffered behind the pruning flag
+  assert.ok(!fs.readFileSync(path.join(dir, "oi.log"), "utf8").includes("\t101\t"), "held while pruning (the old flush() no-op)");
+  st.close();
+  assert.ok(fs.readFileSync(path.join(dir, "oi.log"), "utf8").includes(`xyz:A\t${now}\t101\t0.02\n`), "close() forces the append through");
+  for (const f of ["candles.db", "whale13f.db", "insiders.db", "congress.db"]) assert.ok(!fs.existsSync(path.join(dir, f + "-wal")), f + " checkpointed and closed — no -wal for the next boot to recover");
+  await pruneP.catch(() => {});
+  const again = openStore(dir);
+  assert.equal(again.open13F().prepare("SELECT v FROM meta WHERE k='x'").get().v, "1", "reopening reads what was written");
+  again.close();
+});
+
+test("reliability: an overlapping saveHourly joins the in-flight write instead of resolving at once", async () => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const { openStore } = require("../src/store");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-hjoin-"));
+  const st = openStore(dir);
+  const hourly = {};
+  for (let c = 0; c < 400; c++) hourly["xyz:C" + c] = Array.from({ length: 300 }, (_, i) => [1_700_000_000_000 + i * 3600000, 1, 2, 0.5, 1.5, 10]);
+  const first = st.saveHourly({ ts: 1, hourly });
+  const second = st.saveHourly({ ts: 2, hourly });   // the "shutdown while a tick is mid-stream" shape
+  await second;
+  assert.ok(fs.existsSync(path.join(dir, "hourly.ndjson")), "the shutdown's await returned only once a spine was on disk");
+  assert.ok(!fs.existsSync(path.join(dir, "hourly.ndjson.tmp")), "no half-written temp file remains after the awaited write");
+  await first;
+  const src = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
+  assert.ok(/if \(hourlyWriting\) return hourlyWriting;/.test(src), "an overlapping call returns the in-flight promise");
+});
+
+test("reliability: a last row torn INSIDE a field (four fields, no newline) is dropped by the prune, not legitimised", async () => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const { openStore } = require("../src/store");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-torn-"));
+  const now = Date.now();
+  // Row 3 was "xyz:A\t<ts>\t123500.2\t0.0123\n" and the crash landed after "0.01": four fields, all
+  // parseable, no newline. The old prune re-emitted it with a newline and it became a sample.
+  fs.writeFileSync(path.join(dir, "oi.log"), `xyz:A\t${now - 3000}\t123456.7\t0.01\nxyz:B\t${now - 2000}\t5\t\nxyz:A\t${now - 1000}\t123500.2\t0.01`);
+  const st = openStore(dir);
+  assert.equal(await st.prune(0), 1, "the torn tail counts as removed");
+  const lines = fs.readFileSync(path.join(dir, "oi.log"), "utf8").split("\n").filter(Boolean);
+  assert.deepEqual(lines.map((l) => l.split("\t")[1]), [String(now - 3000), String(now - 2000)], "both whole rows survive, the torn one does not");
+  assert.ok(fs.readFileSync(path.join(dir, "oi.log"), "utf8").endsWith("\n"), "the rewritten file ends cleanly");
+  // The held-back line is the file's PHYSICAL last line, not the last KEPT line: a clean final row
+  // whose predecessor was dropped by retention is still written.
+  fs.writeFileSync(path.join(dir, "oi.log"), `xyz:A\t${now - 10 * 86400e3}\t1\t\nxyz:A\t${now - 1000}\t2\t\nxyz:A\t${now}\t3`);
+  assert.equal(await openStore(dir).prune(now - 5 * 86400e3), 2, "one aged out, one torn");
+  assert.deepEqual(fs.readFileSync(path.join(dir, "oi.log"), "utf8").split("\n").filter(Boolean).map((l) => l.split("\t")[2]), ["2"]);
+  // And a file that ends cleanly keeps its last row through the prune.
+  fs.writeFileSync(path.join(dir, "oi.log"), `xyz:A\t${now - 1000}\t2\t\nxyz:A\t${now}\t3\t\n`);
+  assert.equal(await openStore(dir).prune(0), 0);
+  assert.equal(fs.readFileSync(path.join(dir, "oi.log"), "utf8").split("\n").filter(Boolean).length, 2);
+});
