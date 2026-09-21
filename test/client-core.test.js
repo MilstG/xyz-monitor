@@ -2580,7 +2580,16 @@ test("chat perf -87: arrivals append, a send merges its own reply, the tick pain
   // dmMerge hands back the fresh rows so the painter can append exactly those.
   assert.ok(/return \{added, updated, fresh\};/.test(app), "dmMerge returns the fresh list");
   // dmSync: an arrival on the open thread appends; another thread's arrival redraws the rail only; the full render is the fallback.
-  assert.ok(/if\(chg\.added\)\{ if\(!dmState\.sel\|\|dmState\.results\|\|dmState\.mode!=='chat'\|\|!dmAppend\(chg\.fresh\)\) dmRender\(\); else dmPatchRail\(\); \}/.test(app), "sync appends before it rebuilds");
+  assert.ok(/if\(chg\.added\)\{ if\(!dmState\.sel\|\|dmState\.results\|\|dmState\.mode!=='chat'\|\|!dmAppend\(chg\.fresh\)\) dmRender\(\); else \{ dmPatchRail\(\); dmPatchReceipt\(\); \} \}/.test(app), "sync appends before it rebuilds, and receipts ride along");
+  // Marking read must not undo the append it follows.
+  const mr = app.slice(app.indexOf("async function dmMarkRead(id){"), app.indexOf("async function dmMarkRead(id){") + 700);
+  assert.ok(/dmUpdatePip\(\); if\(state\.view==='dm'\) dmPatchRail\(\);/.test(mr) && !/dmRender\(\)/.test(mr), "mark-read patches the rail, never rebuilds");
+  // Stamps: their drift is derived at read on the server, so the tick still re-pulls the page —
+  // and patches only the stamped and card rows, in place.
+  const rs = app.slice(app.indexOf("async function dmRefreshStamps(){"), app.indexOf("setInterval(async ()=>{"));
+  assert.ok(/fetchJSON\('\/api\/dm\/'\+encodeURIComponent\(id\)\)/.test(rs) && /if\(m&&\(m\.ref\|\|m\.card\)\) dmPatchMsg\(mid\);/.test(rs), "the stamp refresh re-pulls and patches in place");
+  // An edit hands back an older message and must not move the rail row.
+  assert.ok(/if\(arr\.length&&m\.id<arr\[arr\.length-1\]\.id\) return;/.test(app.slice(app.indexOf("function dmTouchThread(m){"))), "an edit does not touch the rail");
   // The append path refuses anything that is not a plain append.
   const fn = app.slice(app.indexOf("function dmAppend(fresh){"), app.indexOf("function dmPatchRail(){"));
   for (const pin of ["if(mine.some(m=>m.pinned)) return false;", "if(mine[0].id<=lastId) return false;",
@@ -2599,9 +2608,8 @@ test("chat perf -87: arrivals append, a send merges its own reply, the tick pain
   assert.equal((cmd.match(/await dmLoad\(\);/g) || []).length, 0, "a command result merges its reply and touches the rail, no reload");
   assert.ok(!/fetchJSON\('\/api\/dm\/'\+dmState\.sel\)/.test(cmd), "…and no history refetch either");
   // The 45s tick: presence + incremental sync, and a redraw only when the signature moved.
-  const tick = app.slice(app.indexOf("function dmPresenceSig(){"), app.indexOf("},45000);"));
-  assert.ok(/await dmSync\(\);\s*\n\s*if\(dmPresenceSig\(\)!==before\) dmRender\(\);/.test(tick), "the tick paints only on change");
-  assert.ok(!/fetchJSON\('\/api\/dm\/'\+encodeURIComponent\(dmState\.sel\)\)/.test(tick), "the tick no longer refetches the whole history page");
+  const tick = app.slice(app.indexOf("setInterval(async ()=>{\n  if(document.hidden||!dmSignedIn()||state.view!=='dm') return;"), app.indexOf("},45000);"));
+  assert.ok(/await dmSync\(\);\s*\n\s*await dmRefreshStamps\(\);\s*\n\s*if\(dmPresenceSig\(\)!==before\) dmRender\(\);/.test(tick), "the tick syncs, refreshes stamps in place, and paints only on change");
   // dmTouchThread keeps the rail honest between the send and the next sync.
   const touch = app.slice(app.indexOf("function dmTouchThread(m){"), app.indexOf("async function dmLoad(){"));
   assert.ok(/t\.lastAt=m\.ts\|\|Date\.now\(\);/.test(touch) && /dmState\.threads\.sort\(\(a,b\)=>\(b\.lastAt\|\|0\)-\(a\.lastAt\|\|0\)\);/.test(touch));

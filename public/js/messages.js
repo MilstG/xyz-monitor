@@ -209,8 +209,11 @@ function dmPatchRail(){ const r=el('dm-rail'); if(r) r.innerHTML=dmRailHtml(); e
 function dmTouchThread(m){
   if(!m) return;
   const t=dmThread(m.thread); if(!t) return;
+  // An edit hands back an OLDER message: the row keeps its place and its preview of the newest.
+  const arr=dmMsgs(m.thread); if(arr.length&&m.id<arr[arr.length-1].id) return;
   t.lastAt=m.ts||Date.now();
-  t.preview=String(m.sys?'':m.deleted?'message deleted':m.cmd?'\u25b8 '+m.cmd:((m.ref?'$'+dmTkName(m.ref)+' \u00b7 ':'')+(m.body||(m.file?'sent a file':'')))).slice(0,90);
+  // The same text the server's threadInfo writes, so the next sync changes nothing visible.
+  t.preview=String(m.sys?'':m.deleted?'message deleted':m.cmd?'\u25b8 '+m.cmd:((m.ref?'$'+m.ref+' \u00b7 ':'')+(m.body||(m.file?'sent a file':'')))).slice(0,90);
   dmState.threads.sort((a,b)=>(b.lastAt||0)-(a.lastAt||0));
 }
 
@@ -289,7 +292,7 @@ async function dmSync(){
         &&(d.messages||[]).some(m=>m.thread===dmState.sel&&!m.mine)) dmMarkRead(dmState.sel);
       // Nothing NEW on the open thread (a reaction, an edit, a read receipt): touch only those rows.
       if(state.view==='dm'){
-        if(chg.added){ if(!dmState.sel||dmState.results||dmState.mode!=='chat'||!dmAppend(chg.fresh)) dmRender(); else dmPatchRail(); }
+        if(chg.added){ if(!dmState.sel||dmState.results||dmState.mode!=='chat'||!dmAppend(chg.fresh)) dmRender(); else { dmPatchRail(); dmPatchReceipt(); } }
         else { for(const id of chg.updated) dmPatchMsg(id); dmPatchReceipt(); if(d.threads) dmPatchRail(); } }
     }
   }catch(_){ /* the next frame or the next open retries; a failed sync is never fatal */ }
@@ -357,7 +360,9 @@ async function dmMarkRead(id){
     await fetch('/api/dm',{method:'POST',headers:{'content-type':'application/json'},
       body:JSON.stringify({thread:id,read:last})});
     if(t) t.unread=0;
-    dmUpdatePip(); dmRender();
+    // Only the rail's unread badge and the pip move: a full rebuild here undid the append the
+    // sync had just painted for the very message being marked read.
+    dmUpdatePip(); if(state.view==='dm') dmPatchRail();
   }catch(_){ }
 }
 
@@ -1983,6 +1988,20 @@ function dmPresenceSig(){
     dmState.threads.map(t=>[t.id,t.lastAt,t.unread,t.muted,t.tgSync,t.hidden,t.boardNotify]),
     dmState.members.map(m=>[m.uid,m.tg,m.display]), dmState.boards.map(b=>[b.id,b.joined,b.unread,b.lastAt])]);
 }
+// A stamp's drift (`px`, the live mark) is derived on the server at READ time, never stored, so
+// the rows the client holds go stale the moment they land: the page has to be re-pulled for the
+// stamps to move. It is, every tick — but the fresh rows are patched IN PLACE, only where a stamp
+// or a card lives, rather than rebuilding the panel to move a percentage.
+async function dmRefreshStamps(){
+  const id=dmState.sel; if(!id||dmState.results||dmState.mode!=='chat') return;
+  const d=await fetchJSON('/api/dm/'+encodeURIComponent(id));
+  if(!d||!d.ok||dmState.sel!==id) return;
+  const chg=dmMerge(d.messages);
+  if(d.info){ d.info.more=!!d.more; dmState.info.set(id,d.info); }
+  if(chg.added&&!dmAppend(chg.fresh)){ dmRender(); return; }
+  const arr=dmMsgs(id);
+  for(const mid of chg.updated){ const m=arr.find(x=>x.id===mid); if(m&&(m.ref||m.card)) dmPatchMsg(mid); }
+}
 setInterval(async ()=>{
   if(document.hidden||!dmSignedIn()||state.view!=='dm') return;   // nobody is reading a hidden tab; the visibilitychange sync catches up
   try{
@@ -1990,8 +2009,10 @@ setInterval(async ()=>{
     await dmLoad();   // presence, thread list and the pip stay fresh while the tab sits open
     if(dmState.mode==='calls'){ await dmFetchCalls(); dmRender(); return; }
     // Messages ride the incremental sync (a cursor, not the whole history page), which paints
-    // by appending; the panel itself is redrawn only when presence or the rail actually moved.
+    // by appending; stamps re-pull their page and patch in place; the panel itself is redrawn
+    // only when presence or the rail actually moved.
     await dmSync();
+    await dmRefreshStamps();
     if(dmPresenceSig()!==before) dmRender();
   }catch(_){ }
 },45000);
