@@ -2492,6 +2492,7 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
   padding-bottom:10px;margin-bottom:12px}
 .dm-callsum{display:flex;align-items:center;gap:12px;font-size:12.5px}
 .dm-callsum .grow{flex:1;min-width:70px}
+.dm-callhzrec{font-size:11px;color:var(--muted);white-space:nowrap}
 .dm-callsum span:not(.grow){font-family:var(--mono);font-size:11px}
 .dm-callrow{align-self:stretch;display:grid;grid-template-columns:64px 1fr auto 68px 68px 58px 52px 52px;gap:10px;align-items:center;
   padding:7px 0;border-bottom:1px solid var(--grid);cursor:pointer;font-size:12.5px}
