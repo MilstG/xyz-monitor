@@ -738,6 +738,8 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .help-modal .hlp-head{font-family:var(--disp);font-size:16px;font-weight:600;margin-bottom:4px;display:flex;align-items:center;gap:10px}
 .help-modal .hlp-head .btn{margin-left:auto}
 .help-modal .hlp-sub{color:var(--muted);font-size:12px;margin-bottom:14px;line-height:1.5}
+.hlp-sub .hlp-docs{color:var(--accent);white-space:nowrap;margin-left:4px}
+.hlp-sub .hlp-docs:hover{text-decoration:underline}
 .help-modal .hlp-h{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:var(--accent);margin:16px 0 5px}
 .help-modal .hlp-h:first-of-type{margin-top:8px}
 .help-modal p{font-size:12.5px;line-height:1.62;color:var(--text);margin:0 0 8px}

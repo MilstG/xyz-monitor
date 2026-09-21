@@ -508,6 +508,62 @@ test("security -20: cross-site writes are refused at the door; /logout answers P
   assert.equal((await app.inject({ method: "POST", url: "/logout", headers: { cookie: gus.header(), "sec-fetch-site": "cross-site" } })).statusCode, 403, "a cross-site POST is stopped by the gate");
 });
 
+test("docs: the manual is gated, nonce-stamped, build-stamped and audience-specific; the reference pages serve", async () => {
+  // Signed out: the login page, exactly like the shell — a manual for a private terminal is not public.
+  const out = await get("/docs");
+  assert.equal(out.statusCode, 401);
+  assert.match(out.headers["content-type"], /text\/html/);
+  assert.match(out.body, /authInit/);
+
+  // gus is account #1 (the operator); a fresh member is invited through the real door so the
+  // member-side assertions never depend on what an earlier test did to bob.
+  const adm = jar(); adm.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const mint = JSON.parse((await post("/api/access", { op: "mint", days: 1 }, adm)).body);
+  const gus = jar(); gus.absorb(await get("/join/" + (mint.code || (mint.invite && mint.invite.code)), gus));
+  assert.equal(gus.absorb(await post("/join", { handle: "docreader", password: "reads-the-manual-12" }, gus)).statusCode, 200);
+  assert.equal((await get("/api/access", gus)).statusCode, 403, "the reader is a member, not an operator");
+  for (const [j, admin] of [[gus, false], [adm, true]]) {
+    for (const url of ["/docs", "/docs.html"]) {
+      const r = await get(url, j);
+      assert.equal(r.statusCode, 200, url);
+      assert.match(r.headers["content-type"], /text\/html/);
+      assert.equal(r.headers["cache-control"], "no-store", "audience-specific body, never cached");
+      // Every inline script carries the response's nonce; the slot never survives.
+      const csp = r.headers["content-security-policy-report-only"];
+      const nonce = (csp.match(/'nonce-([^']+)'/) || [])[1];
+      assert.ok(nonce, "the policy names a nonce");
+      assert.ok(!r.body.includes("{{csp-nonce}}"));
+      const inline = [...r.body.matchAll(/<script(?![^>]*\bsrc=)([^>]*)>/g)].map((m) => m[1]);
+      assert.ok(inline.length >= 2, "the flag slot and the page script are both inline");
+      for (const attrs of inline) assert.match(attrs, new RegExp('nonce="' + nonce.replace(/[+/=]/g, "\\$&") + '"'));
+      // Build-stamped, and the audience boot is injected exactly as the shell injects it.
+      assert.ok(!r.body.includes("{{build}}"), "the build slot is filled");
+      assert.ok(r.body.includes('id="build">2026.'), "the page shows the server build");
+      assert.ok(!r.body.includes("window.__FLAGS=null;window.__ADMIN=false;"), "the static placeholder never reaches a browser");
+      assert.ok(r.body.includes("window.__ADMIN=" + (admin ? "true" : "false") + ";"), "admin flag matches the caller");
+      const flags = JSON.parse((r.body.match(/window\.__FLAGS=(\{.*?\});window\.__ADMIN/) || [])[1]);
+      assert.equal(flags.markets, true);
+      assert.equal(flags.admin, admin, "the admin tab's section is hidden from members by the injected set");
+      // The static fallback must not be what answered: the explicit route owns /docs.html too.
+      assert.ok(r.body.includes("<main class=\"doc\""));
+    }
+  }
+  // The reference pages under docs/ serve nonce-stamped through the same gate; unknown names 404 and list what exists.
+  for (const page of ["signals", "features", "map", "mechanics"]) {
+    const r = await get("/docs/ref/" + page, gus);
+    assert.equal(r.statusCode, 200, page);
+    assert.match(r.headers["content-type"], /text\/html/);
+    assert.ok(!r.body.includes("{{csp-nonce}}"));
+    const nonce = (r.headers["content-security-policy-report-only"].match(/'nonce-([^']+)'/) || [])[1];
+    for (const attrs of [...r.body.matchAll(/<script(?![^>]*\bsrc=)([^>]*)>/g)].map((m) => m[1]))
+      assert.match(attrs, new RegExp('nonce="' + nonce.replace(/[+/=]/g, "\\$&") + '"'), page + ": inline script stamped");
+  }
+  assert.equal((await get("/docs/ref/signals")).statusCode, 401, "reference pages sit behind the site gate too");
+  const nope = await get("/docs/ref/nope", gus);
+  assert.equal(nope.statusCode, 404);
+  assert.deepEqual(JSON.parse(nope.body).pages.sort(), ["features", "map", "mechanics", "signals"]);
+});
+
 // ===== build 2026.09.21-83: Telegram sync verb and /alert over the wire =========================
 test("dm: the sync box needs a phone, /alert binds a rule to the conversation it was typed in, and the rules list names it", async () => {
   const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
