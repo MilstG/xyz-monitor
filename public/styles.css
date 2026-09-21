@@ -348,6 +348,8 @@ footer code{font-family:var(--mono);color:var(--muted)}
 .tabmenu .tab.dragging{opacity:.35}
 @media (prefers-reduced-motion:reduce){.grp .caret{transition:none}}
 .tabs .tabbtn{align-self:center;padding:6px 12px;margin-bottom:5px}
+.tabs .tabnav{padding:6px 9px;font-size:14px;line-height:1}
+.tabs .tabnav:disabled{opacity:.35;cursor:default}
 .tab.dragging{opacity:.35}
 
 /* correlation heatmap */
@@ -736,6 +738,8 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .help-modal .hlp-head{font-family:var(--disp);font-size:16px;font-weight:600;margin-bottom:4px;display:flex;align-items:center;gap:10px}
 .help-modal .hlp-head .btn{margin-left:auto}
 .help-modal .hlp-sub{color:var(--muted);font-size:12px;margin-bottom:14px;line-height:1.5}
+.hlp-sub .hlp-docs{color:var(--accent);white-space:nowrap;margin-left:4px}
+.hlp-sub .hlp-docs:hover{text-decoration:underline}
 .help-modal .hlp-h{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:var(--accent);margin:16px 0 5px}
 .help-modal .hlp-h:first-of-type{margin-top:8px}
 .help-modal p{font-size:12.5px;line-height:1.62;color:var(--text);margin:0 0 8px}
@@ -1081,7 +1085,7 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 @media (hover:none) and (pointer:coarse){
   .btn,.tab,.seg button,.scope,.term-fab{min-height:38px}
   .seg button{min-width:40px}
-  .stbell,#helpBtn,.dm-clip,.dm-mic,.dclose,.fchip-x{min-width:44px;min-height:44px}
+  .stbell,#helpBtn,#backBtn,#homeBtn,.dm-clip,.dm-mic,.dclose,.fchip-x{min-width:44px;min-height:44px}
   .star{display:inline-flex;width:28px;height:28px;align-items:center;justify-content:center;margin:-8px 3px -8px 0;padding:0}   /* a fingertip target, not a cursor target */
   .dm-msg .dm-act{display:inline-flex}   /* hover-only actions have no touch path */
   .nt-act,.wrap thead th .grip{opacity:1}
@@ -2552,6 +2556,7 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
   padding-bottom:10px;margin-bottom:12px}
 .dm-callsum{display:flex;align-items:center;gap:12px;font-size:12.5px}
 .dm-callsum .grow{flex:1;min-width:70px}
+.dm-callhzrec{font-size:11px;color:var(--muted);white-space:nowrap}
 .dm-callsum span:not(.grow){font-family:var(--mono);font-size:11px}
 .dm-callrow{align-self:stretch;display:grid;grid-template-columns:64px 1fr auto 68px 68px 58px 52px 52px;gap:10px;align-items:center;
   padding:7px 0;border-bottom:1px solid var(--grid);cursor:pointer;font-size:12.5px}

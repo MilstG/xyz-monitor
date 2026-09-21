@@ -1421,10 +1421,15 @@ function dmCallsHtml(){
     +'No calls yet. Type <b>$TICKER</b> in a message and it carries the mark it was sent at \u2014 those land here.</div></div>';
   // Summary rows are the by-filter: click a person to read just their record (server-side
   // filter, so it reaches past the newest page).
+  // Headline = the live record (sent price vs the current mark, the same number as the row's move
+  // column); the fixed 1d/7d yardsticks follow, muted, over the calls whose close has printed.
+  const pct=(v)=>(v>=0?'+':'')+(v*100).toFixed(1)+'%';
+  const hzRec=(r,lbl)=>r?' <span class="dm-callhzrec" title="the same record at the fixed '+lbl+' horizon (first daily close ≥ '+lbl+' after each call), over the '+r.n+' call'+(r.n===1?'':'s')+' whose close has printed — a settled yardstick for comparing people, not the live read">'+lbl+' <span class="'+(r.upPct>=0.5?'pos':'neg')+'">'+Math.round(r.upPct*100)+'%</span> <span class="'+(r.avg>=0?'pos':'neg')+'">'+pct(r.avg)+'</span></span>':'';
   const sum=d.summary.map(x=>'<div class="dm-callsum'+(dmState.callsBy===x.uid?' sel':'')+'" data-dmcallsby="'+esc(x.uid)+'" title="'+(dmState.callsBy===x.uid?'show everyone':'show only '+esc(x.who)+'’s calls')+'"><span class="grow">'+esc(x.who)+'</span>'
     +'<span class="acc-mu">'+x.n+' call'+(x.n===1?'':'s')+'</span>'
-    +'<span class="'+(x.upPct>=0.5?'pos':'neg')+'" title="fraction of calls whose direction-adjusted move is positive — at the fixed 1d horizon once it has printed, live until then">'+Math.round(x.upPct*100)+'% right</span>'
-    +'<span class="'+(x.avg>=0?'pos':'neg')+'" title="average direction-adjusted move on the same yardstick">avg '+(x.avg>=0?'+':'')+(x.avg*100).toFixed(1)+'%</span></div>').join('');
+    +(x.upPct!=null?'<span class="'+(x.upPct>=0.5?'pos':'neg')+'" title="fraction of calls that are right on the live move: sent price against the current mark, direction-adjusted (a short that fell counts as right)">'+Math.round(x.upPct*100)+'% right</span>'
+    +'<span class="'+(x.avg>=0?'pos':'neg')+'" title="average direction-adjusted move since sent, live">avg '+pct(x.avg)+'</span>':'<span class="sec">no mark yet</span>')
+    +hzRec(x.h1,'1d')+hzRec(x.h7,'7d')+'</div>').join('');
   const hz=(v)=>v==null?'<span class="sec">—</span>':'<span class="'+(v>0?'pos':(v<0?'neg':'sec'))+'">'+((v>0?'+':'')+(v*100).toFixed(1)+'%')+'</span>';
   const head='<div class="dm-callrow dm-callhead"><span>call</span><span>message</span><span>who \u00b7 when</span>'
     +'<span class="dm-callpx">sent</span><span class="dm-callpx">now</span>'
@@ -1438,7 +1443,7 @@ function dmCallsHtml(){
       +'<span class="dm-callt" data-coin="'+esc(c.ref)+'" title="open the '+esc(dmTkName(c.ref))+' drawer \u2014 the rest of the row jumps to the conversation">'
         +(c.side==='short'?'<span class="neg" title="short call">\u25bc</span>':'<span class="pos" title="long call">\u25b2</span>')+' '+esc(dmTkName(c.ref))+'</span>'
       +'<span class="dm-callb">'+(c.deleted?'<span class="dm-calldelmk">message deleted \u2014 the stamp stands</span>':esc(String(c.body||'').slice(0,120)))+'</span>'
-      +'<span class="acc-mu">'+esc(c.sender)+' \u00b7 '+esc(c.threadName)+' \u00b7 '+dmWhen(c.ts)+'</span>'
+      +'<span class="acc-mu">'+esc(c.sender)+' \u00b7 '+esc(c.kind==='dm'&&c.threadName===c.sender?'DM':c.threadName)+' \u00b7 '+dmWhen(c.ts)+'</span>'
       +'<span class="dm-callpx" title="the mark when it was sent">'+(c.refPx!=null?fmtPx(c.refPx):'\u2014')+'</span>'
       +'<span class="dm-callpx dm-callnow" title="the current mark">'+(c.px!=null?fmtPx(c.px):'\u2014')+'</span>'
       +'<span class="dm-callmv '+cls+'" title="price move since sent \u2014 colored by whether the '+(c.side||'long')+' is right">'+mv+'</span>'

@@ -1825,19 +1825,28 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       });
     }
     // The summary is per person, because "who is right" is the only question a call record
-    // answers — scored on the DIRECTION-ADJUSTED move, at the 1d horizon once it has printed
-    // (a fixed yardstick), and on the live move until then.
+    // answers — scored on the DIRECTION-ADJUSTED move. The headline record is the LIVE one (sent
+    // price against the current mark: the same number the row's move column shows), and the
+    // fixed 1d/7d yardsticks ride beside it as h1/h7 over the calls whose close has printed. The
+    // first build scored the headline on the 1d close once it existed, which read as a
+    // contradiction the moment it happened: two longs up 20% and 10% since sent showed as
+    // "50% right, avg -0.2%" because both had dipped on their first daily close. A fixed horizon
+    // is a fair yardstick for comparing people; it is not what "right" means to the person reading
+    // the row, so it no longer replaces the live read — it sits next to it, labelled.
     const byWho = new Map();
+    const tally = (e, k, v) => { if (v == null) return; const b = e[k]; b.n++; if (v > 0) b.up++; b.sum += v; };
     for (const c of out) {
-      const score = c.adj1 != null ? c.adj1 : c.adj;
-      if (score == null) continue;
-      const e = byWho.get(c.senderUid) || { uid: c.senderUid, who: c.sender, n: 0, up: 0, sum: 0 };
-      e.n++; if (score > 0) e.up++; e.sum += score;
+      if (c.adj == null && c.adj1 == null && c.adj7 == null) continue;
+      const e = byWho.get(c.senderUid) || { uid: c.senderUid, who: c.sender, live: { n: 0, up: 0, sum: 0 }, h1: { n: 0, up: 0, sum: 0 }, h7: { n: 0, up: 0, sum: 0 } };
+      tally(e, "live", c.adj); tally(e, "h1", c.adj1); tally(e, "h7", c.adj7);
       byWho.set(c.senderUid, e);
     }
-    const summary = [...byWho.values()].map((e) => ({
-      uid: e.uid, who: e.who, n: e.n, upPct: e.n ? e.up / e.n : null, avg: e.n ? e.sum / e.n : null,
-    })).sort((a, b) => b.n - a.n);
+    const rec = (b) => (b.n ? { n: b.n, upPct: b.up / b.n, avg: b.sum / b.n } : null);
+    const summary = [...byWho.values()].map((e) => {
+      const live = rec(e.live);
+      return { uid: e.uid, who: e.who, n: live ? live.n : 0, upPct: live ? live.upPct : null, avg: live ? live.avg : null,
+        h1: rec(e.h1), h7: rec(e.h7) };
+    }).sort((a, b) => b.n - a.n);
     return { ok: true, calls: out, summary };
   }
 

@@ -71,6 +71,50 @@ test("funding heatmap: the now column and the lifted row cap (build 2026.09.20-8
   assert.ok(app.includes("const FH_ROWOPTS=[['25','top 25'],['50','top 50'],['all','all rows']]"), "the client owns the trim");
 });
 
+test("tab nav: \u2190 returns to the tab you were on, \u2302 goes home to Markets (build 2026.09.21-84)", () => {
+  const fs = require("fs"), path = require("path");
+  const app = require("./_client").clientSource();
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  // the two buttons live in the control cluster AFTER the spacer, so saved tab order and drag can never move them
+  const at = (s) => html.indexOf(s);
+  assert.ok(at('id="tabSpacer"') < at('id="backBtn"') && at('id="backBtn"') < at('id="homeBtn"') && at('id="homeBtn"') < at('id="helpBtn"'), "\u2190 / \u2302 sit between the spacer and the help button");
+  assert.ok(/id="backBtn" disabled/.test(html) && /id="homeBtn" disabled/.test(html), "both start dead: nowhere to go back to, already home");
+  for (const pin of [
+    "if(switching&&el('view-'+from)) state.prevView=from;",                              // the tab you came from, recorded on every real switch
+    "function goBackTab(){ const p=state.prevView; if(p&&p!==state.view&&tabVisible(p)) showView(p); }",
+    "if(e.key==='b'){ e.preventDefault(); goBackTab(); return; }",
+    "if(e.key==='h'){ e.preventDefault(); showView('markets'); return; }",
+    "b.addEventListener('click',goBackTab);", "h.addEventListener('click',()=>showView('markets'));",
+    "syncTabScroll(); syncTabNav();",                                                                 // every showView restamps the buttons
+    "{ const tm=el('view-treemap'); if(tm) tm.hidden=v!=='treemap'; }",                                                      // the runtime treemap hides on \u2190 / \u2302 / palette, not only on a tab click
+    "e.target.closest('.tab,.tabnav')",                                                              // ...and the treemap installer's delegated listener reads the buttons
+    "<kbd>b</kbd> <kbd>h</kbd>", "view:'markets', prevView:null,",
+  ]) assert.ok(app.includes(pin), `client missing tab-nav pin: ${pin}`);
+  assert.ok(app.indexOf("syncTabNav();   // a scope flip") > 0, "applyTabVisibility resyncs the buttons — a scope flip can hide the Back target");
+  assert.ok(css.includes(".tabs .tabnav:disabled{opacity:.35;cursor:default}") && css.includes("#backBtn,#homeBtn,"), "dead state is visible; touch targets on phones");
+  // exercise syncTabNav: Back is live only with a visible, existing previous tab; Home is dead on Markets
+  const src = app.slice(app.indexOf("function syncTabNav(){"), app.indexOf("function showView(v){"));
+  const run = (view, prevView, visible, sections = ["view-markets", "view-trend", "view-signals"]) => {
+    const btn = { backBtn: { disabled: true, title: "" }, homeBtn: { disabled: true } };
+    const el = (id) => btn[id] || (sections.includes(id) ? {} : null);
+    const doc = { querySelector: (q) => ({ textContent: " " + q.replace(/.*"([a-z]+)".*/, "$1") + " 3 " }) };
+    new Function("state", "el", "tabVisible", "document", src + "; syncTabNav();")({ view, prevView }, el, (v) => visible.includes(v), doc);
+    return btn;
+  };
+  let b = run("trend", "markets", ["markets", "trend"]);
+  assert.equal(b.backBtn.disabled, false, "came from Markets: Back is live"); assert.ok(b.backBtn.title.startsWith("Back to markets \u2014"), "the title names the target, badge count stripped: " + b.backBtn.title);
+  assert.equal(b.homeBtn.disabled, false, "not on Markets: Home is live");
+  b = run("markets", null, ["markets"]);
+  assert.equal(b.backBtn.disabled, true, "fresh load: nowhere to go back to"); assert.equal(b.homeBtn.disabled, true, "already home");
+  b = run("markets", "signals", ["markets"]);
+  assert.equal(b.backBtn.disabled, true, "the previous tab is hidden by scope now: Back is dead rather than bouncing you to Markets with a toast");
+  b = run("markets", "focus", ["markets", "focus"]);
+  assert.equal(b.backBtn.disabled, true, "a view whose section is missing from this build is never a Back target");
+  b = run("signals", "signals", ["signals"]);
+  assert.equal(b.backBtn.disabled, true, "previous == current is not a move");
+});
+
 test("funding heatmap: sorting on the now column (build 2026.09.21-82)", () => {
   const app = require("./_client").clientSource();
   // the three now-sorts mirror the three mean-sorts, and share one comparator
@@ -239,7 +283,7 @@ test("UI -24: session-wide controls live outside every per-view section", () => 
   assert.ok(spans.length >= 8, "could not resolve the view sections in index.html");
 
   // Controls the user must be able to reach or read from any tab.
-  for (const id of ["bellBtn", "bellBadge", "alertpop", "helpBtn", "logoutBtn", "tabSpacer", "focusChip", "freshtray"]) {
+  for (const id of ["bellBtn", "bellBadge", "alertpop", "helpBtn", "backBtn", "homeBtn", "logoutBtn", "tabSpacer", "focusChip", "freshtray"]) {
     const at = html.indexOf(`id="${id}"`);
     assert.ok(at > 0, `missing global control: ${id}`);
     const trapped = spans.find(([, s0, s1]) => at > s0 && at < s1);
@@ -2496,4 +2540,35 @@ test("share to chat (build 2026.09.21-84): the sheet can close — its author di
   const fs = require("fs"), path = require("path");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   assert.ok(/\.share-sheet\[hidden\],\.share-bg\[hidden\]\{display:none\}/.test(css), "display:flex on .share-sheet beats the UA [hidden] rule; the companion restores it");
+});
+
+test("docs: every tab in the manifest has a section in the manual, and the manual names no tab that does not exist", () => {
+  // The manual hides sections by feature key (data-feature) using the same injected set the shell
+  // uses, so a key here that is not in FEATURES would be a section that never hides, and a tab in
+  // FEATURES with no section would be a tab the manual quietly omits. Both directions are pinned.
+  const fs = require("fs"), path = require("path");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "docs.html"), "utf8");
+  const { FEATURES } = require("../src/compute");
+  const tabs = FEATURES.filter((f) => f.kind === "tab");
+  for (const f of tabs) {
+    assert.ok(html.includes(`id="tab-${f.key}"`), `manual has no section anchored tab-${f.key} for the ${f.label} tab`);
+    assert.ok(html.includes(`data-feature="${f.key}"`), `manual section for ${f.key} does not gate on its feature key`);
+    if (f.def === "admin") assert.ok(new RegExp(`data-feature="${f.key}" data-def="admin"`).test(html), `${f.key} ships admin-only — its section must say so`);
+  }
+  const keys = new Set(FEATURES.map((f) => f.key));
+  for (const m of html.matchAll(/data-feature="([a-z.]+)"/g)) assert.ok(keys.has(m[1]), `manual gates a section on unknown feature key ${m[1]}`);
+  // The shell's boot slot is the docs page's boot slot — the server splits on the exact string.
+  assert.ok(html.includes("<script>window.__FLAGS=null;window.__ADMIN=false;</script>"), "docs page carries the shell's flag slot verbatim");
+  assert.ok(html.includes("{{build}}"), "docs page carries the build slot");
+  // The ? help links every tab to its section, and the shell footer links the manual.
+  const nav = fs.readFileSync(path.join(__dirname, "..", "public", "js", "nav.js"), "utf8");
+  assert.ok(nav.includes('href="/docs#tab-${esc(v)}"'), "help modal links to the manual's section for the open tab");
+  const shell = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  assert.ok(shell.includes('href="/docs"'), "shell links the manual");
+  // Sections the page hides by flag must be top-level, or the hide/search logic (main.doc > section) misses them.
+  for (const m of html.matchAll(/<section id="([^"]+)"[^>]*data-feature/g)) {
+    const at = m.index, before = html.slice(0, at);
+    const open = (before.match(/<section\b/g) || []).length, close = (before.match(/<\/section>/g) || []).length;
+    assert.equal(open, close, `section ${m[1]} is nested inside another section`);
+  }
 });

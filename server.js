@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.21-84";
+const VERSION = "2026.09.21-86";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -2115,6 +2115,42 @@ async function buildServer() {
   };
   fastify.get("/", serveIndex);
   fastify.get("/index.html", serveIndex);
+
+  // ===== documentation (build 2026.09.21-85) ====================================================
+  // /docs is the manual (public/docs.html) and /docs/ref/<page> the reference pages under docs/.
+  // Both are HTML the server emits, so they take the two stamps the shell takes: the caller's
+  // resolved feature set (a section about a tab this member cannot see is never in the markup they
+  // receive — same audience rule as the ribbon) and the CSP nonce on every inline script. Read once
+  // at boot, build-stamped; a missing or unreadable file makes the route answer 404 and is said out
+  // loud at boot rather than failing it — the app must never refuse to start because a manual moved.
+  // Explicit routes win over @fastify/static by radix specificity, so /docs.html never reaches the
+  // static fallback unstamped. No feature claims these paths, so the site gate alone decides.
+  const loadDocPage = (file) => {
+    try {
+      return fs.readFileSync(file, "utf8")
+        .split("<script>").join(`<script nonce="${CSP_NONCE_SLOT}">`)   // inline scripts only, same as the shell
+        .split("{{build}}").join(VERSION);
+    } catch (e) { log(`WARN: docs page ${path.basename(file)} unreadable (${e.message}) \u2014 its route answers 404`); return null; }
+  };
+  const DOCS_HTML = loadDocPage(path.join(__dirname, "public", "docs.html"));
+  const serveDocs = (req, reply) => {
+    if (!DOCS_HTML) return reply.code(404).header("cache-control", "no-store").send({ error: "docs not available" });
+    const boot = bootScript(isAdmin(req), meOf(req));
+    // Audience-specific like the shell, hence no-store like the shell.
+    return reply.header("cache-control", "no-store").type("text/html; charset=utf-8")
+      .send(DOCS_HTML.includes(FLAG_SLOT) ? DOCS_HTML.split(FLAG_SLOT).join(boot) : DOCS_HTML);
+  };
+  fastify.get("/docs", serveDocs);
+  fastify.get("/docs.html", serveDocs);
+  const DOC_REFS = { signals: "xyz-monitor-signal-reference.html", features: "xyz-monitor-features.html",
+                     map: "xyz-monitor-map.html", mechanics: "xyz-monitor-mechanics.html" };
+  const DOC_REF_HTML = {};
+  for (const [k, f] of Object.entries(DOC_REFS)) { const h = loadDocPage(path.join(__dirname, "docs", f)); if (h) DOC_REF_HTML[k] = h; }
+  fastify.get("/docs/ref/:page", (req, reply) => {
+    const h = DOC_REF_HTML[String(req.params.page || "")];
+    if (!h) return reply.code(404).header("cache-control", "no-store").send({ error: "no such reference page", pages: Object.keys(DOC_REF_HTML) });
+    return reply.header("cache-control", "no-cache").type("text/html; charset=utf-8").send(h);
+  });
 
   fastify.get("/api/snapshot", (req, reply) =>
     serveCached(req, reply, poller.getSnapshot(), { ts: 0, dataTs: 0, benchCoin: null, markets: [] }));

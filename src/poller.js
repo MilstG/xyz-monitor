@@ -12976,7 +12976,8 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
             + (x.adj7 != null ? " \u00b7 7d " + dgPct(x.adj7) : "") + (x.deleted ? " \u00b7 deleted" : ""));
         for (const e of (c.summary || []).slice(0, 4))
           parts.push(dgEsc(e.who) + ": " + e.n + " call" + (e.n === 1 ? "" : "s")
-            + (e.upPct != null ? " \u00b7 " + Math.round(e.upPct * 100) + "% right \u00b7 avg " + dgPct(e.avg) : ""));
+            + (e.upPct != null ? " \u00b7 " + Math.round(e.upPct * 100) + "% right \u00b7 avg " + dgPct(e.avg) : "")
+            + (e.h7 ? " \u00b7 7d " + Math.round(e.h7.upPct * 100) + "% " + dgPct(e.h7.avg) : (e.h1 ? " \u00b7 1d " + Math.round(e.h1.upPct * 100) + "% " + dgPct(e.h1.avg) : "")));
       }
     }
     const ec = earnCache;

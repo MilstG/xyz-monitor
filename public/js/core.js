@@ -67,7 +67,7 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
   actOpen:true,   // action lists under the markets table: OPEN by default (-03), collapse persisted
   filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'30', ctf:'1d', topN:40, selected:null, search:'', topPairs:10, pair:null, showBuiltins:false},
   colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN),
-  sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30', grp:'sector' }, dataTs:0, connOk:true, view:'markets', regimeSrv:null,
+  sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30', grp:'sector' }, dataTs:0, connOk:true, view:'markets', prevView:null, regimeSrv:null,
   backtest:{ signal:'mom', lookback:20, cadence:5, quantile:0.2, cost:5, universe:'all', split:0.6,
     direction:'high', structure:'ls', weighting:'eq', reqSign:false, holdWindow:'cc', vsBasket:'',
     picks:[], entry:0 },   // picks: explicitly targeted coins — one = single-asset timing test, several = a custom universe. entry: the σ threshold that replaces the book quantile on one name.

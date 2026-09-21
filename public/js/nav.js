@@ -4,7 +4,7 @@
 // on G (core.js).
 import { tabVisible, toggleViewAsPublic } from "./admin.js";
 import { alertMarkRead, buildAlertsPanel, loadAlerts, notifyNewBuild, updateBell } from "./alerts.js";
-import { applyScope, setScope, showView, syncTabScroll } from "./backtest.js";
+import { applyScope, setScope, showView, syncTabNav, syncTabScroll } from "./backtest.js";
 import { COLS } from "./base.js";
 import { COL_BY_KEY, DEFAULT_HIDDEN, DEFAULT_ORDER, G, PKEY, activeRows, el, esc, fmtPrice, mktGrp, overlayPop, overlayPush, overlayTop, parseAmount, state, store } from "./core.js";
 import { exportCorr, exportMarkets, openCorr, renderCorr, renderCorrPairs } from "./corr.js";
@@ -264,6 +264,9 @@ document.querySelectorAll('#rfseg button').forEach(b=>{ if(+b.dataset.ms===state
   b.addEventListener('click',()=>{ document.querySelectorAll('#rfseg button').forEach(x=>x.classList.toggle('active',x===b));
     setRefresh(+b.dataset.ms); savePrefs(); }); });
 document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>showView(t.dataset.view)));
+// ← / ⌂ beside the help button: back to the tab you were on before this one, and home to Markets.
+{ const b=el('backBtn'); if(b) b.addEventListener('click',goBackTab);
+  const h=el('homeBtn'); if(h) h.addEventListener('click',()=>showView('markets')); }
 document.querySelectorAll('#hsgwin button').forEach(b=>b.addEventListener('click',()=>{ state.housingWin=b.dataset.w; renderHousing(); }));
 document.querySelectorAll('#liqwin button').forEach(b=>b.addEventListener('click',()=>{ state.liqWin=b.dataset.w; renderLiquidity(); }));
 document.querySelectorAll('[data-scope]').forEach(b=>b.addEventListener('click',()=>setScope(b.dataset.scope)));
@@ -285,9 +288,11 @@ function saveTabOrder(){ try{ const nav=document.querySelector('nav.tabs');
 // the server manifest, which is the same hide expressed once instead of twice. Every tab is evaluated, so this
 // both hides AND un-hides — a flag flipped in the panel takes effect on the next load with no
 // markup change, and nothing can be left stuck hidden by a stale list.
+function goBackTab(){ const p=state.prevView; if(p&&p!==state.view&&tabVisible(p)) showView(p); }
 function applyTabVisibility(){
   const nav=document.querySelector('nav.tabs'); if(!nav) return;
   nav.querySelectorAll('.tab').forEach(t=>{ t.hidden = !tabVisible(t.dataset.view); });
+  syncTabNav();   // a scope flip or a flag can hide the tab Back would return to — the button says so
   if(typeof syncTabGroups==='function') syncTabGroups(state.view);   // a group with nothing left in it hides too
 }
 function applyTabOrder(){ let ord; try{ ord=JSON.parse(store.get(TABKEY)||'null'); }catch(_){ ord=null; }
@@ -479,6 +484,8 @@ document.addEventListener('keydown',e=>{
   const t=e.target, tag=t&&t.tagName;
   if(tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT'||(t&&t.isContentEditable)) return;
   if(e.key==='?'){ e.preventDefault(); openHelp(); return; }
+  if(e.key==='b'){ e.preventDefault(); goBackTab(); return; }          // ← the tab you were on before this one
+  if(e.key==='h'){ e.preventDefault(); showView('markets'); return; }   // ⌂ home
   if(e.key==='/'){ e.preventDefault();
     // focus the current tab's primary search; tabs without one fall back to the markets filter
     const map={markets:'filter',corr:'corrsearch',report:'ai-q',dm:'dm-q',signals:'sighist-q',news:'nfilter',insiders:'ins-q'};
@@ -726,6 +733,7 @@ const HELP_KEYS=`<div class="hlp-h">Keyboard</div><table class="hlp-keys">
 <tr><td><kbd>/</kbd></td><td>focus this tab's search</td></tr>
 <tr><td><kbd>j</kbd> <kbd>k</kbd> <kbd>Enter</kbd></td><td>walk the markets table (or the conversation rail) and open the highlighted row</td></tr>
 <tr><td><kbd>Esc</kbd></td><td>close the drawer, a menu, or back out a level</td></tr>
+<tr><td><kbd>b</kbd> <kbd>h</kbd></td><td>back to the tab you were on before this one · home (Markets) — the ← and ⌂ buttons beside the help button</td></tr>
 <tr><td><kbd>Ctrl</kbd>+<kbd>K</kbd> / <kbd>⌘</kbd>+<kbd>K</kbd></td><td>command palette — a ticker or a tab; <kbd>⇧</kbd>+<kbd>Enter</kbd> runs an AI report</td></tr>
 <tr><td><kbd>~</kbd></td><td>the terminal (<code>help</code> lists its verbs)</td></tr>
 <tr><td><kbd>?</kbd></td><td>this help</td></tr>
@@ -738,7 +746,7 @@ function openHelp(){
   const TAB_TITLES={markets:'Markets',focus:'Focus',sectors:'Sectors',corr:'Correlation',sessions:'Sessions',signals:'Signals',earnings:'Calendar',backtest:'Backtest',housing:'Housing',liquidity:'Liquidity',treemap:'Treemap'};   // fallback for a view with no ribbon tab (the runtime treemap)
   const title=tb?tb.textContent.trim().replace(/\s*\d+\s*$/,''):(TAB_TITLES[v]||v);
   m.innerHTML=`<div class="hlp-head">How to read: ${esc(title)}<button class="btn xtiny" id="helpclose" title="close">\u2715</button></div>`
-    +`<div class="hlp-sub">What each element means and \u2014 more importantly \u2014 how to interpret it. Every number in the app also explains itself on hover; this is the map. Nothing here is investment advice.</div>`
+    +`<div class="hlp-sub">What each element means and \u2014 more importantly \u2014 how to interpret it. Every number in the app also explains itself on hover; this is the map. Nothing here is investment advice. <a class="hlp-docs" href="/docs#tab-${esc(v)}" target="_blank" rel="noopener" title="the complete manual \u2014 every tab, column, command, alert and setting, in a page of its own">full documentation \u2197</a></div>`
     +(HELP[v]||`<div class="hlp-h">${esc(title)}</div><p>${esc((tb&&tb.title)||'')||'No explainer written for this tab yet.'}</p>`)
     +HELP_KEYS;
   bg.hidden=false; m.hidden=false; m.scrollTop=0; overlayPush('help', closeHelp);

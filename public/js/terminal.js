@@ -964,7 +964,8 @@ function renderTreemap(){
 
     // nav clicks: show/render on our tab, hide our view on any other
     if(nav && !nav.dataset.tmBound){ nav.dataset.tmBound='1';
-      nav.addEventListener('click',e=>{ const t=e.target.closest('.tab'); if(!t) return; const v=t.dataset.view;
+      nav.addEventListener('click',e=>{ const t=e.target.closest('.tab,.tabnav'); if(!t) return;
+        const v=t.classList.contains('tabnav')?state.view:t.dataset.view;   // ← / ⌂ already navigated in their own handler: read where they landed
         if(v==='treemap' && typeof showView==='function') showView('treemap');   // hides built-in views, sets active tab + hash
         const tv=document.getElementById('view-treemap'); if(tv) tv.hidden = v!=='treemap';
         if(v==='treemap') renderTreemap();
