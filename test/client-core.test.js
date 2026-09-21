@@ -2491,3 +2491,9 @@ test("small fixes: escaped terminal sink, capped scrollback, total-order compara
   assert.ok(sw.includes("(build 2026.09.16-80)"), "sw header build stamp updated");
   assert.ok(app.includes("navigator.serviceWorker.addEventListener('message',e=>{ const d=e&&e.data; if(d&&d.go==='dm') showView('dm'); });"), "the page answers the message");
 });
+
+test("share to chat (build 2026.09.21-84): the sheet can close — its author display: has a [hidden] companion", () => {
+  const fs = require("fs"), path = require("path");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(/\.share-sheet\[hidden\],\.share-bg\[hidden\]\{display:none\}/.test(css), "display:flex on .share-sheet beats the UA [hidden] rule; the companion restores it");
+});

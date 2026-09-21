@@ -1552,4 +1552,5 @@ test("share to chat: a card is stored as JSON beside its text body, stamps only 
   // Deleting tombstones the card with the body.
   A.drop(g.uid, plain.id);
   assert.equal(A.history(l.uid, plain.thread).messages.find((m) => m.id === plain.id).card, null, "a deleted card carries nothing");
+  assert.equal(A._db.prepare("SELECT card FROM dm_msg WHERE id = ?").get(plain.id).card, null, "\u2026and the JSON is gone from the row, not just hidden");
 });

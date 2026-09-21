@@ -440,7 +440,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     msgIns: db.prepare("INSERT INTO dm_msg (thread, sender, ts, body, ref, refPx, side, sys, fileId, via, replyTo, cmd, cmdAi, card) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"),
     msgById: db.prepare("SELECT * FROM dm_msg WHERE id = ?"),
     msgEdit: db.prepare("UPDATE dm_msg SET body = ?, ref = ?, editedAt = ? WHERE id = ? AND sender = ? AND deletedAt IS NULL"),
-    msgDrop: db.prepare("UPDATE dm_msg SET deletedAt = ?, body = '', fileId = NULL WHERE id = ? AND sender = ?"),
+    msgDrop: db.prepare("UPDATE dm_msg SET deletedAt = ?, body = '', fileId = NULL, card = NULL WHERE id = ? AND sender = ?"),
     msgPage: db.prepare("SELECT * FROM dm_msg WHERE thread = ? AND id < ? AND id > ? ORDER BY id DESC LIMIT ?"),
     msgSince: db.prepare("SELECT * FROM dm_msg WHERE thread = ? AND id > ? ORDER BY id LIMIT ?"),
     msgLast: db.prepare("SELECT * FROM dm_msg WHERE thread = ? ORDER BY id DESC LIMIT 1"),

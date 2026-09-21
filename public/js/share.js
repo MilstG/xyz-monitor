@@ -106,7 +106,7 @@ function cardHtml(card, m) {
     + "<div class=\"chd\"><span class=\"ck\">⤴</span><span class=\"tk\">" + cardTitle(card) + "</span><span class=\"mk-chip\">" + esc(card.kind) + "</span>"
     + "<span class=\"at\">captured " + esc(cardWhen(card.at)) + (card.px > 0 ? " · mark " + esc(fmtPrice(card.px)) : "") + more + "</span></div>"
     + body
-    + "<div class=\"cft\"><button type=\"button\" class=\"dm-tool\" data-cardopen=\"" + (m ? m.id : "") + "\">open in screener ↗</button>"
+    + "<div class=\"cft\"><button type=\"button\" class=\"dm-tool\" data-cardopen=\"" + (m && m.id != null ? m.id : "") + "\">open in screener ↗</button>"
     + (now ? "<span class=\"now\">" + now + "</span>" : "") + "</div></div>";
 }
 function cardOpen(card) {

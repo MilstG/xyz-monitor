@@ -2852,6 +2852,13 @@ test("share to chat: validateCard bounds every field and cardText pads a screen 
   const huge = validateCard({ kind: "screen", cols: Array.from({ length: 12 }, (_, i) => ({ k: "k" + i, l: "L".repeat(24) })),
     rows: Array.from({ length: 25 }, (_, i) => ({ coin: "xyz:" + "C".repeat(36), t: "T" + i, px: i, c: Array.from({ length: 12 }, () => ({ s: "x".repeat(32), c: "pos" })) })) });
   assert.equal(huge.error, "too-big");
+  // A capture time outside what Date can render (or before the epoch) becomes now, so cardText
+  // can never throw on a validated card.
+  for (const at of [1e20, -5, 0, "yesterday"]) {
+    const c = validateCard({ kind: "cell", cols: [{ k: "px", l: "Price" }], rows: [{ t: "X", c: [{ s: "1" }] }], at });
+    assert.ok(c.ok && c.card.at > 1.7e12 && c.card.at <= Date.now() + 60e3, "at=" + at);
+    assert.doesNotThrow(() => cardText(c.card));
+  }
   const row = validateCard({ kind: "row", cols: [{ k: "px", l: "Price" }, { k: "d1", l: "24h" }], rows: [{ coin: "xyz:NVDA", t: "NVDA", px: 176.4, c: [{ s: "176.40" }, { s: "+1.2%", c: "pos" }] }], at: 1790000000000 });
   assert.deepEqual(cardText(row.card).split("\n").slice(1), ["Price  176.40", "24h    +1.2%", "mark   176.4"]);
 });

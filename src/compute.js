@@ -5724,7 +5724,9 @@ function validateCard(raw) {
     ctx: Array.isArray(raw.ctx) ? raw.ctx.slice(0, CARD_MAX_CTX).map((x) => ({ l: cardStr(x && x.l, CARD_LBL), s: cardStr(x && x.s, CARD_STR), c: CARD_CLS.has(x && x.c) ? x.c : "" })).filter((x) => x.l && x.s) : [],
     filters: cardStr(raw.filters, 160), sort: cardStr(raw.sort, 40),
     total: raw.kind === "screen" ? Math.max(rows.length, Math.min(100000, Math.trunc(cardNum(raw.total) || 0))) : 0,   // rows the screen had; the card shows "n of N"
-    at: cardNum(raw.at) || Date.now(),
+    // A capture time is a real, recent instant or it is now: a crafted value past what Date can
+    // render threw in cardText, and a negative one rendered as 1969.
+    at: (() => { const t = cardNum(raw.at); return t != null && t > 0 && t <= Date.now() + 60e3 ? Math.trunc(t) : Date.now(); })(),
   };
   if (JSON.stringify(card).length > CARD_BYTES) return { ok: false, error: "too-big" };
   return { ok: true, card };
