@@ -146,11 +146,11 @@ function dmMsgs(id){ let a=dmState.msgs.get(id); if(!a){ a=[]; dmState.msgs.set(
 const DM_WINDOW=100, DM_CACHE=500;
 let _dmWin=DM_WINDOW;   // how many of the open thread's messages the log shows; reset on every open
 function dmMerge(list){
-  const touched=new Set(); let added=0; const updated=[];
+  const touched=new Set(); let added=0; const updated=[], fresh=[];
   for(const m of (list||[])){
     const arr=dmMsgs(m.thread);
     const i=arr.findIndex(x=>x.id===m.id);
-    if(i>=0){ arr[i]=m; if(m.thread===dmState.sel) updated.push(m.id); } else { arr.push(m); added++; }
+    if(i>=0){ arr[i]=m; if(m.thread===dmState.sel) updated.push(m.id); } else { arr.push(m); added++; fresh.push(m); }
     touched.add(m.thread);
     // The sync cursor is deliberately NOT advanced here. It is global across threads, and a
     // single-thread history fetch advancing it meant opening thread A skipped every not-yet-
@@ -160,7 +160,58 @@ function dmMerge(list){
   for(const [id,arr] of dmState.msgs){ if(!touched.has(id)) continue; arr.sort((a,b)=>a.id-b.id);
     const cap=id===dmState.sel?Math.max(DM_CACHE,_dmWin):DM_CACHE;
     if(arr.length>cap){ arr.splice(0,arr.length-cap); const info=dmState.info.get(id); if(info) info.more=true; } }   // what was dropped is still on the server: the pager can re-fetch it
-  return {added, updated};
+  return {added, updated, fresh};
+}
+
+// ---- incremental paint (build 2026.09.21-87) -----------------------------------------------------
+// The panel used to be rebuilt wholesale for every arriving message: one innerHTML over the rail,
+// the header, every bubble in the window, every image and the composer — a full DOM teardown,
+// relayout and image re-decode per line of chat, which is what "laggy" felt like. Arrivals are
+// append-only by construction (ids only grow), so the common case is now: build the HTML for the
+// new bubbles only, insert them before the receipt, refresh the rail's previews, and leave every
+// existing node — its images, its hover state, its scroll — exactly where it was. Anything that
+// is not a plain append (out-of-order ids, a pinned arrival, search results showing, another
+// mode) answers false and the caller falls back to the full render it always did.
+function dmAppend(fresh){
+  const t=dmThread(dmState.sel); if(!t) return false;
+  if(state.view!=='dm'||dmState.mode!=='chat'||dmState.results||dmState.searching) return false;
+  const log=el('dm-log'); if(!log||typeof log.querySelectorAll!=='function') return false;
+  const mine=(fresh||[]).filter(m=>m.thread===t.id).sort((a,b)=>a.id-b.id);
+  if(!mine.length) return true;   // nothing for the open conversation: the rail alone moves
+  if(mine.some(m=>m.pinned)) return false;
+  const rendered=log.querySelectorAll('.dm-msg[data-mid]');
+  const lastId=rendered.length?+rendered[rendered.length-1].dataset.mid:0;
+  if(mine[0].id<=lastId) return false;   // not an append: something landed behind what is drawn
+  const arr=dmMsgs(t.id);
+  let html='';
+  for(const m of mine){
+    const i=arr.findIndex(x=>x.id===m.id); if(i<0) return false;
+    const p=arr[i-1];
+    if(!p||!dmSameDay(p.ts,m.ts)) html+='<div class="dm-day"><span>'+esc(dmDayLabel(m.ts))+'</span></div>';
+    html+=dmMessageHtml(m,t,p);
+  }
+  const atBottom=log.clientHeight===0||log.scrollTop+log.clientHeight>=log.scrollHeight-40;
+  const empty=log.querySelector('.dm-empty'); if(empty) empty.remove();
+  const anchor=log.querySelector('.dm-seen')||log.querySelector('.dm-local');
+  if(anchor) anchor.insertAdjacentHTML('beforebegin',html); else log.insertAdjacentHTML('beforeend',html);
+  // "seen by" sits under your LAST message: rewrite it, or draw it if this was your first.
+  if(log.querySelector('.dm-seen')) dmPatchReceipt();
+  else { const rh=dmReceiptHtml(t,arr); if(rh){ const loc=log.querySelector('.dm-local'); if(loc) loc.insertAdjacentHTML('beforebegin',rh); else log.insertAdjacentHTML('beforeend',rh); } }
+  if(atBottom) dmScrollBottom();
+  dmPinBottomOnImages();
+  return true;
+}
+// The rail (previews, unread counts, order) is its own container, so a message in ANOTHER
+// conversation redraws that list and nothing else.
+function dmPatchRail(){ const r=el('dm-rail'); if(r) r.innerHTML=dmRailHtml(); else dmRender(); }
+// After a send, the thread row moves on its own until the next sync replaces the list: the
+// preview and the time are what the sender just wrote, and nobody should wait a round trip to see it.
+function dmTouchThread(m){
+  if(!m) return;
+  const t=dmThread(m.thread); if(!t) return;
+  t.lastAt=m.ts||Date.now();
+  t.preview=String(m.sys?'':m.deleted?'message deleted':m.cmd?'\u25b8 '+m.cmd:((m.ref?'$'+dmTkName(m.ref)+' \u00b7 ':'')+(m.body||(m.file?'sent a file':'')))).slice(0,90);
+  dmState.threads.sort((a,b)=>(b.lastAt||0)-(a.lastAt||0));
 }
 
 async function dmLoad(){
@@ -237,8 +288,9 @@ async function dmSync(){
       if(state.view==='dm'&&dmState.sel&&!document.hidden
         &&(d.messages||[]).some(m=>m.thread===dmState.sel&&!m.mine)) dmMarkRead(dmState.sel);
       // Nothing NEW on the open thread (a reaction, an edit, a read receipt): touch only those rows.
-      if(state.view==='dm'){ if(chg.added||!dmState.sel||dmState.results||dmState.mode!=='chat') dmRender();
-        else { for(const id of chg.updated) dmPatchMsg(id); dmPatchReceipt(); } }
+      if(state.view==='dm'){
+        if(chg.added){ if(!dmState.sel||dmState.results||dmState.mode!=='chat'||!dmAppend(chg.fresh)) dmRender(); else dmPatchRail(); }
+        else { for(const id of chg.updated) dmPatchMsg(id); dmPatchReceipt(); if(d.threads) dmPatchRail(); } }
     }
   }catch(_){ /* the next frame or the next open retries; a failed sync is never fatal */ }
   finally{ _dmSyncing=false; if(_dmSyncQueued){ _dmSyncQueued=false; dmSync(); } }
@@ -355,10 +407,14 @@ async function dmSend(){
     ta.value=''; dmState.editing=null; dmState.replying=null; dmState.pendingFile=null; dmState.pendingPeer=null;
     dmDraftSave(dmState.sel,'');
     _dmClearOnNextRender=true;
+    // The reply IS the message: merged straight in, no second fetch of the thread list and no
+    // refetch of the history the client already holds (build 2026.09.21-87 — that was three
+    // round trips and two full rebuilds per send). Only a FIRST message to a person, which
+    // creates the conversation, still needs the list; everything else rides the sync poke.
     if(res.d.message) dmMerge([res.d.message]);
+    const created=!!(res.d.thread&&!dmThread(res.d.thread));
     if(res.d.thread) dmState.sel=res.d.thread;
-    await dmLoad();
-    if(dmState.sel) { try{ const h=await fetchJSON('/api/dm/'+dmState.sel); if(h&&h.ok){ dmMerge(h.messages); if(h.info){ h.info.more=!!h.more; dmState.info.set(dmState.sel,h.info); } } }catch(_){ } }
+    if(created) await dmLoad(); else dmTouchThread(res.d.message);
     dmRender(); dmScrollBottom();
   }else{
     dmState.err=(res.d&&res.d.error)||'could not send — try again';
@@ -670,9 +726,7 @@ async function dmRunCmd(raw){
     if(!up.ok) return dmLocal('\u2717 '+esc(line)+' \u2014 '+esc(up.error||'could not attach the chart'),'err');
     const res=await dmPost({thread:t.id,body:r.body,cmd:line,fileId:up.id});
     if(!res.ok){ const e=res.d&&res.d.error; return dmLocal('\u2717 '+esc(line)+' \u2014 '+esc(e==='feature-gated'?'terminal commands are switched off in chat on this deployment':(e||'could not post the chart')),'err'); }
-    if(res.d.message) dmMerge([res.d.message]);
-    await dmLoad();
-    if(dmState.sel){ try{ const h=await fetchJSON('/api/dm/'+dmState.sel); if(h&&h.ok){ dmMerge(h.messages); if(h.info){ h.info.more=!!h.more; dmState.info.set(dmState.sel,h.info); } } }catch(_){ } }
+    if(res.d.message){ dmMerge([res.d.message]); dmTouchThread(res.d.message); }
     dmRender(); dmScrollBottom(); return;
   }
   // Resolve exactly as the panel does: complete grammar runs as typed, local NL maps to grammar,
@@ -699,9 +753,7 @@ async function dmRunCmd(raw){
   const body=r.text.length>dmState.maxLen?r.text.slice(0,dmState.maxLen-2)+'\u2026':r.text;
   const res=await dmPost({thread:t.id,body:body,cmd:line,cmdAi:!cmd||r.ai});
   if(res.ok){
-    if(res.d.message) dmMerge([res.d.message]);
-    await dmLoad();
-    if(dmState.sel){ try{ const h=await fetchJSON('/api/dm/'+dmState.sel); if(h&&h.ok){ dmMerge(h.messages); if(h.info){ h.info.more=!!h.more; dmState.info.set(dmState.sel,h.info); } } }catch(_){ } }
+    if(res.d.message){ dmMerge([res.d.message]); dmTouchThread(res.d.message); }
     if(r.errs) dmLocal(esc(r.errs),'err');   // a partial answer posts; what failed stays private
     dmRender(); dmScrollBottom();
   }else{
@@ -1641,7 +1693,7 @@ function dmRenderNow(){
       +'<div class="dm-sh">Online</div>'+onlineStrip
       +'<div class="dm-sh">Conversations'
         +'<button type="button" class="dm-tool dm-callsbtn" id="dm-callsbtn" title="Every price-stamped call, and how each has done since">calls \u2197</button></div>'
-      +dmRailHtml()
+      +'<div id="dm-rail">'+dmRailHtml()+'</div>'
       +'<div role="button" tabindex="0" class="dm-new" id="dm-newbtn">'+(dmState.picking?'× close':'+ new message')+'</div>'+dmPickerHtml()
       +dmTopicsHtml()
       +dmTgHintHtml()
@@ -1922,16 +1974,25 @@ export function __boot_messages_14817() {
 // sat frozen in dmState forever — a stamp showed +0.0% no matter how far the market moved. While
 // a conversation is on screen, re-pull its page every 45s: dmMerge replaces rows by id, so every
 // visible stamp (and the calls view) re-marks against the current price.
+// What the tick is allowed to notice: presence, the rail's rows and receipts, who has a phone.
+// Rendering on every tick (the old behavior) rebuilt the whole panel every 45 seconds whether or
+// not anything had changed — images re-decoded, hover menus vanished, the log jumped.
+function dmPresenceSig(){
+  return JSON.stringify([[...dmState.online].sort(), dmState.meTg,
+    // Receipts are patched in place by the sync, so they do not earn a rebuild here.
+    dmState.threads.map(t=>[t.id,t.lastAt,t.unread,t.muted,t.tgSync,t.hidden,t.boardNotify]),
+    dmState.members.map(m=>[m.uid,m.tg,m.display]), dmState.boards.map(b=>[b.id,b.joined,b.unread,b.lastAt])]);
+}
 setInterval(async ()=>{
   if(document.hidden||!dmSignedIn()||state.view!=='dm') return;   // nobody is reading a hidden tab; the visibilitychange sync catches up
   try{
+    const before=dmPresenceSig();
     await dmLoad();   // presence, thread list and the pip stay fresh while the tab sits open
-    if(dmState.mode==='calls') await dmFetchCalls();
-    else if(dmState.sel&&!dmState.results){
-      const d=await fetchJSON('/api/dm/'+encodeURIComponent(dmState.sel));
-      if(d&&d.ok){ dmMerge(d.messages); if(d.info){ d.info.more=!!d.more; dmState.info.set(dmState.sel,d.info); } }
-    }
-    dmRender();
+    if(dmState.mode==='calls'){ await dmFetchCalls(); dmRender(); return; }
+    // Messages ride the incremental sync (a cursor, not the whole history page), which paints
+    // by appending; the panel itself is redrawn only when presence or the rail actually moved.
+    await dmSync();
+    if(dmPresenceSig()!==before) dmRender();
   }catch(_){ }
 },45000);
 

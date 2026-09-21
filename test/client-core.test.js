@@ -2505,13 +2505,13 @@ test("DM log: windowed to the newest 100, cache capped at 500 (the open thread k
   M.setWin(700); r = M.dmMerge(msgs(1, 1, 700));
   assert.equal(dmState.msgs.get(1).length, 700, "the pager walked to 700: nothing it fetched is trimmed");
   r = M.dmMerge([{ id: 650, thread: 1, body: "edited" }, { id: 5, thread: 2, body: "x" }]);
-  assert.deepEqual(r, { added: 1, updated: [650] }, "an edit reports the id (open thread only); a re-fetched older row on another thread counts as added");
+  assert.deepEqual({ added: r.added, updated: r.updated, freshIds: r.fresh.map((m) => m.id) }, { added: 1, updated: [650], freshIds: [5] }, "an edit reports the id (open thread only); a re-fetched older row on another thread counts as added — and is handed back so the painter can append it");
   assert.equal(dmState.msgs.get(1).find((m) => m.id === 650).body, "edited");
   // Wiring pins: the window, the local-first pager, the in-place patches, the throttle, the idle guard.
   for (const pin of ["const all=dmMsgs(t.id), arr=all.length>_dmWin?all.slice(-_dmWin):all;", "(((info&&info.more)||all.length>arr.length)&&arr.length)",
     "if(arr.length>_dmWin){ _dmWin=Math.min(arr.length,_dmWin+DM_WINDOW); dmRenderNow(); keepTop(); return; }", "_dmWin+=(d.messages||[]).length;",
     "dmState.mode='chat'; _dmWin=DM_WINDOW;", "function dmPatchTyping(id){", "dmPatchTyping(t.thread);", '<div id="dm-typing">',
-    "function dmPatchMsg(id){", "function dmPatchReceipt(){", "else { for(const id of chg.updated) dmPatchMsg(id); dmPatchReceipt(); }",
+    "function dmPatchMsg(id){", "function dmPatchReceipt(){", "else { for(const id of chg.updated) dmPatchMsg(id); dmPatchReceipt(); if(d.threads) dmPatchRail(); }",
     "function dmRenderNow(){", "if(_dmRaf){ _dmDirty=true; return; }", "_dmRaf=requestAnimationFrame(", "if(document.hidden||!dmSignedIn()||state.view!=='dm') return;"])
     assert.ok(app.includes(pin), "DM pin missing: " + pin);
   assert.ok(!app.includes("if(state.view==='dm'&&dmState.sel===t.thread) dmRender();"), "a typing frame no longer rebuilds the panel");
@@ -2571,4 +2571,87 @@ test("docs: every tab in the manifest has a section in the manual, and the manua
     const open = (before.match(/<section\b/g) || []).length, close = (before.match(/<\/section>/g) || []).length;
     assert.equal(open, close, `section ${m[1]} is nested inside another section`);
   }
+});
+
+// ===== build 2026.09.21-87: the chat paints incrementally ==========================================
+test("chat perf -87: arrivals append, a send merges its own reply, the tick paints only on change", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "js", "messages.js"), "utf8");
+  // dmMerge hands back the fresh rows so the painter can append exactly those.
+  assert.ok(/return \{added, updated, fresh\};/.test(app), "dmMerge returns the fresh list");
+  // dmSync: an arrival on the open thread appends; another thread's arrival redraws the rail only; the full render is the fallback.
+  assert.ok(/if\(chg\.added\)\{ if\(!dmState\.sel\|\|dmState\.results\|\|dmState\.mode!=='chat'\|\|!dmAppend\(chg\.fresh\)\) dmRender\(\); else dmPatchRail\(\); \}/.test(app), "sync appends before it rebuilds");
+  // The append path refuses anything that is not a plain append.
+  const fn = app.slice(app.indexOf("function dmAppend(fresh){"), app.indexOf("function dmPatchRail(){"));
+  for (const pin of ["if(mine.some(m=>m.pinned)) return false;", "if(mine[0].id<=lastId) return false;",
+    "if(state.view!=='dm'||dmState.mode!=='chat'||dmState.results||dmState.searching) return false;",
+    "anchor.insertAdjacentHTML('beforebegin',html)", "if(atBottom) dmScrollBottom();", "dmPinBottomOnImages();"])
+    assert.ok(fn.includes(pin), "dmAppend pin missing: " + pin);
+  // The rail is its own container so previews can move without touching the log.
+  assert.ok(app.includes("+'<div id=\"dm-rail\">'+dmRailHtml()+'</div>'"), "the rail has a container");
+  assert.ok(/function dmPatchRail\(\)\{ const r=el\('dm-rail'\); if\(r\) r\.innerHTML=dmRailHtml\(\); else dmRender\(\); \}/.test(app));
+  // A send no longer reloads the thread list and refetches the history it already holds.
+  const send = app.slice(app.indexOf("async function dmSend(){"), app.indexOf("async function dmUpload("));
+  assert.ok(!/fetchJSON\('\/api\/dm\/'\+dmState\.sel\)/.test(send), "no history refetch after a send");
+  assert.ok(/const created=!!\(res\.d\.thread&&!dmThread\(res\.d\.thread\)\);/.test(send) && /if\(created\) await dmLoad\(\); else dmTouchThread\(res\.d\.message\);/.test(send),
+    "only a first message to a person (which creates the conversation) reloads the list");
+  const cmd = app.slice(app.indexOf("async function dmRunCmd("), app.indexOf("async function dmUpload("));
+  assert.equal((cmd.match(/await dmLoad\(\);/g) || []).length, 0, "a command result merges its reply and touches the rail, no reload");
+  assert.ok(!/fetchJSON\('\/api\/dm\/'\+dmState\.sel\)/.test(cmd), "…and no history refetch either");
+  // The 45s tick: presence + incremental sync, and a redraw only when the signature moved.
+  const tick = app.slice(app.indexOf("function dmPresenceSig(){"), app.indexOf("},45000);"));
+  assert.ok(/await dmSync\(\);\s*\n\s*if\(dmPresenceSig\(\)!==before\) dmRender\(\);/.test(tick), "the tick paints only on change");
+  assert.ok(!/fetchJSON\('\/api\/dm\/'\+encodeURIComponent\(dmState\.sel\)\)/.test(tick), "the tick no longer refetches the whole history page");
+  // dmTouchThread keeps the rail honest between the send and the next sync.
+  const touch = app.slice(app.indexOf("function dmTouchThread(m){"), app.indexOf("async function dmLoad(){"));
+  assert.ok(/t\.lastAt=m\.ts\|\|Date\.now\(\);/.test(touch) && /dmState\.threads\.sort\(\(a,b\)=>\(b\.lastAt\|\|0\)-\(a\.lastAt\|\|0\)\);/.test(touch));
+});
+
+test("chat perf -87: dmAppend executes — appends new bubbles before the receipt, keeps the reader's place, and refuses a non-append", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "js", "messages.js"), "utf8");
+  // A minimal live log: the pieces dmAppend touches, no more.
+  const mkLog = (mids, atBottom) => {
+    const nodes = mids.map((id) => ({ cls: "dm-msg", dataset: { mid: String(id) } }));
+    const seen = { cls: "dm-seen", inserted: [] };
+    const log = { scrollTop: atBottom ? 1000 : 0, clientHeight: 500, scrollHeight: 1500, scrolled: 0, appended: [],
+      querySelectorAll: (q) => (q === ".dm-msg[data-mid]" ? nodes : []),
+      querySelector: (q) => (q === ".dm-seen" ? Object.assign(seen, { insertAdjacentHTML: (w, h) => seen.inserted.push([w, h]) }) : null),
+      insertAdjacentHTML: (w, h) => log.appended.push([w, h]) };
+    return { log, seen };
+  };
+  const src = app.slice(app.indexOf("function dmAppend(fresh){"), app.indexOf("function dmPatchRail(){"));
+  const run = (fresh, arr, mids, atBottom) => {
+    const { log, seen } = mkLog(mids, atBottom);
+    const calls = { scrolled: 0, receipt: 0, pinned: 0, html: [] };
+    const ctx = {
+      state: { view: "dm" }, dmState: { sel: 7, mode: "chat", results: null, searching: false },
+      dmThread: (id) => ({ id, kind: "dm" }), el: (id) => (id === "dm-log" ? log : null),
+      dmMsgs: () => arr, dmSameDay: (a, b) => Math.floor(a / 86400000) === Math.floor(b / 86400000),
+      dmDayLabel: () => "today", esc: (x) => String(x),
+      dmMessageHtml: (m, t, p) => { calls.html.push([m.id, p ? p.id : null]); return "<div data-mid=\"" + m.id + "\"></div>"; },
+      dmPatchReceipt: () => { calls.receipt++; }, dmReceiptHtml: () => "<div class=\"dm-seen\">sent</div>",
+      dmScrollBottom: () => { calls.scrolled++; }, dmPinBottomOnImages: () => { calls.pinned++; },
+    };
+    const f = new Function(...Object.keys(ctx), src + "\nreturn dmAppend;")(...Object.values(ctx));
+    return { ok: f(fresh), calls, seen, log };
+  };
+  const D = 86400000;
+  const arr = [{ id: 1, thread: 7, ts: 10 * D }, { id: 2, thread: 7, ts: 10 * D + 5 }, { id: 3, thread: 7, ts: 11 * D + 1 }];
+  // Two arrivals after what is drawn: both appended before the receipt, in order, with a day line
+  // where the day changes, the receipt rewritten, the reader at the bottom carried down.
+  let r = run([arr[2], arr[1]], arr, [1], true);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.calls.html, [[2, 1], [3, 2]], "each new bubble sees its real predecessor for grouping");
+  assert.equal(r.seen.inserted.length, 1); assert.equal(r.seen.inserted[0][0], "beforebegin");
+  assert.ok(/dm-day/.test(r.seen.inserted[0][1]) && r.seen.inserted[0][1].indexOf("dm-day") > r.seen.inserted[0][1].indexOf("data-mid=\"2\""), "the day divider is drawn between the two days only");
+  assert.equal(r.calls.receipt, 1); assert.equal(r.calls.scrolled, 1); assert.equal(r.calls.pinned, 1);
+  // A reader scrolled up keeps their place.
+  r = run([arr[2]], arr, [1, 2], false);
+  assert.equal(r.ok, true); assert.equal(r.calls.scrolled, 0, "no yank to the bottom while reading back");
+  // Not an append: something older than the last drawn bubble, or a pinned arrival, or another view.
+  assert.equal(run([arr[1]], arr, [1, 3], true).ok, false, "an id behind the last drawn one is a full render");
+  assert.equal(run([Object.assign({}, arr[2], { pinned: true })], arr, [1, 2], true).ok, false, "a pinned arrival changes the strip: full render");
+  // Nothing for the open thread: true, so the caller patches the rail alone.
+  assert.equal(run([{ id: 9, thread: 8, ts: 12 * D }], arr, [1, 2, 3], true).ok, true);
 });

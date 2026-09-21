@@ -232,6 +232,16 @@ instant, and the per-IP rate limit stops being a per-user problem.
   with half a percent of hysteresis so a mark sitting on the line does not fire on every wobble.
   Also fixed here: a persisted rule stored its universe as `""`, and the validator rejected that on
   the way back in — every coin-scoped and roster-wide rule was silently dropped on every restart.
+- **Chat paints incrementally** (build 2026.09.21-87) — the panel used to be rebuilt wholesale for
+  every arriving message, every send (after three round trips: the post, a reload of the thread
+  list, a refetch of the history the client already held) and every 45-second tick, whether or
+  not anything had changed: a full DOM teardown, relayout and image re-decode per line of chat.
+  Now an arrival on the open conversation is appended before the receipt (ids only grow, so the
+  common case is an append by construction), a message in another conversation redraws the rail
+  only, a send merges the server's reply and moves the thread row locally, and the tick runs the
+  incremental sync and redraws only when presence or the rail actually moved. Anything that is not
+  a plain append — an out-of-order id, a pinned arrival, search results showing — takes the full
+  render it always did.
 - **Share to chat** (build 2026.09.21-84) — any cell, any row, any screen of the markets table into
   a conversation as a **data card**. Nothing is drawn at rest: hover a data cell and a `⤴` floats
   at its corner (that field), hover the ticker cell and it means the row, right-click for a menu
