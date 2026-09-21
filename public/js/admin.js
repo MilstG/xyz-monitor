@@ -1013,7 +1013,12 @@ function attachDowControls(){
 // every cell's tooltip names the direction in words. An unknown bucket is HATCHED, never
 // zero-filled: a gap in the funding spine and a genuinely flat market must not look alike.
 const FH_STRIDE={'1h':6,'8h':6,'24h':5};        // label every Nth column — chosen to land on clean 6h/2d/5d marks
-const FH_SORTS=[['oi','open interest'],['pay','longs pay most'],['recv','longs receive most'],['abs','strongest carry'],['tkr','ticker A–Z']];
+// Two families of carry sort: by the window MEAN (pay / recv / abs) and by the NOW column
+// (nowpay / nowrecv / nowabs, build 2026.09.21-82) — the same three readings of the live rate.
+// Both are unit-blind (a positive multiplier keeps every ranking), and a now-sort reorders on the
+// snapshot path the moment a rate rolls, because that is when "paying most right now" changes.
+const FH_SORTS=[['oi','open interest'],['pay','longs pay most'],['recv','longs receive most'],['abs','strongest carry'],
+  ['nowpay','now: longs pay most'],['nowrecv','now: longs receive most'],['nowabs','now: strongest'],['tkr','ticker A–Z']];
 const FH_ROWOPTS=[['25','top 25'],['50','top 50'],['all','all rows']];
 // ---- the unit layer (build 2026.09.16-77): annualized by default, per bucket one click away ----
 // The grid shipped reading per bucket — an honest cost, but a unit nothing else on the site uses:
@@ -1096,7 +1101,8 @@ function fhSortRows(rows,tf,sort){
   const a=rows.slice();
   if(sort==='tkr') a.sort((x,y)=>x.ticker<y.ticker?-1:(x.ticker>y.ticker?1:0));
   else if(sort==='oi') a.sort((x,y)=>((y.oi==null?-1:y.oi)-(x.oi==null?-1:x.oi))||(x.ticker<y.ticker?-1:1));
-  else { const key=r=>{ const m=fhMean(r,tf); return m==null?null:(sort==='abs'?Math.abs(m):(sort==='recv'?-m:m)); };
+  else { const now=sort.startsWith('now'), kind=now?sort.slice(3):sort;
+    const key=r=>{ const m=now?fhNowOf(r):fhMean(r,tf); return m==null?null:(kind==='abs'?Math.abs(m):(kind==='recv'?-m:m)); };
     a.sort((x,y)=>{ const kx=key(x),ky=key(y);
       if(kx==null&&ky==null) return x.ticker<y.ticker?-1:1;
       if(kx==null) return 1; if(ky==null) return -1;

@@ -42,7 +42,7 @@ test("funding heatmap: the annualized read (build 2026.09.16-77) — a multiplie
   // one cap across resolutions under APR: the default grid's, annualized — not each grid's own
   assert.ok(/k=axs\[fh&&fh\.tfDefault\]\?fh\.tfDefault:tf/.test(app), "the shared cap anchors on the default (8h) grid");
   // sorts are unit-blind: ranking still runs on the raw per-bucket mean
-  assert.ok(/const key=r=>\{ const m=fhMean\(r,tf\);/.test(app), "sort keys read the raw mean, not the unit-scaled one");
+  assert.ok(/const m=now\?fhNowOf\(r\):fhMean\(r,tf\);/.test(app), "sort keys read the raw mean (or raw live rate), not the unit-scaled one");
   // an annual rate prints at 0–2 decimals, never a bucket cost's 3–6
   assert.ok(/return clamp\(2-Math\.floor\(Math\.log10\(c\)\),0,2\); \}/.test(app), "APR decimals are capped at two");
   // both units in every tooltip, and the label on the timeframe control follows the unit
@@ -69,6 +69,24 @@ test("funding heatmap: the now column and the lifted row cap (build 2026.09.20-8
   // "all rows" means all rows: the server ships every market with a spine, the client trims
   assert.ok(pl.includes("const FUNDHEAT_ROWS = 400;"), "the 60-row server cap is gone");
   assert.ok(app.includes("const FH_ROWOPTS=[['25','top 25'],['50','top 50'],['all','all rows']]"), "the client owns the trim");
+});
+
+test("funding heatmap: sorting on the now column (build 2026.09.21-82)", () => {
+  const app = require("./_client").clientSource();
+  // the three now-sorts mirror the three mean-sorts, and share one comparator
+  for (const pin of ["['nowpay','now: longs pay most']", "['nowrecv','now: longs receive most']", "['nowabs','now: strongest']",
+    "const now=sort.startsWith('now'), kind=now?sort.slice(3):sort;", "const m=now?fhNowOf(r):fhMean(r,tf);"])
+    assert.ok(app.includes(pin), `client missing now-sort pin: ${pin}`);
+  // exercise the comparator: rows without a live rate sink to the bottom, ties break by ticker
+  const src = app.slice(app.indexOf("function fhSortRows(rows,tf,sort){"), app.indexOf("// Time-axis ticks."));
+  const live = new Map([["A", { funding: 2e-5 }], ["B", { funding: -3e-5 }], ["C", { funding: 1e-5 }]]);
+  const fhSortRows = new Function("state", "fhNowOf", "fhMean", src + "; return fhSortRows;")(
+    { rows: live }, (r) => (live.get(r.coin) || {}).funding ?? null, () => null);
+  const rows = ["D", "C", "B", "A"].map((t) => ({ coin: t, ticker: t, oi: 1, tf: {} }));
+  const order = (s) => fhSortRows(rows, "8h", s).map((r) => r.ticker).join("");
+  assert.equal(order("nowpay"), "ACBD", "paying most first, unpriced last");
+  assert.equal(order("nowrecv"), "BCAD", "receiving most first");
+  assert.equal(order("nowabs"), "BACD", "strongest live carry first, either side");
 });
 
 test("transport cap: per-universe lanes so a volatile crypto day cannot evict the equity board", () => {
