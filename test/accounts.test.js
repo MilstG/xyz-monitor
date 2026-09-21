@@ -1233,8 +1233,8 @@ test("chat terminal -69: a command result is a message with cmd, no stamp, no ed
   // A fresh open of the same volume migrates nothing away: the columns are in ADDED_COLUMNS.
   const src = fs.readFileSync(path.join(__dirname, "..", "src", "accounts.js"), "utf8");
   assert.ok(/\["cmd", "TEXT"\], \["cmdAi", "INTEGER"\]/.test(src), "both columns are in the table-driven migration list — a volume from before -69 must open");
-  assert.ok(/S\.msgIns\.run\(\+threadId, actor \|\| "", now, String\(detail \|\| ""\), null, null, null, kind, null, null, null, null, null\)/.test(src), "the system-row insert binds the two new columns too — a positional insert one short binds NULL into the wrong slot next time a column is added");
-  assert.ok(/const sym = cmd \? null : firstTickerRef\(text\);/.test(src), "the no-stamp rule is at the ref site, not a post-hoc null");
+  assert.ok(/S\.msgIns\.run\(\+threadId, actor \|\| "", now, String\(detail \|\| ""\), null, null, null, kind, null, null, null, null, null, null\)/.test(src), "the system-row insert binds the two new columns too — a positional insert one short binds NULL into the wrong slot next time a column is added");
+  assert.ok(/const sym = cmd \? null : \(cardJson \? \(o\.stampSym \? String\(o\.stampSym\) : null\) : firstTickerRef\(text\)\);/.test(src), "the no-stamp rule is at the ref site, not a post-hoc null (a card stamps its own ticker, on request only)");
 
   // Server: the gate lives in the handlers because the keys own no route.
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
@@ -1263,7 +1263,7 @@ test("chat terminal -69: a command result is a message with cmd, no stamp, no ed
   assert.ok(/if\(_termSink&&_termSink\.check\)\{ const why=_termSink\.check\(d\.query\); if\(why\) return termErr/.test(app), "an AI-planned query obeys the chat allowlist — it must not navigate the sender away");
   assert.ok(/const shown=line\.replace\(\/\^\(admin\\s\+\(\?:unlock\|reset-reports\)\)/.test(app), "an admin password typed into chat is redacted in the private echo");
   assert.ok(/cmd:line,cmdAi:!cmd\|\|r\.ai/.test(app), "a planner answer (AI planned, board computed) still posts as AI — the badge follows the spend");
-  assert.ok(/\(m\.cmd\?'':'<button type="button" class="dm-tool" data-dmedit=/.test(app), "no edit button on a command result");
+  assert.ok(/\(\(m\.cmd\|\|m\.card\)\?'':'<button type="button" class="dm-tool" data-dmedit=/.test(app), "no edit button on a command result (nor on a shared card)");
   assert.ok(/<\/div>'\+dmRatioBlock\(m\)\+'<pre class="dm-cmdout">'\+esc\(m\.body\)\+'<\/pre>/.test(app) && /if\(!ra\) return dmFile\(m\);/.test(app), "the output renders escaped, in a monospace block, with the attachment ABOVE it — the first cut never rendered a command result's attachment, so the chart posted and never drew");
   assert.ok(/\/help for commands\)/.test(app), "the composer placeholder points at /help");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
@@ -1516,4 +1516,40 @@ test("telegram sync: one conversation per member, a cursor that starts now, bare
   assert.equal(A.bridgeSyncText(l.uid, "still here?").error, "not-synced");
   assert.deepEqual(A.tgSyncAll(), []);
   assert.ok(A.setTgSync(l.uid, dm, false).ok && A.tgSyncThread(l.uid) === 0, "off is off");
+});
+
+// ===== build 2026.09.21-84: share to chat — the data card is a message kind ======================
+test("share to chat: a card is stored as JSON beside its text body, stamps only when asked, cannot be edited, and mirrors as a block", async () => {
+  const { A, g, l } = await seedDesk({ "xyz:HOOD": 113.9 });
+  const { validateCard, cardText } = require("../src/compute");
+  const raw = { kind: "cell", scope: "stocks", tf: "1d", cols: [{ k: "funding", l: "Funding (APR)" }],
+    rows: [{ coin: "xyz:HOOD", t: "HOOD", px: 113.9, c: [{ s: "+41.2%", c: "pos" }] }], ctx: [{ l: "24h", s: "+3.1%", c: "pos" }], at: 1790000000000 };
+  const v = validateCard(raw); assert.ok(v.ok, v.error);
+  const resolve = (sym) => (sym === "HOOD" ? "xyz:HOOD" : null);
+  // Unstamped by default: a table of numbers is nobody's call.
+  const plain = A.send(g.uid, l.uid, cardText(v.card), resolve, { card: v.card });
+  assert.ok(plain.ok, plain.error);
+  assert.deepEqual(plain.message.card.cols, [{ k: "funding", l: "Funding (APR)" }], "the card rides the wire as JSON");
+  assert.equal(plain.message.card.rows[0].c[0].s, "+41.2%");
+  assert.ok(plain.message.body.startsWith("\u2934 HOOD \u00b7 Funding (APR)"), "the body is the server's text rendering, header first: " + plain.message.body);
+  assert.equal(plain.message.ref, null, "no stamp unless asked");
+  // Stamped on request, from the card's own ticker — never from a $WORD scan over the numbers.
+  const called = A.send(g.uid, l.uid, cardText(v.card), resolve, { card: v.card, stampSym: "HOOD" });
+  assert.equal(called.message.ref, "xyz:HOOD"); assert.equal(called.message.refPx, 113.9);
+  // Immutable like a command result; a reply quote never binds to it.
+  assert.ok(!A.edit(g.uid, plain.id, "rewritten").ok, "a card cannot be edited");
+  const quoted = A.send(g.uid, l.uid, cardText(v.card), resolve, { card: v.card, replyTo: plain.id });
+  assert.equal(quoted.message.replyTo, null, "a card is not a reply");
+  // Previews, search and the mirror all read the body.
+  const th = A.threads(l.uid).find((t) => t.id === plain.thread);
+  assert.ok(th.preview.startsWith("\u2934 HOOD"), "the rail preview is the card's header: " + th.preview);
+  assert.equal(A.search(l.uid, "Funding (APR)").results.length, 3, "the body is searchable");
+  A.setTgSync(l.uid, plain.thread, true);
+  const fresh = A.send(g.uid, l.uid, cardText(v.card), resolve, { card: v.card });
+  const mr = A.mirrorRows(l.uid, plain.thread, 10);
+  const row = mr.rows.find((r) => r.id === fresh.id);
+  assert.ok(row && row.card === true && row.body.includes("\n+41.2%"), "the mirror sees a card row with its block body");
+  // Deleting tombstones the card with the body.
+  A.drop(g.uid, plain.id);
+  assert.equal(A.history(l.uid, plain.thread).messages.find((m) => m.id === plain.id).card, null, "a deleted card carries nothing");
 });

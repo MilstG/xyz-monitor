@@ -10,9 +10,10 @@ import { COL_BY_KEY, DEFAULT_HIDDEN, DEFAULT_ORDER, G, PKEY, activeRows, el, esc
 import { exportCorr, exportMarkets, openCorr, renderCorr, renderCorrPairs } from "./corr.js";
 import { loadDaily, loadSnapshot, updateFreshness } from "./data.js";
 import { closeDetail, openDetail, runSigHist, toggleWatch } from "./drawer.js";
-import { buildHead, clearDrill, render, renderActionLists, renderRegimeStrip, scheduleRender, setGrp, sortedRows, syncGrpSeg } from "./markets.js";
+import { buildHead, clearDrill, render, renderActionLists, renderRegimeStrip, scheduleRender, setGrp, sortedRows, syncGrpSeg, visibleCols } from "./markets.js";
 import { dmKeys, dmLoad, dmRefreshOpen, dmRender, dmState, dmSync, dmTypingFrame } from "./messages.js";
 import { renderHousing, renderLiquidity } from "./notes.js";
+import { shareSetSource, shareWireTable } from "./share.js";
 import { buildLayoutMenu, loadLayouts, loadPositions, loadPrefs, posLink, posStatText, prefsRemoteFrame, saveLayouts, savePrefs, updateLayoutBtn } from "./prefs.js";
 import { aiMatches, openAiReport } from "./report.js";
 import { exportSectors, renderSectors } from "./sectors.js";
@@ -189,6 +190,10 @@ el('body').addEventListener('click', e=>{ const star=e.target.closest('.star');
 // Enter is worse than no tabindex at all.
 el('body').addEventListener('keydown', e=>{ const pit=e.target.closest&&e.target.closest('.pit[data-pit]');
   if(pit&&(e.key==='Enter'||e.key===' ')){ e.preventDefault(); e.stopPropagation(); openDetail(pit.dataset.pit); } });
+// Share to chat (build 2026.09.21-84): the screener hands the share module its live rows and
+// columns, and the table grows the floating glyph, the right-click menu and the `s` key.
+shareSetSource(()=>({rows:sortedRows(),cols:visibleCols()}));
+shareWireTable(el('body'), visibleCols);
 el('watchOnly').addEventListener('click',()=>{ state.watchOnly=!state.watchOnly; el('watchOnly').classList.toggle('on', state.watchOnly); updateFilterChip(); render(); savePrefs(); });
 // Deliberately NOT part of a saved layout, unlike ★-only: adding a field to the layout signature
 // would mark every layout the operator has already saved as dirty. Per browser, in prefs.

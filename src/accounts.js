@@ -238,6 +238,7 @@ CREATE TABLE IF NOT EXISTS dm_msg (
   sys TEXT,                        -- system event ('added'/'removed'/'left'/'renamed'), else NULL
   fileId TEXT,                     -- attachment, when the message carried one
   via TEXT,                        -- 'telegram' when it came in over the bridge, else NULL
+  card TEXT,                       -- a shared screener card (JSON, validated by compute.validateCard); body holds its text rendering
   pinnedAt INTEGER,                -- a desk channel wants the current levels at the top
   pinnedBy TEXT,
   replyTo INTEGER,                 -- quoted message id, same thread — threading without threads
@@ -353,7 +354,7 @@ CREATE TABLE IF NOT EXISTS dm_webpush (
   const ADDED_COLUMNS = {
     dm_thread: [["kind", "TEXT NOT NULL DEFAULT 'dm'"], ["pairKey", "TEXT"], ["title", "TEXT"], ["createdBy", "TEXT"]],
     dm_msg: [["sys", "TEXT"], ["fileId", "TEXT"], ["via", "TEXT"], ["pinnedAt", "INTEGER"], ["pinnedBy", "TEXT"], ["replyTo", "INTEGER"], ["side", "TEXT"],
-      ["cmd", "TEXT"], ["cmdAi", "INTEGER"]],
+      ["cmd", "TEXT"], ["cmdAi", "INTEGER"], ["card", "TEXT"]],
     dm_read: [["hiddenUpTo", "INTEGER NOT NULL DEFAULT 0"], ["clearedUpTo", "INTEGER NOT NULL DEFAULT 0"],
       ["boardNotify", "INTEGER NOT NULL DEFAULT 0"], ["tgSync", "INTEGER NOT NULL DEFAULT 0"]],
   };
@@ -436,7 +437,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     memAll: db.prepare("SELECT * FROM dm_member WHERE thread = ?"),
     memLeave: db.prepare("UPDATE dm_member SET leftAt = ? WHERE thread = ? AND uid = ? AND leftAt IS NULL"),
 
-    msgIns: db.prepare("INSERT INTO dm_msg (thread, sender, ts, body, ref, refPx, side, sys, fileId, via, replyTo, cmd, cmdAi) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"),
+    msgIns: db.prepare("INSERT INTO dm_msg (thread, sender, ts, body, ref, refPx, side, sys, fileId, via, replyTo, cmd, cmdAi, card) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"),
     msgById: db.prepare("SELECT * FROM dm_msg WHERE id = ?"),
     msgEdit: db.prepare("UPDATE dm_msg SET body = ?, ref = ?, editedAt = ? WHERE id = ? AND sender = ? AND deletedAt IS NULL"),
     msgDrop: db.prepare("UPDATE dm_msg SET deletedAt = ?, body = '', fileId = NULL WHERE id = ? AND sender = ?"),
@@ -1093,7 +1094,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   // way for the membership story to drift from the message history.
   function sysMessage(threadId, actor, kind, detail) {
     const now = Date.now();
-    const id = Number(S.msgIns.run(+threadId, actor || "", now, String(detail || ""), null, null, null, kind, null, null, null, null, null).lastInsertRowid);
+    const id = Number(S.msgIns.run(+threadId, actor || "", now, String(detail || ""), null, null, null, kind, null, null, null, null, null, null).lastInsertRowid);
     S.thrTouch.run(id, now, +threadId);
     return id;
   }
@@ -1336,6 +1337,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       body: gone ? "" : (q.cmd ? "▸ " + q.cmd : String(q.body || (q.fileId ? "sent a file" : ""))).slice(0, 120),
       ref: gone ? null : (q.ref || null), deleted: gone };
   }
+  const cardParse = (j) => { try { const c = JSON.parse(j); return c && typeof c === "object" ? c : null; } catch (_) { return null; } };
   function wire(m, uid) {
     return { id: m.id, thread: m.thread, mine: m.sender === uid,
       replyTo: m.replyTo || null, reply: m.replyTo ? replyPreview(m.replyTo, uid) : null,
@@ -1352,6 +1354,9 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       // renders the pair as a monospace block under a "▸ cmd" header with a computed/AI badge —
       // the same two badges the terminal panel wears, so a reader knows what to trust.
       cmd: m.cmd || null, cmdAi: !!m.cmdAi,
+      // A shared screener card (build 2026.09.21-84): the client renders it from the JSON; the
+      // body is its text rendering, which is what search, export and the phone read.
+      card: (m.deletedAt || !m.card) ? null : cardParse(m.card),
       file: m.deletedAt ? null : fileWire(m.fileId),
       reactions: m.deletedAt ? null : reactionsOf(m.id, uid) };
   }
@@ -1381,6 +1386,9 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     // it back out. Capped hard: it is a label, and a label that needs 4000 characters is a body.
     const cmd = o.cmd == null ? null : cleanBody(String(o.cmd)).replace(/\s+/g, " ").trim().slice(0, DM_CMD_MAX) || null;
     const cmdAi = cmd && o.cmdAi ? 1 : null;
+    // A card arrives already validated (compute.validateCard, at the route) and is stored as
+    // JSON beside its text body. It never carries a command or a quote.
+    const cardJson = o.card && typeof o.card === "object" ? JSON.stringify(o.card) : null;
     // A command result quotes nothing (it is the board's output under the sender's name, not a
     // reply) but MAY carry an attachment: /ratio posts its chart as a PNG. replyTo is dropped
     // rather than erred — the client never sends it.
@@ -1393,7 +1401,9 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     // No price stamp on a command result. The stamp is a CALL — "I said this at 113.90" — and a
     // screen dump or an AI paragraph that happens to spell $NVDA is nobody's call; stamping it
     // would seed the calls record with rows nobody made.
-    const sym = cmd ? null : firstTickerRef(text);
+    // A card names its ticker outright, so the stamp comes from that name when the sender asked
+    // for it ("quote as a call"), never from a $WORD scan over a table of numbers.
+    const sym = cmd ? null : (cardJson ? (o.stampSym ? String(o.stampSym) : null) : firstTickerRef(text));
     let ref = null, refPx = null, side = null;
     if (sym) {
       // No resolver (the Telegram bridge path) means NO stamp — falling back to the raw symbol
@@ -1406,12 +1416,12 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     // A quote binds only inside its own conversation: a replyTo naming another thread's message is
     // dropped, not erred — the message still says what it says without the quote.
     let replyTo = null;
-    if (o.replyTo != null && !cmd) {
+    if (o.replyTo != null && !cmd && !cardJson) {
       const rm = S.msgById.get(+o.replyTo);
       if (rm && rm.thread === t.id && !rm.sys && !rm.deletedAt) replyTo = rm.id;
     }
     const now = Date.now();
-    const id = Number(S.msgIns.run(t.id, fromUid, now, text, ref, refPx, side, null, file ? file.id : null, o.via || null, replyTo, cmd, cmdAi).lastInsertRowid);
+    const id = Number(S.msgIns.run(t.id, fromUid, now, text, ref, refPx, side, null, file ? file.id : null, o.via || null, replyTo, cmd, cmdAi, cardJson).lastInsertRowid);
     S.thrTouch.run(id, now, t.id);
     S.readUp.run(t.id, fromUid, id);            // your own message is read by definition
     return { ok: true, id, thread: t.id, message: wire(S.msgById.get(id), fromUid) };
@@ -1424,6 +1434,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     // A command result is the board's output under your name, not your prose: rewording it would
     // put a "computed" badge on words nobody computed. Delete it and run the command again.
     if (m.cmd) return { ok: false, error: "a command result can't be edited — delete it and run the command again" };
+    if (m.card) return { ok: false, error: "a shared card can't be edited — delete it and share again" };
     const text = cleanBody(body);
     if (!text) return { ok: false, error: "write something first" };
     // The stamp is immutable under an edit — exactly what the composer promises ("the original
@@ -1672,7 +1683,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       rows: rows.map((m) => ({ id: m.id, sender: m.sender || "", mine: m.sender === uid, via: m.via || null,
         who: m.sender ? ((users.get(m.sender) || {}).display || "—") : "",
         sys: m.sys ? sysLine(m) : "",
-        cmd: m.cmd || "", body: m.body || "", ref: m.ref || null,
+        cmd: m.cmd || "", body: m.body || "", ref: m.ref || null, card: !!m.card,
         file: m.fileId ? ((S.fileById.get(m.fileId) || {}).name || "attachment") : "",
         reply: m.replyTo ? replyPreview(m.replyTo, uid) : null })) };
   }

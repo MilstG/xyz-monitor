@@ -9,12 +9,12 @@ const { openStore } = require("./src/store");
 const { createPoller } = require("./src/poller");
 const { openAccounts, PW_MIN: ACCOUNT_PW_MIN, DM_MAX_LEN: ACCOUNT_DM_MAX,
   FILE_MAX: ACCOUNT_DM_FILE_MAX } = require("./src/accounts");
-const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HELP, RULE_OP_LABEL } = require("./src/compute");
+const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HELP, RULE_OP_LABEL, validateCard, cardText } = require("./src/compute");
 
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.21-83";
+const VERSION = "2026.09.21-84";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1636,6 +1636,22 @@ async function buildServer() {
       if (!ACCOUNTS.isMember(b.thread, me.uid)) return reply.code(400).send({ ok: false, error: "no such conversation" });
       r = dmAlertCmd(me, b.alert, b.thread, {});
     }
+    else if (b.card != null) {
+      // Share to chat (build 2026.09.21-84): a screener card into a conversation (or to a person,
+      // which opens the pair thread as a plain send does). The card is validated and its text
+      // body rendered HERE, never taken from the client, so search, export and the phone all
+      // read one server-made rendering. `call` stamps the card's own ticker as a price call. A
+      // note travels as a SECOND, ordinary message right after it — searchable, editable,
+      // quotable — and its failure never un-sends the card.
+      const v = validateCard(b.card);
+      if (!v.ok) return reply.code(400).send({ ok: false, error: "that card can't be shared (" + v.error + ")" });
+      r = ACCOUNTS.send(me.uid, String(b.to || ""), cardText(v.card), coinForSymbol,
+        { thread: b.thread || null, card: v.card, stampSym: b.call && v.card.t ? v.card.t : null });
+      if (r.ok && typeof b.body === "string" && b.body.trim()) {
+        const note = ACCOUNTS.send(me.uid, null, b.body, coinForSymbol, { thread: r.thread });
+        r.note = note.ok ? note.message : null;
+      }
+    }
     else if (b.drop && b.id != null) r = ACCOUNTS.drop(me.uid, b.id);
     else if (b.id != null) r = ACCOUNTS.edit(me.uid, b.id, b.body);
     else {
@@ -1769,6 +1785,8 @@ async function buildServer() {
     let out = "<b>" + tgEsc(r.mine ? "you" : r.who) + "</b>";
     if (r.reply && r.reply.sender) out += "\n<i>\u21a9 " + tgEsc(r.reply.sender) + ": " + tgEsc(String(r.reply.body || "").slice(0, 80)) + "</i>";
     if (r.cmd) out += "\n\u25b8 " + tgEsc(r.cmd) + (r.body ? "\n<pre>" + tgEsc(r.body.slice(0, 1500)) + (r.body.length > 1500 ? "\u2026" : "") + "</pre>" : "");
+    // A shared card: its header line as prose, the rest as the padded block the terminal drew.
+    else if (r.card && r.body) { const nl = r.body.indexOf("\n"); out += "\n" + tgEsc(nl >= 0 ? r.body.slice(0, nl) : r.body) + (nl >= 0 ? "\n<pre>" + tgEsc(r.body.slice(nl + 1, nl + 1500)) + "</pre>" : ""); }
     else if (r.body) out += "\n" + tgEsc(r.body);
     if (r.file) out += "\n\ud83d\udcce " + tgEsc(r.file);
     return out;

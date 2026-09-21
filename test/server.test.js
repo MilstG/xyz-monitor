@@ -568,3 +568,38 @@ test("dm: the sync box needs a phone, /alert binds a rule to the conversation it
   assert.ok(/if \(!targets\.length \|\| targets\.some\(\(c\) => poller\.pushQuietNow && poller\.pushQuietNow\(c\)\)\) continue;/.test(srv), "quiet hours hold the whole member");
   assert.ok(/poller\.setRuleThread\(id, 0\)/.test(srv), "an author who left the room gets the rule unbound, not dropped");
 });
+
+// ===== build 2026.09.21-84: share to chat over the wire =========================================
+test("dm: a card posts with a server-rendered body, an optional note behind it, and a stamp only on request", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const cara = jar(); cara.absorb(await post("/login", { handle: "cara", password: "yet-another-long-pw" }));
+  const members = JSON.parse((await get("/api/access", gus)).body).members;
+  const gusUid = members.find((m) => m.handle === "gus").uid;
+  const card = { kind: "row", scope: "stocks", tf: "1d", cols: [{ k: "px", l: "Price" }, { k: "d1", l: "24h" }],
+    rows: [{ coin: "xyz:NVDA", t: "NVDA", px: 176.4, c: [{ s: "176.40", c: "" }, { s: "+1.2%", c: "pos" }] }], at: 1790000000000 };
+  // To a person: opens (or reuses) the pair thread, exactly as a plain send does.
+  const r1 = JSON.parse((await post("/api/dm", { to: gusUid, card, body: "look at this $NVDA", call: true }, cara)).body);
+  assert.ok(r1.ok, JSON.stringify(r1));
+  assert.equal(r1.message.card.kind, "row"); assert.equal(r1.message.card.rows[0].c[1].s, "+1.2%");
+  assert.ok(r1.message.body.startsWith("\u2934 NVDA \u00b7 row \u00b7 captured 2026-09-21 14:13Z \u00b7 stocks \u00b7 1d\nPrice  176.40"), r1.message.body);
+  assert.equal(r1.message.ref, null, "no market called NVDA in this suite, so the stamp is honestly absent even when asked for");
+  assert.ok(r1.note && r1.note.body === "look at this $NVDA" && r1.note.thread === r1.thread, "the note follows as an ordinary message");
+  // Into a thread, no note: no second message.
+  const r2 = JSON.parse((await post("/api/dm", { thread: r1.thread, card }, cara)).body);
+  assert.ok(r2.ok && r2.note === undefined, JSON.stringify(r2));
+  const hist = JSON.parse((await get("/api/dm/" + r1.thread, cara)).body).messages;
+  assert.equal(hist.filter((m) => m.card).length, 2); assert.equal(hist.filter((m) => m.body === "look at this $NVDA").length, 1);
+  // A bad card is refused with the reason; a card cannot be edited; a thread you are not in is refused.
+  const bad = await post("/api/dm", { thread: r1.thread, card: { kind: "row", cols: [], rows: [] } }, cara);
+  assert.equal(bad.statusCode, 400); assert.match(JSON.parse(bad.body).error, /no-columns/);
+  const ed = await post("/api/dm", { id: r2.message.id, body: "rewritten" }, cara);
+  assert.equal(ed.statusCode, 400); assert.match(JSON.parse(ed.body).error, /can't be edited/);
+  assert.equal((await post("/api/dm", { thread: r1.thread + 1000, card }, cara)).statusCode, 400);
+  // The client bundle carries the module and the table wiring.
+  const nav = fs.readFileSync(path.join(__dirname, "..", "public", "js", "nav.js"), "utf8");
+  assert.ok(/shareSetSource\(\(\)=>\(\{rows:sortedRows\(\),cols:visibleCols\(\)\}\)\);/.test(nav) && /shareWireTable\(el\('body'\), visibleCols\);/.test(nav), "the screener hands its rows and columns to the share module");
+  const msgs = fs.readFileSync(path.join(__dirname, "..", "public", "js", "messages.js"), "utf8");
+  assert.ok(/: m\.card\s*\? cardHtml\(m\.card,m\)/.test(msgs) && /if\(\/\^share\\b\/i\.test\(line\)\)/.test(msgs), "cards render through the share module and /share is a composer verb");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(/CLIENT_MODULES = \(\(\) => \{ try \{ return fs\.readdirSync/.test(srv), "modules are discovered from the directory, so share.js ships precompressed and stamped");
+});

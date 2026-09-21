@@ -232,6 +232,24 @@ instant, and the per-IP rate limit stops being a per-user problem.
   with half a percent of hysteresis so a mark sitting on the line does not fire on every wobble.
   Also fixed here: a persisted rule stored its universe as `""`, and the validator rejected that on
   the way back in — every coin-scoped and roster-wide rule was silently dropped on every restart.
+- **Share to chat** (build 2026.09.21-84) — any cell, any row, any screen of the markets table into
+  a conversation as a **data card**. Nothing is drawn at rest: hover a data cell and a `⤴` floats
+  at its corner (that field), hover the ticker cell and it means the row, right-click for a menu
+  naming all three grains with the exact thing under the cursor (cell · row · this screen), or
+  press `s` on a focused row. The sheet opens at the side like the drawer: the preview IS the card
+  the room will see, a picker of your conversations (or a person, which opens the pair thread),
+  an optional line of text, and one switch — *quote as a call*, which stamps the card's own ticker
+  into the calls record. `/share HOOD funding`, `/share NVDA`, `/share screen` do the same from the
+  composer. **The serializer is the column table**: a capture runs each column's own renderer
+  over the row and keeps the text it drew and the class it drew it in, so every column is
+  shareable the day it lands with no second list of getters; "now" in the card's footer is the
+  same renderer over the live row, beside the mark's drift since capture. The server validates
+  the card's shape (≤ 25 rows × 12 columns, strings clipped, ≤ 12 KB) and renders the monospace
+  body that search, export, the digest and the Telegram mirror all read — the client never
+  supplies the text. A card is immutable like a command result (re-capture posts a fresh one of
+  the same address), never a reply, and its note travels as an ordinary message right behind it.
+  Not in this cut: charts, drawer sections and the other boards (the mock in `docs/` shows where
+  the same glyph goes next), and a screen card does not re-run its filters live.
 - **The calls record** (`/api/dm/calls`) — every price-stamped message in one place, with the move
   since it was sent and a per-person summary. This is what the stamp was FOR: without somewhere to
   read them together, each call died in the conversation it was made in. Calls carry a

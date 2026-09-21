@@ -2814,3 +2814,44 @@ test("rules: the 200-day MA rides the snapshot row, and a conversation-bound rul
   p3.hydrateRulesNow();
   assert.equal(p3.getRules("own-a", false).rules[0].thread, 42, "hydrated with its conversation");
 });
+
+// ===== build 2026.09.21-84: share to chat — the card schema and its text rendering ==============
+test("share to chat: validateCard bounds every field and cardText pads a screen into columns", () => {
+  const { validateCard, cardText, cardTitle, CARD_MAX_ROWS, CARD_MAX_COLS } = require("../src/compute");
+  const cell = validateCard({ kind: "cell", cols: [{ k: "funding", l: "Funding (APR)" }], rows: [{ coin: "xyz:HOOD", t: "HOOD", px: 113.9, c: [{ s: "+41.2%", c: "pos" }] }], ctx: [{ l: "24h", s: "+3.1%", c: "pos" }, { l: "junk", s: "" }], at: 1790000000000, extra: "dropped" });
+  assert.ok(cell.ok, cell.error);
+  assert.equal(cell.card.coin, "xyz:HOOD"); assert.equal(cell.card.t, "HOOD"); assert.equal(cell.card.px, 113.9);
+  assert.equal(cell.card.ctx.length, 1, "a context line needs a label and a value");
+  assert.equal(cell.card.extra, undefined, "unknown fields are dropped");
+  assert.equal(cardTitle(cell.card), "\u2934 HOOD \u00b7 Funding (APR)");
+  assert.deepEqual(cardText(cell.card).split("\n"), ["\u2934 HOOD \u00b7 Funding (APR) \u00b7 captured 2026-09-21 14:13Z", "+41.2%   funding (apr)", "24h +3.1%", "mark 113.9"]);
+  // Shape rules: a cell is one row × one column; a row is one row; a screen is any.
+  assert.equal(validateCard({ kind: "cell", cols: [{ k: "a", l: "A" }, { k: "b", l: "B" }], rows: [{ t: "X", c: [{ s: "1" }, { s: "2" }] }] }).error, "shape");
+  assert.equal(validateCard({ kind: "row", cols: [{ k: "a", l: "A" }], rows: [{ t: "X", c: [] }, { t: "Y", c: [] }] }).error, "shape");
+  assert.equal(validateCard({ kind: "chart", cols: [{ k: "a", l: "A" }], rows: [{ t: "X", c: [] }] }).error, "bad-kind");
+  assert.equal(validateCard({ kind: "row", cols: [], rows: [{ t: "X", c: [] }] }).error, "no-columns");
+  assert.equal(validateCard({ kind: "row", cols: [{ k: "a", l: "A" }], rows: [] }).error, "no-rows");
+  assert.equal(validateCard("nope").error, "not-a-card");
+  // Bounds: rows and columns are cut, strings are clipped and control characters stripped, a
+  // missing cell is an honest dash, an unknown class is no class.
+  const big = validateCard({ kind: "screen", scope: "stocks", tf: "1d",
+    cols: Array.from({ length: 20 }, (_, i) => ({ k: "k" + i, l: "L" + i })),
+    rows: Array.from({ length: 40 }, (_, i) => ({ coin: "xyz:T" + i, t: "T" + i, px: i, c: [{ s: "v\u0000\u0001" + i, c: "evil" }] })),
+    filters: "x".repeat(500), sort: "24h desc", total: 40 });
+  assert.ok(big.ok, big.error);
+  assert.equal(big.card.rows.length, CARD_MAX_ROWS); assert.equal(big.card.cols.length, CARD_MAX_COLS);
+  assert.equal(big.card.rows[0].c.length, CARD_MAX_COLS, "every row is padded to the column count");
+  assert.equal(big.card.rows[0].c[0].s, "v0"); assert.equal(big.card.rows[0].c[0].c, ""); assert.equal(big.card.rows[0].c[1].s, "\u2014");
+  assert.equal(big.card.filters.length, 160); assert.equal(big.card.total, 40); assert.equal(big.card.coin, "", "a screen names no single coin");
+  const txt = cardText(big.card).split("\n");
+  assert.ok(txt[0].startsWith("\u2934 screen \u00b7 25 rows \u00b7 captured "), txt[0]);
+  assert.ok(/sorted by 24h desc$/.test(txt[1]));
+  assert.ok(/^TICKER\s+L0\s+L1/.test(txt[2]), "a padded header: " + txt[2]);
+  assert.equal(txt.length, 3 + CARD_MAX_ROWS);
+  // Too big is refused, never truncated into something that looks whole.
+  const huge = validateCard({ kind: "screen", cols: Array.from({ length: 12 }, (_, i) => ({ k: "k" + i, l: "L".repeat(24) })),
+    rows: Array.from({ length: 25 }, (_, i) => ({ coin: "xyz:" + "C".repeat(36), t: "T" + i, px: i, c: Array.from({ length: 12 }, () => ({ s: "x".repeat(32), c: "pos" })) })) });
+  assert.equal(huge.error, "too-big");
+  const row = validateCard({ kind: "row", cols: [{ k: "px", l: "Price" }, { k: "d1", l: "24h" }], rows: [{ coin: "xyz:NVDA", t: "NVDA", px: 176.4, c: [{ s: "176.40" }, { s: "+1.2%", c: "pos" }] }], at: 1790000000000 });
+  assert.deepEqual(cardText(row.card).split("\n").slice(1), ["Price  176.40", "24h    +1.2%", "mark   176.4"]);
+});

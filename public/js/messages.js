@@ -11,6 +11,7 @@ import { fetchJSON } from "./data.js";
 import { openDetail } from "./drawer.js";
 import { HELP_KEYS, closeHelp } from "./nav.js";
 import { TFIELD, nlResolve, termActive, termAsk, termComps, termErr, termExec, termFind, termGrammarComplete, termHistPush, termOutTrans, termSetSink, termSink, tpad } from "./terminal.js";
+import { cardHtml, cardOpen, cardPost, cardRecapture, shareCommand } from "./share.js";
 import { loadRules } from "./triggers.js";
 
 
@@ -444,6 +445,7 @@ const DM_CMD_GUIDE=[
     ['report <ticker> \u00b7 report sector <name> \u00b7 report basket <t> <t> \u2026','the AI analyst report \u2014 opens the report view','ti']]},
   {h:'Chat only',rows:[
     ['/alert <ticker> <above|below|crosses> <n>','a threshold alert that fires INTO this conversation \u00b7 /alert NVDA > 200 \u00b7 /alert NVDA crosses down 180 \u00b7 /alert NVDA above 200ma \u00b7 /alert HOOD d1 > 5 \u00b7 /alert list \u00b7 /alert off <id>','c'],
+    ['/share <ticker> [column] \u00b7 /share screen','a piece of the screener as a data card \u2014 /share HOOD funding \u00b7 /share NVDA \u00b7 /share screen \u00b7 the \u2934 glyph on the table does the same with a picker','c'],
     ['/help','the short card, privately \u2014 only you see it','c'],
     ['/clear','forget your private lines; the conversation is untouched','c'],
     ['//text','send a message that really starts with a slash','c']]},
@@ -637,6 +639,17 @@ async function dmRunCmd(raw){
   // with the alerts engine every member already has, bound to THIS conversation, so it runs ahead
   // of the chat-terminal switch exactly as the server accepts it. A definition or a removal posts
   // into the thread (the room should know a watch was set); list and help come back privately.
+  // /share (build 2026.09.21-84): a piece of the screener as a data card, straight into this
+  // conversation — the composer's road to what the ⤴ glyph does on the table.
+  if(/^share\b/i.test(line)){
+    const r=shareCommand(line.replace(/^share\s*/i,''));
+    if(r.help) return dmLocal(esc(r.text),'help');
+    if(r.error) return dmLocal('\u2717 '+esc(line)+' \u2014 '+esc(r.error),'err');
+    const res=await cardPost(r.card,{thread:t.id},'',r.card.kind!=='screen');
+    if(!res.ok) return dmLocal('\u2717 '+esc(line)+' \u2014 '+esc((res.d&&res.d.error)||'could not share that'),'err');
+    if(res.d.message) dmMerge([res.d.message]);
+    dmRender(); dmScrollBottom(); return;
+  }
   if(/^alert\b/i.test(line)){
     const res=await dmPost({thread:t.id,alert:line.replace(/^alert\s*/i,'')});
     if(!res.ok) return dmLocal('\u2717 '+esc(line)+' \u2014 '+esc((res.d&&res.d.error)||'could not set that alert'),'err');
@@ -762,6 +775,16 @@ async function dmStartWith(uid){
   const ta=el('dm-input'); if(ta) ta.focus();
 }
 
+async function dmRecapture(id){
+  const t=dmThread(dmState.sel); if(!t) return;
+  const m=dmMsgs(t.id).find(x=>x.id===id); if(!m||!m.card) return;
+  const card=cardRecapture(m.card);
+  if(!card) return dmLocal('\u2717 re-capture \u2014 that market is not on the board right now','err');
+  const res=await cardPost(card,{thread:t.id},'',card.kind!=='screen');
+  if(!res.ok) return dmLocal('\u2717 re-capture \u2014 '+esc((res.d&&res.d.error)||'could not post'),'err');
+  if(res.d.message) dmMerge([res.d.message]);
+  dmRender(); dmScrollBottom();
+}
 async function dmToggleMute(){
   const t=dmThread(dmState.sel); if(!t) return;
   const res=await dmPost({thread:t.id,mute:!t.muted});
@@ -1146,7 +1169,8 @@ function dmMessageHtml(m,t,p){
     +'<button type="button" class="dm-tool" data-dmreply="'+m.id+'" title="Quote this message in your reply">reply</button>'
     +'<button type="button" class="dm-tool" data-dmpin="'+m.id+'" data-on="'+(m.pinned?'0':'1')+'" title="'+(m.pinned?'Unpin':'Pin this to the top of the conversation')+'">'+(m.pinned?'unpin':'pin')+'</button>'
     +((m.ref&&m.refPx!=null&&dmState.admin)?'<button type="button" class="dm-tool" data-dmnote="'+m.id+'" title="Write this into the notes book, keeping the price and time it was called at">\u2192 note</button>':'')
-    +(own?(m.cmd?'':'<button type="button" class="dm-tool" data-dmedit="'+m.id+'" title="Edit \u2014 the price stamp stays at what it was sent at">edit</button>')
+    +(m.card?'<button type="button" class="dm-tool" data-dmrecap="'+m.id+'" title="Post a fresh card of the same cell, row or screen \u2014 live values, new capture time">re-capture</button>':'')
+    +(own?((m.cmd||m.card)?'':'<button type="button" class="dm-tool" data-dmedit="'+m.id+'" title="Edit \u2014 the price stamp stays at what it was sent at">edit</button>')
       +'<button type="button" class="dm-tool" data-dmdel="'+m.id+'" title="Delete \u2014 this removes the attachment too">delete</button>':'')
     +'</span>';
   // Edited / via-telegram ride inside the bubble as a faint suffix: the header line is gone on
@@ -1160,6 +1184,10 @@ function dmMessageHtml(m,t,p){
     : '';
   const body=m.deleted
     ? '<div class="dm-b dm-del">message deleted</div>'
+    // A shared screener card (build 2026.09.21-84): its own container, rendered from the JSON
+    // through the table's formatting rules, with the live drift in its footer.
+    : m.card
+    ? cardHtml(m.card,m)+(marks?'<div class="dm-cardmk">'+marks+'</div>':'')
     : m.cmd
     // A command result: the command as a header with the engine's badge, the output as a
     // monospace block so the panel's padded columns line up. No stamp, no tweet, no quote —
@@ -1168,7 +1196,7 @@ function dmMessageHtml(m,t,p){
       +' <span class="tp-badge '+(m.cmdAi?'ai':'c')+'">'+(m.cmdAi?'AI':'computed')+'</span></div>'+dmRatioBlock(m)+'<pre class="dm-cmdout">'+esc(m.body)+'</pre>'+marks+'</div>'
     : '<div class="dm-b" title="'+esc(who+' \u00b7 '+dmWhen(m.ts))+'">'+quote
       +(m.body?dmMentionHtml(esc(m.body)).replace(/\n/g,'<br>'):'')+marks+dmFile(m)+dmStamp(m)+dmTweet(m)+'</div>';
-  return '<div class="dm-msg'+(own?' out':'')+(head?' hd':'')+(m.cmd&&!m.deleted?' cmd':'')+'" data-mid="'+m.id+'">'+meta
+  return '<div class="dm-msg'+(own?' out':'')+(head?' hd':'')+(m.cmd&&!m.deleted?' cmd':'')+(m.card&&!m.deleted?' card':'')+'" data-mid="'+m.id+'">'+meta
     +body+act+(m.deleted?'':dmReactions(m))+'</div>';
 }
 // @handle rendered as a mention chip, YOURS in the loud style \u2014 the visual half of the escalation
@@ -1745,6 +1773,14 @@ function dmWire(){
   host.addEventListener('click',(e)=>{
     const pinBtn=e.target.closest('[data-dmpin]');
     if(pinBtn){ dmPin(+pinBtn.dataset.dmpin, pinBtn.dataset.on==='1'); return; }
+    // Shared cards (build 2026.09.21-84): open restores the view; re-capture posts a fresh one;
+    // a ticker inside a screen card opens its drawer.
+    const co=e.target.closest('[data-cardopen]');
+    if(co){ const m=dmMsgs(dmState.sel).find(x=>x.id===+co.dataset.cardopen); if(m&&m.card) cardOpen(m.card); return; }
+    const rc=e.target.closest('[data-dmrecap]');
+    if(rc){ dmRecapture(+rc.dataset.dmrecap); return; }
+    const cc=e.target.closest('[data-cardcoin]');
+    if(cc){ if(state.rows.get(cc.dataset.cardcoin)) openDetail(cc.dataset.cardcoin); return; }
     const noteBtn=e.target.closest('[data-dmnote]');
     if(noteBtn){ dmToNote(+noteBtn.dataset.dmnote); return; }
     const unw=e.target.closest('[data-dmunwatch]');
