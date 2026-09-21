@@ -478,7 +478,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
       "name = the company's common name", "NUMBERS RULE", "IDENTITY RULE"])
       assert.ok(polSrc.includes(pin), `analyst legend out of sync with shipped context: ${pin}`);
   }
-  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "logoutBtn", "tabSpacer", "focusChip", "cmdk", "cmdk-q", "freshtray", "termFab", "termPanel", "termCmd", "termExpand", "compg"]) {
+  for (const id of ["helpBtn", "backBtn", "homeBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "logoutBtn", "tabSpacer", "focusChip", "cmdk", "cmdk-q", "freshtray", "termFab", "termPanel", "termCmd", "termExpand", "compg"]) {
     if (id === "dledger") continue;   // dledger is injected by JS, not static markup
     assert.ok(html.includes(`id="${id}"`), `missing markup id: ${id}`);
   }

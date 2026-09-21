@@ -854,6 +854,17 @@ window.addEventListener('resize',()=>syncTabScroll());
 window.addEventListener('load',()=>setTimeout(syncTabScroll,50));
 }
 
+// ← goes back to the last tab you were on, ⌂ to Markets — the same home every fallback lands on.
+// Both read live state: Back is dead until there is somewhere to go back to (and while that tab
+// is hidden by scope or a flag), Home is dead while you are already there.
+function syncTabNav(){
+  const p=state.prevView, ok=!!p&&p!==state.view&&tabVisible(p)&&!!el('view-'+p);
+  const b=el('backBtn'); if(b){ b.disabled=!ok;
+    const tb=ok?document.querySelector('.tab[data-view="'+p+'"]'):null;
+    const lbl=tb?tb.textContent.trim().replace(/\s*\d+\s*$/,''):(p||'');
+    b.title=ok?('Back to '+lbl+' — the tab you were on before this one (b)'):'Back — return to the tab you were on before this one (b)'; }
+  const h=el('homeBtn'); if(h) h.disabled=state.view==='markets';
+}
 function showView(v){
   try{ document.body.dataset.view=v; }catch(_){}
   // Falls through to Markets when the target is out of scope OR gated. markets is PINNED public in
@@ -869,11 +880,16 @@ function showView(v){
   // The drawer (and anything stacked over it) belongs to the tab it was opened on: it used to
   // survive a switch and sit over the Report tab. openDetail never calls showView, so a
   // "switch then open" sequence (palette, focus chip) still lands with the drawer open.
+  const from=state.view;
   const switching=v!==state.view;
   state.view=v;
   if(switching) overlayCloseAll();
+  // Where the ← button returns to: the tab you were actually on. A fallback bounce (a view whose
+  // section is missing from this build) sets state.view before landing here again, so a view
+  // with no section was never a place you were and must not become the Back target.
+  if(switching&&el('view-'+from)) state.prevView=from;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
-  syncTabScroll();
+  syncTabScroll(); syncTabNav();
   if(typeof syncTabGroups==='function') syncTabGroups(v);            // underline the group that owns it
   if(typeof closeTabMenus==='function') closeTabMenus();             // navigating always dismisses the menu
   const setHidden=(id,hidden)=>{ const e=el(id); if(e) e.hidden=hidden; };   // null-safe: a stale index.html missing a section can't break navigation
@@ -899,6 +915,7 @@ function showView(v){
   setHidden('view-admin', v!=='admin');
   setHidden('view-housing', v!=='housing');
   setHidden('view-liquidity', v!=='liquidity');
+  { const tm=el('view-treemap'); if(tm) tm.hidden=v!=='treemap'; }   // the runtime-injected treemap (no static section): ← / ⌂ and the palette leave it the same way a tab click does
   if(v==='focus'){ if(el('view-focus')) openFocus(); else { showView('markets'); return; } }
   if(v==='funds'){ if(el('view-funds')) openFunds(); else { showView('markets'); return; } }
   if(v==='trend'){ if(el('view-trend')) openTrend(); else { showView('markets'); return; } }
@@ -922,4 +939,4 @@ function showView(v){
   if(v==='liquidity'){ if(el('view-liquidity')) openLiquidity(); else { showView('markets'); return; } }
   if(!state.detail) setHash(v==='markets'?'':v);
 }
-export { applyScope, drawBacktest, setScope, showView, syncTabScroll, updateBenchNote };
+export { applyScope, drawBacktest, setScope, showView, syncTabNav, syncTabScroll, updateBenchNote };

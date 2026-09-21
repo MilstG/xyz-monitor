@@ -348,6 +348,8 @@ footer code{font-family:var(--mono);color:var(--muted)}
 .tabmenu .tab.dragging{opacity:.35}
 @media (prefers-reduced-motion:reduce){.grp .caret{transition:none}}
 .tabs .tabbtn{align-self:center;padding:6px 12px;margin-bottom:5px}
+.tabs .tabnav{padding:6px 9px;font-size:14px;line-height:1}
+.tabs .tabnav:disabled{opacity:.35;cursor:default}
 .tab.dragging{opacity:.35}
 
 /* correlation heatmap */
@@ -1081,7 +1083,7 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 @media (hover:none) and (pointer:coarse){
   .btn,.tab,.seg button,.scope,.term-fab{min-height:38px}
   .seg button{min-width:40px}
-  .stbell,#helpBtn,.dm-clip,.dm-mic,.dclose,.fchip-x{min-width:44px;min-height:44px}
+  .stbell,#helpBtn,#backBtn,#homeBtn,.dm-clip,.dm-mic,.dclose,.fchip-x{min-width:44px;min-height:44px}
   .star{display:inline-flex;width:28px;height:28px;align-items:center;justify-content:center;margin:-8px 3px -8px 0;padding:0}   /* a fingertip target, not a cursor target */
   .dm-msg .dm-act{display:inline-flex}   /* hover-only actions have no touch path */
   .nt-act,.wrap thead th .grip{opacity:1}
