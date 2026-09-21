@@ -1,0 +1,483 @@
+<meta charset="utf-8">
+<title>Share to Chat</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ── tokens lifted verbatim from public/styles.css: the mock has to read as the app, not as a deck ── */
+:root{
+  --bg:#0E1116; --panel:#151A21; --panel2:#1B222B; --border:#262E39;
+  --text:#E8E3D7; --muted:#7E8794; --faint:#4C5662; --dim:#5b6570;
+  --accent:#E3A53C; --accent-dim:#8a6a28; --blue:#6f93c9;
+  --up:#46B97E; --down:#E5604D; --grid:#1A212A;
+  --mono:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;
+  --disp:'Space Grotesk',system-ui,sans-serif;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:var(--disp);
+  -webkit-font-smoothing:antialiased;font-feature-settings:"tnum" 1}
+body{padding-block:22px 70px;padding-inline:20px;max-width:1180px;margin:0 auto;font-variant-numeric:tabular-nums}
+.pos{color:var(--up)} .neg{color:var(--down)} .sec{color:var(--muted)} .na{color:var(--faint)}
+b{font-weight:600}
+a{color:var(--blue)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+
+/* ── mock frame (the only chrome that isn't the app) ── */
+.mockhd{border-bottom:1px solid var(--border);padding-bottom:16px;margin-bottom:22px}
+.eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin:0 0 8px}
+h1{font-size:27px;font-weight:700;letter-spacing:-.4px;margin:0 0 10px;text-wrap:balance}
+.lede{color:var(--muted);font-size:13.5px;line-height:1.62;max-width:70ch;margin:0}
+.lede b{color:var(--text);font-weight:500}
+.mockchip{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--blue);border:1px solid var(--blue);border-radius:3px;padding:2px 7px;opacity:.9}
+.frame{border:1px dashed var(--accent-dim);border-radius:12px;padding:16px 18px 20px;margin:0 0 8px;position:relative}
+.frame::before{content:"live prototype";position:absolute;top:-8px;left:16px;background:var(--bg);padding:0 7px;
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent-dim)}
+.frame.still::before{content:"still"}
+.hint{font-family:var(--mono);font-size:11px;color:var(--faint);margin:0 0 14px;line-height:1.6}
+.hint kbd{border:1px solid var(--border);border-radius:3px;padding:0 5px;color:var(--muted)}
+.s-sec{margin:30px 0 12px;font-size:13px;line-height:1.4}
+.s-sec .t{color:var(--accent);font-weight:600;letter-spacing:.3px}
+.s-sec .d{color:var(--muted);font-weight:400;font-size:12px}
+.s-cap{color:var(--muted);font-size:11.5px;margin-top:11px;line-height:1.62;max-width:82ch}
+.s-cap b{color:var(--text);font-weight:600}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+@media (max-width:760px){.two{grid-template-columns:1fr}}
+
+/* ── app classes, copied from styles.css so the prototype is pixel-honest ── */
+.wrap{overflow-x:auto;border:1px solid var(--border);border-radius:10px;background:var(--panel)}
+.wrap table{border-collapse:collapse;width:100%;min-width:720px}
+.wrap thead th{position:sticky;top:0;background:var(--panel2);z-index:2;font-size:11px;text-transform:uppercase;
+  letter-spacing:.6px;color:var(--muted);font-weight:600;text-align:right;padding:11px 12px;white-space:nowrap;
+  border-bottom:1px solid var(--border);user-select:none}
+.wrap thead th:first-child{text-align:left}
+.wrap tbody td{font-family:var(--mono);font-size:13px;text-align:right;padding:9px 12px;white-space:nowrap;border-bottom:1px solid var(--grid);position:relative}
+.wrap tbody tr:last-child td{border-bottom:none}
+.wrap tbody tr{cursor:pointer}
+.wrap tbody tr:hover td{background:rgba(227,165,60,.045)}
+.wrap tbody td:first-child{text-align:left}
+.tk{font-weight:600;font-size:13.5px;color:var(--text);font-family:var(--mono)}
+.star{cursor:pointer;color:var(--faint);margin-right:7px;font-size:12px}
+.star.on{color:var(--accent)}
+.dsec{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.9px;color:var(--muted);
+  margin:18px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px}
+.dm-msg{max-width:78%;min-width:0;position:relative;display:flex;flex-direction:column;align-items:flex-start}
+.dm-msg.out{align-self:flex-end;align-items:flex-end}
+.dm-meta{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin:0 0 3px;display:flex;gap:6px}
+.dm-who{font-weight:600}
+.dm-b{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:8px 11px;font-size:13px;line-height:1.5;
+  border-bottom-left-radius:5px;overflow-wrap:anywhere}
+.dm-msg.out .dm-b{background:rgba(227,165,60,.07);border-color:rgba(227,165,60,.32);border-bottom-left-radius:12px;border-bottom-right-radius:5px}
+.dm-mk{font-family:var(--mono);font-size:8.5px;color:var(--dim);margin-left:6px;vertical-align:1px}
+.dm-log{padding:12px 14px 8px;display:flex;flex-direction:column;gap:6px;background:var(--panel);border:1px solid var(--border);border-radius:10px}
+.dm-day{align-self:center;font-family:var(--mono);font-size:10px;color:var(--faint);letter-spacing:.6px;text-transform:uppercase;margin:4px 0}
+.dm-act{display:none;position:absolute;top:-11px;right:4px;gap:2px;background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:1px}
+.dm-msg:hover .dm-act{display:inline-flex}
+.dm-tool{background:transparent;border:none;color:var(--muted);font-family:var(--mono);font-size:10px;padding:2px 6px;border-radius:4px;cursor:pointer}
+.dm-tool:hover{color:var(--accent);background:var(--panel2)}
+.dm-cmp{border-top:1px solid var(--border);padding:11px 14px;display:flex;gap:9px;align-items:flex-end;margin-top:8px}
+.dm-cmp .ta{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-family:var(--disp);font-size:13px;color:var(--faint);min-height:36px}
+.btn{background:var(--panel2);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:11px;padding:6px 11px;border-radius:6px;cursor:pointer}
+.btn:hover{border-color:var(--accent-dim)}
+.btn.primary{background:var(--accent);color:#1a1205;border-color:var(--accent);font-weight:600}
+.btn.primary:hover{filter:brightness(1.08)}
+.mk-chip{font-family:var(--mono);font-size:10px;color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:1px 6px}
+
+/* ════════════════════════════════════════════════════════════════════════
+   NEW — everything below this line is the feature's own CSS proposal.
+   ════════════════════════════════════════════════════════════════════════ */
+
+/* ── 1. the affordance: one glyph, three grains.
+      ROW: appears in the ticker cell on hover, after the star — the one cell that is always
+      on screen (the reasoning .eb already writes down). CELL: a corner glyph on the hovered
+      cell, so the field you are looking at is the field you share. SCREEN: the selection pill
+      that appears once any row is ticked. Nothing is drawn at rest: the table at rest is the
+      table. ── */
+.shr{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:4px;
+  color:var(--faint);font-family:var(--mono);font-size:11px;line-height:1;cursor:pointer;transition:color .12s,background .12s;
+  background:transparent;border:none;padding:0;vertical-align:1px}
+.shr:hover,.shr:focus-visible{color:var(--accent);background:rgba(227,165,60,.12)}
+td.tkc .shr{margin-left:6px;opacity:0}
+tr:hover td.tkc .shr,tr:focus-within td.tkc .shr{opacity:1}
+td .shr.cell{position:absolute;top:2px;right:2px;opacity:0;width:14px;height:14px;font-size:10px}
+td:hover .shr.cell{opacity:1}
+td.tkc:hover .shr.cell{opacity:0}
+.wrap tbody td:hover:not(.tkc):not(.sel-td){outline:1px dotted var(--accent-dim);outline-offset:-3px;border-radius:4px}
+td.sel-td{width:26px;padding-right:0}
+.selbox{appearance:none;width:12px;height:12px;border:1px solid var(--faint);border-radius:3px;background:transparent;cursor:pointer;vertical-align:-1px;margin:0}
+.selbox:checked{background:var(--accent);border-color:var(--accent)}
+tr.picked td{background:rgba(227,165,60,.07)}
+.selpill{position:sticky;left:12px;bottom:10px;display:inline-flex;align-items:center;gap:10px;margin:10px 12px;
+  background:var(--panel2);border:1px solid var(--accent-dim);border-radius:999px;padding:6px 8px 6px 14px;font-family:var(--mono);font-size:11px;color:var(--text);
+  box-shadow:0 6px 24px rgba(0,0,0,.4)}
+.selpill[hidden]{display:none}
+.selpill .n{color:var(--accent);font-weight:600}
+.selpill .x{color:var(--muted);cursor:pointer;padding:0 4px}
+/* the right-click menu — the same three grains, named */
+.cmenu{position:absolute;z-index:20;background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:4px;min-width:220px;
+  box-shadow:0 10px 30px rgba(0,0,0,.5);font-family:var(--mono);font-size:11.5px}
+.cmenu[hidden]{display:none}
+.cmenu button{display:flex;width:100%;justify-content:space-between;gap:14px;background:transparent;border:none;color:var(--text);
+  padding:7px 10px;border-radius:5px;cursor:pointer;font:inherit;text-align:left}
+.cmenu button:hover{background:var(--panel);color:var(--accent)}
+.cmenu button .k{color:var(--faint)}
+.cmenu .sep{height:1px;background:var(--border);margin:4px 2px}
+
+/* ── 2. the share sheet. Not a modal: it opens beside what you are sharing (the drawer's
+      side of the screen), and the preview IS the card the room will see — there is no
+      "what will this look like" question because the answer is on the left. ── */
+.sheet{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:16px;border:1px solid var(--border);border-radius:10px;background:var(--panel);padding:14px 16px 16px;margin-top:12px}
+.sheet[hidden]{display:none}
+@media (max-width:760px){.sheet{grid-template-columns:1fr}}
+.sheet .shd{grid-column:1/-1;display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:11px;color:var(--muted);padding-bottom:8px;border-bottom:1px solid var(--border)}
+.sheet .shd b{color:var(--text);font-weight:600}
+.sheet .shd .x{margin-left:auto;cursor:pointer;color:var(--muted)}
+.prevlbl{font-family:var(--mono);font-size:10px;letter-spacing:.7px;text-transform:uppercase;color:var(--faint);margin:0 0 6px}
+.to{display:flex;flex-direction:column;gap:8px}
+.to input[type=text],.to textarea{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--disp);font-size:13px;padding:8px 10px}
+.to textarea{font-family:var(--mono);font-size:12px;resize:vertical;min-height:58px}
+.to input::placeholder,.to textarea::placeholder{color:var(--faint)}
+.tolist{display:flex;flex-direction:column;gap:2px}
+.torow{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:6px;cursor:pointer;border:1px solid transparent}
+.torow:hover{background:var(--panel2)}
+.torow.on{border-color:var(--accent-dim);background:rgba(227,165,60,.06)}
+.torow .dot{width:7px;height:7px;border-radius:50%;background:var(--faint)}
+.torow .dot.on{background:var(--up)}
+.torow .nm{font-weight:500;font-size:13px}
+.torow .grp{color:var(--muted);font-family:var(--mono)}
+.torow .last{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+.opts{display:flex;flex-wrap:wrap;gap:6px 14px;font-family:var(--mono);font-size:11px;color:var(--muted)}
+.opts label{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.opts input{accent-color:var(--accent);margin:0}
+.sendrow{display:flex;align-items:center;gap:8px;margin-top:4px}
+.sendrow .sec{font-family:var(--mono);font-size:10.5px;margin-right:auto}
+
+/* ── 3. the data card — a message kind, not a formatted body. It renders through the same
+      formatters the table uses, carries the app's own colours, and always says WHEN it was
+      captured, because a number without its time is a rumour. ── */
+.dm-msg.card{max-width:min(92%,560px)}
+.card{border:1px solid var(--border);border-radius:10px;background:var(--panel2);overflow:hidden;min-width:280px}
+.dm-msg.out .card{border-color:rgba(227,165,60,.32)}
+.card .chd{display:flex;align-items:center;gap:8px;padding:7px 10px;font-family:var(--mono);font-size:11px;color:var(--muted);border-bottom:1px solid var(--border);background:var(--panel)}
+.card .chd .ck{color:var(--accent)}
+.card .chd .tk{font-size:12.5px}
+.card .chd .at{margin-left:auto;color:var(--faint)}
+.card table{border-collapse:collapse;width:100%}
+.card td,.card th{font-family:var(--mono);font-size:12px;padding:5px 10px;text-align:right;white-space:nowrap}
+.card th{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--grid)}
+.card td:first-child,.card th:first-child{text-align:left}
+.card tr+tr td{border-top:1px solid var(--grid)}
+.card .kv{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0}
+.card .kv div{padding:7px 10px;border-right:1px solid var(--grid);border-bottom:1px solid var(--grid)}
+.card .kv div:nth-child(4n){border-right:none}
+.card .kv .k{display:block;font-family:var(--mono);font-size:9.5px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
+.card .kv .v{font-family:var(--mono);font-size:13px}
+.card .one{padding:12px 12px 10px}
+.card .one .big{font-family:var(--mono);font-size:26px;font-weight:600;letter-spacing:-.5px;line-height:1}
+.card .one .k{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin-top:5px}
+.card .one .ctx{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:8px;padding-top:8px;border-top:1px solid var(--grid)}
+.card .cft{display:flex;align-items:center;gap:10px;padding:6px 10px;font-family:var(--mono);font-size:10.5px;color:var(--muted);border-top:1px solid var(--border);background:var(--panel)}
+.card .cft a{color:var(--blue);text-decoration:none}
+.card .cft .now{margin-left:auto}
+.card .cft .now b{font-weight:600}
+.card .levels div{display:flex;justify-content:space-between;padding:5px 10px;font-family:var(--mono);font-size:12px;border-top:1px solid var(--grid)}
+.card .levels div:first-child{border-top:none}
+.card .levels .w{color:var(--faint);font-size:10.5px}
+.card .filt{padding:6px 10px;font-family:var(--mono);font-size:11px;color:var(--muted);border-bottom:1px solid var(--grid)}
+.card .filt code{color:var(--text);background:var(--bg);padding:1px 5px;border-radius:3px}
+.dm-note{margin-top:4px}
+
+/* ── 4. the phone ── */
+.phone{width:min(100%,360px);background:#111;border:1px solid #2a2a2a;border-radius:22px;padding:16px 12px;margin:0 auto}
+.tgb{background:#1f2a35;border-radius:12px 12px 12px 3px;padding:8px 10px;font-family:system-ui,sans-serif;font-size:13px;line-height:1.45;color:#e8e8e8;margin-bottom:8px}
+.tgb pre{font-family:var(--mono);font-size:11px;margin:4px 0 0;white-space:pre;overflow-x:auto;color:#dfe6ee}
+.tgb i{color:#9fb0c0}
+.tgb .t{display:block;text-align:right;font-size:10px;color:#8a98a8;margin-top:3px}
+
+/* ── 5. the other surfaces, as thumbnails ── */
+.gal{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
+.gal .g{border:1px solid var(--border);border-radius:8px;background:var(--panel);padding:10px 12px;min-height:96px;position:relative}
+.gal .g .dsec{margin:0 0 8px;padding-bottom:5px}
+.gal .g .dsec .shr{margin-left:auto;opacity:.7}
+.gal .g .l{font-family:var(--mono);font-size:11.5px;display:flex;justify-content:space-between;padding:3px 0}
+.heat{display:grid;grid-template-columns:repeat(6,1fr);gap:2px}
+.heat div{height:18px;border-radius:2px;font-family:var(--mono);font-size:9px;display:flex;align-items:center;justify-content:center;color:var(--text)}
+.heat div.hov{outline:1px dotted var(--accent);outline-offset:1px}
+
+/* ── 6/7 prose ── */
+.spec{border:1px solid var(--border);border-radius:10px;background:var(--panel);padding:14px 16px}
+.spec pre{font-family:var(--mono);font-size:11.5px;line-height:1.55;margin:0;overflow-x:auto;color:var(--text)}
+.spec pre .c{color:var(--faint)}
+.spec pre .k{color:var(--accent)}
+ul.pts{margin:0;padding-left:18px;color:var(--muted);font-size:12.5px;line-height:1.7;max-width:86ch}
+ul.pts li b{color:var(--text)}
+ul.pts li code{font-family:var(--mono);font-size:11px;color:var(--text);background:var(--panel2);padding:1px 5px;border-radius:3px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="mockhd">
+  <p class="eyebrow">Design mock · messages × screener</p>
+  <h1>Share to chat: any cell, any row, any screen, one card</h1>
+  <p class="lede">Today a number leaves the screener by being retyped, screenshotted, or re-run as a command in the composer. The proposal: <b>one share glyph</b> that appears wherever data is drawn, <b>one sheet</b> that shows exactly what the room will see, and <b>one message kind</b> — a data card that keeps the app's own formatting, says when it was captured, drifts against the live mark, and opens the same view when clicked. It rides the existing stamp, pin, reply, note-promotion and Telegram-mirror paths untouched.</p>
+  <p style="margin:14px 0 0"><span class="mockchip">◆ mock · synthetic prices and conversations, nothing is wired to live data</span></p>
+</div>
+
+<div class="s-sec"><span class="t">1 · The affordance</span> &nbsp;<span class="d">the markets table — nothing at rest, three grains on hover</span></div>
+<p class="hint">Hover a row: <kbd>⤴</kbd> appears after the star (the whole row) · hover a cell: a corner <kbd>⤴</kbd> on that field alone · tick rows for a screen · right-click for the menu · with a row focused, <kbd>s</kbd> shares it.</p>
+<div class="frame">
+  <div class="wrap" id="wrap">
+    <table>
+      <thead><tr><th class="sel-td"></th><th>Ticker</th><th>Price</th><th>1d</th><th>7d</th><th>Funding APR</th><th>RVOL</th><th>OI</th><th>vs 200d</th></tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div class="selpill" id="selpill" hidden><span><span class="n" id="seln">0</span> rows picked</span><button class="btn primary" id="selshare">⤴ share as a screen</button><span class="x" id="selclear" title="clear">✕</span></div>
+  </div>
+  <div class="cmenu" id="cmenu" hidden>
+    <button data-grain="cell">Share this cell <span class="k" id="cm-cell">—</span></button>
+    <button data-grain="row">Share the row <span class="k" id="cm-row">—</span></button>
+    <div class="sep"></div>
+    <button data-grain="screen">Share this screen <span class="k">6 rows · 2 filters</span></button>
+    <button data-grain="copy">Copy as text <span class="k">⌘C</span></button>
+  </div>
+  <p class="s-cap"><b>Why three grains, not one.</b> A cell is a claim ("HOOD funding is +41% — shorts are crowded"); a row is a card ("here's NVDA right now"); a screen is a list ("these five are the setups"). Each has a different shape in the conversation, so the glyph asks which one you meant instead of guessing from where your mouse was. The right-click menu names all three with the exact thing under the cursor, which is also the keyboard path.</p>
+</div>
+
+<div class="s-sec"><span class="t">2 · The sheet</span> &nbsp;<span class="d">opens beside the table — the preview is the card</span></div>
+<p class="hint">Click any <kbd>⤴</kbd> above · pick who gets it · add a line if you want · <kbd>send</kbd> appends it to the conversation in section 3.</p>
+<div class="frame">
+  <div class="sheet" id="sheet" hidden>
+    <div class="shd"><span class="ck">⤴</span> Share <b id="sh-what">—</b> <span class="mk-chip" id="sh-ctx">markets · stocks · 1d</span><span class="x" id="sh-close">✕</span></div>
+    <div>
+      <p class="prevlbl">what the room will see</p>
+      <div id="sh-prev"></div>
+      <p class="s-cap" style="margin-top:8px">Values are <b>frozen at capture</b>; the card shows drift against the live mark, and the link reopens this view with the same scope, timeframe and columns.</p>
+    </div>
+    <div class="to">
+      <p class="prevlbl">to</p>
+      <input type="text" id="sh-q" placeholder="search people and rooms">
+      <div class="tolist" id="sh-list"></div>
+      <p class="prevlbl" style="margin-top:6px">say something (optional)</p>
+      <textarea id="sh-note" placeholder="why this is worth a look — $TICKER stamps the price like any message"></textarea>
+      <div class="opts">
+        <label><input type="checkbox" id="sh-call" checked> quote as a call (enters the calls record)</label>
+        <label id="sh-filt-l" hidden><input type="checkbox" id="sh-filt" checked> include the filters</label>
+        <label><input type="checkbox" id="sh-mirror" checked disabled title="mirrors when the recipient has sync on — not a choice you make for them"> mirrors to synced phones</label>
+      </div>
+      <div class="sendrow"><span class="sec" id="sh-size">card · 0.6 KB</span><button class="btn" id="sh-copy">copy as text</button><button class="btn primary" id="sh-send">send ⤴</button></div>
+    </div>
+  </div>
+  <p class="s-cap" id="sheet-empty">Nothing selected yet — hover a row in section 1 and click its <b>⤴</b>.</p>
+  <p class="s-cap"><b>Why not a modal.</b> The drawer already taught the app that detail opens at the side and the table stays live underneath; a share is the same gesture. The sheet has three questions only — which grain, to whom, any words — and the first is answered by where you clicked.</p>
+</div>
+
+<div class="s-sec"><span class="t">3 · In the conversation</span> &nbsp;<span class="d">a data card is a message kind, rendered through the table's own formatters</span></div>
+<p class="hint">Hover a card for its actions · <kbd>open ↗</kbd> restores the view · <kbd>re-capture</kbd> posts a fresh card of the same address · everything else is what a message already has.</p>
+<div class="frame">
+  <div class="dm-log" id="log">
+    <div class="dm-day">today</div>
+    <div class="dm-msg">
+      <div class="dm-meta"><b class="dm-who" style="color:#5CC8FF">lena</b> · 14:02</div>
+      <div class="dm-b">anyone looking at the crowded shorts today?</div>
+    </div>
+    <div class="dm-msg out card">
+      <span class="dm-act"><button class="dm-tool">reply</button><button class="dm-tool">pin</button><button class="dm-tool">→ note</button><button class="dm-tool">re-capture</button><button class="dm-tool">delete</button></span>
+      <div class="dm-meta">14:04</div>
+      <div class="card">
+        <div class="chd"><span class="ck">⤴</span><span class="tk">HOOD</span><span>funding APR</span><span class="mk-chip">cell</span><span class="at">captured 14:04 · mark 113.90</span></div>
+        <div class="one"><div class="big pos">+41.2%</div><div class="k">funding apr · 1d window · stocks</div><div class="ctx">95th pct on the board · squeeze 62 · OI $38.1M (+9.4% 1d)</div></div>
+        <div class="cft"><a href="#">open in screener ↗</a><span class="now">now <b class="pos">+43.0%</b> · mark 114.40 <span class="pos">+0.4%</span></span></div>
+      </div>
+      <div class="dm-b dm-note">$HOOD shorts paying 41% to stay in. this is the squeeze fuel <span class="dm-mk">stamp 113.90</span></div>
+    </div>
+    <div class="dm-msg card">
+      <span class="dm-act"><button class="dm-tool">reply</button><button class="dm-tool">pin</button><button class="dm-tool">re-capture</button></span>
+      <div class="dm-meta"><b class="dm-who" style="color:#46B97E">marco</b> · 14:09</div>
+      <div class="card">
+        <div class="chd"><span class="ck">⤴</span><span>screen</span><span class="mk-chip">3 rows</span><span class="at">captured 14:09 · stocks · 1d</span></div>
+        <div class="filt">rvol &gt; <code>2</code> &amp; funding &gt; <code>20</code> · sorted by <code>funding</code></div>
+        <table><thead><tr><th>Ticker</th><th>Price</th><th>1d</th><th>Funding</th><th>RVOL</th></tr></thead>
+        <tbody><tr><td class="tk">HOOD</td><td>113.90</td><td class="pos">+3.1%</td><td class="pos">+41.2%</td><td>2.8×</td></tr>
+        <tr><td class="tk">PLTR</td><td>168.22</td><td class="pos">+1.9%</td><td class="pos">+27.5%</td><td>2.1×</td></tr>
+        <tr><td class="tk">SMCI</td><td>44.10</td><td class="neg">−2.4%</td><td class="pos">+22.0%</td><td>3.4×</td></tr></tbody></table>
+        <div class="cft"><a href="#">open this screen ↗</a><span class="now">3 of 3 still pass</span></div>
+      </div>
+    </div>
+    <div class="dm-msg card">
+      <span class="dm-act"><button class="dm-tool">reply</button><button class="dm-tool">pin</button><button class="dm-tool">re-capture</button></span>
+      <div class="dm-meta"><b class="dm-who" style="color:#46B97E">marco</b> · 14:10</div>
+      <div class="card">
+        <div class="chd"><span class="ck">⤴</span><span class="tk">NVDA</span><span>levels</span><span class="mk-chip">drawer</span><span class="at">captured 14:10 · mark 176.40</span></div>
+        <div class="levels">
+          <div><span>res · 181.20</span><span class="w">flip · 4 touches · 11d</span></div>
+          <div><span class="pos">▸ mark 176.40</span><span class="w">+1.1% over EMA21</span></div>
+          <div><span>sup · 172.85</span><span class="w">POC · 90d profile</span></div>
+          <div><span>sup · 168.10</span><span class="w">sup · 6 touches · 28d</span></div>
+        </div>
+        <div class="cft"><a href="#">open the drawer ↗</a><span class="now">now 177.05 <span class="pos">+0.4%</span></span></div>
+      </div>
+      <div class="dm-b dm-note">levels haven't moved. 181 is the one</div>
+    </div>
+    <div class="dm-cmp"><div class="ta">Message #desk… (⤴ shares land here too)</div><button class="btn">send</button></div>
+  </div>
+  <p class="s-cap"><b>What a card carries.</b> A header that says the ticker, the grain and the capture time; a body in the exact shape of the thing shared (one big number, a key/value grid, a table, a list); a footer with the link and the live drift. A card that names a ticker is also a <b>stamp</b>, so it enters the calls record like any <code>$HOOD</code> message — the "quote as a call" box in the sheet is that switch. The note under it is an ordinary message body: searchable, editable, quotable.</p>
+</div>
+
+<div class="s-sec"><span class="t">4 · On the phone</span> &nbsp;<span class="d">the Telegram mirror renders the same card as a monospace block</span></div>
+<div class="frame still">
+  <div class="phone">
+    <div class="tgb"><b>you</b><br>⤴ HOOD · funding APR · cell<pre>+41.2%   funding apr · 1d · stocks
+95th pct · squeeze 62 · OI $38.1M (+9.4% 1d)
+captured 14:04 · mark 113.90</pre>$HOOD shorts paying 41% to stay in. this is the squeeze fuel<span class="t">14:04</span></div>
+    <div class="tgb"><b>marco</b><br>⤴ screen · 3 rows · rvol&gt;2 &amp; funding&gt;20<pre>TICKER   PRICE     1D   FUNDING  RVOL
+HOOD    113.90  +3.1%   +41.2%  2.8×
+PLTR    168.22  +1.9%   +27.5%  2.1×
+SMCI     44.10  −2.4%   +22.0%  3.4×</pre><i>open: milst.app/#markets?screen=…</i><span class="t">14:09</span></div>
+  </div>
+  <p class="s-cap"><b>Nothing new on the wire.</b> The mirror already sends a command result as a <code>&lt;pre&gt;</code> block; a card serialises to the same shape through a text renderer the export and search also use. Telegram gets no colour, so the column alignment is what carries the terminal feel — the same rule the alert grammar already follows.</p>
+</div>
+
+<div class="s-sec"><span class="t">5 · Everywhere else</span> &nbsp;<span class="d">the same glyph in every section header that draws data</span></div>
+<div class="frame still">
+  <div class="gal">
+    <div class="g"><div class="dsec">Levels <button class="shr" title="share this section">⤴</button></div><div class="l"><span>res 181.20</span><span class="sec">flip · 4t</span></div><div class="l"><span class="pos">▸ 176.40</span><span class="sec">mark</span></div><div class="l"><span>sup 172.85</span><span class="sec">POC</span></div></div>
+    <div class="g"><div class="dsec">Funding heat · 8h <button class="shr" title="share this cell">⤴</button></div><div class="heat"><div style="background:rgba(70,185,126,.25)">+12</div><div style="background:rgba(70,185,126,.45)">+28</div><div class="hov" style="background:rgba(70,185,126,.7)">+41</div><div style="background:rgba(229,96,77,.25)">−8</div><div style="background:rgba(70,185,126,.15)">+6</div><div style="background:rgba(229,96,77,.4)">−19</div></div><p class="s-cap" style="margin-top:8px;font-size:10.5px">a heatmap cell shares as a cell card: name × window × value, with its neighbours as context</p></div>
+    <div class="g"><div class="dsec">Signal · sweep <button class="shr" title="share this signal">⤴</button></div><div class="l"><span class="tk">PLTR</span><span class="pos">long · R:R 2.4</span></div><div class="l"><span class="sec">stop 161.10 · tgt 184.00</span><span class="sec">EV +0.31R</span></div><p class="s-cap" style="margin-top:6px;font-size:10.5px">a signal shares as its card: geometry, base rate, the ledger link</p></div>
+    <div class="g"><div class="dsec">Trend ladder · D1 <button class="shr" title="share this row">⤴</button></div><div class="l"><span class="tk">NVDA</span><span class="pos">+4 · stacked</span></div><div class="l"><span class="sec">13/21 · H12 ✓ · H4 ✓ · H1 ✗</span><span></span></div></div>
+    <div class="g"><div class="dsec">Calls · lena <button class="shr" title="share this record">⤴</button></div><div class="l"><span>$HOOD 113.90 → 114.40</span><span class="pos">+0.4%</span></div><div class="l"><span class="sec">7 calls · 71% right · +2.1% avg</span><span></span></div></div>
+    <div class="g"><div class="dsec">Chart · NVDA/BTC 4h <button class="shr" title="share this chart">⤴</button></div><p class="s-cap" style="margin-top:4px;font-size:10.5px">a chart shares the way <code>/ratio</code> already posts: rasterised to PNG on the ordinary attachment path, with the card as its caption</p></div>
+  </div>
+  <p class="s-cap"><b>One rule.</b> Anything drawn from a <code>state</code> row through a column definition or a section renderer has an address — view, scope, timeframe, coin, keys — and anything with an address can be captured. The glyph sits in the section's own header, where the tooltip and the timeframe segment already live, so no surface grows a new toolbar.</p>
+</div>
+
+<div class="s-sec"><span class="t">6 · What this pins down</span></div>
+<div class="spec">
+<pre><span class="c">// one message kind. `card` is JSON on the row (dm_msg.card TEXT, validated ≤ 8 KB,</span>
+<span class="c">// ≤ 25 rows × 12 keys); `body` keeps the text rendering for search, export and the mirror.</span>
+{ <span class="k">v</span>: 1,
+  <span class="k">kind</span>: "cell" | "row" | "screen" | "panel" | "chart",
+  <span class="k">view</span>: "markets", <span class="k">scope</span>: "stocks", <span class="k">tf</span>: "1d", <span class="k">lens</span>: "names",      <span class="c">// the address</span>
+  <span class="k">coin</span>: "xyz:HOOD", <span class="k">keys</span>: ["px","d1","funding","rvol","oi","vsma200"],
+  <span class="k">rows</span>: [{ coin, vals: [113.90, 3.1, 0.000047, 2.8, 38.1e6, 12.4] }],   <span class="c">// RAW, never formatted</span>
+  <span class="k">filters</span>: { rvol: [">", 2], funding: [">", 20] }, <span class="k">sort</span>: ["funding","desc"],
+  <span class="k">at</span>: 1790000000000, <span class="k">px</span>: 113.90,                              <span class="c">// the stamp</span>
+  <span class="k">panel</span>: null | { name: "levels", lines: [...] } }                  <span class="c">// drawer sections, signals</span></pre>
+</div>
+<ul class="pts" style="margin-top:12px">
+  <li><b>The serializer is the column table.</b> <code>COL_BY_KEY[k]</code> already owns a label, a getter and a formatter for every screener column; a capture reads the getter, a card renders through the formatter. A column added to the screener is shareable the day it lands, with no second list to forget.</li>
+  <li><b>Raw values, formatted at read.</b> The card stores numbers, never strings, so the reader's own unit and colour rules apply — and "now" can be computed by running the same getter against the live row. A formatted string could not drift.</li>
+  <li><b>The stamp is the existing stamp.</b> A card with a coin sets <code>ref</code>/<code>refPx</code> exactly as <code>$HOOD</code> in a body does today; the calls record, the → note promotion and the delete-proof rule all apply unchanged. The sheet's "quote as a call" box is the only new choice, and it defaults on.</li>
+  <li><b>The link is a hash route.</b> <code>#markets?u=stocks&amp;tf=1d&amp;coin=HOOD&amp;cols=…&amp;f=rvol&gt;2,funding&gt;20</code> — the app already routes views by hash; this adds the view's own state to it, which the URL bar then gains for free.</li>
+  <li><b>Telegram and export render <code>body</code>.</b> The text renderer produces the monospace block once, at send, so the mirror, the digest and the JSON export need no card knowledge.</li>
+  <li><b>Boards are desk-public.</b> A card into a topic board is visible to anyone who joins it — same as a message. Nothing in a card is data a member could not already see on their own screen, since the audience gate is the view gate.</li>
+</ul>
+
+<div class="s-sec"><span class="t">7 · What is missing before this ships</span></div>
+<ul class="pts">
+  <li><b>Default grain on a plain click.</b> The mock shows both glyphs; on a phone there is no hover. Long-press on a row could open the menu, or the drawer header's ⤴ could be the only mobile path. Undecided.</li>
+  <li><b>How live is "now".</b> The footer recomputes from the live row on every render, which is free for a cell and a row; for a screen it re-runs the filters over the roster ("3 of 3 still pass"). Cap at, say, 25 rows, or make it a click.</li>
+  <li><b>Edits.</b> A card is immutable (like a command result); the note under it edits like any message. Re-capture posts a new card rather than mutating the old one, so the record is a sequence of claims, not a rewritten one.</li>
+  <li><b>Charts.</b> The PNG path exists for <code>/ratio</code>; candles and the correlation matrix would need the same offscreen rasteriser. Not in the first cut.</li>
+  <li><b>Retention.</b> Cards ride message retention (30d DM, 7d group, pinned exempt). A pinned screen card is effectively a saved screen — which might be a feature.</li>
+  <li><b>The composer path.</b> A typed <code>/share HOOD funding</code> and <code>/share screen</code> would give the keyboard and the phone the same reach; it is the <code>/alert</code> pattern and costs little once the serializer exists.</li>
+</ul>
+
+<script>
+(function(){
+  // ── synthetic rows: raw values, formatted at render — the same discipline the card proposes ──
+  const COLS=[
+    {k:'px',l:'Price',f:v=>v.toFixed(2)},
+    {k:'d1',l:'1d',f:pct},{k:'d7',l:'7d',f:pct},
+    {k:'funding',l:'Funding APR',f:pct},
+    {k:'rvol',l:'RVOL',f:v=>v.toFixed(1)+'×'},
+    {k:'oi',l:'OI',f:v=>'$'+(v/1e6).toFixed(1)+'M'},
+    {k:'vsma200',l:'vs 200d',f:pct}];
+  const ROWS=[
+    {t:'HOOD',star:1,px:113.90,d1:3.1,d7:9.8,funding:41.2,rvol:2.8,oi:38.1e6,vsma200:12.4},
+    {t:'NVDA',star:1,px:176.40,d1:1.2,d7:4.1,funding:8.3,rvol:1.1,oi:412.0e6,vsma200:9.7},
+    {t:'PLTR',star:0,px:168.22,d1:1.9,d7:-2.3,funding:27.5,rvol:2.1,oi:96.4e6,vsma200:31.2},
+    {t:'SMCI',star:0,px:44.10,d1:-2.4,d7:-6.8,funding:22.0,rvol:3.4,oi:21.7e6,vsma200:-14.8},
+    {t:'TSLA',star:0,px:341.55,d1:-0.6,d7:2.2,funding:-4.1,rvol:0.9,oi:288.0e6,vsma200:3.3},
+    {t:'MSTR',star:0,px:152.30,d1:4.8,d7:11.6,funding:18.9,rvol:2.6,oi:54.2e6,vsma200:-21.5}];
+  const LIVE={HOOD:114.40,NVDA:177.05,PLTR:167.90,SMCI:44.62,TSLA:340.10,MSTR:155.01};
+  const PEOPLE=[{n:'#desk',g:1,on:1,last:'2m'},{n:'gus',on:1,last:'14m'},{n:'lena',on:0,last:'1h'},{n:'#$HOOD thesis',g:1,on:1,last:'3h'},{n:'marco',on:1,last:'yesterday'}];
+  function pct(v){ return (v>=0?'+':'−')+Math.abs(v).toFixed(1)+'%'; }
+  function cls(k,v){ return (k==='px'||k==='rvol'||k==='oi')?'':(v>=0?'pos':'neg'); }
+  const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const $=id=>document.getElementById(id);
+  const picked=new Set();
+
+  function renderTable(){
+    $('tbody').innerHTML=ROWS.map((r,i)=>`<tr data-i="${i}" tabindex="0" class="${picked.has(i)?'picked':''}">`
+      +`<td class="sel-td"><input type="checkbox" class="selbox" data-i="${i}" ${picked.has(i)?'checked':''} title="pick for a screen"></td>`
+      +`<td class="tkc"><span class="star ${r.star?'on':''}">${r.star?'★':'☆'}</span><span class="tk">${r.t}</span><button class="shr" data-grain="row" data-i="${i}" title="share the row">⤴</button></td>`
+      +COLS.map(c=>`<td class="${cls(c.k,r[c.k])}">${c.f(r[c.k])}<button class="shr cell" data-grain="cell" data-i="${i}" data-k="${c.k}" title="share this cell">⤴</button></td>`).join('')+'</tr>').join('');
+    const n=picked.size; $('seln').textContent=n; $('selpill').hidden=!n;
+  }
+  renderTable();
+
+  // ── the sheet ──
+  let cur=null, to='#desk';
+  function cardHtml(sel, out){
+    const at='captured 14:12';
+    if(sel.grain==='cell'){ const r=ROWS[sel.i], c=COLS.find(x=>x.k===sel.k), v=r[c.k];
+      return `<div class="card"><div class="chd"><span class="ck">⤴</span><span class="tk">${r.t}</span><span>${c.l.toLowerCase()}</span><span class="mk-chip">cell</span><span class="at">${at} · mark ${r.px.toFixed(2)}</span></div>
+        <div class="one"><div class="big ${cls(c.k,v)}">${c.f(v)}</div><div class="k">${c.l.toLowerCase()} · 1d window · stocks</div><div class="ctx">1d ${pct(r.d1)} · rvol ${r.rvol.toFixed(1)}× · OI $${(r.oi/1e6).toFixed(1)}M</div></div>
+        <div class="cft"><a href="#">open in screener ↗</a><span class="now">now · mark ${LIVE[r.t].toFixed(2)} <span class="${LIVE[r.t]>=r.px?'pos':'neg'}">${pct((LIVE[r.t]/r.px-1)*100)}</span></span></div></div>`; }
+    if(sel.grain==='row'){ const r=ROWS[sel.i];
+      return `<div class="card"><div class="chd"><span class="ck">⤴</span><span class="tk">${r.t}</span><span>row</span><span class="mk-chip">${COLS.length} fields</span><span class="at">${at} · mark ${r.px.toFixed(2)}</span></div>
+        <div class="kv">${COLS.map(c=>`<div><span class="k">${c.l}</span><span class="v ${cls(c.k,r[c.k])}">${c.f(r[c.k])}</span></div>`).join('')}<div><span class="k">now</span><span class="v ${LIVE[r.t]>=r.px?'pos':'neg'}">${LIVE[r.t].toFixed(2)}</span></div></div>
+        <div class="cft"><a href="#">open in screener ↗</a><span class="now">drift <b class="${LIVE[r.t]>=r.px?'pos':'neg'}">${pct((LIVE[r.t]/r.px-1)*100)}</span></span></div></div>`; }
+    const rows=(sel.rows||[]).map(i=>ROWS[i]); const show=COLS.slice(0,4);
+    return `<div class="card"><div class="chd"><span class="ck">⤴</span><span>screen</span><span class="mk-chip">${rows.length} row${rows.length===1?'':'s'}</span><span class="at">${at} · stocks · 1d</span></div>
+      ${$('sh-filt').checked&&!sel.picked?`<div class="filt">rvol &gt; <code>2</code> &amp; funding &gt; <code>20</code> · sorted by <code>funding</code></div>`:''}
+      <table><thead><tr><th>Ticker</th>${show.map(c=>`<th>${c.l}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr><td class="tk">${r.t}</td>${show.map(c=>`<td class="${cls(c.k,r[c.k])}">${c.f(r[c.k])}</td>`).join('')}</tr>`).join('')}</tbody></table>
+      <div class="cft"><a href="#">open this screen ↗</a><span class="now">${rows.length} of ${rows.length} still pass</span></div></div>`;
+  }
+  function openSheet(sel){
+    cur=sel; $('sheet').hidden=false; $('sheet-empty').hidden=true;
+    const what=sel.grain==='cell'?`${ROWS[sel.i].t} · ${COLS.find(c=>c.k===sel.k).l.toLowerCase()}`:sel.grain==='row'?`${ROWS[sel.i].t} · the row`:`a screen · ${sel.rows.length} rows`;
+    $('sh-what').textContent=what; $('sh-filt-l').hidden=sel.grain!=='screen'||!!sel.picked;
+    $('sh-call').parentElement.hidden=sel.grain==='screen';
+    renderTo(); renderPrev();
+    $('sheet').scrollIntoView({behavior:'smooth',block:'nearest'});
+  }
+  function renderPrev(){ if(!cur) return; const h=cardHtml(cur); $('sh-prev').innerHTML=h; $('sh-size').textContent='card · '+(Math.round(h.length/100)/10)+' KB'; }
+  function renderTo(){ const q=$('sh-q').value.trim().toLowerCase();
+    $('sh-list').innerHTML=PEOPLE.filter(p=>!q||p.n.toLowerCase().includes(q)).map(p=>`<div class="torow ${p.n===to?'on':''}" data-to="${esc(p.n)}"><span class="dot ${p.on?'on':''}"></span><span class="nm ${p.g?'grp':''}">${esc(p.n)}</span><span class="last">${p.last}</span></div>`).join(''); }
+  $('sh-q').addEventListener('input',renderTo);
+  $('sh-list').addEventListener('click',e=>{ const r=e.target.closest('.torow'); if(r){ to=r.dataset.to; renderTo(); } });
+  $('sh-filt').addEventListener('change',renderPrev);
+  $('sh-close').addEventListener('click',()=>{ $('sheet').hidden=true; $('sheet-empty').hidden=false; cur=null; });
+  $('sh-copy').addEventListener('click',()=>{ $('sh-copy').textContent='copied'; setTimeout(()=>$('sh-copy').textContent='copy as text',1200); });
+  $('sh-send').addEventListener('click',()=>{ if(!cur) return;
+    const note=$('sh-note').value.trim();
+    const el=document.createElement('div'); el.className='dm-msg out card';
+    el.innerHTML=`<span class="dm-act"><button class="dm-tool">reply</button><button class="dm-tool">pin</button><button class="dm-tool">re-capture</button><button class="dm-tool">delete</button></span><div class="dm-meta">14:12 · to ${esc(to)}</div>${cardHtml(cur,true)}`
+      +(note?`<div class="dm-b dm-note">${esc(note)}${cur.grain!=='screen'&&$('sh-call').checked?` <span class="dm-mk">stamp ${ROWS[cur.i].px.toFixed(2)}</span>`:''}</div>`:'');
+    const log=$('log'); log.insertBefore(el, log.querySelector('.dm-cmp')); el.scrollIntoView({behavior:'smooth',block:'nearest'});
+    $('sh-note').value=''; $('sheet').hidden=true; $('sheet-empty').hidden=false; $('sheet-empty').innerHTML='Sent to <b>'+esc(to)+'</b> — it is at the bottom of section 3. Hover another row to share again.';
+    picked.clear(); renderTable(); cur=null; });
+
+  // ── table interactions ──
+  const tb=$('tbody');
+  tb.addEventListener('click',e=>{
+    const g=e.target.closest('.shr'); if(g){ e.stopPropagation(); openSheet({grain:g.dataset.grain,i:+g.dataset.i,k:g.dataset.k}); return; }
+    const cb=e.target.closest('.selbox'); if(cb){ const i=+cb.dataset.i; if(cb.checked) picked.add(i); else picked.delete(i); renderTable(); return; }
+  });
+  tb.addEventListener('keydown',e=>{ if(e.key==='s'||e.key==='S'){ const tr=e.target.closest('tr'); if(tr){ e.preventDefault(); openSheet({grain:'row',i:+tr.dataset.i}); } } });
+  $('selshare').addEventListener('click',()=>openSheet({grain:'screen',rows:[...picked].sort(),picked:true}));
+  $('selclear').addEventListener('click',()=>{ picked.clear(); renderTable(); });
+  // right-click menu, positioned inside the frame
+  const cm=$('cmenu'); let cmSel=null;
+  tb.addEventListener('contextmenu',e=>{ const td=e.target.closest('td'), tr=e.target.closest('tr'); if(!tr) return; e.preventDefault();
+    const i=+tr.dataset.i, ci=[...tr.children].indexOf(td)-2, c=COLS[ci];
+    cmSel={i,k:c?c.k:null}; $('cm-row').textContent=ROWS[i].t; $('cm-cell').textContent=c?ROWS[i].t+' · '+c.l.toLowerCase():'—';
+    cm.querySelector('[data-grain=cell]').disabled=!c;
+    const fr=cm.parentElement.getBoundingClientRect(); cm.style.left=(e.clientX-fr.left+8)+'px'; cm.style.top=(e.clientY-fr.top+8)+'px'; cm.hidden=false; });
+  cm.addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b||!cmSel) return; cm.hidden=true;
+    const g=b.dataset.grain; if(g==='copy') return; if(g==='screen') openSheet({grain:'screen',rows:ROWS.map((_,i)=>i)}); else openSheet({grain:g,i:cmSel.i,k:cmSel.k}); });
+  document.addEventListener('click',e=>{ if(!e.target.closest('#cmenu')) cm.hidden=true; });
+  document.addEventListener('keydown',e=>{ if(e.key==='Escape') cm.hidden=true; });
+})();
+</script>

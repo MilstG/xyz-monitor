@@ -317,8 +317,10 @@ instant, and the per-IP rate limit stops being a per-user problem.
 ## Design notes and mocks
 
 `docs/` holds the feature map, system map, mechanics and signal reference pages plus the design
-mocks that preceded the funding heatmap, notes, insiders and backtest-target work. They are not
-served by the app.
+mocks that preceded the funding heatmap, notes, insiders and backtest-target work, and the
+share-to-chat mock (`xyz-monitor-share-to-chat-mock.html`: one share glyph on every cell, row and
+screen, one sheet, one data-card message kind — a proposal, not yet built). They are not served by
+the app.
 
 ## Project layout
 
