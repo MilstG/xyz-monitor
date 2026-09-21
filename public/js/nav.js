@@ -479,8 +479,6 @@ document.addEventListener('keydown',e=>{
   const t=e.target, tag=t&&t.tagName;
   if(tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT'||(t&&t.isContentEditable)) return;
   if(e.key==='?'){ e.preventDefault(); openHelp(); return; }
-  if(e.key==='b'){ e.preventDefault(); goBackTab(); return; }          // ← the tab you were on before this one
-  if(e.key==='h'){ e.preventDefault(); showView('markets'); return; }   // ⌂ home
   if(e.key==='/'){ e.preventDefault();
     // focus the current tab's primary search; tabs without one fall back to the markets filter
     const map={markets:'filter',corr:'corrsearch',report:'ai-q',dm:'dm-q',signals:'sighist-q',news:'nfilter',insiders:'ins-q'};
@@ -488,7 +486,9 @@ document.addEventListener('keydown',e=>{
     if(!inp){ const sec=el('view-'+state.view); inp=sec&&sec.querySelector('input[type="search"],input[type="text"],input:not([type]),textarea'); }   // any tab with a box keeps you on it
     if(!inp){ showView('markets'); inp=el('filter'); }
     if(inp){ inp.focus(); inp.select&&inp.select(); } return; }
-  if(state.view==='dm'){ dmKeys(e); return; }                            // j/k walk the conversation rail, Escape backs out a level
+  if(state.view==='dm'){ dmKeys(e); return; }                            // j/k walk the conversation rail, Escape backs out a level; a bare letter starts a message, so b/h stay out of here
+  if(e.key==='b'){ e.preventDefault(); goBackTab(); return; }          // ← the tab you were on before this one
+  if(e.key==='h'){ e.preventDefault(); showView('markets'); return; }   // ⌂ home
   if(state.view!=='markets'||overlayTop()||mktGrp()!=='names') return;   // j/k/Enter drive the markets NAMES table only — never under an open layer (drawer, help, palette…) or a group lens
   if(e.key==='j'){ e.preventDefault(); kmoveSel(1); return; }
   if(e.key==='k'){ e.preventDefault(); kmoveSel(-1); return; }

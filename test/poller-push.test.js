@@ -488,7 +488,7 @@ test("bridge: bare text from a linked chat is forwarded (never posted here), str
     // (the mirror does not echo) and NOT for the silent not-synced case.
     assert.equal(p.pushStateNow().queue - before, 3, "exactly three replies earned");
     const pol = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "poller.js"), "utf8");
-    assert.ok(/if \(dmBridge && !txt\.startsWith\("\/"\) && pushRecipients\.has\(String\(chat\)\) && \(m\.chat\.type == null \|\| m\.chat\.type === "private"\)\)/.test(pol), "bare text is gated on the chat being linked AND private, at the source");
+    assert.ok(/const priv = m\.chat\.type == null \|\| m\.chat\.type === "private";/.test(pol) && /if \(dmBridge && !txt\.startsWith\("\/"\) && pushRecipients\.has\(String\(chat\)\) && priv\)/.test(pol), "bare text is gated on the chat being linked AND private, at the source");
     assert.ok(/if \(res && !res\.ok && !res\.silent\) pushReply/.test(pol), "a silent refusal spends no reply budget");
   } finally { delete process.env.TG_BOT_TOKEN; }
 });
@@ -507,5 +507,91 @@ test("bridge: pushQuietNow reads the recipient's own quiet window", () => {
     assert.equal(p.pushQuietNow("4343"), true, "inside the window right now");
     assert.ok(p.pushSetPrefs("4343", { quiet: { from: (h + 3) % 24, to: (h + 5) % 24, tz: 0 } }, "uid-lena", false).ok);
     assert.equal(p.pushQuietNow("4343"), false, "outside it");
+  } finally { delete process.env.TG_BOT_TOKEN; }
+});
+
+// ===== audit 2026-09-21: the outbox, the rules' edge state, a re-link, and group chats ==========
+test("push outbox: a queue that moved under the send still removes the SENT item, never a neighbour", async () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  try {
+    const { p, calls, queue } = pushHarness();
+    const a = p.pushMintCode("own-a", true); p.pushBindNow(a.code, 1, "a");
+    const b = p.pushMintCode("own-b", true); p.pushBindNow(b.code, 2, "b");
+    // Chat 1's bot reply sits first in the queue; alerts go first, so the drain sends chat 2's
+    // alert at index 1 while the reply sits ahead of it.
+    queue.push({ result: [{ update_id: 1, message: { chat: { id: 1 }, from: { first_name: "a" }, text: "/help" } }] });
+    await p.pushUpdatesNow();
+    p.pushEnqueueNow("2", "an alert", false);
+    assert.equal(p.pushStateNow().queue, 2);
+    // The reply body is read while the send is in flight: unlinking chat 1 there filters its reply
+    // out, so the sent item is now at index 0 — where a stale index-1 splice finds nothing and
+    // the already-sent alert would go out again on the next drain.
+    queue.push({ get body() { p.pushUnlink("1", null, true); return { ok: true, result: {} }; } });
+    await p.pushDrainNow();
+    assert.equal(calls.length, 2, "one getUpdates, one send");
+    assert.equal(String(calls[1].body.chat_id), "2", "the alert went out");
+    assert.equal(p.pushStateNow().queue, 0, "the sent item is gone — it must not be re-sent on the next drain");
+  } finally { delete process.env.TG_BOT_TOKEN; }
+});
+
+test("rules: a fired pair is persisted as NOT armed, so a redeploy past the cooldown re-announces nothing", () => {
+  const { ruleHarness } = require("./_shared");
+  const H = ruleHarness(), p = H.p;
+  p.seedRowNow("AAA", { ticker: "AAA", px: 100, uni: "xyz", ref: { p1h: 100, p4h: 100, p7d: 100, p30d: 100 } });
+  p.buildSnapshotNow();
+  p.addRule({ metric: "h1", op: ">", value: 5, cooldownMs: 0 }, "own-a");   // no cooldown: the restart alone must hold the edge
+  p.ruleScanNow();                                                            // arms
+  p.seedRowNow("AAA", { px: 112 }); p.buildSnapshotNow(); p.ruleScanNow();    // fires
+  assert.equal(p.getTriggers(0, "own-a", false).events.filter((e) => e.kind === "rule").length, 1);
+  assert.equal((H.saved.armed || []).length, 0, "the pair that just fired is not listed as armed");
+  const { createPoller } = require("../src/poller");
+  const p2 = createPoller({ dex: "xyz", log: () => {}, version: "test", crypto: false,
+    store: { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {}, insert: () => {}, saveRegime: () => {},
+      loadTriggers: () => null, saveTriggers: () => {}, saveRules: () => {}, loadRules: () => H.saved } });
+  assert.equal(p2.hydrateRulesNow(), 1);
+  p2.seedRowNow("AAA", { ticker: "AAA", px: 112, uni: "xyz", ref: { p1h: 100, p4h: 100, p7d: 100, p30d: 100 } });
+  p2.buildSnapshotNow(); p2.ruleScanNow();
+  assert.equal(p2.getTriggers(0, "own-a", false).events.filter((e) => e.kind === "rule").length, 0, "still in breach after the restart: not re-announced");
+  // …and it re-arms and fires again only once the market has actually left and re-entered.
+  p2.seedRowNow("AAA", { px: 100 }); p2.buildSnapshotNow(); p2.ruleScanNow();
+  p2.seedRowNow("AAA", { px: 112 }); p2.buildSnapshotNow(); p2.ruleScanNow();
+  assert.equal(p2.getTriggers(0, "own-a", false).events.filter((e) => e.kind === "rule").length, 1);
+});
+
+test("push: a re-link keeps the per-kind schedule — an explicit landscape OFF stays off", () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  try {
+    const { p } = pushHarness();
+    const a = p.pushMintCode("own-a", true); assert.ok(p.pushBindNow(a.code, 77, "a").ok);
+    assert.ok(p.pushSetPrefs("77", { sched: { landscape: { h: null, days: null }, desk: { h: 8, days: [1, 2, 3, 4, 5] } }, tz: 0 }, "own-a", false).ok);
+    const before = p.getPush("own-a", false).recipients[0].sched;
+    assert.equal(before.landscape.hour, null); assert.equal(before.desk.hour, 8);
+    const b = p.pushMintCode("own-a", true); assert.ok(p.pushBindNow(b.code, 77, "a").ok);   // same chat, new code
+    const after = p.getPush("own-a", false).recipients[0].sched;
+    assert.equal(after.landscape.hour, null, "the OFF decision survives the re-link");
+    assert.equal(after.landscape.dflt, 0, "…as a decision, not as the default it would otherwise fall back to");
+    assert.equal(after.desk.hour, 8); assert.deepEqual(after.desk.days, before.desk.days);
+  } finally { delete process.env.TG_BOT_TOKEN; }
+});
+
+test("push commands: a group chat is never linked, and /r and /alert answer only a private chat", async () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  try {
+    const { p, queue } = pushHarness();
+    const seen = [];
+    p.setDmBridge((chat, text, opts) => { seen.push([chat, text, opts || null]); return { ok: true, text: "ok" }; });
+    const code = p.pushMintCode("own-a", true).code;
+    const grp = (id, text) => ({ update_id: id, message: { chat: { id: -100999, type: "supergroup" }, from: { first_name: "x" }, text } });
+    const before = p.pushStateNow().queue;
+    queue.push({ result: [grp(1, "/start " + code)] });
+    await p.pushUpdatesNow();
+    assert.equal(p.getPush("own-a", false).recipients.length, 0, "a group chat does not bind — every member would act as the one account");
+    assert.equal(p.pushStateNow().queue, before + 1, "the refusal is said, not swallowed");
+    // A group that was linked by an older build: the account-shaped commands still refuse it.
+    assert.ok(p.pushBindNow(p.pushMintCode("own-a", true).code, -100999, "grp").ok);
+    queue.push({ result: [grp(2, "/r hello as you"), grp(3, "/alert NVDA > 200"), grp(4, "bare text"), grp(5, "/stop")] });
+    await p.pushUpdatesNow();
+    assert.deepEqual(seen, [], "nothing from the group reached the bridge");
+    assert.equal(p.getPush("own-a", false).recipients.length, 0, "/stop stays the escape hatch everywhere");
   } finally { delete process.env.TG_BOT_TOKEN; }
 });

@@ -71,7 +71,11 @@ function applySnapshot(s){
   // 304 — arrives with the SAME dataTs. Skip the full 140-market row-walk + table innerHTML rebuild
   // + movers/regime/aggregates repaint; just keep the timed sidecar pulls alive. dataTs starts 0 so
   // the first snapshot always falls through, and a redeploy bumps it so the build badge still updates.
-  if(s.dataTs && s.dataTs===state.dataTs){ maybePullSidecars(); return; }
+  if(s.dataTs && s.dataTs===state.dataTs){
+    // The feed answered: the features are as fresh as the server's, unchanged. Without this stamp
+    // the "stale" dimming read a quiet off-hours tape as a stalled poller two minutes in.
+    const now=Date.now(); for(const r of state.rows.values()) if(r.feat) r.candleTs=now;
+    maybePullSidecars(); return; }
   state.order=s.markets.map(m=>m.coin);
   const mainM=Array.isArray(s.mainMarkets)?s.mainMarkets:[];
   state.mainOrder=mainM.map(m=>m.coin);

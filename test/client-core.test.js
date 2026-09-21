@@ -88,7 +88,8 @@ test("tab nav: \u2190 returns to the tab you were on, \u2302 goes home to Market
     "b.addEventListener('click',goBackTab);", "h.addEventListener('click',()=>showView('markets'));",
     "syncTabScroll(); syncTabNav();",                                                                 // every showView restamps the buttons
     "{ const tm=el('view-treemap'); if(tm) tm.hidden=v!=='treemap'; }",                                                      // the runtime treemap hides on \u2190 / \u2302 / palette, not only on a tab click
-    "e.target.closest('.tab,.tabnav')",                                                              // ...and the treemap installer's delegated listener reads the buttons
+    "document.dispatchEvent(new CustomEvent('xyz:view',{detail:v}))",                              // ...and showView announces the landing, so the treemap renders on ← / ⌂ / palette, not only on a tab click
+    "document.addEventListener('xyz:view',e=>{ if(e.detail==='treemap') renderTreemap(); });",
     "<kbd>b</kbd> <kbd>h</kbd>", "view:'markets', prevView:null,",
   ]) assert.ok(app.includes(pin), `client missing tab-nav pin: ${pin}`);
   assert.ok(app.indexOf("syncTabNav();   // a scope flip") > 0, "applyTabVisibility resyncs the buttons — a scope flip can hide the Back target");
@@ -788,7 +789,7 @@ test("admin panel: markup, wiring and the no-draft-state write path are all pres
   assert.ok(/_adm=d\.features\|\|_adm;/.test(app), "the panel must reconcile with the server's resolved state, not the requested one");
   assert.ok(!/adm-save|admSave/.test(app), "there must be no save button — writes are immediate");
   // view-as-public swaps a server-resolved set, and never strands the operator on a gated view.
-  assert.ok(/FLAGS_VIEW = _admVap \? \(_adm\.resolvedPublic\|\|FLAGS\) : FLAGS;/.test(app), "the toggle must swap in the server-resolved public set");
+  assert.ok(/FLAGS_VIEW = _admVap \? \(_adm\.resolvedPublic\|\|FLAGS\) : \(_adm\.resolved\|\|FLAGS\);/.test(app), "the toggle must swap in the server-resolved public set, and back to the LATEST server-resolved admin set — not the one the page booted with");
   assert.ok(/if\(!tabVisible\(state\.view\)\) showView\('markets'\);/.test(app), "toggling must rescue the active view if it becomes gated");
   assert.ok(app.includes("el('admVap'); if(vb) vb.addEventListener('click',toggleViewAsPublic)"), "the toggle must be wired null-safely");
   // The panel uses the app's real toast helper. `toast(...)` does not exist and would throw at the

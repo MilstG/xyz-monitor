@@ -385,7 +385,10 @@ function guestMerge(serverList){
 async function loadBaskets(force){
   if(!featureOn('baskets')) return;
   if(_basketsInflight) return;
-  if(!force && Date.now()-BASKETS.ts<60000 && BASKETS.list.length){ renderBasketPanel(); return; }
+  // The memo covers a failed or EMPTY pull too: buildHead/renderBacktest re-request whenever the
+  // list is empty, and this function redraws them when it finishes — with no stamp on failure
+  // that was a fetch→redraw→fetch loop on the landing tab for as long as /api/baskets failed.
+  if(!force && Date.now()-BASKETS.ts<60000){ if(BASKETS.list.length) renderBasketPanel(); return; }
   _basketsInflight=true;
   let serverList=[];
   try{ const d=await fetchJSON('/api/baskets');
@@ -393,6 +396,7 @@ async function loadBaskets(force){
       BASKETS={ts:Date.now(), floor:d.floor||0.6, maxMembers:d.maxMembers||20, maxCustom:d.maxCustom||12, rev:(d.rev||0)+'|'+_guestRev, list:guestMerge(d.baskets)};
     }
   }catch(_){}
+  BASKETS.ts=Date.now();
   _basketsInflight=false;
   renderBasketPanel(); syncCorrBk();
   const cg=el('compg'); if(cg&&!cg.hidden&&COMPG.sel.some(t=>isBasketName(t))) renderCompg();

@@ -309,10 +309,14 @@ async function dmMarkRead(id){
 }
 
 async function dmPost(body){
-  const r=await fetch('/api/dm',{method:'POST',headers:{'content-type':'application/json'},
-    body:JSON.stringify(body)});
-  const d=await r.json().catch(()=>({}));
-  return {ok:r.ok&&d&&d.ok!==false,d:d};
+  // Never throws: a rejected fetch (offline, a reset socket) left dmState.sending stuck and the
+  // composer dead until a reload. Every caller already reads {ok:false,d.error}.
+  try{
+    const r=await fetch('/api/dm',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify(body)});
+    const d=await r.json().catch(()=>({}));
+    return {ok:r.ok&&d&&d.ok!==false,d:d};
+  }catch(_){ return {ok:false,d:{error:'network error \u2014 try again'}}; }
 }
 
 // ---- sending -----------------------------------------------------------------------------------

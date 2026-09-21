@@ -520,19 +520,14 @@ function openStore(dataDir) {
     // write — CONFIG-grade like rules/baskets: an applied graduation is a classification the whole
     // board depends on, so a corrupt cache must never take it. Records are validated at fold time
     // (compute.mergeSectorAudit), so a bad line loses that line, never the file.
+    // Through saveConfig/loadConfig, as the comment above promises: fsync, a .bak, and a torn file
+    // quarantined with the backup read in its place — a plain write+rename and a catch-to-null
+    // loader lost the whole record log to one zero-length file, then overwrote it with one record.
     saveSectorAudit(data) {
-      try {
-        const tmp = sectorAuditFile + ".tmp";
-        fs.writeFileSync(tmp, JSON.stringify(data));
-        fs.renameSync(tmp, sectorAuditFile);
-        return true;
-      } catch (_) { return false; }
+      try { saveConfig(sectorAuditFile, data); return true; }
+      catch (_) { return false; }
     },
-    loadSectorAudit() {
-      try { if (fs.existsSync(sectorAuditFile)) return JSON.parse(fs.readFileSync(sectorAuditFile, "utf8")); }
-      catch (_) {}
-      return null;
-    },
+    loadSectorAudit() { return loadConfig(sectorAuditFile, "sector-audit.json"); },
     // Push recipients + delivery cursor and the announced-trigger set are config-grade: a torn
     // alertpush.json read as "first boot" dropped every Telegram recipient, and a torn triggers.json
     // re-announced every open claim. Both go through saveConfig/loadConfig (fsync, .bak, quarantine).
@@ -1182,7 +1177,11 @@ CREATE INDEX IF NOT EXISTS ins_tx_code ON tx(code, txDate);`);
     insidersQueue(rows) { const d = this.openInsiders(); if (!d || !rows || !rows.length) return { seen: 0, added: 0 };
       const ins = d.prepare(`INSERT INTO filing(acc,tk,form,filed,url,issuer,period,owner,role,title,parsed,nTx,nDeriv,tries,pnote)
 VALUES(?,?,?,?,?,NULL,NULL,NULL,NULL,NULL,0,NULL,NULL,0,NULL)
-ON CONFLICT(acc) DO UPDATE SET tk=excluded.tk, form=excluded.form, url=excluded.url,
+ON CONFLICT(acc) DO UPDATE SET
+  -- Once parsed, tk is the ISSUER symbol read off the form (insidersSave) and stays: the atom
+  -- rotation re-sights the same accession under whichever roster name's feed carried it, and a
+  -- 10%-holder's filing arriving via the holder's feed used to be relabelled with the holder.
+  tk=CASE WHEN filing.parsed = 1 THEN filing.tk ELSE excluded.tk END, form=excluded.form, url=excluded.url,
   -- A known filing date is NEVER overwritten, only filled when missing. The first guard here was
   -- "don't let a zero clobber a good value", which reads right and does not hold: any nonsense
   -- positive number still won, and the two discovery paths (the atom rotation and the history

@@ -1504,8 +1504,8 @@ test("rules survive a restart WITH their edge state, so a redeploy re-announces 
   const st = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   assert.ok(/if \(Array\.isArray\(d\.armed\)\)/.test(st) && /if \(Array\.isArray\(d\.fired\)\)/.test(st),
     "hydrate must restore the armed set AND the last-fire times — rules alone would re-announce every breach on boot");
-  assert.ok(/armed: \[\.\.\.ruleArmed\.keys\(\)\]/.test(st) && /fired: \[\.\.\.ruleLastFire\.entries\(\)\]/.test(st),
-    "…which means persisting them");
+  assert.ok(/armed: \[\.\.\.ruleArmed\.entries\(\)\]\.filter\(\(\[, v\]\) => v === true\)/.test(st) && /fired: \[\.\.\.ruleLastFire\.entries\(\)\]/.test(st),
+    "…which means persisting them — the ARMED pairs only: a fired pair listed as armed re-announces its breach on boot");
   assert.ok(p2.hydrateRulesNow);
   // …and the restore must actually restore: a stored rule carries uni "" (absent), and the
   // validator used to reject that on the way back in, so every coin-scoped and roster-wide rule
@@ -1575,7 +1575,10 @@ test("the drain picks the first ELIGIBLE item, so a deferred message cannot head
     "a message held until 07:00 sitting at the head would block every urgent one behind it for hours");
   const drain = pol.slice(pol.indexOf("async function pushDrain()"), pol.indexOf("function pushLogAdd"));
   assert.ok(!/pushQueue\.shift\(\)/.test(drain), "every removal in the drain must target the chosen index, not the head");
-  assert.equal((drain.match(/pushQueue\.splice\(idx, 1\)/g) || []).length, 3, "success, 4xx drop and give-up all remove by index");
+  // …and by IDENTITY after the await, never by that index: the queue moves under a send (an
+  // enqueue at the cap, a /stop, a 403), and a stale index deleted a neighbour's unsent alert.
+  assert.equal((drain.match(/pushQueue\.splice\(idx, 1\)/g) || []).length, 0, "no removal by the pre-await index");
+  assert.equal((drain.match(/dropItem\(\);/g) || []).length, 3, "success, 4xx drop and give-up all remove the sent item by identity");
 });
 
 test("recipients are per-browser: two people link independently and cannot see each other", () => {

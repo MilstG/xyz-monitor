@@ -1112,7 +1112,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         fundProbeTries++; if (n > 0) fundProbeOk++;
         const r = rows.get(coin); if (r) r.fFail = 0;
       } catch (_) {
-        fundProbeTries++;
+        // Not a probe result: a throw is the venue being down, not the endpoint being absent.
+        // Counting it turned a deploy during an outage into "no funding history" for the whole
+        // process, with the 60d backfill off for every market until the next restart.
         const r = rows.get(coin);
         if (r) { r.fFail = (r.fFail || 0) + 1; r.fFailUntil = Date.now() + Math.min(FAIL_BACKOFF * r.fFail, 15 * 60 * 1000); }
       } finally { inflight.delete("f:" + coin); }
@@ -1289,7 +1291,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const dr = r && r.dailyRaw;
     if (!Array.isArray(dr) || dr.length < 30 || !(r.px > 0)) return null;
     const db = bucketsFor(r, 24);
-    const memoK = dr.length + "|" + (Array.isArray(db) ? db.length : 0);
+    // Keyed on the spines' stamps, not their lengths: a 370d daily window keeps its length as it
+    // slides, and a UTC-day bucket count only moves at midnight — length alone froze the map for
+    // a day after a refresh landed.
+    const memoK = dr.length + "|" + (r.dailyTs || 0) + "|" + (r.hourlyTs || 0) + "|" + (Array.isArray(db) ? db.length : 0);
     if (r._vpK === memoK && r._vpM !== undefined) return r._vpM;
     let out = null;
     try {
@@ -1316,7 +1321,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   function sma200Of(r) {
     const d = r && r.dailyRaw;
     if (!Array.isArray(d) || d.length < 200) return null;
-    const lastC = d[d.length - 1] && d[d.length - 1].c;
+    // The window is a fixed span that slides: same length, same last close (a thin name between two
+    // refreshes) but a different first bar is a different mean. The first bar's time is in the key.
+    const lastC = (d[0] && d[0].t) + ":" + (d[d.length - 1] && d[d.length - 1].t) + ":" + (d[d.length - 1] && d[d.length - 1].c);
     const m = sma200Memo.get(r.coin);
     if (m && m.n === d.length && m.last === lastC) return m.v;
     let t = 0, k = 0;
@@ -3115,15 +3122,18 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
                   mv: +(Math.abs(rf.target / r.px - 1) * 100).toFixed(2) }, 0);
           }
         } } catch (e) { swingFails++; swingErr = (e && e.message) || String(e); }
+        // The 7d price move, off the 7d reference like every other reader of it (duelInputs, the
+        // AI context). No row ever carried a `d7` field, so both gates below were permanently shut.
+        const d7 = (r.ref && r.ref.p7d > 0 && r.px > 0) ? (r.px / r.ref.p7d - 1) * 100 : null;
         // OI flush: 7d ΔOI at a −σ extreme of its own distribution, into a decline
         if (st.oiflush && st.oiflush.cur && st.oiflush.cur.sd > 0) {
           const doiNow = computeDoi(r);
-          if (doiNow && doiNow.d7 != null && r.d7 != null && isFinite(r.d7)) {
+          if (doiNow && doiNow.d7 != null && d7 != null && isFinite(d7)) {
             const zF = (doiNow.d7 - st.oiflush.cur.mu) / st.oiflush.cur.sd;
-            VARIANTS.oiflush.vals.forEach((v, vi) => { if (zF <= -v && r.d7 < 0 && sd30 > 0) openLedger(r, "oiflush", { score: 0, reading: "" }, 1, { sd0: +sd30.toFixed(3) }, vi); });
-            if (zF <= -incVal("oiflush") && r.d7 < 0) {
+            VARIANTS.oiflush.vals.forEach((v, vi) => { if (zF <= -v && d7 < 0 && sd30 > 0) openLedger(r, "oiflush", { score: 0, reading: "" }, 1, { sd0: +sd30.toFixed(3) }, vi); });
+            if (zF <= -incVal("oiflush") && d7 < 0) {
               const evd = evidence(st.oiflush.d5, "oiflush", pooledFor(ac, "oiflush", "d5"), "R", r.uni);
-              const sig = mkSignal(r, "oiflush", `\u0394OI7d ${doiNow.d7.toFixed(1)}% (${zF.toFixed(1)}\u03c3 flush) into a ${r.d7.toFixed(1)}% decline`,
+              const sig = mkSignal(r, "oiflush", `\u0394OI7d ${doiNow.d7.toFixed(1)}% (${zF.toFixed(1)}\u03c3 flush) into a ${d7.toFixed(1)}% decline`,
                 (-zF - incVal("oiflush")) * 18 + 18, evd, { horizon: evMeta("oiflush", r.uni).horizon });
               { const mR = sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null);
                 sig.play = playbook("oiflush", { logGeo: r.uni === "main", px: r.px, sd30, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
@@ -3132,10 +3142,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           }
         }
         // Funding–price divergence: trajectory against tape, both directions
-        if (st.fpdiv && sd30 > 0 && r.d7 != null && isFinite(r.d7)) {
+        if (st.fpdiv && sd30 > 0 && d7 != null && isFinite(d7)) {
           const fwD = computeFundWin(r);
           if (fwD && fwD.d1 != null && fwD.d7 != null) {
-            const EPS_H = 5e-6, z7 = r.d7 / (sd30 * Math.sqrt(7));
+            const EPS_H = 5e-6, z7 = d7 / (sd30 * Math.sqrt(7));
             let dDir = 0;
             if (z7 >= 0.8 && fwD.d1 < fwD.d7 - EPS_H) dDir = 1;
             else if (z7 <= -0.8 && fwD.d1 > fwD.d7 + EPS_H) dDir = -1;
@@ -11806,6 +11816,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       quiet: prev ? prev.quiet : null, digestHour: prev ? prev.digestHour : null,
       // A fresh link inherits the default brief hour by leaving dgSet clear.
       dgSet: prev ? (prev.dgSet ? 1 : 0) : 0, tz: prev && Number.isFinite(prev.tz) ? prev.tz : null,
+      // The per-kind schedule (brief / landscape / desk hours, explicit offs) rides across a re-link
+      // like the rest of the prefs; dropping it turned an explicit landscape OFF back on and lost
+      // the desk digest hour. hydratePush derives a missing one from digestHour, so undefined is safe.
+      sched: prev && prev.sched && typeof prev.sched === "object" ? prev.sched : undefined,
       muted: false, lastOk: null, lastErr: null });
     persistPush();
     log(`push: linked recipient ${name || key} (${pushMask(key)})`);
@@ -11912,9 +11926,16 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       if (!m || !m.chat || typeof m.text !== "string") continue;
       const chat = m.chat.id, name = (m.from && (m.from.first_name || m.from.username)) || String(chat);
       const txt = m.text.trim();
+      // A link binds a CHAT to an account, and everything that acts as that account (/r, /alert,
+      // bare text) is authorised by "this arrived from the linked chat". In a group that claim is
+      // every member's, so a group chat is never linked and the account-shaped commands answer only
+      // a private one. /stop stays open everywhere: it is the escape hatch. (Telegram omits `type`
+      // on nothing real; the harness does, so an absent type is treated as private.)
+      const priv = m.chat.type == null || m.chat.type === "private";
       const start = txt.match(/^\/start(?:@\S+)?\s+(\S+)/i);
       if (start) {
         const now = Date.now(), key = String(chat);
+        if (!priv) { pushReply(chat, "Group chats can't be linked — send /start CODE to the bot directly."); continue; }
         const fails = (pushStartFails.get(key) || []).filter((t) => now - t < PUSH_START_FAIL_WINDOW);
         if (fails.length >= PUSH_START_FAILS) { pushStartFails.set(key, fails); continue; }   // silent: no oracle, no reply budget
         const res = pushBind(start[1], chat, name);
@@ -11942,6 +11963,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       if (rm) {
         const body = (rm[1] || "").trim();
         if (!dmBridge) pushReply(chat, "Messages aren't available on this deployment.");
+        else if (!priv) pushReply(chat, "Send that to the bot directly — a group can't reply as one account.");
         else if (!body) pushReply(chat, "Send <code>/r your message</code>, or <code>/r @handle your message</code>.");
         else if (!pushRecipients.has(String(chat))) pushReply(chat, "Not linked. Open the alerts panel for a link code, then send /start CODE.");
         else {
@@ -11967,6 +11989,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       // rule live behind the bridge with everything else account-shaped; this only forwards.
       const am = /^\/alert(?:@\S+)?(?:\s+([\s\S]+))?$/i.exec(txt);
       if (am) {
+        if (!priv) { pushReply(chat, "Send that to the bot directly — a group can't set alerts as one account."); continue; }
         if (!dmBridge || !pushRecipients.has(String(chat))) { pushReply(chat, "Not linked. Open the alerts panel for a link code, then send /start CODE."); continue; }
         let res;
         try { res = dmBridge(String(chat), (am[1] || "").trim(), { alert: true }); }
@@ -11983,7 +12006,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       // Private chats only: a group chat linked with /start would otherwise post every member's
       // lines under the one account that linked it. (Telegram omits `type` on nothing real; the
       // harness does, so an absent type is treated as private.)
-      if (dmBridge && !txt.startsWith("/") && pushRecipients.has(String(chat)) && (m.chat.type == null || m.chat.type === "private")) {
+      if (dmBridge && !txt.startsWith("/") && pushRecipients.has(String(chat)) && priv) {
         let res;
         try { res = dmBridge(String(chat), txt, { bare: true }); }
         catch (e) { res = { ok: false, error: "That didn't send \u2014 try again.", silent: false }; }
@@ -12060,6 +12083,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       return;
     }
     const item = pushQueue[idx];
+    // The queue can move under the await: an enqueue at the cap shifts or splices an older entry,
+    // a /stop or a 403 filters a chat out. Removal is by identity, never by the index read before
+    // the send — a stale index deleted someone else's unsent alert and re-sent this one.
+    const dropItem = () => { const i = pushQueue.indexOf(item); if (i >= 0) pushQueue.splice(i, 1); };
     pushSending = true;
     try {
       const held = pushDropped;
@@ -12069,7 +12096,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       const rec = pushRecipients.get(item.chat);
       if (r.ok) {
         if (held > 0) pushDropped -= held;
-        pushQueue.splice(idx, 1);
+        dropItem();
         if (rec) { rec.lastOk = now; rec.lastErr = null; rec.sent = (rec.sent || []).concat(now); }
         pushHoldUntil = now + PUSH_SEND_GAP;
         pushLogAdd({ t: now, chat: pushMask(item.chat), ok: true });
@@ -12088,7 +12115,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         log(`push: ${pushMask(item.chat)} blocked the bot — muted`);
       } else if (r.status >= 400 && r.status < 500) {
         // A malformed message must never wedge the queue behind itself.
-        pushQueue.splice(idx, 1);
+        dropItem();
         if (rec) rec.lastErr = r.error;
         pushLastErr = r.error;
         pushLogAdd({ t: now, chat: pushMask(item.chat), ok: false, err: r.error });
@@ -12097,7 +12124,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         item.tries++;
         pushHoldUntil = now + Math.min(60000, 2000 * Math.pow(2, item.tries));
         if (item.tries >= PUSH_MAX_TRIES) {
-          pushQueue.splice(idx, 1);
+          dropItem();
           pushLogAdd({ t: now, chat: pushMask(item.chat), ok: false, err: "gave up after " + item.tries + " tries" });
         }
         pushLastErr = r.error;
@@ -12302,7 +12329,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   function persistRules() {
     if (!store.saveRules) return;
     store.saveRules({ ts: Date.now(), seq: ruleSeq, rules: alertRules,
-      armed: [...ruleArmed.keys()].slice(-RULE_STATE_MAX),
+      // Only the pairs that ARE armed: a fired pair sits in the map as `false`, and hydrate reads
+      // every listed key as armed — so a still-breached market re-announced on every redeploy.
+      armed: [...ruleArmed.entries()].filter(([, v]) => v === true).map(([k]) => k).slice(-RULE_STATE_MAX),
       fired: [...ruleLastFire.entries()].slice(-RULE_STATE_MAX) });
     rulesDirty = false;
   }

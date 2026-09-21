@@ -523,7 +523,7 @@ function closedWindows(startMs, endMs) {
   for (let i = 0; i + 1 < ses.length; i++) {
     const enter = ses[i].close, exit = ses[i + 1].open;
     if (enter >= startMs && exit <= endMs)
-      out.push({ enter, exit, tag: exit - enter < 40 * HOUR ? "overnight" : "weekend" });
+      out.push({ enter, exit, tag: exit - enter < 40 * HOUR ? "overnight" : "weekend", nextClose: ses[i + 1].close });
   }
   return out;
 }
@@ -620,7 +620,7 @@ function homeClosedWindows(mk, startMs, endMs) {
   for (let i = 0; i + 1 < ses.length; i++) {
     const enter = ses[i].close, exit = ses[i + 1].open;
     if (enter >= startMs && exit <= endMs)
-      out.push({ enter, exit, tag: exit - enter < 40 * HOUR ? "overnight" : "weekend" });
+      out.push({ enter, exit, tag: exit - enter < 40 * HOUR ? "overnight" : "weekend", nextClose: ses[i + 1].close });
   }
   return out;
 }
@@ -847,7 +847,7 @@ function studyGapFade(hourly, windows, tol, fine) {
   let approx = false;
   for (const a of [...windows].sort((x, y) => x.enter - y.enter)) {
     const pIn = anchorPrice(hourly, fine, a.enter, tol), pOut = anchorPrice(hourly, fine, a.exit, tol);
-    if (pIn.px > 0 && pOut.px > 0) { gaps.push({ exit: a.exit, g: (pOut.px / pIn.px - 1) * 100 }); if (pIn.approx || pOut.approx) approx = true; }
+    if (pIn.px > 0 && pOut.px > 0) { gaps.push({ exit: a.exit, g: (pOut.px / pIn.px - 1) * 100, nextClose: a.nextClose }); if (pIn.approx || pOut.approx) approx = true; }
   }
   const sd = retStd(gaps.map((x) => x.g), 10);
   if (sd == null || sd <= 0) return { session: { n: 0 }, nGaps: gaps.length, sd: null, approx };
@@ -862,9 +862,14 @@ function studyGapFade(hourly, windows, tol, fine) {
     // gap record as noise. marketSessions carries the real close per calendar day (13:00 on a
     // half-day, 16:00 otherwise). Pick the session whose open is at/just after this gap's exit;
     // fall back to the old fixed offset only if no session is found in a tight window.
-    const sess = marketSessions(gp.exit - HOUR, gp.exit + 8 * HOUR);
-    let closeT = null;
-    for (const s of sess) { if (s.open >= gp.exit - HOUR) { closeT = s.close; break; } }
+    // A window built by closedWindows/homeClosedWindows carries the close of the session it opens
+    // into — for a KRX/TSE/HKEX home name that is the HOME close, where the US lookup below found
+    // the NYSE close twenty hours later and measured the whole home day plus the US session.
+    let closeT = gp.nextClose > gp.exit ? gp.nextClose : null;
+    if (closeT == null) {
+      const sess = marketSessions(gp.exit - HOUR, gp.exit + 8 * HOUR);
+      for (const s of sess) { if (s.open >= gp.exit - HOUR) { closeT = s.close; break; } }
+    }
     if (closeT == null) closeT = gp.exit + 6.5 * HOUR;   // no session matched -> conservative fallback
     const closeA = anchorPrice(hourly, fine, closeT, tol), close = closeA.px;
     if (!(open > 0) || !(close > 0)) continue;
@@ -1699,7 +1704,9 @@ function detectPead(prints, daily, px, sd30, hourly, now) {
   if (!(px > 0) || !(sd30 > 0)) return null;
   const dayOf = (t) => { const x = new Date(t); return x.getUTCFullYear() + "-" + String(x.getUTCMonth() + 1).padStart(2, "0") + "-" + String(x.getUTCDate()).padStart(2, "0"); };
   const idxByDay = new Map();
-  for (let i = 0; i < daily.length; i++) if (daily[i] && Number.isFinite(daily[i].c)) idxByDay.set(dayOf(daily[i].t), i);
+  // Coerced: the live daily spine carries string closes (candleSnapshot verbatim), and an
+  // uncoerced isFinite read every one of them as "no close" — the detector never fired.
+  for (let i = 0; i < daily.length; i++) if (daily[i] && Number.isFinite(+daily[i].c)) idxByDay.set(dayOf(daily[i].t), i);
   let best = null;
   for (const pr of prints) {
     const pi = idxByDay.get(pr.d);
@@ -1710,7 +1717,7 @@ function detectPead(prints, daily, px, sd30, hourly, now) {
     if (!best || ri > best.ri) best = { pr, ri };
   }
   if (!best) return null;
-  let c1 = best.ri < daily.length ? daily[best.ri].c : null, c0 = daily[best.ri - 1].c;
+  let c1 = best.ri < daily.length ? +daily[best.ri].c : null, c0 = +daily[best.ri - 1].c;
   if (hourly) {
     const nowMs = now == null ? Date.now() : now, t0 = earnPrintUtc(best.pr);
     const hs = t0 != null && t0 + 24 * HOUR <= nowMs ? packedRows(hourly) : [];
@@ -2577,7 +2584,9 @@ function sessionRecords(hourly, opts) {
     const rng = hi - lo;
     // openQ: which quarter of the day's EVENTUAL range the open landed in (1 = lowest). A
     // zero-range day has no quarters — openQ null, excluded from the split downstream.
-    const openQ = rng > 0 ? Math.min(4, 1 + Math.floor((op - lo) / rng * 4)) : null;
+    // Clamped both ways: an open printed outside the day's own range (a closes-only first bar)
+    // gave openQ 0 or −1, and the anatomy pool indexed its cells with it and threw.
+    const openQ = rng > 0 ? Math.max(1, Math.min(4, 1 + Math.floor((op - lo) / rng * 4))) : null;
     out.push({ t: d, o: op, h: hi, l: lo, c: cl, bars: bars.length,
       mfeUpPct: +((hi - op) / op * 100).toFixed(4),
       mfeDnPct: +((op - lo) / op * 100).toFixed(4),
@@ -4450,14 +4459,14 @@ function earnPrintReaction(print, daily, px, hourly, now) {
   // keeps a print whose bar has not reached the spine yet measurable against yesterday's close.
   let ref = null, pb = null;
   for (let i = 0; i < daily.length; i++) {
-    const k = daily[i]; if (!k || !Number.isFinite(k.c)) continue;
+    const k = daily[i]; if (!k || !Number.isFinite(+k.c)) continue;   // string closes on the live spine
     const d = dayOf(k.t);
     if (d < print.d) ref = k; else if (d === print.d) { pb = k; break; } else break;
   }
   if (!ref || !(ref.c > 0)) return null;
   if (Date.UTC(+print.d.slice(0, 4), +print.d.slice(5, 7) - 1, +print.d.slice(8, 10)) > nowMs) return null;   // not printed yet
-  if (pb && Number.isFinite(+pb.t) && +pb.t + DAY <= nowMs) return { pct: +(((pb.c - ref.c) / ref.c) * 100).toFixed(1), state: "final" };
-  if (live != null) return { pct: +(((live - ref.c) / ref.c) * 100).toFixed(1), state: "forming" };
+  if (pb && Number.isFinite(+pb.t) && +pb.t + DAY <= nowMs) return { pct: +(((+pb.c - +ref.c) / +ref.c) * 100).toFixed(1), state: "final" };
+  if (live != null) return { pct: +(((live - +ref.c) / +ref.c) * 100).toFixed(1), state: "forming" };
   return null;
 }
 // One print, fully dressed: what was expected, what printed, whether that beat, by how much, and
@@ -4709,7 +4718,9 @@ function earnReactionsFor(prints, daily, now, hourly, opts) {
   const nowMs = now == null ? Date.now() : now;
   const dayOf = (t) => { const x = new Date(t); return x.getUTCFullYear() + "-" + String(x.getUTCMonth() + 1).padStart(2, "0") + "-" + String(x.getUTCDate()).padStart(2, "0"); };
   const idxByDay = new Map();
-  for (let i = 0; i < daily.length; i++) if (daily[i] && Number.isFinite(daily[i].c)) idxByDay.set(dayOf(daily[i].t), i);
+  // Coerced: the live daily spine carries string closes (candleSnapshot verbatim), and an
+  // uncoerced isFinite read every one of them as "no close" — the detector never fired.
+  for (let i = 0; i < daily.length; i++) if (daily[i] && Number.isFinite(+daily[i].c)) idxByDay.set(dayOf(daily[i].t), i);
   const curve = hourly ? earnReactionCurve(prints, hourly, Object.assign({}, opts || {}, { now: nowMs, horizons: [24] })) : null;
   const h24 = new Map();
   if (curve) for (const r of curve.rows) if (Number.isFinite(r.mv.h24)) h24.set(r.t + "|" + r.d, r.mv.h24);
@@ -4722,7 +4733,7 @@ function earnReactionsFor(prints, daily, now, hourly, opts) {
     if (ri <= 0 || ri >= daily.length) continue;
     const fromH = h24.get(p.t + "|" + p.d);
     if (fromH == null && Number.isFinite(+daily[ri].t) && +daily[ri].t + DAY > nowMs) continue;   // the reaction candle is still forming: not a reaction yet
-    const c1 = daily[ri].c, c0 = daily[ri - 1].c;
+    const c1 = +daily[ri].c, c0 = +daily[ri - 1].c;
     if (fromH == null && (!Number.isFinite(c1) || !Number.isFinite(c0) || c0 <= 0)) continue;
     const mv = fromH != null ? fromH : (c1 - c0) / c0 * 100;
     if (fromH != null) hN++;
@@ -5527,6 +5538,9 @@ const RULE_OPS = [">", "<", "abs>", "cross_up", "cross_dn"];
 function ruleBand(rule) {
   if (rule && Number.isFinite(rule.band) && rule.band >= 0) return rule.band;
   const v = Math.abs(rule && Number.isFinite(rule.value) ? rule.value : 0);
+  // "price above the 200-day" compares to 0, and 2% of 0 is no band: a mark sitting on the line
+  // would fire on every wobble. Half a percent of clear air, whichever surface wrote the rule.
+  if (rule && rule.metric === "vsma200" && v === 0) return 0.5;
   return Math.max(v * 0.02, 1e-9);
 }
 
@@ -5586,13 +5600,16 @@ function validateRule(rule) {
   if (!rule || typeof rule !== "object") return { ok: false, error: "not-an-object" };
   if (!RULE_BY_K[rule.metric]) return { ok: false, error: "unknown-metric" };
   if (!RULE_OPS.includes(rule.op)) return { ok: false, error: "unknown-op" };
-  if (!Number.isFinite(+rule.value)) return { ok: false, error: "bad-value" };
+  // `+""`, `+null`, `+[]` and `+true` are all finite: an empty threshold field would become
+  // "above 0" and fire on every market in scope. A number, or a string that reads as one.
+  const numLike = (v) => (typeof v === "number" || (typeof v === "string" && v.trim() !== "")) && Number.isFinite(+v);
+  if (!numLike(rule.value)) return { ok: false, error: "bad-value" };
   if (rule.coin != null && typeof rule.coin !== "string") return { ok: false, error: "bad-coin" };
   // "" is absent, not a universe. The validated rule is stored with uni "" and re-validated on
   // hydrate; rejecting "" there dropped every coin-scoped and roster-wide rule on every restart.
   if (rule.uni != null && rule.uni !== "" && rule.uni !== "xyz" && rule.uni !== "main") return { ok: false, error: "bad-universe" };
-  if (rule.band != null && (!Number.isFinite(+rule.band) || +rule.band < 0)) return { ok: false, error: "bad-band" };
-  if (rule.cooldownMs != null && (!Number.isFinite(+rule.cooldownMs) || +rule.cooldownMs < 0)) return { ok: false, error: "bad-cooldown" };
+  if (rule.band != null && (!numLike(rule.band) || +rule.band < 0)) return { ok: false, error: "bad-band" };
+  if (rule.cooldownMs != null && (!numLike(rule.cooldownMs) || +rule.cooldownMs < 0)) return { ok: false, error: "bad-cooldown" };
   // A conversation id, when the rule fires INTO a chat rather than to its owner's phone. The
   // server decides whether the owner may post there; here it is only a positive integer or nothing.
   if (rule.thread != null && rule.thread !== 0 && !((typeof rule.thread === "number" || typeof rule.thread === "string") && Number.isInteger(+rule.thread) && +rule.thread > 0)) return { ok: false, error: "bad-thread" };
@@ -6126,7 +6143,11 @@ function featureRouteKeyFor(m, p) {
   return null;
 }
 function featureGateFor(method, url, flags, isAdmin) {
-  const p = String(url || "").split("?")[0];
+  // The router matches the DECODED path with the fragment gone; the lookup must see the same
+  // string or `/api/%77hale` and `/api/whale#x` reach a gated handler ungated. A path that does
+  // not decode is looked up raw — the router will not match it either.
+  let p = String(url || "").split(/[?#]/)[0];
+  try { p = decodeURIComponent(p); } catch (_) {}
   if (FEATURE_NEVER_GATE.has(p)) return null;
   const m = String(method || "GET").toUpperCase();
   const key = featureRouteKeyFor(m, p);
@@ -6918,7 +6939,7 @@ function briefContextNumbers(ctx) {
       // Thousands separators: a headline saying "1,200% profit" put "1" and "200" in the set while
       // the model quite reasonably wrote "1,200" — and the brief lost its prose over a comma.
       const m = v.match(/\d[\d,]*(?:\.\d+)?/g);
-      if (m) for (const x of m) { const t = x.replace(/,/g, ""); set.add(t.replace(/\.?0+$/, "")); set.add(t); }
+      if (m) for (const x of m) { const t = x.replace(/,/g, ""); if (/\./.test(t)) set.add(t.replace(/\.?0+$/, "")); set.add(t); }
       return;
     }
     if (Array.isArray(v)) { for (const x of v) walk(x); return; }
@@ -6990,7 +7011,9 @@ function briefTextViolation(text, nums, names) {
   for (const raw of String(text).match(/\d+(?:[.,]\d+)?/g) || []) {
     const t = raw.replace(/,/g, "");
     if (!/\./.test(t) && +t <= 99) continue;              // small counts are prose, not claims
-    const norm = t.replace(/\.?0+$/, "");
+    // Trailing zeros are dropped only past a decimal point ("2.50" is "2.5"); on an integer the
+    // same strip turned "300" into "3" and let any round number through on a small count.
+    const norm = /\./.test(t) ? t.replace(/\.?0+$/, "") : t;
     if (nums.has(norm) || nums.has(t)) continue;
     return `number not in context: ${raw}`;
   }
@@ -8003,8 +8026,8 @@ function sicToSector(sicRaw) {
   if (sic >= 2900 && sic <= 2999) return "Energy";
   if (sic >= 3000 && sic <= 3399) return "Materials";
   if (sic >= 3400 && sic <= 3499) return "Industrials";
+  if (sic === 3571 || sic === 3572 || sic === 3575 || sic === 3576 || sic === 3577 || sic === 3578) return "Information Technology";   // before the range: computers are IT, not machinery
   if (sic >= 3500 && sic <= 3579) return "Industrials";
-  if (sic === 3571 || sic === 3572 || sic === 3575 || sic === 3576 || sic === 3577 || sic === 3578) return "Information Technology";
   if (sic >= 3580 && sic <= 3599) return "Industrials";
   if (sic >= 3600 && sic <= 3699) return "Information Technology";
   if (sic >= 3700 && sic <= 3799) return sic >= 3760 && sic <= 3769 ? "Industrials" : "Consumer Discretionary";  // space vehicles carve-out
@@ -8521,7 +8544,10 @@ function pdfDecryptor(src, objs) {
   const encMeta = !/\/EncryptMetadata\s+false/.test(d);
   if (R >= 4 && !encMeta) h = Buffer.concat([h, Buffer.from([255, 255, 255, 255])]);
   let key = md5(h);
-  const n = R === 2 ? 5 : Math.max(5, Math.min(16, Math.floor(len / 8)));
+  // AESV2 is AES-128 by definition; for RC4 under V4 the first /Length in the dictionary can be
+  // the crypt filter's own entry in BYTES (16), so a value under 40 is read as bytes, not bits.
+  const bits = V === 4 && len < 40 ? len * 8 : len;
+  const n = aes ? 16 : R === 2 ? 5 : Math.max(5, Math.min(16, Math.floor(bits / 8)));
   if (R >= 3) for (let i = 0; i < 50; i++) key = md5(key.subarray(0, n));
   key = key.subarray(0, n);
   const objKey = (num, gen) => {

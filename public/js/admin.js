@@ -567,7 +567,9 @@ function toggleViewAsPublic(){
   if(!_adm) return;
   _admVap=!_admVap;
   // Swaps in a SERVER-resolved set either way — never a locally recomputed one.
-  FLAGS_VIEW = _admVap ? (_adm.resolvedPublic||FLAGS) : FLAGS;
+  // Back from the public view = the latest SERVER-resolved admin set, not the one the page booted
+  // with: a tab switched off in between would otherwise reappear in the ribbon and 403 on click.
+  FLAGS_VIEW = _admVap ? (_adm.resolvedPublic||FLAGS) : (_adm.resolved||FLAGS);
   applyTabVisibility();
   if(!tabVisible(state.view)) showView('markets');
   renderAdmin();

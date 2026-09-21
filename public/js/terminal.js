@@ -5,7 +5,7 @@
 import { IS_ADMIN, applyHash, featureOn, tabVisible } from "./admin.js";
 import { showView } from "./backtest.js";
 import { earnDiffC, earnNext, earnSessLbl, loadEarnings, loadNews, secShort } from "./calendar.js";
-import { DAY, G, SCROLL_B, TF_MAP, activeRows, clamp, el, esc, fmtPrice, fmtUsd, inScope, median, state } from "./core.js";
+import { DAY, G, SCROLL_B, TF_MAP, activeRows, clamp, el, esc, fmtPrice, fmtUsd, inScope, median, safeHref, state } from "./core.js";
 import { BASKETS, RATIO, basketByName, basketMutate, dailyReturns, isBasketName, loadBaskets, openCompg, openRatio, renderCorr, syncCorrLookback, tfLabel } from "./corr.js";
 import { computeDerived, fetchJSON, loadDaily, loadSnapshot, renderAskBudget, updateFreshTray } from "./data.js";
 import { openDetail } from "./drawer.js";
@@ -218,7 +218,7 @@ async function termNewsCmd(tk,n){ n=n||8;
   if(tk) items=items.filter(a=>(a.tk||'').toUpperCase()===tk); else items=items.filter(a=>!!a.tk);   // bare: verified attributions only
   items=items.slice().sort((a,b)=>(b.pub||0)-(a.pub||0)).slice(0,n);
   if(!items.length) return termOut(`<span class="sec">no ${tk?tesc(tk)+' ':''}headlines in the 72h window</span>${tk?' <span class="tp-trans">(per-name coverage rotates — thin names surface less often)</span>':''}`);
-  const lines=items.map(a=>`<span class="tp-trans">${termAgo(a.pub||Date.now())}</span> ${a.tk?`<span role="button" tabindex="0" class="tp-deep" data-tcmd="${tesc(a.tk)}">${tpad(tesc(a.tk),6)}</span> `:''}${a.url?`<a href="${tesc(a.url)}" target="_blank" rel="noopener">${tesc(a.h||'')}</a>`:tesc(a.h||'')}`).join('\n');
+  const lines=items.map(a=>`<span class="tp-trans">${termAgo(a.pub||Date.now())}</span> ${a.tk?`<span role="button" tabindex="0" class="tp-deep" data-tcmd="${tesc(a.tk)}">${tpad(tesc(a.tk),6)}</span> `:''}${safeHref(a.url)?`<a href="${esc(safeHref(a.url))}" target="_blank" rel="noopener">${tesc(a.h||'')}</a>`:tesc(a.h||'')}`).join('\n');   // safeHref: a feed URL is third-party text, and esc cannot refuse a javascript: scheme
   termOut(`<span class="tp-hd">news${tk?' · '+tesc(tk):''}</span> <span class="tp-trans">· verified attributions · 72h window</span>\n${lines}\n<span role="button" tabindex="0" class="tp-deep" data-tview="news">open news tab ▸</span>`); }
 async function termReports(){ let d=state.report.list;
   if(!d){ try{ d=await fetchJSON('/api/ai-reports'); state.report.list=d; }catch(_){} }
@@ -453,7 +453,7 @@ function termExec(cmdStr){ const p=cmdStr.trim().split(/\s+/), h=p[0].toLowerCas
   const lev=(a,b)=>{ a=a.toLowerCase(); b=b.toLowerCase(); const d=[]; for(let i=0;i<=a.length;i++){ d[i]=[i]; } for(let j=1;j<=b.length;j++) d[0][j]=j;
     for(let i=1;i<=a.length;i++) for(let j=1;j<=b.length;j++) d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(a[i-1]===b[j-1]?0:1)); return d[a.length][b.length]; };
   const w=String(h).split(/\s+/)[0]||''; const near=TERM_VERBS.filter(v=>w&&lev(w,v)<=2&&v!==w).sort((x,y)=>lev(w,x)-lev(w,y))[0];
-  termErr(`unknown "${tesc(h)}"`+(near?` — did you mean <span class="tp-deep" data-tcmd="${tesc(String(h).replace(w,near))}">${tesc(String(h).replace(w,near))}</span>?`:' — type help')); }
+  termErrHtml(`unknown "${tesc(h)}"`+(near?` — did you mean <span class="tp-deep" data-tcmd="${tesc(String(h).replace(w,near))}">${tesc(String(h).replace(w,near))}</span>?`:' — type help')); }
 // ---- basket / ratio verbs (build 2026.07.28-06) ----
 async function termBasket(args){
   const sub=(args[0]||'').toLowerCase();
@@ -640,6 +640,9 @@ function termOutTrans(cmd){ const d=document.createElement('div'); d.className='
 function termOutAI(html){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<span class="tp-badge ai">AI</span> <span class="tp-line">${html}</span>`; termEmit(d); }
 function termEcho(c){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<div class="tp-line tp-echo"><span class="pr">▸</span> <span class="c">${tesc(c)}</span></div>`; termEmit(d); }
 function termErr(m){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<span class="tp-line tp-err">✗ ${tesc(m)}</span>`; termEmit(d); }
+// An error line whose pieces are ALREADY escaped and carry markup (the "did you mean" suggestion
+// is a clickable command): termErr would print the span as text.
+function termErrHtml(html){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<span class="tp-line tp-err">✗ ${html}</span>`; termEmit(d); }
 function termScrollDown(){ const s=termEl('termScroll'); s.scrollTop=s.scrollHeight; }
 function termHi(coin){ const r=state.rows.get(coin); if(!r) return; if(state.view!=='markets') return;
   const tr=document.querySelector(`#body tr[data-coin="${CSS.escape(coin)}"]`); if(tr){ tr.classList.add('rowflash'); tr.scrollIntoView({block:'center',behavior:SCROLL_B}); setTimeout(()=>tr.classList.remove('rowflash'),1500); } }
@@ -963,13 +966,11 @@ function renderTreemap(){
       document.head.appendChild(st); }
 
     // nav clicks: show/render on our tab, hide our view on any other
+    // Every route into the view — the ribbon tab, ← / ⌂, the palette, a hash — goes through
+    // showView, which hides/unhides the section and announces the landing; the render hangs off
+    // that announcement, so a palette jump no longer lands on a stale or "Loading…" canvas.
     if(nav && !nav.dataset.tmBound){ nav.dataset.tmBound='1';
-      nav.addEventListener('click',e=>{ const t=e.target.closest('.tab,.tabnav'); if(!t) return;
-        const v=t.classList.contains('tabnav')?state.view:t.dataset.view;   // ← / ⌂ already navigated in their own handler: read where they landed
-        if(v==='treemap' && typeof showView==='function') showView('treemap');   // hides built-in views, sets active tab + hash
-        const tv=document.getElementById('view-treemap'); if(tv) tv.hidden = v!=='treemap';
-        if(v==='treemap') renderTreemap();
-      }); }
+      document.addEventListener('xyz:view',e=>{ if(e.detail==='treemap') renderTreemap(); }); }
 
     // control bindings (window syncs with the rest of the app via setWindow)
     bindSeg('#tmf','tf', tf=>{ if(typeof setWindow==='function') setWindow(tf); renderTreemap(); });

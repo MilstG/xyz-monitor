@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.21-84";
+const VERSION = "2026.09.21-85";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -909,7 +909,13 @@ async function buildServer() {
   // never be closed by a flag write. Routes no feature claims pass through untouched — see the
   // ASYMMETRY note in compute.js before changing that.
   fastify.addHook("onRequest", async (req, reply) => {
-    const blocked = featureGateFor(req.method, req.url, poller.getFlags(), isAdmin(req));
+    // Gated on the DECODED path (featureGateFor normalises %xx and strips a fragment — the router
+    // matches the decoded URL, so `/api/%77hale` used to reach the handler ungated) and, belt and
+    // braces, on the route pattern the router actually matched.
+    const flags = poller.getFlags(), adm = isAdmin(req);
+    const routeUrl = req.routeOptions && req.routeOptions.url;
+    const blocked = featureGateFor(req.method, req.url, flags, adm)
+      || (routeUrl && routeUrl !== req.url ? featureGateFor(req.method, routeUrl, flags, adm) : null);
     if (!blocked) return;
     // Same lifecycle rule as the site gate above: RETURN the reply or the handler still runs and
     // double-sends. 403 not 404 — hiding the route's existence is the client's job (it never renders
@@ -1727,7 +1733,9 @@ async function buildServer() {
     const o = opts || {};
     const owner = poller.pushOwnerOf ? poller.pushOwnerOf(String(chat)) : "";
     const me = owner && ACCOUNTS.getUser(owner);
-    if (!me) return { ok: false, error: "This chat is not linked to an account." };
+    // A disabled account keeps its linked chat until the operator unlinks it; the bridge verbs
+    // below (/alert included — the other two refuse inside ACCOUNTS) must not be its way back in.
+    if (!me || me.disabledAt) return { ok: false, error: "This chat is not linked to an account." };
     // /alert from the phone: bound to the conversation this chat mirrors, if any; otherwise a
     // plain personal rule that reaches the phone through the rule class like one set in the panel.
     // Everything returned from here rides pushReply with parse_mode HTML: the help text has
@@ -1769,7 +1777,9 @@ async function buildServer() {
     let out = "<b>" + tgEsc(r.mine ? "you" : r.who) + "</b>";
     if (r.reply && r.reply.sender) out += "\n<i>\u21a9 " + tgEsc(r.reply.sender) + ": " + tgEsc(String(r.reply.body || "").slice(0, 80)) + "</i>";
     if (r.cmd) out += "\n\u25b8 " + tgEsc(r.cmd) + (r.body ? "\n<pre>" + tgEsc(r.body.slice(0, 1500)) + (r.body.length > 1500 ? "\u2026" : "") + "</pre>" : "");
-    else if (r.body) out += "\n" + tgEsc(r.body);
+    // Prose is capped like a command dump: a 4000-char paste (DM_MAX_LEN) escaped for HTML
+    // overruns Telegram's 4096 and the wire DROPS a 400'd message — after the cursor moved.
+    else if (r.body) out += "\n" + tgEsc(r.body.slice(0, 1500)) + (r.body.length > 1500 ? "\u2026 <i>(open Messages for the rest)</i>" : "");
     if (r.file) out += "\n\ud83d\udcce " + tgEsc(r.file);
     return out;
   };
@@ -1784,7 +1794,12 @@ async function buildServer() {
       parts.unshift(line); used += line.length + 2;
     }
     const skipped = m.skipped + cut;
-    return (skipped ? "<i>+" + skipped + " earlier message" + (skipped === 1 ? "" : "s") + " not mirrored \u2014 open Messages</i>\n\n" : "") + parts.join("\n\n");
+    const text = (skipped ? "<i>+" + skipped + " earlier message" + (skipped === 1 ? "" : "s") + " not mirrored \u2014 open Messages</i>\n\n" : "") + parts.join("\n\n");
+    // The budget is per line before this point; the message as a whole must clear Telegram's
+    // 4096 with room for the outbox's own overflow footer. Cut on a line boundary, never inside a tag.
+    if (text.length <= 3900) return text;
+    const cutAt = text.lastIndexOf("\n\n", 3700);
+    return text.slice(0, cutAt > 0 ? cutAt : 3700) + "\n\n<i>\u2026 cut \u2014 open Messages for the rest</i>";
   }
   function dmMirror(threadId, uidOnly) {
     if (!poller.pushEnqueueNow || !poller.pushRecipientsFor) return 0;
@@ -1847,7 +1862,7 @@ async function buildServer() {
       const out = { ok: true, text: "\ud83d\udd15 alert #" + p.id + " off: " + r.rule.text };
       // Announced where it used to fire, so the room learns the watch is gone.
       if (r.rule.thread && ACCOUNTS.isMember(r.rule.thread, me.uid)) {
-        const post = ACCOUNTS.send(me.uid, null, out.text, null, { thread: r.rule.thread, cmd: "alert off " + p.id });
+        const post = ACCOUNTS.send(me.uid, null, out.text, null, { thread: r.rule.thread, cmd: "alert off " + p.id, via: opts.tg ? "telegram" : null });
         if (post.ok) { out.message = post.message; out.thread = post.thread; dmPoke(post.thread); dmMirror(post.thread); }
       }
       return out;
@@ -1864,7 +1879,8 @@ async function buildServer() {
     const line = "\ud83d\udd14 alert #" + r.rule.id + " \u00b7 " + r.rule.text + (r.rule.note ? " \u2014 " + r.rule.note : "") + " \u2192 fires " + where(thread);
     const out = { ok: true, text: line, rule: r.rule };
     if (thread) {
-      const post = ACCOUNTS.send(me.uid, null, line, null, { thread, cmd: "alert " + String(text || "").replace(/\s+/g, " ").trim().slice(0, 120) });
+      // via: the phone already shows the bot's reply, so the mirror must not echo the post too.
+      const post = ACCOUNTS.send(me.uid, null, line, null, { thread, cmd: "alert " + String(text || "").replace(/\s+/g, " ").trim().slice(0, 120), via: opts.tg ? "telegram" : null });
       if (post.ok) { out.message = post.message; out.thread = post.thread; dmPoke(post.thread); dmMirror(post.thread); }
     }
     return out;
@@ -2741,7 +2757,7 @@ async function buildServer() {
   // 8 KB body cap — the payload is just { password }; anything larger is malformed or hostile (413).
   fastify.post("/api/ai-reset", { bodyLimit: 8 * 1024 }, async (req, reply) => {
     reply.header("cache-control", "no-store");
-    const r = poller.resetAiDay(String((req.body || {}).password || ""), req.ip);
+    const r = poller.resetAiDay(String((req.body || {}).password || ""), clientIp(req));   // the real client behind the proxy, like /login — req.ip is the proxy for everyone
     return reply.code(r.ok ? 200 : (r.error === "rate" ? 429 : r.error === "not-configured" ? 503 : 403)).send(r);
   });
   // Admin AI unlock: verify ADMIN_PASSWORD (same constant-time compare + shared lockout as the
@@ -2749,7 +2765,7 @@ async function buildServer() {
   // there is no header/script path. Body is just { password } — 8 KB cap like the reset route.
   fastify.post("/api/ai-unlock", { bodyLimit: 8 * 1024 }, async (req, reply) => {
     reply.header("cache-control", "no-store");
-    const r = poller.checkAdminPassword(String((req.body || {}).password || ""), req.ip);
+    const r = poller.checkAdminPassword(String((req.body || {}).password || ""), clientIp(req));
     if (!r.ok) return reply.code(r.error === "rate" ? 429 : r.error === "not-configured" ? 503 : 403).send(r);
     setAiUnlockCookie(reply, req, signAiUnlock(Date.now() + AI_UNLOCK_MS));
     // The terminal path is also an escalation path: someone who proves ADMIN_PASSWORD here gets the

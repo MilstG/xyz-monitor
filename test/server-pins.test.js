@@ -846,7 +846,8 @@ test("perf batch 2026.07.21-08: getFunding memo, bucketsFor memo, gzip+dataTs wi
   assert.ok(srv.includes('const zlib = require("zlib");'), "zlib import missing");
 
   // #2 client dataTs short-circuit + factored sidecar pulls
-  assert.ok(app.includes("if(s.dataTs && s.dataTs===state.dataTs){ maybePullSidecars(); return; }"), "client snapshot short-circuit missing");
+  assert.ok(/if\(s\.dataTs && s\.dataTs===state\.dataTs\)\{[\s\S]{0,400}?maybePullSidecars\(\); return; \}/.test(app), "client snapshot short-circuit missing");
+  assert.ok(app.includes("for(const r of state.rows.values()) if(r.feat) r.candleTs=now;"), "an unchanged snapshot still refreshes the feature stamp â€” the stale dimming reads a quiet tape as a stalled poller otherwise");
   assert.ok(app.includes("function maybePullSidecars()"), "sidecar pulls must be factored so they still fire on a 304");
 });
 
@@ -1395,7 +1396,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract â€
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.21-84"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.21-85"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);

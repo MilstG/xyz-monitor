@@ -571,3 +571,16 @@ test("dm: the sync box needs a phone, /alert binds a rule to the conversation it
   // event on the wire was marked quiet, so the phone is the only delivery left and it takes it.
   assert.ok(/if \(!post\.ok\) \{ log\("rule fire post failed \(" \+ post\.error \+ "\)[^\n]*toPhone\("could not post into the conversation: " \+ post\.error\); continue; \}/.test(srv), "a refused fire post falls back to the author's phone");
 });
+
+test("feature gate: a percent-encoded or fragment-carrying path is gated like the path the router matches", async () => {
+  const cara = jar(); cara.absorb(await post("/login", { handle: "cara", password: "yet-another-long-pw" }));
+  const plain = await get("/api/whale", cara);
+  assert.equal(plain.statusCode, 403, plain.body);
+  const feature = JSON.parse(plain.body).feature;
+  assert.ok(feature, "the whale route is admin-only by default");
+  for (const u of ["/api/%77hale", "/api/whale#x", "/api/%77hale?x=1"]) {
+    const r = await get(u, cara);
+    assert.equal(r.statusCode, 403, u + " → " + r.statusCode);
+    assert.equal(JSON.parse(r.body).feature, feature, u);
+  }
+});

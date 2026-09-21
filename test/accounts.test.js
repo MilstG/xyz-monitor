@@ -482,7 +482,7 @@ test("the pair schema migrates onto the membership table without losing a conver
   const now = Date.now();
   // Rows built the old way, hashed the old way: hashPwSync is the pre-async hasher, byte-identical.
   const { hashPwSync } = require("../src/accounts");
-  for (const [uid, h] of [["uidA", "ann"], ["uidB", "bo"]])
+  for (const [uid, h] of [["uidA", "ann"], ["uidB", "bo"], ["uidC", "cy"]])
     db.prepare("INSERT INTO user (uid, handle, display, pw, createdAt) VALUES (?,?,?,?,?)").run(uid, h, h, hashPwSync("another-long-password"), now);
   db.prepare("INSERT INTO dm_thread (a, b, createdAt, lastMsgId, lastAt) VALUES (?,?,?,?,?)").run("uidB", "uidA", now, 1, now);
   db.prepare("INSERT INTO dm_msg (thread, sender, ts, body) VALUES (1,'uidA',?, 'said before the migration')").run(now);
@@ -496,6 +496,13 @@ test("the pair schema migrates onto the membership table without losing a conver
   assert.equal(A.threadFor("uidA", "uidB", false).id, 1, "the pair still resolves to the same thread, in either order");
   assert.ok(A.history("uidB", 1).messages.some((x) => x.body === "said before the migration"), "with its messages");
   assert.ok(A.send("uidA", null, "and after", null, { thread: 1 }).ok, "and it still works");
+  // NEW conversations on the migrated volume: the legacy NOT NULL pair columns used to make every
+  // INSERT into dm_thread fail — silently, so "could not open that conversation" forever.
+  const uidC = "uidC";
+  const fresh = A.send("uidA", uidC, "a brand new DM", null, {});
+  assert.ok(fresh.ok && fresh.thread > 1, JSON.stringify(fresh));
+  assert.ok(A.createGroup("uidA", "after the migration", ["uidB", uidC]).ok, "a group too");
+  assert.ok(!A._db.prepare("PRAGMA table_info(dm_thread)").all().some((c) => c.name === "a" || c.name === "b"), "the legacy columns are gone");
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -1535,4 +1542,36 @@ test("telegram sync: one conversation per member, a cursor that starts now, bare
   assert.equal(A.bridgeSyncText(l.uid, "still here?").error, "not-synced");
   assert.deepEqual(A.tgSyncAll(), []);
   assert.ok(A.setTgSync(l.uid, dm, false).ok && A.tgSyncThread(l.uid) === 0, "off is off");
+});
+
+
+// ===== code audit 2026-09-21 ======================================================================
+test("audit: sync OFF is scoped to its conversation; one upload rides one message; a mention sixty posts deep in a muted room still escalates", async () => {
+  const { A, g, l, m } = await seedDesk();
+  const dm = A.threadFor(l.uid, g.uid, true).id;
+  const G = A.createGroup(l.uid, "desk", [g.uid, m.uid]).thread;
+  assert.ok(A.setTgSync(l.uid, G, true).ok);
+  assert.equal(A.tgSyncThread(l.uid), G);
+  assert.ok(A.setTgSync(l.uid, dm, false).ok, "unticking a conversation that was never synced is fine");
+  assert.equal(A.tgSyncThread(l.uid), G, "…and leaves the synced one alone");
+  assert.ok(A.setTgSync(l.uid, dm, true).ok);
+  assert.equal(A.tgSyncThread(l.uid), dm, "ON moves the one sync");
+  assert.ok(A.setTgSync(l.uid, dm, false).ok);
+  assert.equal(A.tgSyncThread(l.uid), 0);
+
+  const up = A.putFile(g.uid, G, "chart.png", Buffer.from("89504e470d0a1a0a0000000d49484452", "hex"));
+  assert.ok(up.ok, JSON.stringify(up));
+  assert.ok(A.send(g.uid, null, "here", null, { thread: G, fileId: up.file.id }).ok);
+  const again = A.send(g.uid, null, "here again", null, { thread: G, fileId: up.file.id });
+  assert.ok(!again.ok && /already sent/.test(again.error), "a retried POST sharing the id would strand the first message's attachment");
+
+  assert.ok(A.setMuted(l.uid, G, true).ok);
+  // 57 lines from three senders (the per-sender burst cap is 20 / 10s), lena's own among them:
+  // the scan window is raw rows above the floor, and the old cap of fifty never reached row 58.
+  for (let i = 0; i < 57; i++) assert.ok(A.send([g, m, l][i % 3].uid, null, "line " + i, null, { thread: G }).ok, "line " + i);
+  assert.ok(A.send(m.uid, null, "@lena look at this", null, { thread: G }).ok);   // m: gus already spent his burst on the attachment line
+  const nobody = () => false;
+  const forLena = A.pendingEscalations(0, nobody).filter((e) => e.uid === l.uid && e.thread === G);
+  assert.equal(forLena.length, 1, "the mention is found past the first fifty unread lines");
+  assert.ok(forLena[0].hot && /@lena/.test(forLena[0].lines[forLena[0].lines.length - 1]), JSON.stringify(forLena[0]));
 });

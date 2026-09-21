@@ -374,6 +374,16 @@ CREATE TABLE IF NOT EXISTS dm_webpush (
         for (const uid of [t.a, t.b])
           db.prepare("INSERT OR IGNORE INTO dm_member (thread, uid, joinedAt) VALUES (?,?,?)").run(t.id, uid, t.createdAt);
       }
+      // The legacy columns are NOT NULL, and the new inserts never write them: left in place, every
+      // new DM, group or board on a migrated volume failed its INSERT (silently — threadFor's
+      // catch only rolls back). Any index over them goes first, then the columns.
+      for (const ix of db.prepare("PRAGMA index_list(dm_thread)").all()) {
+        if (ix.origin !== "c") continue;   // only CREATE INDEX indexes can be dropped; pk/unique constraints have none over a/b
+        const on = db.prepare("PRAGMA index_info(" + ix.name + ")").all().map((c) => c.name);
+        if (on.includes("a") || on.includes("b")) db.exec("DROP INDEX IF EXISTS " + ix.name);
+      }
+      db.exec("ALTER TABLE dm_thread DROP COLUMN a");
+      db.exec("ALTER TABLE dm_thread DROP COLUMN b");
       db.exec("COMMIT");
     } catch (e) { try { db.exec("ROLLBACK"); } catch (_) {} throw e; }
   })();
@@ -484,6 +494,8 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     // Telegram sync is ONE conversation per member (a bot chat is one conversation), so turning it
     // on anywhere clears it everywhere else for that member first — the pair is one transaction.
     readSyncClear: db.prepare("UPDATE dm_read SET tgSync = 0 WHERE uid = ? AND tgSync = 1"),
+    readSyncOff: db.prepare("UPDATE dm_read SET tgSync = 0 WHERE thread = ? AND uid = ?"),
+    msgAnyWithFile: db.prepare("SELECT 1 AS x FROM dm_msg WHERE fileId = ? LIMIT 1"),
     readSync: db.prepare(`INSERT INTO dm_read (thread, uid, tgSync) VALUES (?,?,1)
       ON CONFLICT(thread, uid) DO UPDATE SET tgSync = 1`),
     readSyncOf: db.prepare("SELECT thread FROM dm_read WHERE uid = ? AND tgSync = 1 LIMIT 1"),
@@ -1387,6 +1399,9 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const file = o.fileId ? S.fileById.get(o.fileId) : null;
     if (!text && !file) return { ok: false, error: "write something first" };
     if (file && (file.thread !== t.id || file.uid !== fromUid)) return { ok: false, error: "that attachment is not yours" };
+    // An upload rides ONE message: drop() and retention delete the bytes with the message that
+    // carries them, so a retried POST sharing the id would strand the first message's attachment.
+    if (file && S.msgAnyWithFile.get(file.id)) return { ok: false, error: "that attachment was already sent" };
     if (S.msgBurst.get(fromUid, Date.now() - DM_BURST_MS).n >= DM_BURST_N)
       return { ok: false, error: "slow down — too many messages at once", retry: true };
 
@@ -1620,7 +1635,9 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (!t || !isMember(t.id, uid)) return { ok: false, error: "no such conversation" };
     db.exec("BEGIN IMMEDIATE");
     try {
-      S.readSyncClear.run(uid);
+      // ON clears the member's sync everywhere first (one conversation per member); OFF is scoped
+      // to THIS conversation — a stale rail unticking the DM must not stop the group's mirror.
+      if (on) S.readSyncClear.run(uid); else S.readSyncOff.run(t.id, uid);
       if (on) {
         S.readSync.run(t.id, uid);
         const last = (S.msgLast.get(t.id) || { id: 0 }).id;
@@ -1942,8 +1959,11 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
         const rd = S.readGet.get(t.id, uid) || { readMsgId: 0, muted: 0, notifiedMsgId: 0 };
         if (rd.tgSync && isMirrored && isMirrored(uid)) continue;
         const floor = Math.max(rd.readMsgId || 0, rd.notifiedMsgId || 0);
-        const fresh = S.msgSince.all(t.id, floor, 50)
-          .filter((m) => m.sender !== uid && !m.deletedAt && !m.sys);
+        // A wide window, oldest first: the mention/watch scan below must reach a name called
+        // sixty posts deep in a muted room, and a cap of fifty never got there — and on a thread
+        // that cannot digest, the floor never moved, so it never would have.
+        const scanned = S.msgSince.all(t.id, floor, 500);
+        const fresh = scanned.filter((m) => m.sender !== uid && !m.deletedAt && !m.sys);
         // Two things jump the queue — out immediately, and through a muted thread: a ticker you
         // asked to hear about, and YOUR OWN handle. Muting a busy group should not be the same as
         // asking not to be told when somebody watches your name or calls it directly.
@@ -1953,6 +1973,10 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
         // everyone regardless — that is what makes the quiet default safe.
         const digestOk = t.kind === "board" ? (!rd.muted && rd.boardNotify === 1) : !rd.muted;
         const rows = hot.length ? hot : (digestOk ? fresh.filter((m) => m.ts <= cut) : []);
+        // A quiet thread (muted, or a board on its default) with a FULL window and nothing hot in
+        // it: move the cursor past what was scanned, or the same 500 rows are re-read forever and
+        // a mention beyond them is never seen. Nothing in the window was going to be delivered.
+        if (!rows.length && !digestOk && scanned.length >= 500) { markEscalated(uid, t.id, scanned[scanned.length - 1].id); continue; }
         if (!rows.length) continue;
         out.push({ uid, thread: t.id, kind: t.kind,
           from: t.kind === "group" ? threadName(t, uid)

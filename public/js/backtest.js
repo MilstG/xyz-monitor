@@ -702,10 +702,14 @@ async function loadDuelData(){
   const d=state.duel;
   if(d.pending||(d.at&&Date.now()-d.at<DUEL_REFRESH_MS)) return;
   d.pending=true;
-  try{ d.data=await fetchJSON('/api/duel'); d.at=Date.now(); }
+  // The attempt is stamped whatever happened: drawBacktest calls back in here, so a failed pull
+  // with no stamp was an immediate refetch and a full re-render, in a loop, for as long as the
+  // server kept failing. Redraw only when something new arrived.
+  let got=false;
+  try{ d.data=await fetchJSON('/api/duel'); got=true; }
   catch(_){ }
-  d.pending=false;
-  if(state.view==='backtest') drawBacktest();
+  d.at=Date.now(); d.pending=false;
+  if(got&&state.view==='backtest') drawBacktest();
 }
 function duelSvg(ic){
   const W=520,H=150, pl=54,pr=16,pt=12,pb=22;
@@ -916,6 +920,7 @@ function showView(v){
   setHidden('view-housing', v!=='housing');
   setHidden('view-liquidity', v!=='liquidity');
   { const tm=el('view-treemap'); if(tm) tm.hidden=v!=='treemap'; }   // the runtime-injected treemap (no static section): ← / ⌂ and the palette leave it the same way a tab click does
+  try{ document.dispatchEvent(new CustomEvent('xyz:view',{detail:v})); }catch(_){}   // self-installing views (the treemap) render on this, whatever route landed here
   if(v==='focus'){ if(el('view-focus')) openFocus(); else { showView('markets'); return; } }
   if(v==='funds'){ if(el('view-funds')) openFunds(); else { showView('markets'); return; } }
   if(v==='trend'){ if(el('view-trend')) openTrend(); else { showView('markets'); return; } }
