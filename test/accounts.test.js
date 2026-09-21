@@ -919,9 +919,28 @@ test("messages -66: call direction — parsed at send, immutable, and the scoreb
   const rec2 = A.calls(g.uid, {});
   const s2 = rec2.calls.find((c) => c.id === sh.message.id);
   assert.ok(Math.abs(s2.chg1 - (97 / 100 - 1)) < 1e-9 && s2.adj1 > 0, "the 1d horizon scores off the printed close, direction-adjusted");
-  // the summary scores the person on the adjusted 1d yardstick
+  // the summary's headline is the LIVE record (the number the row shows); the fixed yardsticks
+  // ride beside it — a call up 20% since sent must never read as "wrong" because its first daily
+  // close dipped
   const me = rec2.summary.find((x) => x.uid === g.uid);
   assert.equal(me.n, 4, "all four calls counted");
+  assert.equal(me.upPct, 0.5, "live: the two shorts are right on a 2% fall, the two longs are wrong");
+  assert.ok(Math.abs(me.avg - 0) < 1e-12, "live avg nets to zero across mirrored calls");
+  assert.equal(me.h1.n, 4, "the 1d record covers the calls whose close printed");
+  assert.equal(me.h1.upPct, 0.5, "1d: scored off the printed close, direction-adjusted");
+  assert.ok(Math.abs(me.h1.avg - 0) < 1e-12);
+  assert.equal(me.h7.n, 4, "the injected reader answers the 7d close too");
+  // live and fixed disagree exactly when the tape reversed after the close: the headline follows
+  // the tape, the yardstick stays settled. A fifth, unmirrored long breaks the symmetry.
+  A.send(g.uid, null, "long $HOOD again", resolve, { thread: dm });
+  marks["xyz:HOOD"] = 120;
+  const rec3 = A.calls(g.uid, {});
+  const me3 = rec3.summary.find((x) => x.uid === g.uid);
+  assert.equal(me3.n, 5);
+  assert.equal(me3.upPct, 0.6, "live: three longs right at +20%, two shorts wrong");
+  assert.ok(Math.abs(me3.avg - ((0.2 + 0.2 + (120 / 98 - 1)) - 0.2 - 0.2) / 5) < 1e-9, "live avg over the five (the fifth was stamped at the 98 mark)");
+  assert.equal(me3.h1.upPct, 0.4, "1d: only the two shorts are right on the 97 close");
+  assert.ok(Math.abs(me3.h1.avg - ((0.03 + 0.03 - 0.03 - 0.03 + (97 / 98 - 1)) / 5)) < 1e-9, "the 1d record is settled on the 97 close and did not follow the mark to 120");
 });
 
 test("messages -66: search takes an optional thread scope — membership still the only authorization", async () => {
