@@ -281,16 +281,25 @@ instant, and the per-IP rate limit stops being a per-user problem.
   backfilled immediately (new listings jump the queue). A daily audit line logs the active
   count and anything still awaiting backfill.
 
-## Design notes and mocks
+## Documentation
 
-`docs/` holds the feature map, system map, mechanics and signal reference pages plus the design
-mocks that preceded the funding heatmap, notes, insiders and backtest-target work. They are not
-served by the app.
+The complete manual ships with the app at **`/docs`** (`public/docs.html`): every tab, every
+column, the drawer, the terminal and chat grammars, alerts and Telegram, the signal engine, data
+sources and retention, the HTTP API, every environment variable, deployment, the security model, a
+glossary and troubleshooting. The `?` help on every tab links to its section. The page is served
+the way the shell is: the caller's resolved feature set is injected so a section about a tab that
+member cannot see is not in the markup they receive, every inline script carries the CSP nonce, and
+the build stamp is at the top. Signed-out visitors get the login page, like everything else.
+
+`docs/` holds the longer reference pages — the feature map, system map, mechanics and signal
+reference — plus the design mocks that preceded the funding heatmap, notes, insiders and
+backtest-target work. The four reference pages are served at `/docs/ref/features`, `/docs/ref/map`,
+`/docs/ref/mechanics` and `/docs/ref/signals` (nonce-stamped, same gate); the mocks are not served.
 
 ## Project layout
 
 ```
-server.js            Fastify server: serves /public + the JSON API, owns the poller, auth, SSE, CSP
+server.js            Fastify server: serves /public + the JSON API, owns the poller, auth, SSE, CSP, /docs
 src/hyperliquid.js   REST client + weight-based rate limiter, WebSocket universe feed, Coinalyze
 src/compute.js       stats + feature extraction, event studies, calendars, brief/landscape prose
 src/poller.js        universe poll, candle backfill, OI sampling, snapshot build, every data lane
@@ -298,13 +307,14 @@ src/store.js         persistence on the volume: OI log, candle archive, feature 
 src/accounts.js      SQLite (accounts.db): members, invites, messages, prefs, wallets
 src/sectors.js       curated sector / industry / display-name tables
 public/index.html    frontend shell
+public/docs.html     the manual, served at /docs
 public/styles.css    styles
 public/app.js        client entry: imports the modules below and runs their boot steps in order
 public/js/*.js       the client, one ES module per area (core, markets, drawer, notes, messages, …)
 public/sw.js         install-only service worker (caches nothing)
 scripts/             bench-builds.js — event-loop cost of the poller's synchronous builds
 test/                node:test suites, one file per module and area (see Tests)
-docs/                design notes and mocks (not served)
+docs/                reference pages (served at /docs/ref/*) and design mocks (not served)
 railway.json         Railway build/deploy config
 ```
 

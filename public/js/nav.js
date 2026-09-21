@@ -733,7 +733,7 @@ function openHelp(){
   const TAB_TITLES={markets:'Markets',focus:'Focus',sectors:'Sectors',corr:'Correlation',sessions:'Sessions',signals:'Signals',earnings:'Calendar',backtest:'Backtest',housing:'Housing',liquidity:'Liquidity',treemap:'Treemap'};   // fallback for a view with no ribbon tab (the runtime treemap)
   const title=tb?tb.textContent.trim().replace(/\s*\d+\s*$/,''):(TAB_TITLES[v]||v);
   m.innerHTML=`<div class="hlp-head">How to read: ${esc(title)}<button class="btn xtiny" id="helpclose" title="close">\u2715</button></div>`
-    +`<div class="hlp-sub">What each element means and \u2014 more importantly \u2014 how to interpret it. Every number in the app also explains itself on hover; this is the map. Nothing here is investment advice.</div>`
+    +`<div class="hlp-sub">What each element means and \u2014 more importantly \u2014 how to interpret it. Every number in the app also explains itself on hover; this is the map. Nothing here is investment advice. <a class="hlp-docs" href="/docs#tab-${esc(v)}" target="_blank" rel="noopener" title="the complete manual \u2014 every tab, column, command, alert and setting, in a page of its own">full documentation \u2197</a></div>`
     +(HELP[v]||`<div class="hlp-h">${esc(title)}</div><p>${esc((tb&&tb.title)||'')||'No explainer written for this tab yet.'}</p>`)
     +HELP_KEYS;
   bg.hidden=false; m.hidden=false; m.scrollTop=0; overlayPush('help', closeHelp);

@@ -2491,3 +2491,34 @@ test("small fixes: escaped terminal sink, capped scrollback, total-order compara
   assert.ok(sw.includes("(build 2026.09.16-80)"), "sw header build stamp updated");
   assert.ok(app.includes("navigator.serviceWorker.addEventListener('message',e=>{ const d=e&&e.data; if(d&&d.go==='dm') showView('dm'); });"), "the page answers the message");
 });
+
+test("docs: every tab in the manifest has a section in the manual, and the manual names no tab that does not exist", () => {
+  // The manual hides sections by feature key (data-feature) using the same injected set the shell
+  // uses, so a key here that is not in FEATURES would be a section that never hides, and a tab in
+  // FEATURES with no section would be a tab the manual quietly omits. Both directions are pinned.
+  const fs = require("fs"), path = require("path");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "docs.html"), "utf8");
+  const { FEATURES } = require("../src/compute");
+  const tabs = FEATURES.filter((f) => f.kind === "tab");
+  for (const f of tabs) {
+    assert.ok(html.includes(`id="tab-${f.key}"`), `manual has no section anchored tab-${f.key} for the ${f.label} tab`);
+    assert.ok(html.includes(`data-feature="${f.key}"`), `manual section for ${f.key} does not gate on its feature key`);
+    if (f.def === "admin") assert.ok(new RegExp(`data-feature="${f.key}" data-def="admin"`).test(html), `${f.key} ships admin-only — its section must say so`);
+  }
+  const keys = new Set(FEATURES.map((f) => f.key));
+  for (const m of html.matchAll(/data-feature="([a-z.]+)"/g)) assert.ok(keys.has(m[1]), `manual gates a section on unknown feature key ${m[1]}`);
+  // The shell's boot slot is the docs page's boot slot — the server splits on the exact string.
+  assert.ok(html.includes("<script>window.__FLAGS=null;window.__ADMIN=false;</script>"), "docs page carries the shell's flag slot verbatim");
+  assert.ok(html.includes("{{build}}"), "docs page carries the build slot");
+  // The ? help links every tab to its section, and the shell footer links the manual.
+  const nav = fs.readFileSync(path.join(__dirname, "..", "public", "js", "nav.js"), "utf8");
+  assert.ok(nav.includes('href="/docs#tab-${esc(v)}"'), "help modal links to the manual's section for the open tab");
+  const shell = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  assert.ok(shell.includes('href="/docs"'), "shell links the manual");
+  // Sections the page hides by flag must be top-level, or the hide/search logic (main.doc > section) misses them.
+  for (const m of html.matchAll(/<section id="([^"]+)"[^>]*data-feature/g)) {
+    const at = m.index, before = html.slice(0, at);
+    const open = (before.match(/<section\b/g) || []).length, close = (before.match(/<\/section>/g) || []).length;
+    assert.equal(open, close, `section ${m[1]} is nested inside another section`);
+  }
+});

@@ -1,0 +1,1056 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Milst Screener · Documentation</title>
+<meta name="referrer" content="same-origin">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#0E1116">
+<!-- The audience-specific boot slot, same contract as index.html: the server replaces this line with
+     the caller's resolved feature set so a section about a tab this member cannot see is never in
+     the markup they receive. -->
+<script>window.__FLAGS=null;window.__ADMIN=false;</script>
+<style>
+:root{
+  color-scheme:dark;
+  --bg:#0E1116; --panel:#151A21; --panel2:#1B222B; --border:#262E39;
+  --text:#E8E3D7; --muted:#8A93A0; --faint:#4C5662; --dim:#7A8592;
+  --accent:#E3A53C; --accent-dim:#8a6a28; --blue:#6f93c9;
+  --up:#46B97E; --down:#E5604D; --grid:#1A212A;
+  --mono:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;
+  --disp:'Space Grotesk',system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:64px}
+body{margin:0;background:var(--bg);color:var(--text);font-family:var(--disp);font-size:14.5px;line-height:1.62;-webkit-font-smoothing:antialiased}
+a{color:var(--blue);text-decoration:none}
+a:hover{text-decoration:underline}
+code,kbd,pre,.mono{font-family:var(--mono)}
+code{font-size:.9em;background:var(--panel2);border:1px solid var(--border);border-radius:3px;padding:1px 5px;color:var(--text);overflow-wrap:anywhere}
+kbd{font-size:.85em;background:var(--panel2);border:1px solid var(--faint);border-bottom-width:2px;border-radius:4px;padding:1px 6px;color:var(--text);white-space:nowrap}
+pre{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:12px 14px;overflow:auto;font-size:12.5px;line-height:1.5;margin:10px 0 16px}
+pre code{background:none;border:0;padding:0;font-size:inherit}
+b,strong{font-weight:600}
+h1,h2,h3,h4{font-family:var(--disp);line-height:1.25;margin:0;font-weight:600}
+h1{font-size:26px;letter-spacing:-.01em;margin-bottom:6px}
+h2{font-size:21px;margin:56px 0 14px;padding-top:18px;border-top:1px solid var(--border);color:var(--text)}
+h2:first-of-type{margin-top:26px}
+h3{font-size:16px;margin:28px 0 8px;color:var(--accent)}
+h4{font-size:14px;margin:18px 0 6px;color:var(--text)}
+p{margin:0 0 12px}
+ul,ol{margin:0 0 14px;padding-left:22px}
+li{margin:3px 0}
+li>ul,li>ol{margin:4px 0 6px}
+hr{border:0;border-top:1px solid var(--border);margin:24px 0}
+.lede{color:var(--muted);font-size:15px;max-width:72ch}
+.sec{color:var(--muted)}
+.dim{color:var(--dim)}
+.up{color:var(--up)} .down{color:var(--down)} .amber{color:var(--accent)}
+table{border-collapse:collapse;width:100%;margin:8px 0 18px;font-size:13px}
+th,td{text-align:left;vertical-align:top;padding:7px 9px;border-bottom:1px solid var(--border)}
+th{color:var(--muted);font-weight:600;font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;background:var(--panel);position:sticky;top:52px;z-index:1}
+td:first-child{white-space:nowrap}
+tr:hover td{background:rgba(255,255,255,.015)}
+.tw{overflow-x:auto;margin:8px -2px 18px;-webkit-overflow-scrolling:touch}
+.tw table{margin:0;min-width:520px}
+.chip{display:inline-block;font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;border:1px solid var(--faint);border-radius:3px;padding:1px 6px;margin-left:8px;vertical-align:middle;color:var(--muted);white-space:nowrap}
+.chip.adm{color:var(--down);border-color:var(--down)}
+.chip.pub{color:var(--up);border-color:var(--up)}
+.chip.grp{color:var(--blue);border-color:var(--blue)}
+.chip.key{color:var(--accent);border-color:var(--accent-dim)}
+.note{background:var(--panel);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:4px;padding:10px 14px;margin:12px 0 16px;font-size:13.5px}
+.note.warn{border-left-color:var(--down)}
+.note.ok{border-left-color:var(--up)}
+.note b:first-child{color:var(--accent)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px 22px}
+@media(max-width:760px){.grid2{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:12px 14px;margin:0 0 12px}
+.card h4{margin-top:0}
+dl{margin:0 0 14px}
+dt{font-weight:600;margin-top:10px}
+dd{margin:2px 0 0 0;color:var(--text)}
+dd .sec{display:block}
+.kbd-row td:first-child{white-space:nowrap}
+
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:14px;padding:10px 20px;background:rgba(14,17,22,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--border)}
+.wordmark{font-weight:700;font-size:15px;letter-spacing:.01em;white-space:nowrap}
+.wordmark .bk{color:var(--accent);margin-left:5px}
+.wordmark .doc{color:var(--muted);font-weight:500;margin-left:10px}
+.top .build{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--dim);white-space:nowrap}
+.top .back{font-size:12.5px;color:var(--muted);white-space:nowrap;padding:4px 9px;border:1px solid var(--border);border-radius:4px}
+.top .back:hover{color:var(--text);text-decoration:none;border-color:var(--faint)}
+.top .tocbtn{display:none;font:inherit;font-size:12.5px;color:var(--muted);background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:4px 9px;cursor:pointer}
+
+/* ---- layout ---- */
+.page{display:grid;grid-template-columns:270px minmax(0,1fr);gap:0;max-width:1320px;margin:0 auto}
+aside.toc{position:sticky;top:52px;align-self:start;height:calc(100vh - 52px);overflow:auto;padding:18px 14px 30px 20px;border-right:1px solid var(--border);font-size:13px}
+aside.toc .search{width:100%;font:inherit;font-size:13px;color:var(--text);background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:6px 9px;margin-bottom:12px;outline:none}
+aside.toc .search:focus{border-color:var(--accent-dim)}
+aside.toc ol{list-style:none;margin:0;padding:0}
+aside.toc li{margin:0}
+aside.toc a{display:block;color:var(--muted);padding:3px 8px;border-left:2px solid transparent;border-radius:0 3px 3px 0;line-height:1.35}
+aside.toc a:hover{color:var(--text);text-decoration:none;background:var(--panel)}
+aside.toc a.on{color:var(--accent);border-left-color:var(--accent)}
+aside.toc li li a{padding-left:20px;font-size:12px;color:var(--dim)}
+aside.toc .tochd{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);margin:14px 0 4px 8px}
+main.doc{padding:22px 34px 90px;min-width:0}
+main.doc>section{scroll-margin-top:64px}
+.hidden{display:none !important}
+.nohit{color:var(--muted);font-size:13px;padding:12px 0}
+footer.docfoot{max-width:1320px;margin:0 auto;padding:18px 34px 40px;color:var(--dim);font-size:12px;border-top:1px solid var(--border)}
+@media(max-width:920px){
+  .page{grid-template-columns:1fr}
+  aside.toc{position:fixed;left:0;top:52px;width:min(320px,86vw);height:calc(100vh - 52px);background:var(--bg);transform:translateX(-102%);transition:transform .18s ease;z-index:6;border-right:1px solid var(--border)}
+  aside.toc.open{transform:none;box-shadow:0 0 0 100vw rgba(0,0,0,.45)}
+  .top .tocbtn{display:inline-block}
+  .top{gap:8px;padding:9px 12px}
+  .top .build,.wordmark .doc{display:none}
+  .top .back{margin-left:auto;padding:4px 7px}
+  main.doc{padding:16px 16px 70px}
+  footer.docfoot{padding:16px 16px 40px}
+  h2{margin-top:40px}
+  th{top:0;position:static}
+}
+@media print{.top,aside.toc{display:none}.page{display:block}main.doc{padding:0}h2{break-before:page}}
+</style>
+</head>
+<body>
+<div class="top">
+  <span class="wordmark"><span>Milst</span><span class="bk">Screener</span><span class="doc">Documentation</span></span>
+  <button type="button" class="tocbtn" id="tocbtn" aria-controls="toc" aria-expanded="false">Contents</button>
+  <span class="build" title="server build serving this page">build <b id="build">{{build}}</b></span>
+  <a class="back" href="/">← back to the terminal</a>
+</div>
+
+<div class="page">
+<aside class="toc" id="toc" aria-label="Contents">
+  <input class="search" id="docq" type="search" placeholder="Search the docs…  ( / )" autocomplete="off" spellcheck="false" aria-label="Search the documentation">
+  <ol id="toclist"></ol>
+</aside>
+
+<main class="doc" id="doc">
+
+<h1>Milst Screener — the complete manual</h1>
+<p class="lede">Everything the terminal shows, how each number is computed, what every control does, how the alerts and the messaging reach you, and how the server behind it is run. Every number in the app also explains itself on hover; this page is the map. Nothing here is investment advice.</p>
+<p class="sec" style="font-size:13px">Sections about tabs you cannot see on this deployment are not on this page. Press <kbd>/</kbd> to search; the contents list follows you as you scroll.</p>
+<div class="nohit hidden" id="nohit">Nothing on this page matches that search.</div>
+
+<!-- ================================================================================ -->
+<section id="overview">
+<h2>1. What this is</h2>
+<p>Milst Screener is a monitor for the <b>HIP-3 perpetual markets on Hyperliquid</b> — the <code>xyz</code> dex, where synthetic perps track US and foreign equities, indices, FX, commodities and baskets — plus a second, walled-off universe of the main-dex <b>crypto</b> perps (BTC, ETH and the top names by open interest).</p>
+<p>The design has one central idea: <b>the heavy work happens once, on the server.</b> A small Node process polls Hyperliquid, fetches and archives candles, samples open interest, computes every feature (momentum, volatility, reference prices, funding history, session studies, signals, sector aggregates) and caches the result. Browsers read a single pre-computed snapshot. Nobody's browser talks to Hyperliquid, so the per-IP rate limit is never a per-user problem and a cold start takes seconds rather than minutes.</p>
+<h3>How data reaches your screen</h3>
+<ul>
+  <li><b>Snapshot</b> — the market table is rebuilt every ~15 seconds and served whole from <code>/api/snapshot</code>. The status line's <b>updated</b> field is the server's last successful poll, not your last fetch.</li>
+  <li><b>Push stream</b> — while the live stream (Server-Sent Events) is healthy the status line reads <b>push live</b> and the browser pulls the moment the server's data changes. The stream carries <i>versions</i>, never payloads: it tells the browser what changed, the browser fetches it.</li>
+  <li><b>Fallback poll</b> — if the stream drops, the browser polls at the cadence in the <b>refresh</b> selector (15s to 15m, default 30s). This setting is idle while the stream is up.</li>
+  <li><b>WebSocket universe feed</b> — server-side, the universe subscribes to Hyperliquid's real-time asset contexts for price / funding / OI at zero rate-limit cost; REST drops to a slow reconciliation poll while the socket is healthy.</li>
+  <li><b>Persistence</b> — open interest, funding history, the candle archive, the signal ledger, notes, messages and accounts live on a mounted volume and survive restarts and redeploys. A redeploy serves a warm table within a poll or two.</li>
+</ul>
+<h3>Two universes, one wall</h3>
+<p>The <b>Stocks | Crypto</b> switch in the nav is a hard wall: separate universes, separate benchmark (the S&amp;P 500 perp for stocks, BTC for crypto), separate histories, never mixed in one list. Session concepts (gaps, overnight holds, cash sessions) do not exist on a 24/7 crypto tape and vanish in that scope. Crypto history is retained for 31 days by design, so long moving averages and year-to-date columns show honest dashes there. The one deliberate exception: <b>BTC may join a stock set</b> in <code>comp</code> and <code>ratio</code> comparisons, aligned on the hours both legs traded.</p>
+<h3>Honesty rules that run through every tab</h3>
+<ul>
+  <li><b>A dash is a dash.</b> Missing history, an unqualified baseline, a retired data series — all render as an explicit blank, never a guess, an interpolation or a zero.</li>
+  <li><b>One code path.</b> A level, a score or a record is computed once on the server and restated by every surface. The board, the drawer, the alerts and the Telegram wire cannot disagree because none of them recomputes.</li>
+  <li><b>Frozen claims.</b> Every signal is ledgered at the mark it fired at, with its void and target frozen, and scored out of sample. The record is the part to trust; the card is the part to read.</li>
+  <li><b>Stamped prose.</b> A note or a message that names a ticker carries the price it was written at, so every later read carries the move since.</li>
+</ul>
+</section>
+
+<!-- ================================================================================ -->
+<section id="access">
+<h2>2. Getting in — accounts, invites, sessions</h2>
+<p>The terminal has <b>per-person accounts</b>. An operator mints a <b>single-use invite link</b> from <i>Admin › Access</i>; opening it validates the code, moves it into a short-lived HttpOnly cookie and redirects to a bare <code>/join</code>, so the code leaves the address bar before anything renders and never lands in browser history or a <code>Referer</code> header. You pick a handle and a password; the invite is burned inside one database transaction, so two people opening the same link cannot both get in — the second sees "already used".</p>
+<div class="grid2">
+  <div class="card"><h4>Sign in</h4><p><code>/login</code> — handle and password. Sessions are signed tokens carrying your account id and a per-user <i>epoch</i>; they last <code>SESSION_DAYS</code> (30 by default). A <b>⎋</b> button in the nav signs this browser out (<code>/logout</code>).</p></div>
+  <div class="card"><h4>Forgot your password</h4><p><code>/reset</code> — enter your handle and a six-digit code is sent to your <b>linked Telegram</b> (the quiet window and the hourly cap are bypassed). The code lasts 10 minutes, works once, dies after five wrong guesses, and at most three are sent per hour per account. Every outcome — unknown handle, no Telegram, throttled — returns the same answer, so the page is not a directory of who has an account. No Telegram linked? Ask the operator for a <b>reset link</b> instead.</p></div>
+  <div class="card"><h4>Sign out everywhere / disable</h4><p>Resetting a password or an operator disabling an account bumps that account's epoch, which invalidates every session it holds <i>without touching anybody else</i>. Under the old shared password, removing one person meant rotating the password for everyone; that failure is what accounts replaced.</p></div>
+  <div class="card"><h4>Legacy shared password</h4><p>A deployment that still has <code>SITE_PASSWORD</code> set accepts it as a shared door; a shared-password session that arrives after accounts exist lands on <code>/claim</code> to pick a handle. Your alerts, rules and notes carry over automatically — they were already keyed to your browser's signed handle. Once everyone has claimed, the operator sets <code>LEGACY_SHARED_PASSWORD=0</code> and the shared door is closed for good.</p></div>
+</div>
+<h3>Roles</h3>
+<ul>
+  <li><b>Member</b> — sees the public feature set (whatever the operator has opened to the group) plus every personal surface: watchlist, layouts, alerts, notes you can read, messages, positions.</li>
+  <li><b>Operator (admin)</b> — everything, plus the Admin tab: accounts and invites, feature visibility, nav menus, alert recipients, the message read-through and its audit log, lane maintenance. The first account is bootstrapped with <code>ADMIN_PASSWORD</code>, which stays as a break-glass login for when an operator locks themselves out. A member can be promoted with <i>make operator</i> in Admin › Access.</li>
+</ul>
+<h3>Scripts and curl</h3>
+<p>The JSON API accepts HTTP Basic with the shared password (<code>curl -u friend:PASSWORD …/api/snapshot</code>) so a script needs no cookie jar. <code>/api/health</code> stays open without any credential — it is the platform healthcheck. Eight wrong passwords from one IP lock that IP out for 15 minutes; Basic attempts count against the same lock.</p>
+<div class="note"><b>Privacy notice.</b> On this deployment the operator can read every message, including conversations they are not in. Every such read is written to an audit log shown in the Admin panel, and the Messages tab says so plainly. Write accordingly.</div>
+</section>
+
+<!-- ================================================================================ -->
+<section id="layout">
+<h2>3. The shell — header, status line, nav</h2>
+<h3>Header</h3>
+<p><b>Markets</b>, <b>24h Volume</b> and <b>Open Interest</b> are totals for the active universe. The dot beside the wordmark is the connection state: green = live, amber = the server's data has gone stale (its poller stalled — the snapshot carries the last successful poll time), red = the browser cannot reach the server.</p>
+<h3>Status line</h3>
+<div class="tw"><table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td>benchmark</td><td>The name every "vs" column is measured against in this scope: the S&amp;P 500 perp for stocks, BTC for crypto.</td></tr>
+<tr><td>next</td><td>Countdown to the next fallback pull. Reads <b>push live</b> while the stream is up.</td></tr>
+<tr><td>sync</td><td>Server-side backfill progress: <code>syncing X/Y</code> while candle history is being fetched for new listings, then <code>live</code>.</td></tr>
+<tr><td>updated</td><td>Age of the server's last successful poll — the number that goes amber when the poller stalls.</td></tr>
+<tr><td>build</td><td>The server build stamp (also in <code>/api/health</code>). If it does not match the latest delivery, the deploy is stale.</td></tr>
+<tr><td>freshness tray</td><td>One dot per external feed — <b>Data</b> (Hyperliquid poll), <b>Earn</b> (Finnhub calendar), <b>News</b>, <b>Filings</b> (SEC EDGAR) — colour-graded by age against each feed's own cadence; red also means the fetch is failing. The <b>Loop</b> dot is the server event-loop p99 (green &lt;20ms, amber &lt;50ms, red ≥50ms). Hover for the exact age.</td></tr>
+<tr><td>◎ focus chip</td><td>The <b>focused ticker</b> follows you across tabs: pick a name and every tab that has a per-ticker view opens on it. Click the chip to reopen the drawer, ✕ to clear.</td></tr>
+<tr><td>🔔 bell</td><td>Alerts — setups, ledger events, rules and ops notices, with an unread count. It lives in the status bar so it is reachable from every tab. See <a href="#alerts">Alerts</a>.</td></tr>
+</table></div>
+<h3>Navigation ribbon</h3>
+<ul>
+  <li><b>Scope pills</b> — <b>Stocks | Crypto</b>. Remembered per browser. Tabs that have no meaning in a scope hide when you flip to it; Markets, Trend and Report follow the switch, Signals and Actionable have per-universe visibility the operator sets separately.</li>
+  <li><b>Tabs and menus</b> — related tabs are grouped into drop-down menus (by default <i>Tape</i>, <i>Signals</i>, <i>Macro</i>, <i>Research</i>; the operator can rename a menu or move a tab in Admin › Feature visibility without a deploy). Drag a tab to reorder it; the order is saved in this browser. Some tabs show a live count badge.</li>
+  <li><b>?</b> — the per-tab explainer: how to read the tab you are on, plus the keyboard table. Each explainer links to the matching section of this manual.</li>
+  <li><b>⎋</b> — sign out.</li>
+</ul>
+<h3>Strips under the nav</h3>
+<ul>
+  <li><b>Macro banner</b> — appears on every tab when the next universe-wide macro event (FOMC, CPI, payrolls, PPI, retail sales, GDP, PCE) is ≤2 ET days out, and flips to a blue result strip once the print is out.</li>
+  <li><b>Regime strip</b> — the crypto tape strip: crowd pays (OI-weighted funding APR), breadth, total OI with its weighted delta, BTC's day and the alt-season gauge. Crypto scope only.</li>
+</ul>
+<h3>Always-on controls</h3>
+<ul>
+  <li><b>▸_ Ask</b> (bottom right, or <kbd>~</kbd>) — the <a href="#terminal">terminal</a>: a query console over the board.</li>
+  <li><b>Chat dock</b> (bottom left) — unread messages, on every tab, once you are signed in.</li>
+  <li><b>Toasts</b> (bottom left) — new setups and void hits, if you have enabled trigger alerts in the bell.</li>
+</ul>
+</section>
+
+<!-- ================================================================================ -->
+<section id="navigation">
+<h2>4. Keyboard, command palette, deep links, mobile</h2>
+<h3>Keyboard</h3>
+<div class="tw"><table>
+<tr><th>Key</th><th>Does</th></tr>
+<tr class="kbd-row"><td><kbd>/</kbd></td><td>Focus the current tab's search box (the ticker filter on Markets, the correlation focus, the report picker, the conversation search, the claim history, the news filter…). Tabs without one fall back to the Markets filter.</td></tr>
+<tr class="kbd-row"><td><kbd>j</kbd> <kbd>k</kbd> <kbd>Enter</kbd></td><td>Walk the Markets table (or the Messages rail) and open the highlighted row. Only in the names lens, never under an open layer.</td></tr>
+<tr class="kbd-row"><td><kbd>Esc</kbd></td><td>Close the top-most layer — drawer, menu, palette, help — or back out one level (clear the row highlight, then the group drill).</td></tr>
+<tr class="kbd-row"><td><kbd>Ctrl</kbd>+<kbd>K</kbd> / <kbd>⌘</kbd>+<kbd>K</kbd></td><td>Command palette: type a ticker or a tab name. <kbd>Enter</kbd> opens the ticker's drawer (or the tab); <kbd>Shift</kbd>+<kbd>Enter</kbd> opens the AI report for that ticker. Gated tabs are not listed.</td></tr>
+<tr class="kbd-row"><td><kbd>~</kbd></td><td>Open the terminal. Inside it: <kbd>Tab</kbd> completes verbs, fields and tickers, <kbd>↑</kbd> <kbd>↓</kbd> walk the history.</td></tr>
+<tr class="kbd-row"><td><kbd>?</kbd></td><td>The per-tab help.</td></tr>
+<tr class="kbd-row"><td><kbd>Enter</kbd> / <kbd>Space</kbd></td><td>Activate any focused custom control (a row, a star, a chip) — everything is reachable without a mouse.</td></tr>
+</table></div>
+<h3>Deep links</h3>
+<p>The URL reflects where you are, so links are shareable: <code>#sectors</code> opens a tab, <code>#t=NVDA</code> opens a ticker's drawer, <code>#report</code> with a focused ticker opens its report. Paste a link into an open tab and it navigates.</p>
+<h3>Phone and PWA</h3>
+<p>The app installs as a Progressive Web App (browser menu → <i>Add to home screen</i>). The service worker is install-only and deliberately <b>caches nothing</b>: a caching worker is exactly the stale-client failure the version-stamped assets were built to kill. On a phone-width screen the first visit starts from a <b>mobile column preset</b> (ticker, price, 24h, 7d, funding, ΔOI, volume); every other column is one toggle away in the column menu and your own arrangement is never overridden later. Browser notifications for messages work with the tab closed once you enable them in the Messages rail.</p>
+</section>
+
+<!-- ================================================================================ -->
+<section id="tab-markets" data-feature="markets">
+<h2>5. Markets tab</h2>
+<p>One row per market, one column per lens. The table is the home screen; everything else in the app is a different cut of the same rows.</p>
+<h3>Controls</h3>
+<div class="tw"><table>
+<tr><th>Control</th><th>What it does</th></tr>
+<tr><td>Filter ticker…</td><td>Narrows the table to matching tickers and names. Not part of a layout.</td></tr>
+<tr><td>group</td><td><b>stocks · sectors · industries</b> — the group lens (below). Industries are equities-only; crypto's curated sectors are already its fine grouping.</td></tr>
+<tr><td>weight</td><td>How members average into a group cell: <b>by volume</b> (the tape's own weighting) or <b>equal</b>. Volume and OI are straight sums either way.</td></tr>
+<tr><td>window</td><td><b>1h · 4h · 1d · 7d · 30d</b> — re-anchors every windowed column at once: vs S&amp;P, vs tape, ΔOI, Squeeze, Carry, Avg Range, RVOL all answer "over this window".</td></tr>
+<tr><td>refresh</td><td>Fallback-poll cadence, used only when the push stream is down.</td></tr>
+<tr><td>Refresh</td><td>Pull now.</td></tr>
+<tr><td>Filters</td><td>24h volume and OI ranges (millions by default; suffixes <code>500k</code>, <code>2.5b</code> override), the <b>Positions</b> wallet link, and the toggles <b>⬡ held</b> (names the linked wallet holds), <b>★ only</b> (watchlist), <b>◢ noted</b> (names you have written on), <b>☾ dim</b> (fade foreign-home names while their exchange is closed). A dot on the button means a filter is active; the footer counts rows shown.</td></tr>
+<tr><td>Layouts</td><td>Save and switch named views: column set and order, sort, window, vol/OI filters, ★-only. The active layout shows a <b>•</b> when the live view has unsaved changes. Synced to your account (see <a href="#prefs">watchlist and layouts</a>); the <i>active</i> layout is per browser on purpose, so a phone can run its own.</td></tr>
+<tr><td>Columns</td><td>Show, hide and drag-reorder columns. Hidden-by-default columns (5m, 15m, H/4h/12h open, VWAP, DownCap, Hit%, MAs…) live here.</td></tr>
+<tr><td>↓ CSV</td><td>Download whichever lens is on screen, with the current filters and sort.</td></tr>
+</table></div>
+<p>Click any header to sort (a second click flips direction). Cell shading scales with the size of the move — a wall of deep red 7d cells <i>is</i> the market-breadth read. <b>★</b> beside a ticker pins it to the watchlist and to the top of the table.</p>
+
+<h3>Ticker cell badges</h3>
+<div class="tw"><table>
+<tr><th>Mark</th><th>Meaning</th></tr>
+<tr><td>★ / ☆</td><td>Watchlist. Synced across your devices when signed in.</td></tr>
+<tr><td><b>E</b> solid / hollow</td><td>Reports earnings <b>today</b> / <b>tomorrow</b> (ET days, because BMO/AMC are ET concepts). Hover for the session and the EPS estimate. After the print it becomes a scoreboard: beat/miss and the live day move.</td></tr>
+<tr><td>◢ post-it</td><td>You have a note on this name: solid accent within 7 days of the newest note, dimmed to 30 days, a hollow outline after. Shows a count past one. Hover for the first line and the move since it was written; click to open the drawer. Age is calendar time only — the marker never moves because the <i>market</i> moved.</td></tr>
+<tr><td>⬡</td><td>Your linked wallet holds a position here, in the side's colour.</td></tr>
+<tr><td>Amber rail (left edge) · microline</td><td>Foreign-home name whose exchange is open right now; the microline counts down to the next open/close.</td></tr>
+<tr><td>◆ (Casc)</td><td>Crypto: a liquidation cascade in the last 24h; red = longs liquidated, green = shorts.</td></tr>
+</table></div>
+
+<h3>Every column</h3>
+<p>Hover any cell for its exact inputs. "Window" means the column follows the window selector.</p>
+<div class="tw"><table>
+<tr><th>Column</th><th>Definition</th></tr>
+<tr><td>Ticker</td><td>Display ticker; hover for the market's full name and coin id.</td></tr>
+<tr><td>Sess</td><td>Home market of the reference line under the perp — KR (KRX), JP (TSE), HK (HKEX), CN (SSE) for foreign listings with no US symbol; US for everything else. Lit dot = that exchange is open now, server-computed against its real holiday calendar. <code>US·TW</code>-style chips on ADRs mean a US-listed line (ET machinery applies) with the home line as context. Stocks scope only.</td></tr>
+<tr><td>Price</td><td>Live mark, streamed. Flashes on change.</td></tr>
+<tr><td>Funding (APR)</td><td>Hourly funding × 24 × 365. <b class="down">Positive = longs pay (red, crowded long)</b>; <b class="up">negative = longs receive (green)</b>. The ▴/▾ flag with a number = today's funding sits at the 90th+/10th− percentile of this market's <i>own</i> 31-day hourly distribution — the crowd is paying near its monthly max, the classic mean-reversion zone.</td></tr>
+<tr><td>Prem</td><td>Perp vs oracle dislocation in basis points, (mark − oracle) / oracle. When the cash market is closed the oracle sits near the last print, so a persistent premium or discount <i>is</i> the live off-hours price discovery — the tradeable dislocation.</td></tr>
+<tr><td>5m · 15m</td><td>Live mark vs the mark ~5/15 minutes ago, sampled server-side every 15s from the same streaming mark the Price column shows. Memory-only: dashes for the first minutes after a deploy or across a feed gap. Hidden by default.</td></tr>
+<tr><td>1h · 4h</td><td>Rolling window changes.</td></tr>
+<tr><td>24h</td><td>Rolling 24-hour change vs Hyperliquid's price ~24h ago — at 3pm it measures against yesterday 3pm, not a day boundary.</td></tr>
+<tr><td>D open · H open · 4h open · 12h open</td><td>Change since the current UTC day / hour / 4h bucket / 12h bucket opened — what the forming candle shows on a chart. Perps trade continuously, so a day's open is the prior day's close. Resets at the boundary by construction. Hover for the exact open. The three intraday ones are hidden by default.</td></tr>
+<tr><td>7d · 30d</td><td>Rolling window changes.</td></tr>
+<tr><td>Gap</td><td>The last close→open move, measured on the name's <b>home</b> session: 16:00→09:30 ET for US names, the KRX/TSE/HKEX boundary for foreign-home names (SMSN gaps on Seoul's clock). Live while the market is closed. Hover for the cumulative ~30d off-hours drift — a persistent sign there is the overnight effect.</td></tr>
+<tr><td>30d trend</td><td>Sparkline of the 30-day price path; sorts by 30-day change.</td></tr>
+<tr><td>vs S&amp;P</td><td>Excess return over the benchmark perp across the window (this market % − benchmark %). BTC is the benchmark in crypto scope.</td></tr>
+<tr><td>vs tape</td><td>This market's window return minus the <b>universe median</b> — relative strength against the whole tape rather than a benchmark, so a BTC-green-while-alts-bleed day is measured correctly. On a red tape, sort descending.</td></tr>
+<tr><td>Δ vs ⬒</td><td>Window return minus the equal-weight mean of a picked basket's members (pick it in the header ▾). A lens only — the benchmark under every beta and signal stays SP500/BTC. Dash when fewer than 60% of members carry the field.</td></tr>
+<tr><td>DownCap 31d</td><td>Down-capture vs the tape: on the last 31 days' 4h bars where the whole scope was red (≥70% of names down, negative median), how much of the tape's move this name ate. &lt;100 dumps less than the typical name, negative = net green on red bars, &gt;100 amplifies. Fixed 31d/4h, does not follow the window. Dash below 20 matched bars.</td></tr>
+<tr><td>Hit%</td><td>On those same red-tape bars, the share where this name beat the median — the consistency check on DownCap. Good DownCap with low Hit% means a couple of lucky bars carried the average.</td></tr>
+<tr><td>RVOL</td><td>Relative volume, <b>clock-hour matched</b>: notional over the window (1h/4h/1d) ÷ the median notional of the same clock hours across the prior month. 1.0× = normal for this time of day, ≥2× = genuinely elevated. Overnight hours are judged against prior overnights, so the session shape cannot masquerade as a volume signal. Dash on 7d/30d.</td></tr>
+<tr><td>β</td><td>Beta to the benchmark perp on 90 days of daily returns. &gt;1 amplifies it, 0–1 dampens, &lt;0 moves inverse.</td></tr>
+<tr><td>Momentum</td><td>Self-normalizing −100…+100: risk-adjusted 1h–30d returns × 7d trend quality, tilted by range position, modulated by OI conviction. Comparable across a quiet FX pair and a violent pre-IPO synthetic. <span class="amber">●</span> = volume above the market's own norm.</td></tr>
+<tr><td>MOM+</td><td>The <b>candidate</b> momentum running head-to-head with the incumbent: same core, but the OI term is regime-qualified (OI building amplifies only when funding corroborates the side; falling OI is short covering and dampens at half strength) and a funding-crowding haircut (×0.8) applies at the crowd's monthly extreme. Adjudicated on daily forward rank IC in the Backtest tab's Score duel; promotion only on a locked verdict, and the loser is deleted.</td></tr>
+<tr><td>Vol (ann)</td><td>Annualized realized volatility from ~30 days of hourly returns.</td></tr>
+<tr><td>Avg Range</td><td>Mean of each completed day's (high − low) / close over the window (7d, or 30d on the 30d window). "On a typical day this moves X%."</td></tr>
+<tr><td>vs 30d hi</td><td>Distance below the 30-day high; 0% = at the high now.</td></tr>
+<tr><td>Swing R</td><td>Structural room for the <i>next</i> swing trade per unit of risk: distance to the nearest unified-level-map target in the trend direction ÷ distance to the D1 EMA21 void. The map merges detected structure, volume-profile HVN/LVN and the daily EMA50/200, confluence-weighted with disclosed hand-set weights. Needs a stacked trend side and a live EMA21; dash otherwise.</td></tr>
+<tr><td>vs YTD hi</td><td>Distance below the year's highest daily <i>close</i>. Names listed this year use their full-life high. Crypto: dash outside January (31-day retention).</td></tr>
+<tr><td>Y open · M open</td><td>The level the year / month opened at (= the prior day's close on a continuous perp); green when price is above, red below; hover for the distance.</td></tr>
+<tr><td>ΔOI</td><td>Open-interest change over the window with a price-vs-OI regime tag: <b>longs+</b> price↑/OI↑ (new money confirming) · <b>squeeze</b> price↑/OI↓ (shorts covering, not fresh demand) · <b>shorts+</b> price↓/OI↑ (new money pressing lower) · <b>unwind</b> price↓/OI↓ (longs deleveraging). Hover for conviction and whether funding corroborates. OI is symmetric: long/short attribution is always an inference.</td></tr>
+<tr><td>Squeeze</td><td>0–100, how loaded the short-squeeze spring is over the window: crowding (shorts paying via negative window-average funding) × fuel (OI building) × trigger (price pressing the 30d high). Zero whenever funding is positive.</td></tr>
+<tr><td>Casc</td><td>Crypto only: ◆ with age when a 15-minute bucket in the last 24h printed one side's forced-liquidation notional ≥3σ above its trailing 24h baseline <i>with</i> OI dropping ≥1% in the same bucket. Aggregated CEX data via Coinalyze — context, not Hyperliquid-native.</td></tr>
+<tr><td>24h Liqs</td><td>Crypto only: total forced liquidations over 24h (Coinalyze). Hover for the long/short split.</td></tr>
+<tr><td>Carry</td><td>Window-average funding APR ÷ annualized realized vol: how much you are paid per unit of risk for taking the unpopular side. Same sign convention as Funding.</td></tr>
+<tr><td>24h Vol · OI</td><td>Notional traded over 24h; open interest. Both in USD.</td></tr>
+<tr><td>Position</td><td>Your open position from the linked wallet: side, notional at the live mark and the move since entry signed with the side. Hidden until a wallet is linked.</td></tr>
+<tr><td>MA 20 · 50 · 100 · 200</td><td>Simple moving averages of daily closes; green when price is above. Crypto shows dashes past MA 20 (31-day retention).</td></tr>
+<tr><td>VWAP 30d · vs VWAP</td><td>Σ(typical price × volume) ÷ Σ(volume) over ~31 days of hourly candles, typical = (H+L+C)/3 — the average recent holder's entry, weighted by where volume printed. Positive vs VWAP = the month's buyers are in profit; deeply negative = trapped supply overhead. A candle-level approximation of tick VWAP.</td></tr>
+<tr><td>OI/Vol</td><td>Open interest ÷ 24h volume. ≥2 = stale, crowded positioning that cannot exit quickly (fragile to squeezes and unwinds); &lt;0.5 = fresh churn.</td></tr>
+</table></div>
+
+<h3>Group lens — sectors and industries</h3>
+<p>The group toggle re-renders the same board with one row per <b>sector</b> (GICS plus asset classes) or <b>industry</b> (the finer curated split — Semis vs Software vs Memory, Banks vs Capital Markets). Each cell is the weighted average of exactly the rows the names view shows, computed only over members that have the value (a missing window is excluded and the weights renormalize, never zero-filled); hover discloses coverage. <b>Best · Worst</b> (pinned to 24h) is the aggregate-liar detector — whether the group number is everyone or one name dragging the rest — read against <b>Cohesion</b> (90-day average internal correlation: high = the label trades as one block, low = a stock-picker's bucket). Click a group row to drill in: the table flips back to its members with a chip to clear. Industry rows marked <i>= sector</i> have no curated split yet.</p>
+
+<h3>Action strip — heating · cooling · strongest bid</h3>
+<p>The collapsible strip under the table is the <i>rate-of-change</i> read next to the table's levels, and it always describes exactly the rows the table shows (scope, window, filters, drill and group lens all apply).</p>
+<ul>
+  <li><b>accel</b> = the window's natural fast leg (1h→15m, 4h→1h, 1d→4h, 7d→1d, 30d→7d) minus the window's own pace, both relative to the tape. <b>heat</b> = accel + 0.6·tanh(ΔOI/8) + 0.4·clamp(RVOL−1): flow can confirm an acceleration, never replace it; RVOL is dropped at 7d/30d, not faked.</li>
+  <li><b>HEATING</b> = positive accel with flow agreeing — what is starting. <b>COOLING</b> = names still ahead of the tape whose pace has died — with a high MOM this is the take-profit read. "Never went anywhere" makes no list at all.</li>
+  <li><b>STRONGEST BID</b> ranks the server's dip-reclaim claims off the 5-minute archive (equities, last 4h): the deepest peak→trough dip, the fraction reclaimed, minutes since the low, ranked dip × reclaimed ÷ √minutes. Demand response, not momentum.</li>
+  <li><b>M</b> on every chip is the momentum level: high/high = ride, high/stalling = exit, low/accelerating = new rotation. In a group lens the strip regroups (share-of-tape replaces RVOL as the volume confirm; the bid column stays name-level because dips don't aggregate).</li>
+</ul>
+<p>The <b>1d movers</b> row above the table lists the day's biggest moves as chips; click one to open the name.</p>
+
+<h3>Crypto scope</h3>
+<p>Adds the tape strip (crowd pays, breadth, total OI and its weighted delta, BTC's day, alt-season gauge), the Casc and 24h Liqs columns, and BTC as the benchmark. Session columns (Gap, Sess) vanish. Crypto claims and features run on compressed horizons throughout the app.</p>
+</section>
+
+<!-- ================================================================================ -->
+<section id="drawer" data-feature="markets">
+<h2>6. The ticker drawer</h2>
+<p>Click a ticker (or press <kbd>Enter</kbd> on a highlighted row, or pick one in the command palette) and the drawer slides in from the right. It sets the <b>focused ticker</b>, so Trend, Report, Charts and the rest open on the same name. Top to bottom:</p>
+<dl>
+  <dt>Header</dt><dd>Name, price, day move, sector / industry, home session, the earnings badge, the <b>AI report →</b> deep link, and the Notes panel toggle.</dd>
+  <dt>Notes</dt><dd>Your written notes on this name, above the charts: everything else in the drawer is the server's read, the note is yours. Each note is stamped with the mark it was written at ("wrote it at 113.90 · +4.0% since"). <code>#tags</code> in the body filter the Notes tab. Editing rewrites the body and nothing else; the original timestamp and price stand, and the rewrite is disclosed. Writing needs the operator's <i>notes.write</i> permission.</dd>
+  <dt>Position</dt><dd>If your linked wallet holds this market: side, size, entry, leverage, liquidation price, margin, funding paid since open, and unrealized P&amp;L / ROE derived off the live mark — beside the trend board's read of the name.</dd>
+  <dt>Where the 30d return happened</dt><dd>The 30-day return decomposed into what accrued off-hours (overnight + weekend close→open) vs during cash sessions. A persistent off-hours drift is the overnight-effect edge this panel exists to expose. Anchored to the home session for foreign-home names.</dd>
+  <dt>Metrics</dt><dd>The table's columns for this name, in one grid, including the hidden ones.</dd>
+  <dt>Event risk</dt><dd>The next scheduled earnings print and any macro event inside the coming days, plus the name's earnings reaction study: number of prints, average and median |next-session move|, up/down split, gap behaviour, and the move as a multiple of the name's usual daily range.</dd>
+  <dt>90-day price</dt><dd>Sparkline; then <b>Top co-movers</b> and <b>Top hedges — inverse</b> over 90 days of daily returns.</dd>
+  <dt>Hourly candles</dt><dd>OHLCV chart with a timeframe switcher (1h–4h aggregations, 1–60 days), crosshair readout, and the levels the signal engine froze on any open claim.</dd>
+  <dt>OI / funding history</dt><dd>Open interest and funding APR sparklines over the retained history, with the current hourly funding stated.</dd>
+  <dt>Fundamentals</dt><dd>Finnhub basic financials and profile for US listings: point-in-time, quarterly-updated, refreshed daily server-side. Market cap, P/E and P/S are derived live off this board's mark.</dd>
+  <dt>Derivs context</dt><dd>Crypto: aggregated CEX liquidations and open interest for the coin (Coinalyze, 15-minute buckets aggregated hourly) — market context for the Hyperliquid name, not Hyperliquid-native, and labelled as such.</dd>
+  <dt>News</dt><dd>The last 72 hours of verified headlines tied to this name — the News tab's payload, filtered.</dd>
+  <dt>Signal record</dt><dd>The out-of-sample record of every claim the engine ever fired on this name: hit = share of resolved claims that went the way the signal implied. The claim-by-claim history lives behind the ticker search on the Signals tab. <b>Signal accuracy — live track</b> unfolds the per-event split.</dd>
+</dl>
+</section>
+
+<!-- ================================================================================ -->
+<section id="tabs-intro">
+<h2>7. The tabs</h2>
+<p>Each tab is one question asked of the same rows. Tabs marked <span class="chip adm" style="margin-left:0">operator-only by default</span> ship closed to the group until the operator opens them in Admin › Feature visibility; a closed tab is absent from the ribbon and its routes refuse, not hidden. Where a tab has a per-universe split, the scope pills decide which universe you are reading.</p>
+</section>
+
+<section id="tab-focus" data-feature="focus" data-def="admin">
+<h3>Focus — today's six most tradeable equities</h3>
+<p>Six seats, stamped once at the 09:30 ET cash open, one late fill at +1h, then <b>immutable for the day</b> — a compressed morning scan, not a signal. It never reshuffles at 10:47 because a number ticked; yesterday's list stays viewable exactly as stamped.</p>
+<ul>
+  <li><b>How seats are earned</b> — a disclosed loudness ordering: |gap σ| + RVOL excess + |ΔOI| + a flat earnings boost + a small headline count, every unit in the name's own distribution. Max 2 seats per industry cluster, so six seats are six trades rather than one theme wearing six tickers. The <b>cut line</b> discloses what just missed and why. Foreign-home names are excluded (their gap anchors to the wrong exchange for an ET stamp).</li>
+  <li><b>Liquidity floors</b> — two walls the operator sets in Admin (a 24h notional minimum and an OI minimum), applied before loudness is compared: a seat you cannot exit at your size is not a seat. Names that fail a wall get their own <b>BELOW FLOOR</b> roster with the wall they failed and how far it would have to fall. The floors in force at 09:30 are frozen onto the record.</li>
+  <li><b>The +1h columns</b> — sVWAP, 1H HI, 1H LO fill once at 10:30 ET from the 5-minute archive and freeze; the 1H RANGE bar shows where the open sat in the hour's eventual range vs the 10:30 print — "who won the first hour".</li>
+  <li><b>The chart (▦)</b> — 5m/15m/1h/4h candles over 72h from the local 5m archive, off-session time shaded, the frozen levels drawn verbatim, the session VWAP labelled.</li>
+</ul>
+</section>
+
+<section id="tab-funds" data-feature="funds" data-def="admin">
+<h3>Funds — the 13F watchlist</h3>
+<p>Tracked institutional filers with filing badges, per-fund books (holdings, quarter-over-quarter delta, concentration) and the once-per-quarter season summary. 13F snapshots are quarter-end positions filed up to 45 days late: <b>positioning history, never the current book</b>. Long US-listed equity and listed options only. Curating the watchlist (<code>whale add|rm|mute</code>) is an operator verb; reading it is the tab. The terminal's <code>fund</code>, <code>etf</code> and <code>holds</code> verbs read the same lane.</p>
+</section>
+
+<section id="tab-trend" data-feature="trend">
+<h3>Trend — the EMA 13/21 ladder</h3>
+<p>An EMA 13/21 ribbon evaluated on <b>D1 · H12 · H4 · H1</b> for every market in the active scope, ranked into long and short leaderboards (top 10 per side, ≥2/4 alignment). Per rung: <b class="up">green</b> = price &gt; EMA13 &gt; EMA21 (stacked), <b class="amber">yellow</b> = the middle state, <b class="down">red</b> = stacked the other way. The <b>score</b> counts aligned rungs — 4/4 is an established trend on every rung; 2–3/4 means higher timeframes lead and you wait for the lower ones to agree.</p>
+<ul>
+  <li><b>RETEST</b> fires when the last few bars probed into the 13/21 zone on a trending rung while the close held the EMA21 side — the continuation pullback (long) or rally-into-resistance (short). The badge carries a clock-matched volume multiple when the baseline qualifies: ~1× or less is a quiet, healthy pullback; ≥2× means the level is being fought. A retest is promoted verbatim into the signal ledger as <code>tretest</code> / <code>tretestdn</code>, with entry = mark, void = the rung's EMA21 and target = that rung's prior swing.</li>
+  <li><b>Width</b> — average EMA13–EMA21 spread across aligned rungs, in percent: two 4/4s are not the same trade when one holds a 0.08% ribbon and the other a 2% ribbon. <b>Age</b> counts consecutive D1 days stacked this side (N+ = extends past available history). <b>Δ21</b> is the live distance from the H1 EMA21 — the proximity-to-entry number.</li>
+  <li><b>Ranking</b> — by score, then fresh-first: a day-3 trend is the entry, a day-40 trend is the chase. Ticker badges carry the funding-percentile flag (crypto) or the earnings badge (stocks).</li>
+  <li><b>Chart button</b> — a candlestick chart of any rung with the ribbon, the retest zone banded at the ladder's own levels and a crosshair OHLC + EMA readout. Every annotation is the board's own payload restated. Bars inside the EMA seed window render dimmed with no ribbon.</li>
+</ul>
+<p class="sec">H1 is the hourly spine; H4/H12 are UTC-aligned aggregations of it; D1 is the daily series with the live mark driving the forming bar. EMAs need 26+ bars per rung; a market missing a rung is excluded and counted in the header.</p>
+</section>
+
+<section id="tab-charts" data-feature="charts">
+<h3>Charts — multi-pane grid and MTF wall</h3>
+<p>Up to <b>8</b> names side by side (<b>GRID</b>), or one name across timeframes (<b>MTF WALL</b>: 4, 6 or 8 panes at 15M/1H/4H/1D up to 5M…1D). Timeframes <b>5M · 15M · 1H</b> read the local 5-minute archive; <b>4H · 12H · 1D</b> read the deep daily archive seeded back to each listing's birth — the two sources are disclosed per pane and never mixed in one. <b>Link</b> shares crosshair and zoom across panes (always on in the wall). Picks are per universe and remembered per browser.</p>
+</section>
+
+<section id="tab-treemap" data-feature="treemap">
+<h3>Treemap</h3>
+<p>The universe by sector: tile area = the size measure you pick (24h volume or open interest), colour = the move over the selected window. Click a tile to open the name. Installs itself into the Tape menu at boot.</p>
+</section>
+
+<section id="tab-sectors" data-feature="sectors">
+<h3>Sectors — rotation, leadership, cohesion</h3>
+<ul>
+  <li><b>Flow map</b> (default) — each bubble is a sector (or industry). Horizontal = capital direction, a blend of return and OI conviction (right = money flowing in with conviction). Vertical = activity heat from volume and volatility. Top-right = accumulation, top-left = distribution, bottom half = quiet. Bubble size = 24h volume. Click a bubble for its members.</li>
+  <li><b>Leaders map</b> — positioning vs the benchmark over the window (right = beating it) against whether the lead is growing (up) or shrinking. Four regimes: Leaders, Catching up (early rotation candidates), Cooling (where leadership goes to die), Laggards. Intraday windows floor to 7d.</li>
+  <li><b>Rotation board</b> — sectors ranked by capital direction, with <b>Cohesion</b> (average pairwise correlation inside the sector: high = own the theme, any name; low = a stock-picker's sector).</li>
+  <li><b>Sector × sector correlation</b> — 90-day average pairwise daily-return correlation between members of each pair. Deep co-movement means one risk factor wearing two names.</li>
+  <li><b>Grouping</b> — sector vs curated industry (equities only). Industries may deliberately cross GICS sectors when that is how the tape trades; <i>thin</i> marks groups under 5 members, <i>= sector</i> marks names with no split. Display grouping only — signal pooling and news badges stay on the 11 GICS sectors.</li>
+</ul>
+<p class="sec">Window, weighting and CSV export follow the same conventions as Markets. A weekly <b>classification audit</b> (AI-assisted, operator-reviewed) proposes overlay changes to the curated tables; applied overlays are revertable from Admin.</p>
+</section>
+
+<section id="tab-corr" data-feature="corr">
+<h3>Correlation — matrix, pairs, COMP/G, ratios, baskets</h3>
+<ul>
+  <li><b>Matrix</b> — pairwise correlation of daily log returns over the chosen lookback (30d–1y for stocks; 4h/1d/7d intraday grids for crypto), cluster-ordered (UPGMA on correlation distance) so blocks along the diagonal are real co-movement families. The number of overlapping days is in every hover — a ±0.9 on 12 days is noise. Focus search isolates tickers; <i>top by vol</i> widens or tightens the universe (20/40/60).</li>
+  <li><b>Pair view</b> (click a cell) — hedge β (units of B per unit of A), the beta-adjusted spread ln(A) − β·ln(B) with its mean ±1σ band and z-score (beyond ±1.5–2, A is rich or cheap vs B), and the rolling correlation that says whether the relationship is stable enough to trust.</li>
+  <li><b>Co-movers &amp; hedges</b> (click a ticker label) — proxies and contagion map on one side, natural hedges on the other. <b>Strongest pairs</b> below surfaces the tightest relationships across the set.</li>
+  <li><b>COMP/G</b> — N names rebased to 100 at a chosen anchor (presets, date picker, or drag the amber line), or <b>spread mode</b> (each name minus the equal-weight basket of visible names, in percentage points). Runs on closes already loaded, so it never adds a fetch.</li>
+  <li><b>Ratio</b> — synthetic pair candles A/B at 1h · 4h · 12h · 1d with an honest EMA200 (drawn only where 200 bars exist). BTC may face a stock, aligned on the hours both traded.</li>
+  <li><b>Baskets</b> <span class="chip adm">operator-only by default</span> — custom equal-weight baskets (<code>basket create MAG7 AAPL MSFT …</code>) usable as virtual tickers in COMP/G, ratios and the Δ vs ⬒ column. A visual layer only: never a benchmark under signal math.</li>
+</ul>
+</section>
+
+<section id="tab-funding" data-feature="funding">
+<h3>Funding — the heatmap</h3>
+<p>A row per market, a column per time bucket, readable at <b>1h, 8h or 24h</b>, in one of two units:</p>
+<ul>
+  <li><b>Annualized</b> (default) — a cell is the bucket's mean hourly rate × 24 × 365, the convention every other funding readout uses. The timeframe is a <i>resolution</i>: one market reads one number on every grid, and all three share one colour cap (the 8h grid's 98th percentile) so a zoom never repaints a cell.</li>
+  <li><b>Per bucket</b> — a cell is what a 1× long <i>paid</i> over that bucket (the hourly spine summed), so the timeframe changes the quantity: the same market reads ~8× larger per 8h than per 1h, and each timeframe has its own colour cap. Remembered per browser; every tooltip carries both.</li>
+</ul>
+<p><b class="down">Red = longs pay</b> (crowded long, carry is a cost), <b class="up">green = longs receive</b>. A bucket whose spine covers under half its hours is <b>hatched</b> rather than drawn as zero — a gap in the data and a market that went flat mean opposite things to anyone sizing a position. The newest column is always the last <i>complete</i> bucket. Beside each row's window <b>mean</b> sits its <b>current</b> funding (this hour's rate off the live snapshot), so carry building or fading reads as now vs mean; rows rank by open interest and can be sorted by carry side, |carry| or the now column; the client trims to top 25 / 50 / all.</p>
+</section>
+
+<section id="tab-sessions" data-feature="sessions">
+<h3>Sessions — when the returns happen</h3>
+<ul>
+  <li><b>Session decomposition</b> (the flagship) — what an overnight (close→open), weekend (Fri→Mon) and cash (open→close) hold actually pays, pooled one equal-weight bet per calendar boundary across the equity class, compounded into equity curves. The shaded band is the running funding drag: an edge that dies net of funding is a donation. A rising overnight curve against a flat cash curve is the classic overnight effect.</li>
+  <li><b>The clocks</b> — hour-of-day activity in each market's own volume norm; the funding clock; a day-of-week 7×24 heatmap and return seasonality by hour. Read with sample-size humility.</li>
+  <li><b>Structure panels</b> — cross-ticker clustering by the shape of the trading day; asset-class overlays (equities vs FX vs commodities). Panels unlock as the 180-day hourly spine accrues; an empty panel means insufficient coverage.</li>
+  <li><b>Every chart hovers</b> — date, value and breadth (how many names stood behind that point).</li>
+</ul>
+</section>
+
+<section id="tab-signals" data-feature="signals">
+<h3>Signals — unusual conditions, ranked and audited</h3>
+<p>A signal is an <b>unusual condition, ranked — never a prediction</b>. Score = unusualness now (0–50) + historical edge (0–50): the market's own base rate when it has ≥8 occurrences, else the asset-class pooled rate at a 30% discount, else a token score. Every base rate shows n, median forward outcome and hit — evidence, not adjectives. <i>unproven</i> = a flag without history; <i>neg exp</i> = past occurrences lost money on average (ranked as noise). Per-universe visibility: the operator opens the crypto and equity slices separately.</p>
+<h4>How to read a card</h4>
+<p>Every condition renders in the same four-line grammar. <b>Line 1</b>: the event chip, the plain-language reading, and — at the right edge — when the condition appeared and the ledger claim it is scored against (at the frozen mark, with time to resolution). <b>Line 2</b>: the evidence in one fixed format — scope (own base rate / class-pooled / thin) · n · median · hit · expectancy · horizon — plus any qualifier pills (unproven, neg exp, no live edge, earnings proximity). <b>Line 3</b>: the mechanical play — side, target, void, R/R — frozen from the claim when one is open. <b>Line 4</b>: the single corroborating thing to watch.</p>
+<h4>Self-audit — the part to trust</h4>
+<p>Every fired signal is ledgered at its mark and resolved at its horizon, out of sample. The record blends back into scoring (weight grows with resolved count, so trust migrates from backtest to reality), and event types whose live record shows no edge get capped automatically. The accuracy panel shows: live hit/median vs claimed (the honesty gap); <b>pf</b>, the profit factor that catches the 55%-hit event that still loses money; <b>calibration buckets</b> that audit the scorer itself (if 55+ scores don't hit more than &lt;35 scores, the ranking is broken); a <b>⛔ stop-aware</b> re-score of every claim as if the void had been a hard stop; and the <b>bracket</b> track, where outcomes cap at whichever frozen level — target or void — was touched first.</p>
+<h4>Playbooks, prime, decay, confluence</h4>
+<ul>
+  <li>Each signal states a side, a mechanical level that voids it and a target from the historical median; the R:R is scored and poor structure is penalized.</li>
+  <li><b>★ prime</b> = ≥60% hit, positive expectancy, sound structure at fire time (+6 score).</li>
+  <li>Signals <b>decay</b> past their claimed horizon (amber, ×0.6) and drop at 2× — a stale signal is not a signal.</li>
+  <li><b>Confluence</b>: multiple same-side conditions on one name compound; the bonus is <i>earned</i> — once 15+ resolutions exist on each side it scales to the measured lift of with-company firings and drops to zero if agreement doesn't prove out. <b>⇄</b> means long and short fired on one name: flagged, no bonus for anyone.</li>
+  <li><b>Earnings / macro guard</b>: session-spanning signals on a name reporting ≤1 ET day out (or with a macro print ≤1 day out) have their evidence capped at 8 points and cannot be prime — a stated prior, labelled on the card. Once ≥5 tagged claims resolve per event, the tab shows the conditioned record beside the ordinary one.</li>
+</ul>
+<h4>Ticker history and self-tuning</h4>
+<p>The search bar loads any name's full claim-by-claim audit trail — what fired, at what score and mark, what it claimed, what happened, open claims counting down — and the signal-type selector browses one event across all tickers. Each gated event also runs 2–3 candidate thresholds as <b>shadow variants</b> that ledger silently on identical bookkeeping; a challenger is promoted only on ≥30 out-of-sample resolutions per side with a real expectancy beat. Whole-strategy shadows (gap fade, breakdown reclaim, failed-breakout fade, MA50 pullback, post-earnings drift, liquidity sweep) earn a record on the same terms before anything visible ships. The full roster is in <a href="#signals-reference">Signals reference</a>.</p>
+</section>
+
+<section id="tab-actionable" data-feature="actionable" data-def="admin">
+<h3>Actionable — names at a swing trigger</h3>
+<p>Every name currently sitting <b>at</b> a swing trigger — one row per name per side, with the entry, invalidation and target you would actually use. The morning list: the other tabs tell you what is true, this one tells you what is actionable.</p>
+<ul>
+  <li><b>Nothing on this board is computed here.</b> Every claim froze its side, void and target at fire time; those frozen values are what you see — the same numbers the track record was scored against. Entry is the one live number, because that is what entering now costs.</li>
+  <li><b>R:R is net of funding.</b> A three-week hold on a crowded long at 45% APR donates ~2.6% of notional before the trade does anything; the headline R:R is net of expected funding across the horizon and can flip sign (a short in a name paying to be short is paid to wait). Hover for the gross figure.</li>
+  <li><b>EV</b> is expectancy in R for entering here: the event's out-of-sample hit rate applied to this row's own net geometry. Below 8 resolved fires EV stays blank and the row sits in <i>no record yet</i>, ranked by net R:R.</li>
+  <li><b>Age and falling off</b> — bars in trigger measured in the setup's own timeframe. A row leaves at 10 bars, when the reward:risk from the live mark drops under 1.2 (2.0 to enter as CONFIRMED), or when price passes its void.</li>
+  <li><b>Flags</b> — ⚠ earnings inside the horizon (flagged, never filtered; the <i>no earnings in horizon</i> checkbox hides them), blue ◆ macro event inside the horizon, <b>+n</b> other detectors on the same name and side (corroboration, not extra trades). Filters: side, the <b>2:1+ setups</b> class (level-triggered, stop at a real chart level) vs <b>positive-EV grinders</b> (the statistical family against a 1σ void).</li>
+  <li>Horizons of 3 days or longer only for equities (2 days for crypto). Both universes, scoped by the pills, never mixed. A new CONFIRMED row is what the <b>setup</b> alert class announces.</li>
+</ul>
+</section>
+
+<section id="tab-backtest" data-feature="backtest" data-def="admin">
+<h3>Backtest — cross-sectional long/short, and the Score duel</h3>
+<p>A client-side backtest on the daily returns already in your browser, so parameter tweaks are instant and cost the server nothing. Ranking rules are deliberately non-fitted; the honest overfitting risk is you, picking parameters by eye.</p>
+<ul>
+  <li><b>Signal roster</b> — seventeen rules in six families: trend (momentum, sector-relative, residual, high proximity), reversion, risk (low vol, low idio vol, low beta, anti-lottery), perp-native (funding carry), flow (volume trend, OI change — sign-ambiguous, the direction toggle decides), and the live-score variants (Blend M0, the daily mirror of the Markets momentum, plus V1–V4 each adding one candidate upgrade). The live-score family is the promotion bench for the board's Momentum column.</li>
+  <li><b>Controls</b> — lookback, hold window, book quantile, rank gate, weighting, structure (long/short, long-or-flat, short-or-flat), costs, funding, and the in-sample | out-of-sample split.</li>
+  <li><b>Target picker</b> — pick one name and the tab switches to single-asset mode: the same signal runs as a timing rule (sign, ±0.5σ or ±1σ entry bands), buy-and-hold becomes the dashed benchmark, a position ribbon shows when the rule was long/short/flat, and the round-trip count is shown first because a Sharpe on ten round trips is an anecdote. Several names = a custom universe, ranked among themselves.</li>
+  <li><b>Reading the curve</b> — net, gross, benchmark and equal-weight universe. Judge on out-of-sample net vs equal-weight: beating the benchmark with a long/short book is table stakes.</li>
+  <li><b>Score duel</b> — once per UTC day the server snapshots Momentum and MOM+ for every name and, when the next day's prices land, computes each column's rank IC (Spearman correlation of the ordering with the realized next-day return). Forward, out of sample, persisted across redeploys. The verdict gate refuses to call a winner before 60 days or |t| ≥ 2; the live-disagreements list shows which names the two columns argue about and why.</li>
+  <li><b>Crypto scope</b> — top-60 perps against BTC, 365-day annualization, no overnight hold, funding carry at home.</li>
+</ul>
+</section>
+
+<section id="tab-earnings" data-feature="earnings">
+<h3>Calendar — earnings and macro, in ET</h3>
+<ul>
+  <li><b>Upcoming earnings</b> — the next 14 days for the equity universe, grouped by ET day with the session: <b>BMO</b> before the 09:30 open, <b>AMC</b> after the 16:00 close, <b>DMH</b> during hours, <b>TBD</b> date known, session not. Finnhub-fed in chunked date windows, refreshed every ~6h. Day move, 24h volume and ADR on each row come from the live snapshot; ★ names float to the top of each day.</li>
+  <li><b>Reported</b> — the two prior ET days stay on the tab with EPS actual vs estimate, the verdict (beat / miss / in line, EPS-only — the tape's verdict is the move beside it) and the print's own reaction candle (BMO/DMH scores its UTC daily candle, AMC the next one). Display precision expands until actual, estimate and the surprise % reconcile. Rows come from the persisted print history, so they survive redeploys; feed hygiene drops retracted and placeholder-date prints, and an operator can <b>void</b> a garbage print permanently with the × on the row.</li>
+  <li><b>Reaction study</b> — each name's own earnings base rate on the perp's daily closes: n, average and median |next-session move|, up/down split, gap behaviour, and the move as a multiple of the name's usual range. A one-time ~1-year backfill, self-accruing after.</li>
+  <li><b>Coverage</b> — indices, ETFs, FX, commodities, baskets and pre-IPO synthetics never report; foreign listings without a US symbol are real companies the feed does not carry. The coverage line states how many eligible equities exist so absence is auditable.</li>
+  <li><b>Macro rows</b> — FOMC decisions (statement 2:00 PM ET, presser 2:30, an SEP chip on dot-plot meetings) from the Fed's published schedule, and CPI · nonfarm payrolls · PPI · retail sales · GDP · PCE (8:30 ET) from FRED's release schedule. Upcoming rows show the <b>prior</b> print — not a consensus estimate, no street feed exists here — and flip to prior → actual once released (between the release clock and FRED's data landing they say "released — actual pending"). FOMC rows resolve to held / cut / hiked.</li>
+  <li><b>Interaction with the rest</b> — the E badge on Markets, the earnings and macro guards on Signals, the ⚠ / ◆ flags on Actionable, the flags and context handed to AI reports, and the global macro banner all read this calendar.</li>
+</ul>
+</section>
+
+<section id="tab-news" data-feature="news">
+<h3>News — company headlines, macro tape, filings</h3>
+<p>Two feeds merged into one tape: per-name headlines (Finnhub) tied to names in the universe, and the general macro tape from configured Telegram channels — a 72-hour rolling window, per-name refresh every few minutes, served whole to the browser and sliced client-side (the drawer's per-name news is the same payload filtered). Badges cross-reference the app: <b class="amber">amber</b> = earnings within 7 days, <b class="down">red</b> = a live signal is firing on that name. A headline is tied to a ticker only when the match verifies.</p>
+<p><b>Filings overlay</b> — SEC EDGAR filings for covered US names ride the same feed, flagged <b>FL</b>, with material forms marked; those also fire the <i>filing</i> alert class. <b>Telegram channels</b> are group configuration the operator edits (each shows a live status). A warm cache serves the last good pull across redeploys.</p>
+</section>
+
+<section id="tab-housing" data-feature="housing" data-def="admin">
+<h3>Housing — macro housing and MBS board</h3>
+<p>The backdrop behind the homebuilders, mortgage servicers, REITs and banks in the universe. Seven FRED series pulled in full history, refreshed every 6 hours, warm-cached: the Freddie Mac 30-year conforming mortgage rate, single-family vs multifamily starts (SAAR), months' supply of new homes (6+ historically reads as a buyer's market), new-home sales and the median price, and ICE BofA BBB corporate OAS standing in for non-QM spreads. Each card names its series; a <b>Proxy</b> chip says exactly what differs from the paid original. A series whose newest print is older than its own cadence can explain is dropped and named at the foot of the tab rather than charted as if current — FRED retires series without erroring. The 12m column compares the latest print with the observation closest to one year earlier; a missing month is a dash.</p>
+</section>
+
+<section id="tab-liquidity" data-feature="liquidity" data-def="admin">
+<h3>Liquidity — Fed net liquidity</h3>
+<p><b>Net liquidity = total assets − Treasury General Account − ON RRP</b>, on the weekly H.4.1 dates (Thursdays ~4:30pm ET; the board refires after each release and every 6h otherwise). Shown in dollars and as % of nominal GDP, with year-to-date change by component <i>signed by liquidity effect</i> (holdings add when they grow; TGA and ON RRP add when they shrink — a blue TGA bar means Treasury ran its balance down), balance-sheet composition (Treasuries, agency debt, MBS), the TGA / ON RRP drains, and two plumbing-stress reads the usual pages leave out: <b>bank reserves</b> (what the Fed targets as "ample"; the 2019 repo spike came near $1.4T) and <b>SOFR − IORB</b> (persistently positive = collateral scarce, reserves tight). Ten FRED series, everything normalised to billions before any arithmetic. <b>QT end</b> is derived: the first week after the 13-week change in holdings stopped being negative.</p>
+</section>
+
+<section id="tab-congress" data-feature="congress" data-def="admin">
+<h3>Congress — STOCK Act disclosures</h3>
+<p>Periodic Transaction Reports filed with the House Clerk, parsed into individual trades that name a ticker in the universe. Sorted by <b>filing date</b>, because that is when the market learned; the lag column is the gap back to the trade (a disclosure lands up to 45 days after it). Amounts are the disclosed band, never a point figure. The tab shows the parse rate and the ticker-resolution rate so the coverage is a real number; scanned PDFs go through OCR (<code>congress ocr</code>) as an operator lane.</p>
+</section>
+
+<section id="tab-insiders" data-feature="insiders" data-def="admin">
+<h3>Insiders — SEC Form 4</h3>
+<p>Section 16 transactions — officers, directors and 10% holders reporting their own trades within two business days — for the equity roster, rotated through EDGAR two names a minute. Exact share count, exact price, exact date: nothing here is a band or an estimate. Opens on open-market buys and sales (codes P and S); grants, option exercises and tax withholding are one chip away, as is the form's derivative half (options and strikes, kept in their own columns because an exercise price is not a transaction price). A sale under a <b>Rule 10b5-1</b> plan was scheduled in advance and says less than a discretionary one.</p>
+</section>
+
+<section id="tab-notes" data-feature="notes" data-def="admin">
+<h3>Notes — every note, across every name</h3>
+<p>All your per-ticker notes, newest first, searchable over bodies and tickers and filterable by the <code>#tags</code> found in the bodies (derived at read time, never stored). Every note carries the mark it was written at and the move since. A name rotated out of the universe keeps its note, greyed and labelled; notes are keyed by coin and displayed by ticker, so a rename moves the note with the market. Stored server-side on the volume (not in the browser) because a note is prose somebody sat and typed. Writing is a separate permission (<i>notes.write</i>) from reading the tab, so opening the tab to the group never hands the group the pen. An operator can promote any price-stamped chat message into the Notes book, keeping the message's own timestamp and price.</p>
+</section>
+
+<section id="tab-report" data-feature="report">
+<h3>AI Report — the analyst read</h3>
+<p>Everything the server holds on one name — price structure, positioning, funding, the signal ledger's own base rates, earnings and macro context, flags — compiled into one prompt and synthesized by an AI analyst (Claude or GPT, per server configuration) into a plain-language read. It is a reading of the board, not an oracle: every number it cites is a number another tab shows, and the machinery around the model exists to keep it honest.</p>
+<ul>
+  <li><b>Sections</b> — the picture in one paragraph; what the data says; scenarios with computed R/R and EV (colour follows the money — an adverse "target" the model mislabelled renders red); <i>if you act on this</i>, a mandatory action block whose EV-at-entry is computed server-side (a plan that prices negative is downgraded to "wait" before it reaches you); what would change the read; flags; the track record on this name; recent reports.</li>
+  <li><b>Validation</b> — a short read without a correctly-sided void and scenario is rejected; EMAs cannot be smuggled in as chart levels; an opposing-bias anchor cannot override the void. Every directional read is ledgered as an <code>airead</code> claim and resolved out of sample, so the tab grades its own past reads.</li>
+  <li><b>Annotated chart</b> — candles with a D1 · H12 · H4 switcher, the EMA 13/21 ribbon, the levels the read leans on as labelled lines, and proven-edge markers for past signal fires (only where the edge has earned it: ≥8 resolved roster-wide with positive average R, or ≥5 at ≥60% hit on this name).</li>
+  <li><b>Caching and budget</b> — reports are shared: the first generation is cached for everyone (<code>AI_REPORT_TTL_MIN</code>, 30 minutes by default) and <i>regenerate</i> unlocks only on the cooldown or a material change (a moved mark, a fresh signal, an earnings print). Generation is capped per user (3/day, 20/month) and per group (5/day) unless you hold the admin unlock. Group reports on a sector or a custom basket run from the terminal (<code>report sector Energy</code>, <code>report basket NVDA AMD …</code>).</li>
+  <li><b>ai alert</b> — a regenerated report whose action stance flips vs the cached one fires the <i>ai</i> alert class.</li>
+</ul>
+</section>
+
+<section id="tab-dm" data-feature="dm">
+<h3>Messages — price-stamped conversations</h3>
+<p>Direct messages, groups and topic boards between account holders. The reason it exists rather than a Telegram group: <b>a message carries the mark it was sent at.</b> Type <code>$TICKER</code> and the server stamps the price straight off the snapshot it rebuilt seconds ago, so a call made at 113.90 and read at 118.50 says <i>sent at 113.90 · +4.0%</i> on its face. The stamp is written once; an edit never relocates it.</p>
+<div class="grid2">
+  <div class="card"><h4>Conversations</h4><p>A 1-to-1 per person, groups (creator-managed; the last owner leaving hands ownership to the longest-standing member), and <b>topic boards</b> anyone may join, whose first pin is the standing post. Adding, removing, renaming and leaving are recorded as system rows in the history. Joining marks the backscroll read. Close is per-viewer and reversible from the folded <i>Closed</i> section; clear forgets the backscroll for you alone; delete (owner or operator, groups only) shreds the thread for everyone and lands in the audit log.</p></div>
+  <div class="card"><h4>Calls</h4><p>Write <code>short $HOOD</code> (or <code>$HOOD puts</code>) and the call scores as a short; everything else is a long. <b>calls ↗</b> in the rail is every stamped message in one place with the direction-adjusted move since, fixed <b>1d / 7d</b> horizons (the first daily close past the mark), and a per-person record — click a person to filter. Delete-proof: deleting a call removes its words, never its stamp or score. A stamp card carries a one-tap <b>⚑ alert</b> that arms a price alert at the called level.</p></div>
+  <div class="card"><h4>Chat-style reading</h4><p>Grouped runs with one name/time header, day dividers, per-member colours in groups, live read receipts (<i>seen by</i> under your last message), <b>replies</b> that quote one line and click back, <b>@mentions</b>, <b>pins</b> in a strip at the top, drafts that survive a reload, a <b>JSON export</b> per conversation, and <b>tweet cards</b> (x.com links unfurl via X's public oEmbed; only parsed fields are stored).</p></div>
+  <div class="card"><h4>Attachments and reactions</h4><p>Attachments are typed by the server's own magic-byte sniff, never the uploader's claim: png/jpeg/gif/webp render inline and <code>.txt</code> that validates as text is accepted; everything else is refused at upload. Reading a file is a membership check, so a forwarded link is not an access grant. Reactions are a fixed vocabulary of eight and name who reacted. Retention: 30 days in a 1-to-1, 7 in groups and topics, pinned messages exempt.</p></div>
+  <div class="card"><h4>Escalation</h4><p>An unread message reaches your linked Telegram after 5 minutes (<code>DM_ESCALATE_MS</code>) as one digest per sender, honouring your quiet hours and caps; being online cancels it; muted threads never escalate — except that a <b>watched ticker</b> (a per-person list in the rail, separate from the ★ watchlist) or an <b>@mention</b> escalates immediately and pierces a mute. Browser push (enable it in the rail) is the second leg, tab closed included. From Telegram, <code>/r your message</code> replies to your last notification and <code>/r @handle message</code> picks the person — command-only on purpose.</p></div>
+  <div class="card"><h4>Search and keys</h4><p>Search is scoped by membership (the scope is the authorization). <kbd>/</kbd> focuses the conversation search, <kbd>j</kbd>/<kbd>k</kbd> walk the rail, <kbd>Esc</kbd> backs out a level. Signed-out visitors get a rate-limited <i>request an invite</i> that pings the operator; members with no Telegram can adopt a chat the bot already serves with a 6-digit code.</p></div>
+</div>
+<p>Commands in the composer are covered in <a href="#chat-commands">Chat terminal</a>. Delivery rides the same push stream as the tape (versions, never payloads), so no WebSocket is needed and a dropped frame costs nothing.</p>
+</section>
+
+<section id="tab-admin" data-feature="admin" data-def="admin">
+<h3>Admin — the operator panel</h3>
+<p>Every segment is a collapsed fold naming what is inside; open folds are remembered per browser.</p>
+<div class="tw"><table>
+<tr><th>Fold</th><th>Contents</th></tr>
+<tr><td>Access</td><td>Members with their state, <b>mint an invite</b> (with a private label), pending invites, per-member <b>disable / enable</b>, <b>reset link</b> (an invite with <code>kind='reset'</code>), <b>make operator / demote</b>. Disabling or resetting bumps that member's session epoch and touches nobody else.</td></tr>
+<tr><td>All messages</td><td>The operator read-through: every conversation, including ones you are not in, and a search — on a separate admin-gated surface that never consults membership, so one bug in the membership filter can never hand a member the same reach. Every read and search is written to the audit log shown at the bottom.</td></tr>
+<tr><td>Event loop</td><td>Live p50 / p99 / max tick delay and the persisted 7-day p99 ring, with the 50ms worker-thread decision gate drawn as a dashed line.</td></tr>
+<tr><td>Morning brief</td><td>Schedule and test sends for the brief and the Landscape (see <a href="#schedules">scheduled sends</a>).</td></tr>
+<tr><td>FOCUS liquidity floors</td><td>The 24h-notional and OI walls under which a name is never seated on the Focus tab, with the structural scan of every eligible ticker's size.</td></tr>
+<tr><td>Classification audit</td><td>The weekly sector/industry audit: applied overlay entries (revertable), flagged holds (one-click resolve), run now.</td></tr>
+<tr><td>Alert recipients</td><td>Every linked Telegram chat (masked ids), its owner, classes, hourly send count, quiet hours, schedules, and revocation.</td></tr>
+<tr><td>Feature visibility</td><td>Every feature key with its state — <b>Everyone / Operators / Hidden</b> — for tabs, actions (<i>write notes</i>, <i>edit 13F watchlist</i>, <i>AI report generation</i>, <i>terminal commands in chat</i>…) and per-universe scopes (the crypto and equity slices of Signals and Actionable). <b>Nav menus</b>: rename a menu, move a tab between menus or out of one, all without a deploy. A public nav preview and <b>◉ view as public</b> re-render the whole app with the group's feature set without dropping your admin session. Server-enforced: a gated tab is absent from the markup and its routes 403.</td></tr>
+</table></div>
+<p>Operator verbs also live in the terminal: <code>admin unlock &lt;password&gt;</code> (unlimited AI, burns no budget), <code>admin lock</code>, <code>admin reset-reports &lt;password&gt;</code>, <code>whale add|pick|rm|mute|unmute|pull|ingest13f</code>, <code>earnings backfill</code>, <code>insiders parse|requeue|backfill</code>, <code>congress ingest|parse|ocr</code>.</p>
+</section>
+
+<section id="prefs">
+<h3>Watchlist, layouts and positions follow the account</h3>
+<ul>
+  <li><b>Watchlist and saved layouts</b> sync to your account: one preference row per (member, key), last-writer-wins on the client's own timestamp, and a poke to your other tabs so a phone and a desktop converge on whichever change was made later. localStorage stays the working copy (signed out, nothing changes). The <i>active</i> layout is deliberately per browser.</li>
+  <li><b>Positions overlay</b> — link one Hyperliquid wallet under Filters › Positions (public address only; the app reads the public clearinghouse state and can never sign). The server reads the xyz book and, in crypto, the main-dex book every 30s — but only for wallets somebody is looking at. It ships the structure of each position (side, size, entry, leverage, liquidation, margin, funding paid); notional, unrealized P&amp;L, ROE and the move since entry are derived client-side off the live mark, so they move with the tape. On the table: ⬡ beside the ticker, a sortable <b>Position</b> column (migrated in next to OI in saved layouts), the ⬡ held filter; in the drawer, a panel next to the trend read.</li>
+  <li><b>Per browser, not synced</b> — tab order, the active layout, the funding unit, open admin folds, the mobile preset flag, the analysis window and refresh cadence, terminal history, chat drafts.</li>
+</ul>
+</section>
+
+<!-- ================================================================================ -->
+<section id="terminal">
+<h2>8. The terminal — ask the board</h2>
+<p>The <b>▸_ Ask</b> button (or <kbd>~</kbd>) opens a query console over the rows already in your browser. Every board column is a lens; the grammar below runs locally and instantly, and anything it cannot parse is handed to the AI fallback where the operator has enabled it. Tab completes verbs, fields and tickers; <kbd>↑</kbd> <kbd>↓</kbd> walk the history; a result names the rows it ran on.</p>
+<div class="tw"><table>
+<tr><th>Verb</th><th>What it does</th></tr>
+<tr><td><code>&lt;ticker&gt; [field]</code></td><td>The card (price, day move, funding, OI, squeeze, momentum, vs tape…), or one column on one name: <code>nvda funding</code>, <code>btc oi</code>, <code>tsla vsma200</code>.</td></tr>
+<tr><td><code>top|bottom &lt;field&gt; [n]</code></td><td>Any column, plus <code>gainers</code> · <code>losers</code> · <code>trending</code>: <code>top funding 5</code>, <code>bottom d7</code>, <code>top rvol 10</code>.</td></tr>
+<tr><td><code>screen &lt;expr&gt;</code></td><td>Fields joined with <code>&amp;</code>, compared with <code>&gt;</code> / <code>&lt;</code>: <code>screen funding&gt;20 &amp; squeeze&gt;50</code>, <code>screen vsma200&gt;0</code>, <code>screen rvol&gt;2</code>.</td></tr>
+<tr><td><code>breadth</code> · <code>sectors [d7|d30]</code></td><td>Tape health; sector performance over a window.</td></tr>
+<tr><td><code>earnings [ticker|today|tomorrow|week|recent]</code></td><td>The calendar, or one name's next print.</td></tr>
+<tr><td><code>news [ticker] [n]</code></td><td>Verified headlines, 72h window.</td></tr>
+<tr><td><code>signals [ticker]</code> · <code>reports</code></td><td>Active signals; recent AI reports.</td></tr>
+<tr><td><code>vs &lt;a&gt; &lt;b&gt;</code> · <code>corr &lt;a&gt; &lt;b&gt;</code> · <code>diverge &lt;ticker&gt;</code></td><td>Side-by-side field compare; correlation and hedge β over 90 days; a name against its benchmark — is it decoupling.</td></tr>
+<tr><td><code>comp &lt;a&gt; &lt;b&gt; …</code></td><td>Overlay N names rebased to 100 (opens COMP/G on the Correlation tab). Baskets welcome; BTC may join a stock set.</td></tr>
+<tr><td><code>ratio &lt;A&gt;/&lt;B&gt; [1h|4h|12h|1d]</code></td><td>Synthetic pair candles with an honest EMA200: <code>ratio MAG7/EWZ 4h</code>, <code>ratio NVDA/BTC</code>.</td></tr>
+<tr><td><code>basket create|list|drop</code></td><td>Custom equal-weight baskets: <code>basket create MAG7 AAPL MSFT …</code>. Visual layer only. Operator-gated by default.</td></tr>
+<tr><td><code>report &lt;ticker&gt;</code> · <code>report sector &lt;name&gt;</code> · <code>report basket &lt;t&gt; &lt;t&gt; …</code></td><td>Open or generate the AI analyst report on a name, a GICS sector, or a custom basket (2–12 live equities).</td></tr>
+<tr><td><code>fund &lt;ticker&gt;</code> · <code>etf &lt;symbol&gt;</code> · <code>holds &lt;ticker&gt;</code></td><td>Latest SEC-filed balance sheet and income facts (XBRL, on demand); ETF composition from the latest N-PORT (30–60 day lag); who holds a name from the market-wide index.</td></tr>
+<tr><td><code>whale [KEY [full] | season]</code></td><td>Tracked 13F funds; one fund's book; the quarter summary.</td></tr>
+<tr><td><code>insiders</code> · <code>congress</code></td><td>Form 4 and PTR lane status.</td></tr>
+<tr><td><code>stocks</code> · <code>crypto</code></td><td>Flip the scope.</td></tr>
+<tr><td><code>help</code> · <code>clear</code></td><td>The verb card; clear the scrollback.</td></tr>
+<tr><td><code>admin …</code></td><td>Operator verbs (unlock, lock, reset-reports, lane maintenance). Password echoes are redacted.</td></tr>
+</table></div>
+<h4>Fields and aliases</h4>
+<p>Canonical fields: <code>funding fundpct oi doi squeeze momentum vstape carry beta dd ddy vol vol30 d1 d7 d30 h1 h4 rvol gap prem adr vsvwap vsma200 vsyopen vsmopen yopen mopen turn dcap hitr rs sector price</code>. Plain-English aliases resolve to them — <code>apr</code>, <code>rate</code> → funding; <code>sqz</code> → squeeze; <code>mom</code> → momentum; <code>week</code>, <code>7d</code> → d7; <code>month</code>, <code>30d</code> → d30; <code>ytd</code> → vsyopen; <code>premium</code>, <code>basis</code> → prem; <code>relvol</code> → rvol; <code>volatility</code> → vol30; <code>downcap</code> → dcap; <code>hitrate</code> → hitr; <code>fromhigh</code> → dd; <code>spx</code>, <code>vssp</code> → rs; <code>oivol</code> → turn.</p>
+<h4>Plain English</h4>
+<p>"who reports tomorrow", "best sector this week", "whats above the 200dma", "nvda vs amd", "most crowded shorts", "hows the tape" — a translation layer maps common questions onto the grammar first (the translation is echoed as <code>→ screen vsma200&gt;0</code>), and only what still cannot parse goes to the model. The AI leg is metered: the <b>ask</b> budget chip shows the group's remaining daily calls (<code>ASK_MAX_PER_DAY</code>, resets midnight UTC), each member has a daily cap, and the 🔒 chip means AI generation is locked until an operator runs <code>admin unlock</code>.</p>
+</section>
+
+<!-- ================================================================================ -->
+<section id="chat-commands" data-feature="dm">
+<h2>9. The chat terminal — commands in a conversation</h2>
+<p>Type <code>/</code> and a verb in any conversation's composer — <code>/top funding 5</code>, <code>/nvda</code>, <code>/screen rvol&gt;2</code>, <code>/earnings today</code> — and the result posts into the thread under your name as a monospace block badged <b>computed</b>, so a group reads one table instead of six people opening the panel. One code path: the same handlers the terminal runs, against the same rows.</p>
+<ul>
+  <li><code>/help</code> is a private card only you see; <code>/clear</code> forgets your private lines; <code>//text</code> sends a message that really starts with a slash; the <b>?</b> beside the composer opens the full guide; <kbd>Tab</kbd> completes.</li>
+  <li><code>/ratio A/B [tf]</code> is the one verb that posts a <b>picture</b>: the Correlation tab's SVG rasterised to a PNG, riding the ordinary attachment path.</li>
+  <li>Verbs that open a view or change state (<code>comp</code>, <code>report</code>, <code>basket</code>, <code>whale add</code>, <code>admin …</code>) are refused with a pointer to the panel. A command result carries no price stamp and cannot be edited — delete it and run it again.</li>
+  <li>Two operator switches in Admin › Features: <b>dm.terminal</b> (the local grammar, public by default) and <b>dm.ask</b> (the AI fallback in chat, operator-only by default because it spends the shared budget and the answer lands where everyone reads it). The server enforces both on the post and on the ask.</li>
+</ul>
+</section>
+
+<!-- ================================================================================ -->
+<section id="alerts">
+<h2>10. Alerts — the bell, rules, Telegram, push, schedules</h2>
+<p>The poller owns <b>one sequenced, persisted event stream</b>. Every transport — the in-tab toasts, the bell panel, Telegram, browser push — is a thin consumer with its own eligibility filter, so a channel's thresholds can never censor the record of what fired. Events are announced once per claim and per fire; a rebuild or a redeploy re-announces nothing.</p>
+<h3>The bell panel</h3>
+<div class="tw"><table>
+<tr><th>Section</th><th>What it holds</th></tr>
+<tr><td>Trigger alerts</td><td><b>Alert on new triggers</b> — a new CONFIRMED row on the Actionable board. Thresholds <b>EV ≥</b> (expectancy in R), <b>R:R ≥</b> (frozen at fire) and <b>late ≤</b> (how far the setup already ran from its fire, in its own risk unit), the class filter (<b>2:1+ setups</b> vs <b>positive-EV grinders</b>), and per-name mutes. One control writes both the in-tab filter and your Telegram recipients' thresholds. Defaults off.</td></tr>
+<tr><td>Rules</td><td>Metric rules, private to you, <b>evaluated server-side against the exact snapshot the board renders</b>, firing with no tab open. Ticker (blank = any market) · metric · <code>&gt;</code> / <code>&lt;</code> · threshold. Edge-triggered with an arm band and a 30-minute cooldown per rule×coin; 60 rules per person. A few metrics (squeeze, momentum, beta) are derived in the browser against your analysis window and so exist as <i>this browser only</i> rules that never reach Telegram.</td></tr>
+<tr><td>Delivery</td><td>Your Telegram recipients (below) and browser push.</td></tr>
+<tr><td>Recent</td><td>The server-held ring — survives a refresh, a closed tab, a redeploy. Tags: <b>SETUP</b>, <b>RES</b> / <b>VOID</b> / <b>TGT</b> (ledger), rule, trend, filing, earnings, macro, ai, regime, coverage, ops. Consecutive identical rows collapse with a count. <i>Clear</i> hides what is listed for this browser only; <i>Mark all read</i> moves the unread watermark.</td></tr>
+</table></div>
+<h4>Server-side rule metrics</h4>
+<p><code>price</code> · <code>1h %</code> · <code>4h %</code> · <code>1d %</code> · <code>7d %</code> · <code>30d %</code> · <code>funding APR %</code> · <code>funding percentile</code> · <code>premium (bp)</code> · <code>24h volume</code> · <code>open interest</code> · <code>relative volume</code> · <code>24h liquidations</code> · <code>ΔOI 1h/4h/1d/7d/30d %</code> · <code>funding 1d/7d avg APR %</code>. Thresholds in the metric's unit (5 for 5%, 50 for 50M).</p>
+
+<h3>Alert classes</h3>
+<div class="tw"><table>
+<tr><th>Class</th><th>Fires when</th><th>Default</th></tr>
+<tr><td>setup</td><td>A claim newly reaches the Actionable CONFIRMED board, filtered by your EV / R:R / lateness / class / mute settings.</td><td>on</td></tr>
+<tr><td>ledger</td><td>An announced claim's void is taken, its target reached, or its horizon resolves. One class; the message says which. Only the void hit toasts in the browser.</td><td>on</td></tr>
+<tr><td>rule</td><td>One of your metric rules crosses its threshold.</td><td>on</td></tr>
+<tr><td>trend</td><td>Trend-board state changes: new 4/4 stacks, new retests. Scanned every 5 minutes; a full pass seeds state before anything fires.</td><td>opt-in</td></tr>
+<tr><td>ma200</td><td>A daily-close cross of the 200-day moving average.</td><td>opt-in</td></tr>
+<tr><td>filing</td><td>A material EDGAR filing on a roster name (8-K, 10-K, 10-Q, SC 13D, 6-K, 425), ≤6h fresh.</td><td>opt-in</td></tr>
+<tr><td>earnings</td><td>A name with an open, announced claim reports today or tomorrow. One per ticker per report date.</td><td>opt-in</td></tr>
+<tr><td>macro</td><td>The universe-wide calendar: day-ahead, imminent and result for FOMC and the six FRED prints. No ticker, by design.</td><td>opt-in</td></tr>
+<tr><td>ai</td><td>A regenerated report's action stance flips vs the cached one.</td><td>opt-in</td></tr>
+<tr><td>regime</td><td>Net crowding beyond ±35 across percentile-carrying names, or aggregate OI stretch ≥2σ of its own 60 days. One episode, one alert; re-arms only when the condition lapses.</td><td>opt-in</td></tr>
+<tr><td>coverage</td><td>A data source goes stale or degraded.</td><td>opt-in</td></tr>
+<tr><td>congress</td><td>A new congressional disclosure naming a roster ticker.</td><td>opt-in</td></tr>
+<tr><td>ops</td><td>The server telling on itself: deploys, poller stalls, degraded feeds. Operator-only, enforced in delivery and in the feed.</td><td>on (operators)</td></tr>
+</table></div>
+<p>Recipients with no selection get the frozen default set; every class added later is opt-in, shown in the panel with its measured fires per day.</p>
+
+<h3>Telegram</h3>
+<ol>
+  <li>Open the bell → <b>Delivery</b> → <b>link</b>. The panel mints a single-use code (10 minutes) bound to your account.</li>
+  <li>Send <code>/start CODE</code> to the deployment's bot. Reply: <i>Linked.</i></li>
+  <li>Pick classes, set <b>quiet hours</b> (a local range like <code>23-7</code>; your browser supplies the offset), and the scheduled sends below. <b>test</b> sends a probe.</li>
+</ol>
+<p>Bot commands: <code>/start CODE</code> link · <code>/stop</code> unlink (always works — control of the Telegram account outranks any cookie) · <code>/status</code> or <code>/help</code> · <code>/r message</code> and <code>/r @handle message</code> reply into Messages. Delivery is paced (1 message / 3s, 20 per recipient per hour — held, not dropped, and disclosed), with Telegram's own errors surfaced verbatim in the panel log. The whole transport is dormant without <code>TG_BOT_TOKEN</code>.</p>
+
+<h3 id="schedules">Scheduled sends</h3>
+<div class="tw"><table>
+<tr><th>Send</th><th>What it is</th><th>Default</th></tr>
+<tr><td>Morning brief</td><td>Indices, movers, sectors, regime, positioning, earnings, macro and the day's headlines, with two written sections. AI-written, and its claims are validated against the server's own numbers.</td><td>10:00 UTC daily (<code>BRIEF_DEFAULT_HOUR</code>), per recipient hour/days</td></tr>
+<tr><td>The Landscape</td><td>Written market commentary built from the headline corpus — which stories are the same story, and what hasn't been repriced. Interpretation, not measurement; it cites the headlines it rests on.</td><td>11:00 UTC Mon/Wed/Fri</td></tr>
+<tr><td>Desk digest</td><td>Deterministic and per member (no model call): your own calls and how they are scoring, today's earnings for the universe, live signals and the tape's 24h extremes.</td><td>off until you pick an hour</td></tr>
+</table></div>
+<p>Each recipient sets the hour (local) and the days (<code>all</code>, <code>weekdays</code>, <code>mon,wed,fri</code> or <code>MWF</code>) per send.</p>
+
+<h3>Browser push</h3>
+<p><b>Browser notifications</b> in the bell shows setups and void hits as system notifications while a tab is open. Enabling notifications in the <b>Messages rail</b> adds web-push for unread messages with the tab closed (same 5-minute grace, mute and mention-piercing rules as Telegram). VAPID keys are minted once on the volume.</p>
+</section>
+
+<!-- ================================================================================ -->
+<section id="signals-reference">
+<h2>11. Signals reference — the engine</h2>
+<p>How a condition becomes a card, a claim, a record and an alert. The full per-event reference with every threshold, stamp and knob is a separate page: <a href="/docs/ref/signals">Signal, study &amp; shadow reference</a>.</p>
+<h3>Pipeline in one pass</h3>
+<pre>data (hourly spine · daily · funding · OI · Coinalyze · Finnhub earnings · EDGAR)
+  ↓ studies      in-sample base rates, per market per event, memoized to the data version
+  ↓ signals      live surveillance: condition fires → intensity 0–50 + evidence 0–50
+  ↓ ledger       claim frozen at fire: mark · side · void · target · 30d σ · context stamp
+  ↓ gates        episode re-arm · universe whitelist · geometry (no inverted or degenerate levels)
+  ↓ resolve      at horizon: realized (play-signed) + stop-aware track + bracket track
+  ↓ records      blend back into evidence · no-edge cap · earned confluence · variant promotion
+  ↓ surfaces     Signals cards · Actionable board · drawer record · ticker history · AI report
+  ↓ stream       one sequenced event log → browser toast / bell · Telegram · push</pre>
+<h3>Scoring</h3>
+<ul>
+  <li><b>Evidence is expectancy-centred</b>: an event whose average outcome is ≤0 scores 0 evidence and wears <i>neg exp</i>, however loud the condition. Otherwise min(1, avg/scale)·30 + max(0, hit−0.5)·2·20, with scale = 0.5R for R-united events and 0.8% for %-united ones.</li>
+  <li><b>Source</b>: the market's own study if n ≥ 8; else the asset-class pool if n ≥ 12 at a 0.7 discount (<i>unproven</i>); else a token 6–8 points. Crypto pools in its own bucket.</li>
+  <li><b>Live blend</b>: once an event has ≥5 live resolutions, stats blend study and live record with weight resolved/(resolved+25). <b>No-live-edge cap</b>: ≥10 resolved, hit &lt;50%, median ≤0 → evidence capped at 8.</li>
+  <li><b>Universe lanes</b>: 40 signals per universe, so a volatile crypto day cannot evict the equity board.</li>
+</ul>
+<h3>Ledger mechanics</h3>
+<ul>
+  <li><b>Frozen geometry</b> — at fire: entry mark, play side, void level, target (absolute), 30-day daily σ for R normalization, score and prime flag. Never re-derived, never moved.</li>
+  <li><b>Episode re-arm</b> — if a claim resolves while its condition still fires, no new claim opens until the condition lapses for a full build. One episode, one claim.</li>
+  <li><b>Units</b> — premium in bp; the R-united set (big move, breakout, breakdown, funding flip, vol shift, OI flush, funding–price divergence, the shadows, cascade, funding extreme) in R via σ; everything else in %. Crypto levels are built in log space so σ constructions cannot produce negative prices.</li>
+  <li><b>Context stamp</b> — funding and its percentile, 5d OI change, position in the 30d range, the benchmark's 24h move, session or hour-of-day bucket, day of week — so records can be sliced later. Absent means unknown, never null-padded.</li>
+  <li><b>Persistence</b> — <code>ledger.json</code> plus an append-only archive on trim; optional weekly off-site backup to a GitHub repo.</li>
+</ul>
+<h3>Event roster</h3>
+<div class="tw"><table>
+<tr><th>Event</th><th>Fires when</th><th>Play · horizon · unit</th><th>Universe</th></tr>
+<tr><td>Big move <code>bigmove</code></td><td>Today's move ≥ 2σ of the market's own trailing 30d daily returns (variants 1.5 / 2 / 2.5).</td><td>Continuation; 1d (crypto 12h); R. Stop 1σ against the move.</td><td>both</td></tr>
+<tr><td>30d-high breakout <code>breakout</code></td><td>First close/mark above the prior 30-day high.</td><td>Long; 5d (2d); R. Stop = the breakout level.</td><td>both</td></tr>
+<tr><td>30d-low breakdown <code>breakdown</code></td><td>Close below the prior 30-day low.</td><td>Short; 5d (2d); R.</td><td>both</td></tr>
+<tr><td>Outsized gap <code>gap</code></td><td>Live close→open move ≥0.75σ of the name's own gap distribution, while the cash market is closed.</td><td>Continue, or <i>fade</i> when the name's proven record fades its gaps; resolves at the next session close; %.</td><td>stocks</td></tr>
+<tr><td>Funding flip <code>fundflip</code></td><td>Day-summed funding changed sign after ≥3 days pinned the other way.</td><td>Side of the new crowd; 3d (2d); R. Stop 1σ.</td><td>both</td></tr>
+<tr><td>Squeeze setup <code>squeeze</code></td><td>Composite ≥60: crowded shorts × OI building × price pressing the range highs.</td><td>Long; 3d; %. Target = hi30 + 0.382 × range; stop = lo30 + 0.25 × range.</td><td>stocks</td></tr>
+<tr><td>Long unwind <code>unwind</code></td><td>Mirror composite ≥60: crowded longs × OI building × price near range lows.</td><td>Short; 3d; %.</td><td>stocks</td></tr>
+<tr><td>OI flush <code>oiflush</code></td><td>7d ΔOI collapsed below −2σ of its own distribution while price fell — forced deleveraging exhausting itself.</td><td>Long; 5d (2d); R.</td><td>both</td></tr>
+<tr><td>Funding–price divergence <code>fpdiv</code></td><td>7d price z-score diverging from the funding trajectory (|z| ≥ ~0.8σ).</td><td>Divergence side; 3d (2d); R.</td><td>both</td></tr>
+<tr><td>Premium dislocation <code>prem</code></td><td>Perp vs oracle |z| ≥ 2σ of its own 7d premium baseline.</td><td>Revert to the oracle; 12h; bp. No stop.</td><td>stocks</td></tr>
+<tr><td>Overnight drift <code>ondrift</code></td><td>The name's summed off-hours drift over ~21 windows, z-scored across the universe, |z| ≥ 2 and |drift| ≥ 1%.</td><td>Drift side over the next 5 overnight windows; %. No target, no stop.</td><td>stocks</td></tr>
+<tr><td>Trend retest <code>tretest</code> / <code>tretestdn</code></td><td>The Trend board's RETEST badge on a board-visible row (≥3/4, top 10).</td><td>Long / short; 5d (3d); %. Void = the rung's EMA21, target = prior swing.</td><td>both</td></tr>
+<tr><td>Cascade exhaustion <code>casc</code></td><td>A ≥3σ liquidation spike with OI falling, aged 1–24h, mark between the flush extreme and the pre-cascade level.</td><td>Fade the flush; 12h; R. Void = flush extreme, target = pre-cascade close.</td><td>crypto</td></tr>
+<tr><td>Funding extreme <code>fundext</code></td><td>Funding at the 90th+/10th− percentile of its own 31 days, same sign for 24h.</td><td>Fade the crowd; 2d; R. Target = geometric mid of the 30d range.</td><td>crypto</td></tr>
+<tr><td colspan="4" class="sec">Context flags that render but never ledger: <b>vol expansion</b> (10d realized vol above its 90th percentile), <b>range compression</b> (bottom decile — feeds confluence on a breakout out of it), <b>volume surge</b> (24h ≥2.5× the 30d norm).</td></tr>
+<tr><td colspan="4" class="sec">Strategy shadows earning a record before any UI: universal gap fade, breakdown reclaim, failed-breakout fade, MA50 pullback, post-earnings drift, 5-minute liquidity sweep, outsized-wick fill, round-figure front-run. Plus <code>airead</code>, the analyst accountability bucket.</td></tr>
+</table></div>
+<h3>Actionable gates</h3>
+<p>Horizon ≥ 3d equity / 2d crypto · ≤ 10 bars in trigger · CONFIRMED needs n ≥ 8, positive average and positive EV here, no no-edge cap · net R/R between 2.0 and 20 · void ≥ 0.05% (plus a σ-relative floor). R/R is repriced from the live mark every build, so a chased setup dies on its own.</p>
+</section>
+
+<!-- ================================================================================ -->
+<section id="data">
+<h2>12. Data sources, cadences, persistence</h2>
+<h3>Sources</h3>
+<div class="tw"><table>
+<tr><th>Source</th><th>Feeds</th><th>Cadence</th><th>Needs</th></tr>
+<tr><td>Hyperliquid REST + WebSocket</td><td>Universe, price, funding, OI, candles (1m for the Focus seats, 5m archive, hourly spine, daily), oracle, wallet positions.</td><td>Universe every 30s (slow reconciliation while the socket is healthy); snapshot rebuilt ~15s; new listings detected within 30s and backfilled first.</td><td>nothing</td></tr>
+<tr><td>Finnhub</td><td>Earnings calendar and EPS actuals, company news, basic financials.</td><td>Calendar ~6h in chunked windows; news every few minutes per name.</td><td><code>FINNHUB_TOKEN</code></td></tr>
+<tr><td>FRED</td><td>Macro release schedule and prints; the Housing and Liquidity boards.</td><td>~6h; Liquidity also after the Thursday H.4.1 release.</td><td><code>FRED_KEY</code></td></tr>
+<tr><td>Federal Reserve schedule</td><td>FOMC dates (a static table extended when the Fed publishes the next year).</td><td>—</td><td>nothing</td></tr>
+<tr><td>SEC EDGAR</td><td>Filings feed, Form 4 insiders, 13F and N-PORT holdings, XBRL facts.</td><td>Rotation ~2 names/minute; full pass ~40 minutes.</td><td><code>SEC_CONTACT</code> (their fair-access policy)</td></tr>
+<tr><td>House Clerk</td><td>Congressional PTRs.</td><td>Ingest lane; OCR for scanned PDFs.</td><td>nothing</td></tr>
+<tr><td>Coinalyze</td><td>Aggregated CEX liquidations and OI for crypto names.</td><td>15-minute buckets.</td><td><code>COINALYZE_API_KEY</code></td></tr>
+<tr><td>Telegram</td><td>Alert delivery, DM escalation, reset codes, news channels.</td><td>Inbound poll every 20s; outbox drained every 1s.</td><td><code>TG_BOT_TOKEN</code></td></tr>
+<tr><td>X (oEmbed)</td><td>Tweet cards in Messages.</td><td>On link, cached per id.</td><td>nothing</td></tr>
+<tr><td>Anthropic / OpenAI</td><td>Reports, the ask fallback, the brief, the Landscape, the news/sector classifier.</td><td>On demand and scheduled.</td><td><code>ANTHROPIC_API_KEY</code> or <code>OPENAI_API_KEY</code></td></tr>
+</table></div>
+<h3>Retention</h3>
+<ul>
+  <li><b>Open interest</b> — append-only log, 365 days: full resolution for 31, thinned to hourly beyond (the crypto roster keeps a flat 31); pruned daily. OI accrues and cannot be re-fetched, so this is the one series a lost volume actually loses.</li>
+  <li><b>Candles</b> — a SQLite archive: 5-minute bars for ~20 days, the hourly spine for ~180 days, daily bars back to each listing's birth. Only spines that went stale while the server was down are re-fetched after a redeploy.</li>
+  <li><b>Funding history</b> — seeded from the OI samples and topped up by a best-effort backfill; the heatmap hatches what it cannot see.</li>
+  <li><b>News</b> 72h · <b>messages</b> 30d in a 1-to-1, 7d in groups (pins exempt) · <b>ledger</b> trimmed to an archive, never deleted.</li>
+</ul>
+<h3>What lives on the volume</h3>
+<p><code>DATA_DIR</code> (mount it at <code>/data</code>). Every JSON file is written atomically (temp file, then rename) and warm-loaded on boot.</p>
+<div class="tw"><table>
+<tr><th>File</th><th>Holds</th></tr>
+<tr><td><code>oi.log</code></td><td>The open-interest sample log.</td></tr>
+<tr><td><code>candles.db</code></td><td>The candle archive (5m, hourly, daily).</td></tr>
+<tr><td><code>accounts.db</code></td><td>Members, invites, sessions' epochs, messages, threads, attachments, reactions, preferences, wallets, audit log. Rotated backups in <code>backups/</code> (or <code>ACCOUNTS_BACKUP_DIR</code>).</td></tr>
+<tr><td><code>hourly.json</code> · <code>regime.json</code></td><td>The computed feature cache and the regime state, so a redeploy serves a warm table.</td></tr>
+<tr><td><code>ledger.json</code> · <code>ledger-archive.jsonl</code></td><td>The signal ledger and its trimmed archive.</td></tr>
+<tr><td><code>earnings.json</code> · <code>macro.json</code></td><td>Earnings prints and history; the macro calendar cache.</td></tr>
+<tr><td><code>housing.json</code> · <code>liquidity.json</code></td><td>The FRED boards.</td></tr>
+<tr><td><code>news.json</code> · <code>tgchannels.json</code></td><td>The news cache; the Telegram channel configuration (its own file so a trimmed cache can never lose it).</td></tr>
+<tr><td><code>fundamentals.json</code></td><td>Finnhub basic financials cache.</td></tr>
+<tr><td><code>triggers.json</code> · <code>alertpush.json</code> · <code>alertrules.json</code></td><td>The event ring and announced set; Telegram recipients and their prefs; server-side metric rules.</td></tr>
+<tr><td><code>features.json</code> · <code>navgroups.json</code> · <code>flags.json</code></td><td>Feature visibility, nav menus, runtime flags.</td></tr>
+<tr><td><code>baskets.json</code> · <code>notes.json</code> · <code>focus.json</code> · <code>whale.json</code></td><td>Custom baskets; notes; the frozen Focus stamps and floors; the 13F watchlist.</td></tr>
+<tr><td><code>whale13f.db</code> · <code>insiders.db</code> · <code>congress.db</code></td><td>13F/N-PORT holdings; Form 4 transactions; PTR trades.</td></tr>
+<tr><td><code>derivs.log</code> · <code>derivmap.json</code></td><td>Coinalyze samples and the venue map.</td></tr>
+<tr><td><code>duel.json</code> · <code>sector-audit.json</code></td><td>The Score duel record; the classification audit overlays.</td></tr>
+<tr><td><code>ai-reports.json</code></td><td>Cached reports and the AI budget state.</td></tr>
+<tr><td><code>webpush-keys.json</code> · <code>loop-history.json</code> · <code>volume-heartbeat.json</code></td><td>VAPID keys; the event-loop p99 ring; a heartbeat that proves the volume is writable.</td></tr>
+</table></div>
+</section>
+
+<!-- ================================================================================ -->
+<section id="api">
+<h2>13. HTTP API</h2>
+<p>All JSON, under <code>/api</code>. Reads accept the session cookie or HTTP Basic; writes additionally refuse cross-site requests. Feature-gated routes return <code>403 {error:"feature-gated"}</code> when the tab that owns them is closed to you; a signed-out call is <code>401</code>. Cached payloads carry an ETag; the SSE stream tells a client when to re-fetch.</p>
+<div class="tw"><table>
+<tr><th>Route</th><th>Returns</th></tr>
+<tr><td><code>GET /api/health</code></td><td>Liveness, build, poll and feed timestamps, event-loop stats, the CSP report ledger (signed in). Open, no credential.</td></tr>
+<tr><td><code>GET /api/snapshot</code></td><td>The market table for both universes: price, funding, %-changes, reference prices, momentum, vol, OI deltas, note digests, earnings badges.</td></tr>
+<tr><td><code>GET /api/daily</code></td><td>Daily closes per market (correlation, beta, sparklines, backtest).</td></tr>
+<tr><td><code>GET /api/series?coin=</code> · <code>GET /api/candles?coin=&amp;days=</code></td><td>Per-market OI/funding history; hourly OHLCV (1–60 days).</td></tr>
+<tr><td><code>GET /api/events</code></td><td>The Server-Sent Events stream: data versions, alert sequence, DM sequence, prefs and position pokes.</td></tr>
+<tr><td><code>GET /api/analytics</code> · <code>/api/funding</code> · <code>/api/trend</code> · <code>/api/corr-crypto</code></td><td>The session studies; the funding heatmap; the EMA ladder; the crypto intraday correlation grid.</td></tr>
+<tr><td><code>GET /api/signals</code> · <code>/api/ledger</code> · <code>/api/triggers?since=</code> · <code>/api/actionable</code> · <code>/api/duel</code></td><td>Live signals; the claim ledger and records; the event stream (cursor-based); the Actionable board; the Score duel.</td></tr>
+<tr><td><code>GET /api/export/ledger</code></td><td>The ledger as CSV.</td></tr>
+<tr><td><code>GET /api/earnings</code> · <code>POST /api/earnings/void</code> · <code>POST /api/earnings/backfill</code></td><td>The calendar (upcoming + reported + reaction study); void a print (operator); run the backfill (operator).</td></tr>
+<tr><td><code>GET /api/news</code> · <code>GET|POST /api/news/channels</code></td><td>The tape; the Telegram channel list (write is operator).</td></tr>
+<tr><td><code>GET /api/housing</code> · <code>/api/liquidity</code></td><td>The FRED boards.</td></tr>
+<tr><td><code>GET /api/focus</code> · <code>GET|POST /api/focus/limits</code></td><td>Today's frozen list; the liquidity floors (operator).</td></tr>
+<tr><td><code>GET /api/whale</code> · <code>POST /api/whale/watch</code> · <code>GET /api/fund/:t</code> · <code>GET /api/etf/:t</code></td><td>13F watchlist, fund books and season; curate (operator); XBRL facts; N-PORT composition.</td></tr>
+<tr><td><code>GET|POST /api/congress</code> · <code>GET|POST /api/insiders</code></td><td>The lanes; POST is operator maintenance.</td></tr>
+<tr><td><code>GET /api/fundamentals</code> · <code>GET /api/derivs</code> · <code>POST /api/derivs/refresh</code></td><td>Finnhub financials; Coinalyze context; force a refresh (operator).</td></tr>
+<tr><td><code>GET|POST /api/notes</code></td><td>Notes (write needs <i>notes.write</i>).</td></tr>
+<tr><td><code>GET|POST /api/baskets</code> · <code>GET /api/ratio</code></td><td>Custom baskets; pair candles.</td></tr>
+<tr><td><code>GET /api/sector-audit</code> · <code>POST …/run|apply|revert|ack</code></td><td>The classification audit (operator).</td></tr>
+<tr><td><code>GET /api/ai-report?coin=</code> · <code>POST /api/ai-report</code> · <code>GET /api/ai-reports</code> · <code>GET /api/ai-status</code> · <code>GET /api/ai-sectors</code></td><td>Read a cached report; generate (metered); recent reports; budget and lock state; sector list for group reports.</td></tr>
+<tr><td><code>POST /api/ask</code></td><td>The terminal's AI fallback (metered).</td></tr>
+<tr><td><code>POST /api/ai-unlock</code> · <code>/api/ai-lock</code> · <code>/api/ai-reset</code></td><td>Operator: unlock unlimited AI for this caller, re-lock, reset the daily budget.</td></tr>
+<tr><td><code>GET /api/alerts</code> · <code>POST /api/alerts/link|claim|unlink|adopt|prefs|classes|test|brief-test</code> · <code>GET|POST /api/alerts/rules</code> · <code>GET /api/alerts/adoptable</code></td><td>Telegram recipients and everything in the bell panel.</td></tr>
+<tr><td><code>GET /api/dm</code> · <code>/api/dm/sync?since=</code> · <code>/api/dm/:id</code> · <code>/api/dm/search</code> · <code>/api/dm/calls</code> · <code>/api/dm/export/:id</code> · <code>/api/dm/file/:id</code> · <code>POST /api/dm</code> · <code>/api/dm/upload</code> · <code>/api/dm/push-sub</code> · <code>GET /api/dm/push-key</code></td><td>Messages: thread list, cursor sync, history, search, the calls record, export, attachments, every write verb, web-push subscription.</td></tr>
+<tr><td><code>POST /api/dm/request-invite</code></td><td>The signed-out invite request (1 per IP per hour).</td></tr>
+<tr><td><code>GET|POST /api/prefs</code> · <code>GET|POST /api/positions</code></td><td>Account-synced watchlist and layouts; the linked wallet and its positions.</td></tr>
+<tr><td><code>GET|POST /api/account</code> · <code>GET|POST /api/access</code> · <code>GET /api/access/dm</code> · <code>/api/access/dm/:id</code> · <code>/api/access/dm/search</code> · <code>/api/access/dm/audit</code></td><td>Your own account; the operator's access panel; the read-through and its audit log (operator).</td></tr>
+<tr><td><code>GET|POST /api/features</code> · <code>POST /api/nav-groups</code></td><td>Feature visibility and nav menus (operator).</td></tr>
+<tr><td><code>POST /api/csp-report</code></td><td>Browser CSP violation reports (open).</td></tr>
+<tr><td><code>/login</code> · <code>/logout</code> · <code>/join[/:code]</code> · <code>/claim</code> · <code>/bootstrap</code> · <code>/reset</code> · <code>/reset/code</code></td><td>The doors (HTML pages and their POSTs).</td></tr>
+<tr><td><code>/docs</code> · <code>/docs/ref/:page</code></td><td>This manual and the reference pages.</td></tr>
+<tr><td><code>/manifest.webmanifest</code> · <code>/icon.svg</code> · <code>/sw.js</code></td><td>PWA assets.</td></tr>
+</table></div>
+</section>
+
+<!-- ================================================================================ -->
+<section id="config">
+<h2>14. Configuration — environment variables</h2>
+<p>Every variable the server reads. The value shown is the default when unset. Nothing reads a <code>.env</code> file automatically; on Railway set them on the service.</p>
+<h3>Storage and runtime</h3>
+<div class="tw"><table>
+<tr><th>Variable</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>DATA_DIR</code></td><td><code>./data</code></td><td>The mounted volume. Unset on Railway means an ephemeral directory inside the container — history resets on every redeploy.</td></tr>
+<tr><td><code>ACCOUNTS_BACKUP_DIR</code></td><td><code>&lt;DATA_DIR&gt;/backups</code></td><td>Where the rotated <code>accounts.db</code> copies go.</td></tr>
+<tr><td><code>PORT</code></td><td><code>3000</code></td><td>Listen port. Railway injects it; do not set it there.</td></tr>
+<tr><td><code>DEX</code></td><td><code>xyz</code></td><td>The HIP-3 dex whose universe the equities lane polls.</td></tr>
+<tr><td><code>CRYPTO</code></td><td><code>1</code></td><td><code>0</code> disables the crypto universe entirely.</td></tr>
+<tr><td><code>TRUST_PROXY</code></td><td><code>1</code></td><td><code>1</code> = exactly one trusted edge appends the last <code>X-Forwarded-For</code> element (Railway). <code>0</code> when exposed directly, or every caller could pick its own rate-limit key.</td></tr>
+<tr><td><code>PUBLIC_URL</code></td><td>—</td><td>The <code>https://…</code> origin used in push and Telegram links.</td></tr>
+<tr><td><code>CSP_ENFORCE</code></td><td><code>0</code></td><td><code>1</code> enforces the Content-Security-Policy (default report-only; watch the health ledger stay at zero first).</td></tr>
+<tr><td><code>XYZ_QUIET</code> · <code>XYZ_NO_NET</code></td><td>—</td><td>Silence the stdout log; reject every outbound request (tests and offline development).</td></tr>
+</table></div>
+<h3>Access</h3>
+<div class="tw"><table>
+<tr><th>Variable</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>SITE_PASSWORD</code> · <code>SITE_USER</code></td><td>— · <code>friend</code></td><td>The shared door. Unset = the read-only site is open to anyone with the link, and the AI routes and <code>/claim</code> are closed.</td></tr>
+<tr><td><code>LEGACY_SHARED_PASSWORD</code></td><td><code>1</code></td><td><code>0</code> once everyone has an account: closes the shared door for good.</td></tr>
+<tr><td><code>SESSION_SECRET</code> · <code>SESSION_DAYS</code></td><td>derived · <code>30</code></td><td>HMAC key for legacy sessions (derived from the accounts secret when unset); session lifetime.</td></tr>
+<tr><td><code>ADMIN_PASSWORD</code> · <code>ADMIN_DAYS</code></td><td>— · <code>30</code></td><td>Break-glass operator login and <code>admin unlock</code>; the admin cookie lifetime. Unset = no admin surface at all, and every operator-only feature is closed to everyone (said out loud at boot).</td></tr>
+<tr><td><code>DM_ESCALATE_MS</code></td><td><code>300000</code></td><td>How long a message sits unread before it escalates to Telegram / push.</td></tr>
+</table></div>
+<h3>Data sources</h3>
+<div class="tw"><table>
+<tr><th>Variable</th><th>Meaning</th></tr>
+<tr><td><code>SEC_CONTACT</code></td><td>Goes in the SEC user-agent; their fair-access policy wants a real contact.</td></tr>
+<tr><td><code>FINNHUB_TOKEN</code></td><td>Earnings calendar, company news, fundamentals. Without it the app runs, the Calendar tab explains what is missing and no E badges render.</td></tr>
+<tr><td><code>FRED_KEY</code></td><td>Macro prints, Housing, Liquidity. Without it the FOMC rows still serve.</td></tr>
+<tr><td><code>COINALYZE_API_KEY</code></td><td>Crypto liquidation / OI lane.</td></tr>
+<tr><td><code>TG_BOT_TOKEN</code></td><td>Telegram alerts, DM escalation, password-reset codes. Unset = the transport does not exist.</td></tr>
+<tr><td><code>PUSH_VAPID_SUBJECT</code></td><td>Contact sent with web-push VAPID claims (<code>mailto:…</code>).</td></tr>
+<tr><td><code>LEDGER_BACKUP_REPO</code> · <code>LEDGER_BACKUP_TOKEN</code> · <code>LEDGER_BACKUP_BRANCH</code></td><td>Weekly off-site ledger backup through the GitHub contents API (<code>owner/repo</code>, a token with <code>contents:write</code>, falls back to <code>GITHUB_TOKEN</code>; branch <code>main</code>). Off unless both are set.</td></tr>
+</table></div>
+<h3>AI</h3>
+<div class="tw"><table>
+<tr><th>Variable</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>ANTHROPIC_API_KEY</code> · <code>OPENAI_API_KEY</code> · <code>AI_PROVIDER</code></td><td>—</td><td>Either key enables AI; <code>AI_PROVIDER</code> (<code>anthropic</code> | <code>openai</code>) picks when both are set (anthropic by default).</td></tr>
+<tr><td><code>AI_MODEL</code> · <code>AI_MODEL_FALLBACK</code></td><td>per provider</td><td>The report/ask model and the one tried when it errors.</td></tr>
+<tr><td><code>AI_CLASSIFY_MODEL</code> · <code>AI_CLASSIFY_EFFORT</code></td><td>per provider · <code>low</code></td><td>The unattended news/sector classifier and its reasoning effort.</td></tr>
+<tr><td><code>AI_REPORT_EFFORT</code> · <code>AI_ASK_EFFORT</code> · <code>AI_REPORT_TTL_MIN</code></td><td><code>high</code> · <code>medium</code> · <code>30</code></td><td>Reasoning effort per surface; cached report lifetime (minimum 5).</td></tr>
+<tr><td><code>AI_REPORTS_PER_DAY</code> · <code>AI_USER_PER_DAY</code> · <code>AI_USER_PER_MONTH</code></td><td><code>5</code> · <code>3</code> · <code>20</code></td><td>Report budgets: group per day, per user per day and per month (operators exempt). Pools roll at midnight UTC and persist across redeploys.</td></tr>
+<tr><td><code>ASK_MAX_PER_MIN</code> · <code>ASK_MAX_PER_DAY</code> · <code>ASK_USER_PER_DAY</code></td><td><code>12</code> · <code>50</code> · <code>5</code></td><td>Terminal ask budgets.</td></tr>
+<tr><td><code>BRIEF_ENABLED</code> · <code>BRIEF_DEFAULT_HOUR</code> · <code>BRIEF_PER_DAY</code> · <code>BRIEF_EFFORT</code> · <code>BRIEF_MODEL</code> · <code>BRIEF_MODEL_FALLBACK</code> · <code>BRIEF_MAX_TOKENS</code></td><td><code>1</code> · <code>10</code> · <code>6</code> · <code>medium</code> · AI_MODEL · … · <code>12000</code></td><td>The morning brief: on/off, UTC hour, manual regenerations per day, effort, models, token budget.</td></tr>
+<tr><td><code>LANDSCAPE_ENABLED</code> · <code>LANDSCAPE_DEFAULT_HOUR</code> · <code>LANDSCAPE_PER_DAY</code> · <code>LANDSCAPE_EFFORT</code> · <code>LANDSCAPE_MODEL</code> · <code>LANDSCAPE_MODEL_FALLBACK</code> · <code>LANDSCAPE_MAX_TOKENS</code></td><td><code>1</code> · registry default · <code>4</code> · <code>high</code> · BRIEF_MODEL · … · <code>12000</code></td><td>The Landscape commentary.</td></tr>
+</table></div>
+</section>
+
+<!-- ================================================================================ -->
+<section id="deploy">
+<h2>15. Running and deploying</h2>
+<h3>Locally</h3>
+<pre>npm install
+DATA_DIR=./data npm start
+# open http://localhost:3000</pre>
+<p>Node 22.5+ (the built-in WebSocket client and SQLite). On first boot the server backfills candle history for every market — the slow part, once, server-side; the table fills progressively and the status line shows <code>syncing X/Y</code>.</p>
+<h3>Railway</h3>
+<ol>
+  <li>Push the repository to GitHub; <b>New Project → Deploy from GitHub repo</b>. Nixpacks detects Node and runs <code>node server.js</code> from <code>railway.json</code>.</li>
+  <li>Add a <b>volume</b> mounted at <code>/data</code> and set <code>DATA_DIR=/data</code>. Without it every redeploy loses the OI history.</li>
+  <li>Set <code>ADMIN_PASSWORD</code>, then the optional keys above. Do not set <code>PORT</code>.</li>
+  <li><b>Settings → Networking → Generate Domain</b>; set <code>PUBLIC_URL</code> to it so push and Telegram links resolve.</li>
+  <li>Open the domain: the first account is created at <code>/bootstrap</code> with <code>ADMIN_PASSWORD</code>. Mint invites from Admin › Access.</li>
+</ol>
+<p>Keep the service always-on: the whole benefit is the warm cache. Redeploys keep the OI history and candle archive; only stale spines are re-fetched. The build stamp in the status line is how you tell a fresh deploy from a stale one; every asset URL carries it, so a browser can never run last build's client against this build's API.</p>
+<h3>Tests, lint, bench</h3>
+<pre>npm test          # node:test, one file per module and area under test/, in parallel
+npm run test:cov  # the same with Node's coverage table (what CI runs)
+npm run lint      # ESLint flat config: server (CommonJS), client (ES modules), service worker
+npm run bench     # event-loop cost of the poller's synchronous builds on a synthetic 150-market book</pre>
+<p>CI runs <code>npm audit</code>, lint and the covered test suite on every push and pull request. Many tests are <i>pins</i>: they read the source and assert that a convention still holds (every tab has a feature entry and a help entry, every inline script gets a nonce, every level ships from the server), so a change that breaks a contract fails the suite by design.</p>
+<h3>Project layout</h3>
+<pre>server.js            Fastify server: /public, the JSON API, auth, SSE, CSP, the docs routes
+src/hyperliquid.js   REST client + weight-based rate limiter, WebSocket feed, Coinalyze
+src/compute.js       stats and feature extraction, event studies, calendars, the feature manifest
+src/poller.js        every data lane, the snapshot build, the ledger, alerts, Telegram, AI
+src/store.js         persistence on the volume
+src/accounts.js      SQLite: members, invites, messages, prefs, wallets
+src/sectors.js       curated sector / industry / display-name tables
+public/index.html    the app shell · public/docs.html this manual
+public/app.js        client entry; public/js/*.js one ES module per area
+public/styles.css    styles · public/sw.js install-only service worker
+test/                node:test suites · docs/ design notes and reference pages</pre>
+</section>
+
+<!-- ================================================================================ -->
+<section id="security">
+<h2>16. Security model</h2>
+<ul>
+  <li><b>Sessions</b> are stateless HMAC tokens in <code>SameSite=Lax</code>, HttpOnly cookies carrying the account id and a per-user epoch. Bumping the epoch (password reset, disable, sign out everywhere) invalidates one person's sessions only.</li>
+  <li><b>Two gates, in order.</b> The site gate answers 401 to anyone without a session (the login page for pages, JSON for the API). The feature gate, registered last, answers 403 to a route whose owning feature is closed to the caller. Routes no feature claims pass through. The escalation path (health, login, logout, the AI unlock pair, <code>/api/features</code>) can never be closed by a flag write.</li>
+  <li><b>Two locks on every privileged write.</b> The manifest gate decides audience visibility; the handler's own admin check decides authorization; both must pass. Opening a tab to the group can never hand the group its write verbs.</li>
+  <li><b>Cross-site writes</b> are refused before any handler runs when the browser says the request came from another site (<code>Sec-Fetch-Site: cross-site</code>).</li>
+  <li><b>Headers on every response</b>: <code>nosniff</code>, <code>X-Frame-Options: DENY</code>, same-origin referrer, HSTS over HTTPS, and a per-request-nonce <b>Content-Security-Policy</b> (report-only until the operator flips <code>CSP_ENFORCE=1</code>; violations are counted on <code>/api/health</code>).</li>
+  <li><b>Login throttling</b>: eight wrong passwords from one IP lock it for 15 minutes, keyed on the trusted proxy's forwarded address. Reset codes are capped and the reset page never reveals whether a handle exists.</li>
+  <li><b>Invites</b> burn inside one database transaction; codes never reach a Referer header or the history. Attachments are typed by magic-byte sniff and non-image files are served as downloads with a sandboxed CSP. Text a member typed is escaped everywhere it renders, including inside inline scripts (the JSON is HTML-safe).</li>
+  <li><b>Wallets</b> are public addresses; the app reads clearinghouse state and holds no key.</li>
+  <li><b>Operator read-through</b> is a separate, admin-gated, audited surface (see <a href="#tab-admin">Admin</a>), and members are told.</li>
+  <li><b>Rate budgets</b>: a weight-based limiter keeps Hyperliquid calls under the per-IP budget; FRED, Finnhub and EDGAR lanes are paced to their published limits; AI spend is metered per user and per group.</li>
+</ul>
+</section>
+
+<!-- ================================================================================ -->
+<section id="glossary">
+<h2>17. Glossary</h2>
+<dl>
+  <dt>HIP-3 · xyz</dt><dd>Hyperliquid's permissionless perp-deployment standard; <code>xyz</code> is the dex whose synthetic equity, index, FX and commodity perps this monitor covers. The "main dex" is Hyperliquid's native crypto book.</dd>
+  <dt>Perp · mark · oracle</dt><dd>A perpetual future has no expiry; funding payments keep it near the reference price. The <b>mark</b> is the perp's own price; the <b>oracle</b> is the reference (the cash market, frozen near the last print while that market is closed). <b>Prem</b> is the gap between them.</dd>
+  <dt>Funding · APR · carry</dt><dd>The hourly payment between longs and shorts. Shown annualized (×24×365). Positive = longs pay. <b>Carry</b> is window-average funding per unit of realized vol.</dd>
+  <dt>OI · ΔOI · regime tag</dt><dd>Open interest — standing positioning. Its change with price tells one of four stories: longs+, squeeze, shorts+, unwind.</dd>
+  <dt>Window</dt><dd>The selected lookback (1h–30d) every windowed column shares.</dd>
+  <dt>RVOL</dt><dd>Relative volume, clock-hour matched against the prior month.</dd>
+  <dt>vs tape · DownCap · Hit%</dt><dd>Relative strength against the universe median; the share of red-tape moves a name ate; the share of red-tape bars it beat the median.</dd>
+  <dt>Momentum · MOM+</dt><dd>The board's −100…+100 score, and its candidate under adjudication.</dd>
+  <dt>Squeeze · OI/Vol</dt><dd>Short-squeeze susceptibility; standing positioning relative to daily flow.</dd>
+  <dt>Gap · overnight · cash session · home session</dt><dd>The close→open move; the hold from close to open (and Friday to Monday); the open→close hold; the exchange whose clock a foreign-listed name's session follows.</dd>
+  <dt>Signal · claim · ledger · record</dt><dd>An unusual condition; the frozen entry/void/target it was scored against; the store of every claim; the out-of-sample outcome statistics.</dd>
+  <dt>Void · target · R · R:R · EV</dt><dd>The level that invalidates a claim; where it aims; one unit of risk (entry-to-void distance, or 1σ where levels are σ-built); reward-to-risk; expectancy in R.</dd>
+  <dt>Prime · confluence · decay · re-arm</dt><dd>A high-quality signal at fire; same-side agreement across conditions; the fade past horizon; the one-episode-one-claim gate.</dd>
+  <dt>Shadow · variant · promotion</dt><dd>A candidate threshold or strategy ledgering silently; the process by which one replaces the incumbent on out-of-sample evidence.</dd>
+  <dt>Setup · CONFIRMED</dt><dd>An open claim on the Actionable board; one that clears the record and geometry gates and is announced as an alert.</dd>
+  <dt>BMO · AMC · DMH · TBD</dt><dd>Earnings sessions: before the open, after the close, during hours, date known but session not.</dd>
+  <dt>13F · N-PORT · Form 4 · PTR · 8-K</dt><dd>Quarterly institutional holdings; monthly fund holdings; insider transactions; congressional Periodic Transaction Reports; a material-event filing.</dd>
+  <dt>TGA · ON RRP · H.4.1 · SOFR · IORB</dt><dd>The Treasury's account at the Fed; the overnight reverse repo facility; the Fed's weekly balance-sheet release; the overnight funding rate; interest on reserve balances.</dd>
+  <dt>EMA 13/21 · rung · retest</dt><dd>The trend ribbon; one of its four timeframes; a pullback into the ribbon that held.</dd>
+  <dt>Scope · universe · lane</dt><dd>Stocks or crypto; the set of markets in a scope; one server-side data or scan loop.</dd>
+  <dt>Feature key · act · scope key</dt><dd>A tab's visibility switch; a write verb's switch; a per-universe slice of a tab.</dd>
+  <dt>Snapshot · spine · archive</dt><dd>The cached table; the hourly candle series every feature is built on; the SQLite candle store.</dd>
+</dl>
+</section>
+
+<!-- ================================================================================ -->
+<section id="faq">
+<h2>18. Troubleshooting</h2>
+<dl>
+  <dt>The dot is amber and "updated" is minutes old.</dt><dd>The server's poller stalled or Hyperliquid is rate-limiting it; the browser is fine. It recovers on its own; an operator sees the <i>ops</i> alert and the health endpoint.</dd>
+  <dt>A column shows dashes.</dt><dd>Read the hover. Usually: history still backfilling after a deploy (hourly features fill within ~10 minutes), crypto's 31-day retention (long MAs, YTD), a baseline that does not qualify (RVOL on 7d/30d, DownCap under 20 matched bars), or a feed key the deployment lacks.</dd>
+  <dt>A tab I used to see is gone.</dt><dd>The operator changed its visibility, or you flipped to a scope where it has no meaning. Gated tabs are absent, not hidden.</dd>
+  <dt>I see the wrong build / a stale UI.</dt><dd>Compare the <b>build</b> in the status line with the latest delivery. Every asset URL carries the build stamp, so a hard reload always fetches the current client.</dd>
+  <dt>The refresh selector does nothing.</dt><dd>Correct while the status reads <b>push live</b>: updates arrive as the server has them, and the selector only paces the fallback poll.</dd>
+  <dt>No Telegram alerts arrive.</dt><dd>Check the bell's Delivery section: linked, the class enabled, not inside quiet hours, not at the hourly cap (held messages are disclosed). The panel log shows Telegram's own error text. <code>/status</code> to the bot reports what it thinks.</dd>
+  <dt>The regenerate button on a report is disabled.</dt><dd>The report is fresh for everyone; the freshness line counts down to the cooldown, or names the material change that unlocked it. The server enforces the same rule with a 429.</dd>
+  <dt>The AI answered with 🔒 / "budget".</dt><dd>Generation is locked or the group pool for today is spent; an operator can <code>admin unlock</code> or <code>admin reset-reports</code>. Your own daily cap is separate.</dd>
+  <dt>My phone shows different columns than my desktop.</dt><dd>By design: the first phone visit starts from the mobile preset and the <i>active</i> layout is per browser. Saved layouts and the watchlist sync.</dd>
+  <dt>A note or message "moved" after I edited it.</dt><dd>It did not: the timestamp and the price stamp are written once; only the words changed, and the edit is disclosed.</dd>
+  <dt>I lost access after a password reset.</dt><dd>Intended — a reset signs out every other device. Sign in again with the new password.</dd>
+</dl>
+</section>
+
+<!-- ================================================================================ -->
+<section id="reference-pages">
+<h2>19. Further reading</h2>
+<p>Longer reference pages, served from the same site and gated the same way:</p>
+<ul>
+  <li><a href="/docs/ref/signals">Signal, study &amp; shadow reference</a> — every event, threshold, stamp and knob, on four axes: trigger, measurement, display, alert.</li>
+  <li><a href="/docs/ref/features">Feature map</a> — every feature with its scope, audience and the code that owns it.</li>
+  <li><a href="/docs/ref/map">System map</a> — how the lanes, stores and surfaces connect.</li>
+  <li><a href="/docs/ref/mechanics">Mechanics</a> — the computations behind the columns and studies, in detail.</li>
+</ul>
+<p class="sec">The reference pages describe the engine as of the build noted on each; the code and its test pins remain the source of truth. This manual is regenerated with the app and its build stamp is at the top of the page.</p>
+<p class="sec"><b>Not investment advice.</b> Everything here is a description of what the software computes and shows.</p>
+</section>
+
+</main>
+</div>
+<footer class="docfoot">Milst Screener · documentation · served from the same cache that serves the terminal · <a href="/">back to the app</a></footer>
+
+<script>
+(function(){
+  'use strict';
+  var $=function(id){ return document.getElementById(id); };
+  // ---- audience: hide sections about tabs this member cannot see ---------------------------
+  // window.__FLAGS is the caller's resolved feature set, injected by the server exactly as it is
+  // for the shell. null (a static copy, or a deployment that failed to inject) shows everything.
+  var flags=window.__FLAGS;
+  var secs=Array.prototype.slice.call(document.querySelectorAll('main.doc > section'));
+  secs.forEach(function(s){
+    var f=s.getAttribute('data-feature');
+    if(f && flags && typeof flags==='object' && flags[f]===false) s.classList.add('hidden');
+    // Operator-default chip on the heading, from the manifest default carried in the markup.
+    if(s.getAttribute('data-def')==='admin'){
+      var h=s.querySelector('h2,h3'); if(h && !h.querySelector('.chip')){ var c=document.createElement('span'); c.className='chip adm'; c.textContent='operator-only by default'; h.appendChild(c); }
+    }
+  });
+  // ---- contents ----------------------------------------------------------------------------
+  var toc=$('toclist'); var entries=[];
+  var heads=Array.prototype.slice.call(document.querySelectorAll('main.doc h2, main.doc h3'));
+  var curLi=null, curOl=null;
+  heads.forEach(function(h){
+    var sec=h.closest('section'); if(!sec || sec.classList.contains('hidden')) return;
+    var id=sec.id; if(h.tagName==='H3' && h.id) id=h.id;
+    if(h.tagName==='H3' && !h.id && sec.querySelector('h2')) { id=h.id='h-'+id+'-'+(h.textContent.trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,40)); }
+    var a=document.createElement('a'); a.href='#'+id; a.textContent=h.textContent.replace(/operator-only by default$/,'').trim();
+    var li=document.createElement('li'); li.appendChild(a);
+    if(h.tagName==='H2' || !curLi){ toc.appendChild(li); curLi=li; curOl=null; }
+    else { if(!curOl){ curOl=document.createElement('ol'); curLi.appendChild(curOl); } curOl.appendChild(li); }
+    entries.push({id:id, a:a, el:(h.tagName==='H3'&&h.id)?h:sec});
+  });
+  // ---- scrollspy ---------------------------------------------------------------------------
+  var ticking=false;
+  function spy(){ ticking=false; var y=window.scrollY+80, best=null;
+    for(var i=0;i<entries.length;i++){ var e=entries[i]; if(e.el.classList.contains('hidden')) continue; if(e.el.offsetTop<=y) best=e; }
+    entries.forEach(function(e){ e.a.classList.toggle('on', e===best); });
+    if(best && toc.scrollHeight>toc.clientHeight){ var r=best.a.getBoundingClientRect(), t=toc.getBoundingClientRect(); if(r.top<t.top+20||r.bottom>t.bottom-20) best.a.scrollIntoView({block:'center'}); } }
+  window.addEventListener('scroll',function(){ if(!ticking){ ticking=true; requestAnimationFrame(spy); } },{passive:true});
+  spy();
+  // ---- search: hide sections that do not mention the query ---------------------------------
+  var q=$('docq'), nohit=$('nohit');
+  function search(){ var s=(q.value||'').trim().toLowerCase(); var any=false;
+    secs.forEach(function(sec){
+      var f=sec.getAttribute('data-feature');
+      var gated=!!(f && flags && typeof flags==='object' && flags[f]===false);
+      var hit=!s || sec.textContent.toLowerCase().indexOf(s)>=0;
+      sec.classList.toggle('hidden', gated||!hit); if(!gated&&hit) any=true; });
+    entries.forEach(function(e){ var sec=e.el.closest('section'); e.a.parentNode.classList.toggle('hidden', !sec || sec.classList.contains('hidden')); });
+    nohit.classList.toggle('hidden', any); spy(); }
+  var st=null; q.addEventListener('input',function(){ clearTimeout(st); st=setTimeout(search,120); });
+  document.addEventListener('keydown',function(e){
+    if(e.key==='/' && !e.ctrlKey && !e.metaKey && !e.altKey){ var t=e.target; if(t && (t.tagName==='INPUT'||t.tagName==='TEXTAREA')) return; e.preventDefault(); q.focus(); q.select(); }
+    if(e.key==='Escape' && document.activeElement===q){ q.value=''; search(); q.blur(); }
+  });
+  // ---- phone: the contents drawer ------------------------------------------------------------
+  var btn=$('tocbtn'), aside=$('toc');
+  if(btn){ btn.addEventListener('click',function(){ var open=aside.classList.toggle('open'); btn.setAttribute('aria-expanded', open?'true':'false'); });
+    aside.addEventListener('click',function(e){ if(e.target.tagName==='A'){ aside.classList.remove('open'); btn.setAttribute('aria-expanded','false'); } }); }
+  // A hash that points at a hidden (gated) section lands on the top rather than on nothing.
+  try{ var h=location.hash.slice(1); if(h){ var tgt=document.getElementById(h); if(tgt && tgt.closest('section') && tgt.closest('section').classList.contains('hidden')) location.hash=''; } }catch(_){}
+})();
+</script>
+</body>
+</html>
