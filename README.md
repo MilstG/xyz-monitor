@@ -199,6 +199,39 @@ instant, and the per-IP rate limit stops being a per-user problem.
   verb that posts a **picture**: the same SVG the Correlation tab draws is rasterised offscreen and
   rides the ordinary attachment path as a PNG. **Tab** completes verbs, fields and tickers in the
   composer, and the `?` beside it opens the full guide.
+- **Telegram sync** (build 2026.09.21-83) — a `⇄ telegram` box in any conversation's header
+  mirrors THAT conversation to your linked Telegram, both ways: every message posts to your chat
+  as it happens (no five-minute wait, no unread test, being at the terminal changes nothing), and
+  plain text you type at the bot posts into the conversation under your name, marked `tg`. One
+  conversation per member, by construction — a bot chat is a single stream with no way to say
+  which of several threads a bare line was meant for, so ticking the box here unticks it anywhere
+  else, and the bot tells you what it is now syncing. Sync starts from **now**: the backscroll is
+  never replayed into the chat. Your own phone lines are not echoed back; the offline digest
+  stands down for a synced conversation while a phone is reachable (unlinked or blocked, it is the
+  fallback again); a chat inside its quiet hours holds, then catches up with the last ten lines
+  and a count of the rest. The mirror rides the alert outbox (`force`: a conversation you asked
+  for live is not an alert, and the hourly alert cap must not park it), and the cursor is the
+  same `notifiedMsgId` the digest uses, so the two can never deliver a line twice. Edits,
+  deletions and reactions are not mirrored; attachments arrive as their name. Bare text is only
+  accepted from a **private** chat with the bot — a group chat linked with `/start` would post
+  everyone's lines under the one account that linked it. `/r` and `/r @handle` keep working as
+  before.
+- **Chat alerts: `/alert`** (build 2026.09.21-83) — a threshold rule written where it will fire.
+  `/alert NVDA > 200`, `/alert NVDA crosses down 180`, `/alert NVDA above 200ma`, `/alert HOOD d1
+  > 5 big day`, `/alert any rvol > 3`; `/alert list` and `/alert off <id>` manage them; `/alert
+  help` prints the grammar. The rule is the existing owner-scoped engine (same hysteresis,
+  cooldown, per-person cap and persistence as one written in the alerts panel) with one new field:
+  the **conversation it was typed in**. When it fires, the fire posts **there**, under the author's
+  name as a command result — so the whole room sees it, a synced phone mirrors it, and the offline
+  digest nudges the rest — and the event is marked quiet on the alert wire so nobody is told twice.
+  A scan that trips a roster-wide rule on twenty names posts one list, not twenty lines. The
+  same line works at the Telegram bot: bound to the conversation the chat syncs, or a plain
+  personal rule when none is. New metric for the question people actually ask: `vsma200`, the
+  mark's distance to the **200-day SMA** (the snapshot row now carries `ma200`, the same
+  arithmetic as the markets column), so "above the 200-day" and "crosses the 200-day" are rules,
+  with half a percent of hysteresis so a mark sitting on the line does not fire on every wobble.
+  Also fixed here: a persisted rule stored its universe as `""`, and the validator rejected that on
+  the way back in — every coin-scoped and roster-wide rule was silently dropped on every restart.
 - **The calls record** (`/api/dm/calls`) — every price-stamped message in one place, with the move
   since it was sent and a per-person summary. This is what the stamp was FOR: without somewhere to
   read them together, each call died in the conversation it was made in. Calls carry a

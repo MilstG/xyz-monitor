@@ -279,6 +279,7 @@ CREATE TABLE IF NOT EXISTS dm_read (
   hiddenUpTo INTEGER NOT NULL DEFAULT 0,      -- closed: off the rail until a message id passes this
   clearedUpTo INTEGER NOT NULL DEFAULT 0,     -- history cleared: this viewer never sees ids at or under
   boardNotify INTEGER NOT NULL DEFAULT 0,     -- boards only: 1 = full Telegram digests (default is mentions/watched only)
+  tgSync INTEGER NOT NULL DEFAULT 0,          -- 1 = this member's Telegram chat mirrors this conversation, both ways (one per member)
   PRIMARY KEY (thread, uid)
 ) STRICT, WITHOUT ROWID;
 
@@ -354,7 +355,7 @@ CREATE TABLE IF NOT EXISTS dm_webpush (
     dm_msg: [["sys", "TEXT"], ["fileId", "TEXT"], ["via", "TEXT"], ["pinnedAt", "INTEGER"], ["pinnedBy", "TEXT"], ["replyTo", "INTEGER"], ["side", "TEXT"],
       ["cmd", "TEXT"], ["cmdAi", "INTEGER"]],
     dm_read: [["hiddenUpTo", "INTEGER NOT NULL DEFAULT 0"], ["clearedUpTo", "INTEGER NOT NULL DEFAULT 0"],
-      ["boardNotify", "INTEGER NOT NULL DEFAULT 0"]],
+      ["boardNotify", "INTEGER NOT NULL DEFAULT 0"], ["tgSync", "INTEGER NOT NULL DEFAULT 0"]],
   };
   for (const [table, cols] of Object.entries(ADDED_COLUMNS)) {
     const have = db.prepare("PRAGMA table_info(" + table + ")").all().map((c) => c.name);
@@ -480,6 +481,13 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       ON CONFLICT(thread, uid) DO UPDATE SET hiddenUpTo = excluded.hiddenUpTo`),
     readBoardNotify: db.prepare(`INSERT INTO dm_read (thread, uid, boardNotify) VALUES (?,?,?)
       ON CONFLICT(thread, uid) DO UPDATE SET boardNotify = excluded.boardNotify`),
+    // Telegram sync is ONE conversation per member (a bot chat is one conversation), so turning it
+    // on anywhere clears it everywhere else for that member first — the pair is one transaction.
+    readSyncClear: db.prepare("UPDATE dm_read SET tgSync = 0 WHERE uid = ? AND tgSync = 1"),
+    readSync: db.prepare(`INSERT INTO dm_read (thread, uid, tgSync) VALUES (?,?,1)
+      ON CONFLICT(thread, uid) DO UPDATE SET tgSync = 1`),
+    readSyncOf: db.prepare("SELECT thread FROM dm_read WHERE uid = ? AND tgSync = 1 LIMIT 1"),
+    readSyncAll: db.prepare("SELECT thread, uid, notifiedMsgId FROM dm_read WHERE tgSync = 1"),
     // Clearing also reads and closes up to the same point: cleared history must not keep counting
     // as unread or keep the row on the rail with a preview of text this viewer chose to forget.
     readClearAll: db.prepare(`INSERT INTO dm_read (thread, uid, clearedUpTo, readMsgId, hiddenUpTo) VALUES (?,?,?,?,?)
@@ -1459,7 +1467,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       members: mem.map((m) => ({ uid: m.uid, display: (users.get(m.uid) || {}).display || "—", owner: !!m.owner })),
       owner: !!(me && me.owner),
       disabled: t.kind === "dm" ? !!(users.get(peerOf(t, uid)) || {}).disabledAt : false,
-      lastAt: t.lastAt, muted: !!rd.muted, boardNotify: !!rd.boardNotify,
+      lastAt: t.lastAt, muted: !!rd.muted, boardNotify: !!rd.boardNotify, tgSync: !!rd.tgSync,
       // What the OTHER side has read, so "did my call land" is answerable. The data was already
       // being stored for unread counts; showing it costs a lookup.
       // One query for the whole thread's read cursors, not one per member: threads() runs this
@@ -1596,6 +1604,86 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (!t || t.kind !== "board" || !isMember(t.id, uid)) return { ok: false, error: "no such topic" };
     S.readBoardNotify.run(t.id, uid, on ? 1 : 0);
     return { ok: true, thread: t.id, boardNotify: !!on };
+  }
+  // ---- Telegram sync (build 2026.09.21-83) --------------------------------------------------------
+  // A member's linked Telegram chat can MIRROR one conversation: every message posted here goes to
+  // the chat as it happens (not the 5-minute offline digest), and plain text typed in the chat posts
+  // here under their name. ONE conversation per member, by construction: a bot chat is a single
+  // stream with no way to say which of several threads a bare line was meant for, and guessing
+  // would post it under the sender's name somewhere they did not intend. Switching is a click.
+  // The mirror's cursor is the same notifiedMsgId the escalation uses ("highest id already
+  // delivered to Telegram"), so the two paths can never deliver the same message twice: what the
+  // mirror sends the digest sees as handled, and vice versa. Enabling seeds the cursor at the
+  // thread's current last id — sync starts from NOW; the backscroll is not replayed into the chat.
+  function setTgSync(uid, threadId, on) {
+    const t = S.thrById.get(+threadId);
+    if (!t || !isMember(t.id, uid)) return { ok: false, error: "no such conversation" };
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      S.readSyncClear.run(uid);
+      if (on) {
+        S.readSync.run(t.id, uid);
+        const last = (S.msgLast.get(t.id) || { id: 0 }).id;
+        if (last) S.readNotified.run(t.id, uid, last);
+      }
+      db.exec("COMMIT");
+    } catch (e) { try { db.exec("ROLLBACK"); } catch (_) {} return { ok: false, error: "could not change sync" }; }
+    return { ok: true, thread: t.id, tgSync: !!on, name: threadName(t, uid), kind: t.kind };
+  }
+  // The conversation a member's chat mirrors, or 0. Membership is re-checked at read time so a
+  // flag left behind by leaving a group (or being removed from one) is inert, never a back door.
+  function tgSyncThread(uid) {
+    const r = S.readSyncOf.get(uid);
+    if (!r) return 0;
+    const t = S.thrById.get(r.thread);
+    return t && isMember(t.id, uid) ? t.id : 0;
+  }
+  // Every live (thread, member) mirror: the safety sweep's worklist.
+  function tgSyncAll() {
+    const out = [];
+    for (const r of S.readSyncAll.all()) {
+      const u = users.get(r.uid);
+      if (!u || u.disabledAt) continue;
+      const t = S.thrById.get(r.thread);
+      if (t && isMember(t.id, r.uid)) out.push({ uid: r.uid, thread: t.id });
+    }
+    return out;
+  }
+  // Rows above this member's delivery cursor on the conversation they mirror, oldest first, with
+  // the rendering already decided (sender name, system line, command header, attachment stub).
+  // Bounded: a mirror that was unreachable for a day (chat blocked, quiet hours) catches up with
+  // the LAST `limit` rows and a count of what it skipped, not a thousand Telegram messages.
+  // The caller advances the cursor with markEscalated once the rows are actually enqueued.
+  function mirrorRows(uid, threadId, limit) {
+    const t = S.thrById.get(+threadId);
+    if (!t || !isMember(t.id, uid)) return null;
+    const rd = S.readGet.get(t.id, uid);
+    if (!rd || !rd.tgSync) return null;
+    const floor = Math.max(rd.notifiedMsgId || 0, rd.clearedUpTo || 0);
+    const n = Math.trunc(Math.min(Math.max(+limit || 10, 1), 50));
+    const all = S.msgSince.all(t.id, floor, 500).filter((m) => !m.deletedAt);
+    if (!all.length) return { thread: t.id, name: threadName(t, uid), kind: t.kind, rows: [], skipped: 0, upTo: 0 };
+    const rows = all.slice(-n);
+    return { thread: t.id, name: threadName(t, uid), kind: t.kind, skipped: all.length - rows.length,
+      upTo: all[all.length - 1].id,
+      rows: rows.map((m) => ({ id: m.id, sender: m.sender || "", mine: m.sender === uid, via: m.via || null,
+        who: m.sender ? ((users.get(m.sender) || {}).display || "—") : "",
+        sys: m.sys ? sysLine(m) : "",
+        cmd: m.cmd || "", body: m.body || "", ref: m.ref || null,
+        file: m.fileId ? ((S.fileById.get(m.fileId) || {}).name || "attachment") : "",
+        reply: m.replyTo ? replyPreview(m.replyTo, uid) : null })) };
+  }
+  // Plain text typed in a synced chat. Silent no-op when nothing is synced: stray text at the bot
+  // has never posted anywhere, and an opt-in elsewhere must not change that for a chat that did
+  // not opt in. `not-synced` lets the wire tell the two cases apart without replying to either.
+  function bridgeSyncText(uid, text) {
+    const who = users.get(uid);
+    if (!who || who.disabledAt) return { ok: false, error: "that chat is not linked to an account" };
+    const thread = tgSyncThread(uid);
+    if (!thread) return { ok: false, error: "not-synced", silent: true };
+    const raw = String(text == null ? "" : text).trim();
+    if (!raw) return { ok: false, error: "nothing to send" };
+    return send(uid, null, raw, null, { thread, via: "telegram" });
   }
 
   // ---- attachment lifecycle ----------------------------------------------------------------------
@@ -1827,7 +1915,11 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const h = String(handle || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     return new RegExp("(^|[^A-Za-z0-9._-])@" + h + "(?![A-Za-z0-9._-])", "i");
   }
-  function pendingEscalations(delayMs, isOnline) {
+  // isMirrored(uid) says the member has a live Telegram to mirror into: a synced conversation is
+  // then delivered by the mirror as it happens, and the digest would only repeat it five minutes
+  // later. With no reachable chat the mirror cannot run, so the digest (and the browser push
+  // beside it) stays the fallback exactly as for an unsynced thread.
+  function pendingEscalations(delayMs, isOnline, isMirrored) {
     const now = Date.now(), cut = now - (delayMs == null ? 5 * 60000 : delayMs);
     const out = [];
     for (const t of S.thrActive.all()) {
@@ -1836,6 +1928,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
         if (!u || u.disabledAt) continue;
         if (isOnline && isOnline(uid)) continue;
         const rd = S.readGet.get(t.id, uid) || { readMsgId: 0, muted: 0, notifiedMsgId: 0 };
+        if (rd.tgSync && isMirrored && isMirrored(uid)) continue;
         const floor = Math.max(rd.readMsgId || 0, rd.notifiedMsgId || 0);
         const fresh = S.msgSince.all(t.id, floor, 50)
           .filter((m) => m.sender !== uid && !m.deletedAt && !m.sys);
@@ -1941,6 +2034,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     // messages
     setMarkSource, threadFor, threadPeers, isMember, memberUids, send, edit, drop,
     threads, history, sync, search, markRead, setMuted, setBoardNotify,
+    setTgSync, tgSyncThread, tgSyncAll, mirrorRows, bridgeSyncText,
     closeThread, reopenThread, clearHistory,
     createGroup, addMembers, removeMember, leaveGroup, renameGroup, deleteGroup,
     createBoard, joinBoard, listBoards, setTweetSource,

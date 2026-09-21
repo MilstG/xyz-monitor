@@ -5511,6 +5511,10 @@ const RULE_METRICS = [
   // Distance from the mark to the D1 EMA21, in %. Negative = below it. The retest zone lives near
   // zero, so "|x| < 1" is "sitting on the ribbon" and a large positive is "extended above it".
   { k: "e21d", label: "dist to D1 EMA21 %", unit: "%", live: 1, get: (r) => (r.e21d != null && isFinite(r.e21d) ? r.e21d : null) },
+  // Distance from the mark to the 200-day SMA, in % (build 2026.09.21-83). "vsma200 > 0" is
+  // "above the 200-day"; "cross_up 0" is the reclaim. Same arithmetic as the terminal's vsma200
+  // lens, off the ma200 the snapshot row now carries. Absent under 200 daily closes.
+  { k: "vsma200", label: "% vs 200d MA", unit: "%", live: 1, get: (r) => (r.px > 0 && r.ma200 > 0 ? (r.px / r.ma200 - 1) * 100 : null) },
 ];
 const RULE_BY_K = {};
 for (const m of RULE_METRICS) RULE_BY_K[m.k] = m;
@@ -5571,6 +5575,8 @@ function ruleLabel(rule) {
   const m = RULE_BY_K[rule && rule.metric];
   if (!m) return "";
   const scope = rule.coin ? rule.coin : rule.uni === "main" ? "any crypto" : rule.uni === "xyz" ? "any stock" : "any market";
+  // "% vs 200d MA above 0%" is the arithmetic; "price above the 200d MA" is what was asked.
+  if (m.k === "vsma200" && +rule.value === 0 && RULE_OP_LABEL[rule.op]) return scope + " \u00b7 price " + RULE_OP_LABEL[rule.op] + " the 200d MA";
   return scope + " \u00b7 " + m.label + " " + (RULE_OP_LABEL[rule.op] || rule.op) + " " + rule.value + (m.unit === "%" ? "%" : m.unit === "M" ? "M" : "");
 }
 
@@ -5582,16 +5588,107 @@ function validateRule(rule) {
   if (!RULE_OPS.includes(rule.op)) return { ok: false, error: "unknown-op" };
   if (!Number.isFinite(+rule.value)) return { ok: false, error: "bad-value" };
   if (rule.coin != null && typeof rule.coin !== "string") return { ok: false, error: "bad-coin" };
-  if (rule.uni != null && rule.uni !== "xyz" && rule.uni !== "main") return { ok: false, error: "bad-universe" };
+  // "" is absent, not a universe. The validated rule is stored with uni "" and re-validated on
+  // hydrate; rejecting "" there dropped every coin-scoped and roster-wide rule on every restart.
+  if (rule.uni != null && rule.uni !== "" && rule.uni !== "xyz" && rule.uni !== "main") return { ok: false, error: "bad-universe" };
   if (rule.band != null && (!Number.isFinite(+rule.band) || +rule.band < 0)) return { ok: false, error: "bad-band" };
   if (rule.cooldownMs != null && (!Number.isFinite(+rule.cooldownMs) || +rule.cooldownMs < 0)) return { ok: false, error: "bad-cooldown" };
+  // A conversation id, when the rule fires INTO a chat rather than to its owner's phone. The
+  // server decides whether the owner may post there; here it is only a positive integer or nothing.
+  if (rule.thread != null && rule.thread !== 0 && !(Number.isInteger(+rule.thread) && +rule.thread > 0)) return { ok: false, error: "bad-thread" };
   return { ok: true, rule: {
     id: rule.id || null, metric: rule.metric, op: rule.op, value: +rule.value,
     coin: rule.coin || "", uni: rule.uni || "", band: rule.band != null ? +rule.band : null,
     cooldownMs: rule.cooldownMs != null ? +rule.cooldownMs : null,
     note: typeof rule.note === "string" ? rule.note.slice(0, 80) : "",
+    thread: rule.thread ? +rule.thread : 0,
   } };
 }
+
+// ---- /alert: the chat grammar for a rule (build 2026.09.21-83) ---------------------------------
+// One line, typed in a conversation or at the Telegram bot, becomes a validated rule. Deliberately
+// small: a scope (a ticker, or any/stocks/crypto), an optional metric, a comparison, a number, and
+// whatever follows is the note. The moving-average words are the one sugar — "above the 200 day"
+// is the question people actually ask, and it is vsma200 > 0 underneath.
+//   /alert NVDA > 200            price above 200         /alert NVDA crosses 200        price crosses up
+//   /alert NVDA below 180        price below 180         /alert NVDA crosses down 180   price crosses down
+//   /alert NVDA above 200ma      vsma200 > 0             /alert NVDA crosses below 200dma
+//   /alert HOOD d1 > 5 big day   1d % above 5, note      /alert any rvol > 3            every market
+//   /alert list · /alert off 12 · /alert help
+// Returns { ok, rule } for a definition, { ok, action: "list"|"off"|"help", id? } for the verbs,
+// or { ok: false, error } in plain words — the line came from a phone, and "unknown-op" is not
+// something a phone can act on. The caller resolves the ticker (or refuses it) and owns the rule.
+const ALERT_METRIC_ALIAS = {
+  px: "px", price: "px", mark: "px",
+  d1: "d1", "1d": "d1", day: "d1", d7: "d7", "7d": "d7", week: "d7", d30: "d30", "30d": "d30", h1: "h1", "1h": "h1", h4: "h4", "4h": "h4",
+  funding: "fundAPR", fund: "fundAPR", fundapr: "fundAPR", apr: "fundAPR", fundpct: "fundPct",
+  prem: "prem", premium: "prem", vol: "vol", volume: "vol", oi: "oi", rvol: "rvol", liq: "liq24", liq24: "liq24",
+  doi: "doiD1", doid1: "doiD1", doid7: "doiD7", doih1: "doiH1", doih4: "doiH4", doid30: "doiD30",
+  hi30: "hi30", lo30: "lo30", vwap: "vwap30", vwap30: "vwap30", trend: "tscore", tscore: "tscore",
+  ema21: "e21d", e21d: "e21d", e21: "e21d",
+  ma200: "vsma200", vsma200: "vsma200", "200ma": "vsma200", "200dma": "vsma200", "200d": "vsma200", "200sma": "vsma200", sma200: "vsma200",
+};
+const ALERT_MA_WORD = /^(?:the\s+)?(?:200\s*-?\s*(?:ma|dma|sma|day|d)(?:\s+(?:ma|sma|moving\s+average|average))?|ma\s*200|sma\s*200|200-day)$/i;
+function parseAlertCmd(text) {
+  const raw = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
+  if (!raw || /^(help|\?)$/i.test(raw)) return { ok: true, action: "help" };
+  if (/^(list|ls|show)$/i.test(raw)) return { ok: true, action: "list" };
+  const off = /^(?:off|rm|del|delete|remove|stop)\s+#?(\d+)$/i.exec(raw);
+  if (off) return { ok: true, action: "off", id: +off[1] };
+  if (/^(?:off|rm|del|delete|remove|stop)\b/i.test(raw)) return { ok: false, error: "say which one: /alert off <id> \u2014 /alert list shows the ids" };
+  const p = raw.split(" ");
+  const scopeTok = p.shift();
+  let scope;
+  if (/^(any|all|\*)$/i.test(scopeTok)) scope = { coin: "" };
+  else if (/^(stocks?|equit(?:y|ies)|xyz)$/i.test(scopeTok)) scope = { coin: "", uni: "xyz" };
+  else if (/^(crypto|coins?|main)$/i.test(scopeTok)) scope = { coin: "", uni: "main" };
+  else if (/^\$?[A-Za-z][A-Za-z0-9.:_-]{0,15}$/.test(scopeTok)) scope = { ticker: scopeTok.replace(/^\$/, "").toUpperCase() };
+  else return { ok: false, error: "start with a ticker (or any / stocks / crypto): /alert NVDA > 200" };
+  if (!p.length) return { ok: false, error: "then a condition: /alert " + scopeTok + " > 200, or /alert " + scopeTok + " above 200ma" };
+  // Optional metric word, then the comparison. A metric that is not one is left for the op.
+  let metric = "px";
+  const mk = p[0].toLowerCase().replace(/^\$/, "");
+  if (ALERT_METRIC_ALIAS[mk] && !/^(above|below|over|under|cross(?:es|ed)?|>|<|>=|<=|=)$/i.test(p[0])) { metric = ALERT_METRIC_ALIAS[mk]; p.shift(); }
+  if (!p.length) return { ok: false, error: "then a comparison and a number: > 200, below 180, crosses 150" };
+  // The comparison: symbols or words; "crosses" takes an optional direction word.
+  let op = null;
+  const w = p[0].toLowerCase();
+  if (w === ">" || w === ">=" || w === "above" || w === "over" || w === "gt") { op = ">"; p.shift(); }
+  else if (w === "<" || w === "<=" || w === "below" || w === "under" || w === "lt") { op = "<"; p.shift(); }
+  else if (/^(?:abs|\|x\|)$/.test(w) && p[1] === ">") { op = "abs>"; p.splice(0, 2); }
+  else if (/^cross(?:es|ed)?$/.test(w) || w === "x") {
+    p.shift();
+    const d = (p[0] || "").toLowerCase();
+    if (/^(up|above|over|through)$/.test(d)) { op = "cross_up"; p.shift(); }
+    else if (/^(down|below|under)$/.test(d)) { op = "cross_dn"; p.shift(); }
+    else op = "cross_up";
+  }
+  else return { ok: false, error: "compare with >, <, above, below or crosses: /alert " + scopeTok + " > 200" };
+  if (!p.length) return { ok: false, error: "and a number to compare against" };
+  // The value: a number, or a moving-average phrase (which pins the metric and compares to 0).
+  let value = null, i = 0;
+  // Greedy: try the longest MA phrase first ("200 day moving average" is four words).
+  for (let n = Math.min(6, p.length); n >= 1; n--) {
+    const phrase = p.slice(0, n).join(" ");
+    if (ALERT_MA_WORD.test(phrase)) { if (metric !== "px") return { ok: false, error: "the 200-day compares the PRICE: /alert " + scopeTok + " above 200ma" }; metric = "vsma200"; value = 0; i = n; break; }
+  }
+  if (value == null) {
+    const num = p[0].replace(/^\$/, "").replace(/,/g, "").replace(/%$/, "");
+    if (!/^[-+]?(?:\d+\.?\d*|\.\d+)$/.test(num)) return { ok: false, error: "\u201c" + p[0] + "\u201d is not a number \u2014 /alert " + scopeTok + " > 200" };
+    value = +num; i = 1;
+  }
+  const note = p.slice(i).join(" ").slice(0, 80);
+  // A rule against the 200-day compares to 0, and 2% of 0 is no hysteresis at all: a mark sitting
+  // on the line would fire on every wobble. Half a percent of clear air before it re-arms.
+  const band = metric === "vsma200" && value === 0 ? 0.5 : null;
+  return { ok: true, rule: Object.assign({ metric, op, value, note }, band != null ? { band } : null, scope) };
+}
+// The grammar, for the phone and the chat's private help line. Plain text; the caller escapes.
+const ALERT_HELP = "/alert <ticker> [metric] <above|below|crosses [up|down]> <number> [note]\n"
+  + "/alert NVDA > 200 \u00b7 /alert NVDA crosses down 180 \u00b7 /alert NVDA above 200ma \u00b7 /alert HOOD d1 > 5 big day \u00b7 /alert any rvol > 3\n"
+  + "metrics: px d1 d7 d30 h1 h4 funding rvol oi vol prem hi30 lo30 trend ema21 ma200 \u00b7 /alert list \u00b7 /alert off <id>";
+module.exports.parseAlertCmd = parseAlertCmd;
+module.exports.ALERT_HELP = ALERT_HELP;
 
 module.exports.RULE_METRICS = RULE_METRICS;
 module.exports.RULE_BY_K = RULE_BY_K;

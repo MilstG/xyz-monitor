@@ -1312,6 +1312,19 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     r._vpK = memoK; r._vpM = out;
     return out;
   }
+  const sma200Memo = new Map();   // coin -> { n, last, v }
+  function sma200Of(r) {
+    const d = r && r.dailyRaw;
+    if (!Array.isArray(d) || d.length < 200) return null;
+    const lastC = d[d.length - 1] && d[d.length - 1].c;
+    const m = sma200Memo.get(r.coin);
+    if (m && m.n === d.length && m.last === lastC) return m.v;
+    let t = 0, k = 0;
+    for (let i = d.length - 200; i < d.length; i++) { const c = d[i] && +d[i].c; if (Number.isFinite(c)) { t += c; k++; } }
+    const v = k === 200 && t > 0 ? sig(t / 200, 9) : null;
+    sma200Memo.set(r.coin, { n: d.length, last: lastC, v });
+    return v;
+  }
   function buildSnapshot() {
     sampleRegime();
     // 5m/15m reference sampling rides the snapshot's own 15s cadence — one push per non-delisted
@@ -1412,6 +1425,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         // Signed so ONE metric expresses both sides: +4 fully stacked up, -4 fully stacked down.
         tscore: tb ? (tb.side === "long" ? tb.score : -tb.score) : undefined,
         e21d: (tb && tb.e21 > 0 && r.px > 0) ? rnd((r.px / tb.e21 - 1) * 100, 2) : undefined,
+        // 200-day SMA of the row's own daily closes (build 2026.09.21-83) — the same arithmetic
+        // the client's MA200 column runs on /api/daily, computed here so a rule ("price above the
+        // 200-day", "crosses the 200-day") can read it off the snapshot like every other metric.
+        // Memoized per name on the series' length and last close: the daily series moves once a
+        // day, the snapshot builds every 15s. Absent, never guessed, under 200 closes.
+        ma200: sma200Of(r) ?? undefined,
         // 5m/15m mark references from the in-memory ring — shipped as reference PRICES like
         // ref.p1h/p4h so the client derives the % the same way it does every other window (one
         // convention, one code path). Absent (undefined) during warm-up or across a feed gap
@@ -11938,8 +11957,37 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         pushReply(chat, r2
           ? "<b>Linked</b> \u00b7 classes: " + (r2.classes && r2.classes.length ? r2.classes.join(", ") : "all")
             + "\n/r &lt;message&gt; replies to your last message notification \u00b7 /r @handle &lt;message&gt; picks the person."
+            + "\nWith a conversation synced (the \u21c4 Telegram box in Messages), plain text here posts straight into it."
+            + "\n/alert NVDA &gt; 200 sets a price alert that fires into the synced conversation \u00b7 /alert help for the grammar."
             + "\n/stop to unlink."
           : "Not linked. Open the alerts panel for a link code, then send /start CODE.");
+        continue;
+      }
+      // /alert (build 2026.09.21-83): a threshold rule written from the phone. The parser and the
+      // rule live behind the bridge with everything else account-shaped; this only forwards.
+      const am = /^\/alert(?:@\S+)?(?:\s+([\s\S]+))?$/i.exec(txt);
+      if (am) {
+        if (!dmBridge || !pushRecipients.has(String(chat))) { pushReply(chat, "Not linked. Open the alerts panel for a link code, then send /start CODE."); continue; }
+        let res;
+        try { res = dmBridge(String(chat), (am[1] || "").trim(), { alert: true }); }
+        catch (e) { res = { ok: false, error: "That didn't work \u2014 try again." }; }
+        pushReply(chat, res && res.ok ? (res.text || "\u2713 Done.") : "\u26a0 " + ((res && res.error) || "Could not set that alert."));
+        continue;
+      }
+      // Bare text from a LINKED chat (build 2026.09.21-83): forwarded, never posted here. The bridge
+      // posts it only into a conversation this member explicitly synced to their chat, and answers
+      // `silent` when there is none — so stray text at the bot stays exactly as inert as it has
+      // always been, and the reply budget is not spent telling people so. A delivered line earns
+      // no "sent" reply either: the mirror does not echo a chat's own messages back at it, and a
+      // confirmation per line would double every message in the conversation.
+      // Private chats only: a group chat linked with /start would otherwise post every member's
+      // lines under the one account that linked it. (Telegram omits `type` on nothing real; the
+      // harness does, so an absent type is treated as private.)
+      if (dmBridge && !txt.startsWith("/") && pushRecipients.has(String(chat)) && (m.chat.type == null || m.chat.type === "private")) {
+        let res;
+        try { res = dmBridge(String(chat), txt, { bare: true }); }
+        catch (e) { res = { ok: false, error: "That didn't send \u2014 try again.", silent: false }; }
+        if (res && !res.ok && !res.silent) pushReply(chat, "\u26a0 " + (res.error || "Could not send."));
       }
     }
     pushCmdPrune();
@@ -12225,6 +12273,12 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   const ruleLastFire = new Map();            // ruleId|coin -> ts
   const rulePrev = new Map();                // ruleId|coin -> previous value (cross detection)
   let rulesDirty = false;
+  // A rule bound to a conversation (build 2026.09.21-83) fires INTO it: the server installs the
+  // sink that posts the message. The poller never learns what a conversation is — it hands over
+  // the rule and the event, and the event itself is marked quiet, because the post IS the
+  // delivery (everyone in the conversation sees it; a synced Telegram mirrors it; the offline
+  // digest nudges the rest). A second Telegram push of the same fire would say it twice.
+  let ruleSink = null;
 
   function hydrateRules() {
     const d = store.loadRules ? store.loadRules() : null;
@@ -12285,7 +12339,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         ruleArmed.set(key, false);
         ruleLastFire.set(key, now);
         rulesDirty = true; fired++;
-        emitTrig("rule", {
+        const ev = emitTrig("rule", Object.assign({
           // A personal rule produces a personal event. Without this the ring would carry one
           // person's thresholds to everyone else's phone and bell log — the same leak the shared
           // recipient list had, one layer down.
@@ -12293,7 +12347,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
           coin: row.coin, t: row.ticker || row.coin, uni: row.uni,
           ruleId: rule.id, metric: rule.metric, label: m.label, op: rule.op, value: rule.value,
           note: rule.note || "", now: ruleFmtValue(m, val), rule: ruleLabel(rule),
-        }, now);
+        }, rule.thread ? { thread: rule.thread, quiet: 1 } : null), now);
+        if (rule.thread && ruleSink) {
+          try { ruleSink(rule, ev); } catch (e) { log("rule sink failed (isolated): " + (e && e.message)); }
+        }
       }
     }
     // Bound the edge maps: 60 rules across two rosters is small, but a long-lived process with
@@ -12339,7 +12396,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     for (const map of [ruleArmed, ruleLastFire, rulePrev])
       for (const k of [...map.keys()]) if (k.startsWith(n + "|")) map.delete(k);
     persistRules();
-    return { ok: true, removed: before - alertRules.length };
+    return { ok: true, removed: before - alertRules.length, rule: Object.assign({}, target, { text: ruleLabel(target) }) };
   }
 
 
@@ -14704,6 +14761,12 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     pushEnqueueNow: (chat, text, force) => pushEnqueue(chat, text, !!force, 0),
     // The inbound half of the same wire: server.js installs the handler that turns /r into a message.
     setDmBridge: (fn) => { dmBridge = typeof fn === "function" ? fn : null; },
+    // Conversation-bound rules: the server installs the poster (build 2026.09.21-83).
+    setRuleSink: (fn) => { ruleSink = typeof fn === "function" ? fn : null; },
+    // Whether a chat is inside its quiet window right now. The mirror asks before sending a
+    // conversation into a sleeping phone: it holds (and catches up compactly later) rather than
+    // parking a night's worth of chat in the shared outbox.
+    pushQuietNow: (chat) => { const r = pushRecipients.get(String(chat)); return !!(r && r.quiet && inQuietWindow(Date.now(), r.quiet)); },
     // positions lane: the server hands in the wallet table and a per-uid SSE poke
     setWalletSource: (fn) => { walletSource = typeof fn === "function" ? fn : null; },
     setPosPoke: (fn) => { posPoke = typeof fn === "function" ? fn : null; },
