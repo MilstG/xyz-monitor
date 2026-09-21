@@ -1886,21 +1886,29 @@ async function buildServer() {
       // into a conversation its author can no longer read. Not a silent drop either: the rule is
       // unbound (it becomes the plain personal rule it would have been) and THIS fire goes to the
       // author's phone directly, since the event on the wire was already marked quiet.
+      // The phone is the fallback for every path that cannot post: the event on the wire was
+      // marked quiet (the post IS the delivery), so a fire that never reaches the conversation
+      // and never reaches the phone would be a fire nobody saw.
+      const toPhone = (why) => {
+        if (!poller.pushEnqueueNow || !poller.pushRecipientsFor) return;
+        const text = "\ud83d\udd14 <b>alert</b> (" + tgEsc(why) + ")\n"
+          + b.evs.map((ev) => tgEsc(ev.t + " \u00b7 " + sentence(ev) + " \u2014 now " + ev.now + (ev.note ? " \u00b7 " + ev.note : ""))).join("\n");
+        for (const chat of poller.pushRecipientsFor(b.owner)) poller.pushEnqueueNow(chat, text, false);
+      };
       if (!ACCOUNTS.isMember(thread, b.owner)) {
         const ids = [...new Set(b.evs.map((ev) => ev.ruleId))];
         for (const id of ids) { try { poller.setRuleThread(id, 0); } catch (_) {} }
         log("rule fire: author is no longer in conversation " + thread + " — rule(s) " + ids.map((i) => "#" + i).join(" ") + " unbound, fire sent to their phone");
-        if (poller.pushEnqueueNow && poller.pushRecipientsFor) {
-          const text = "\ud83d\udd14 <b>alert</b> (no longer in that conversation \u2014 now a personal alert)\n"
-            + b.evs.map((ev) => tgEsc(ev.t + " \u00b7 " + sentence(ev) + " \u2014 now " + ev.now + (ev.note ? " \u00b7 " + ev.note : ""))).join("\n");
-          for (const chat of poller.pushRecipientsFor(b.owner)) poller.pushEnqueueNow(chat, text, false);
-        }
+        toPhone("no longer in that conversation \u2014 now a personal alert");
         continue;
       }
       const lines = b.evs.map((ev) => "\ud83d\udd14 " + ev.t + " \u00b7 " + sentence(ev) + " \u2014 now " + ev.now + (ev.note ? " \u00b7 " + ev.note : ""));
       const ids = [...new Set(b.evs.map((ev) => "#" + ev.ruleId))].join(" ");
       const post = ACCOUNTS.send(b.owner, null, lines.join("\n"), null, { thread, cmd: "alert " + ids + " fired" });
-      if (!post.ok) { log("rule fire post failed: " + post.error); continue; }
+      // The post can be refused — the author's own send burst limit is the realistic case (the
+      // rule posts under their name, so twenty quick lines of theirs park it). Not a drop: the
+      // fire goes to their phone instead, and the rule stays bound for the next one.
+      if (!post.ok) { log("rule fire post failed (" + post.error + ") — sent to the author's phone instead"); toPhone("could not post into the conversation: " + post.error); continue; }
       dmPoke(thread); dmMirror(thread);
     }
   }

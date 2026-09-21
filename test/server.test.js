@@ -567,4 +567,7 @@ test("dm: the sync box needs a phone, /alert binds a rule to the conversation it
   assert.ok(/const key = rule\.thread \+ "\|" \+ \(rule\.owner \|\| ""\);/.test(srv), "fire batches are per author per conversation");
   assert.ok(/if \(!targets\.length \|\| targets\.some\(\(c\) => poller\.pushQuietNow && poller\.pushQuietNow\(c\)\)\) continue;/.test(srv), "quiet hours hold the whole member");
   assert.ok(/poller\.setRuleThread\(id, 0\)/.test(srv), "an author who left the room gets the rule unbound, not dropped");
+  // A fire whose post is refused (the author's own send burst, realistically) is not a drop: the
+  // event on the wire was marked quiet, so the phone is the only delivery left and it takes it.
+  assert.ok(/if \(!post\.ok\) \{ log\("rule fire post failed \(" \+ post\.error \+ "\)[^\n]*toPhone\("could not post into the conversation: " \+ post\.error\); continue; \}/.test(srv), "a refused fire post falls back to the author's phone");
 });
