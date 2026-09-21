@@ -443,6 +443,7 @@ const DM_CMD_GUIDE=[
     ['<plain english>','anything the grammar can\u2019t parse \u2014 the answer posts here, badged AI','ci'],
     ['report <ticker> \u00b7 report sector <name> \u00b7 report basket <t> <t> \u2026','the AI analyst report \u2014 opens the report view','ti']]},
   {h:'Chat only',rows:[
+    ['/alert <ticker> <above|below|crosses> <n>','a threshold alert that fires INTO this conversation \u00b7 /alert NVDA > 200 \u00b7 /alert NVDA crosses down 180 \u00b7 /alert NVDA above 200ma \u00b7 /alert HOOD d1 > 5 \u00b7 /alert list \u00b7 /alert off <id>','c'],
     ['/help','the short card, privately \u2014 only you see it','c'],
     ['/clear','forget your private lines; the conversation is untouched','c'],
     ['//text','send a message that really starts with a slash','c']]},
@@ -632,6 +633,17 @@ async function dmRunCmd(raw){
   // The box empties the moment the command is accepted, like the panel's: an error line below
   // repeats what was typed, so nothing is lost.
   if(ta){ ta.value=''; dmAutoGrow(ta); } dmDraftSave(dmState.sel,'');
+  // /alert (build 2026.09.21-83) is server-side end to end and NOT a terminal verb: the rule lives
+  // with the alerts engine every member already has, bound to THIS conversation, so it runs ahead
+  // of the chat-terminal switch exactly as the server accepts it. A definition or a removal posts
+  // into the thread (the room should know a watch was set); list and help come back privately.
+  if(/^alert\b/i.test(line)){
+    const res=await dmPost({thread:t.id,alert:line.replace(/^alert\s*/i,'')});
+    if(!res.ok) return dmLocal('\u2717 '+esc(line)+' \u2014 '+esc((res.d&&res.d.error)||'could not set that alert'),'err');
+    if(res.d.message){ dmMerge([res.d.message]); dmRender(); dmScrollBottom(); }
+    else dmLocal(esc(res.d.text||'done').replace(/\n/g,'<br>'),'');
+    return;
+  }
   if(!dmCmdAllowed()) return dmLocal('terminal commands are switched off in chat on this deployment','err');
   if(!line||/^(help|\?)$/i.test(line)) return dmHelpCmd();
   if(/^clear$/i.test(line)){ dmState.localOut.delete(dmState.sel); dmRender(); return; }
@@ -759,6 +771,15 @@ async function dmToggleBoardNotify(){
   const t=dmThread(dmState.sel); if(!t) return;
   const res=await dmPost({thread:t.id,boardNotify:!t.boardNotify});
   if(res.ok){ t.boardNotify=!t.boardNotify; dmRender(); }
+}
+async function dmToggleTgSync(){
+  const t=dmThread(dmState.sel); if(!t||!dmState.meTg) return;
+  const res=await dmPost({thread:t.id,tgSync:!t.tgSync});
+  // The server keeps ONE synced conversation per member, so every other row flips off locally
+  // too — the rail must agree with the server without a reload.
+  if(res.ok){ for(const x of dmState.threads) x.tgSync=false; t.tgSync=!!(res.d&&res.d.tgSync); dmState.err=''; }
+  else dmState.err=(res.d&&res.d.error)||'could not change Telegram sync';
+  dmRender();
 }
 
 // ---- @mention autocomplete ---------------------------------------------------------------------
@@ -1195,6 +1216,7 @@ function dmRailHtml(){
     return '<div class="dm-th'+(t.id===dmState.sel?' sel':'')+'" data-dmth="'+t.id+'">'
       +'<div class="dm-thn">'+dot+' '+esc(t.name)
       +(t.muted?' <span class="dm-mute" title="muted — no Telegram escalation">⊘</span>':'')
+      +(t.tgSync?' <span class="dm-mute" title="synced with your Telegram">\u21c4</span>':'')
       +(t.unread?'<span class="dm-badge">'+(t.unread>99?'99+':t.unread)+'</span>':'')+'</div>'
       +'<div class="dm-thp">'+esc(t.preview||'no messages yet')+'</div></div>';
   }).join('')+closedSec;
@@ -1514,6 +1536,11 @@ function dmRenderNow(){
       +(t.disabled?'<span class="sec">account disabled</span>':'')
       +'<span class="dm-hdact">'
       +(grp?'<button type="button" class="btn dm-mutebtn" id="dm-managebtn">'+(dmState.manage?'close':'members')+'</button>':'')
+      // Telegram sync (build 2026.09.21-83): the box mirrors THIS conversation to the member's
+      // phone both ways. One at a time by construction, so ticking it here unticks it elsewhere.
+      +'<label class="dm-sync'+(dmState.meTg?'':' off')+'" title="'+(dmState.meTg
+        ?'Sync this conversation with your Telegram, both ways: every message lands on your phone as it happens, and plain text you send the bot posts here under your name. One conversation at a time \u2014 ticking it here unticks it anywhere else.'
+        :'Link a Telegram in the alerts panel first')+'"><input type="checkbox" id="dm-tgsync"'+(t.tgSync?' checked':'')+(dmState.meTg?'':' disabled')+'> \u21c4 telegram</label>'
       +'<a class="btn dm-mutebtn" href="/api/dm/export/'+t.id+'" title="Download this conversation as JSON \u2014 messages, stamps and members">\u2913</a>'
       +(t.kind==='board'
         ?'<button type="button" class="btn dm-mutebtn" id="dm-bnotify" title="Boards are quiet on Telegram by default: only @mentions and tickers you watch reach your phone. Toggle to get every message nudged like a group.">'
@@ -1795,6 +1822,7 @@ function dmWire(){
     { const rt=e.target.closest('[data-dmrtf]'); if(rt){ dmRatioSwitch(+rt.dataset.mid, rt.dataset.dmrtf); return; } }
     if(e.target.closest('#dm-mute')){ dmToggleMute(); return; }
     if(e.target.closest('#dm-bnotify')){ dmToggleBoardNotify(); return; }
+    if(e.target.id==='dm-tgsync'){ e.preventDefault(); dmToggleTgSync(); return; }
     if(e.target.closest('#dm-mic')){ dmMicToggle(); return; }
     const mn=e.target.closest('[data-dmmention]');
     if(mn){ dmMentionPick(mn.dataset.dmmention); return; }

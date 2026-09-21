@@ -459,3 +459,53 @@ test("audit -67: bot command replies are throttled per chat, strangers share a b
   assert.equal(c3.filter((c) => /sendMessage/.test(c.url)).length, 1, "the pacing gap still holds between the two");
   delete process.env.TG_BOT_TOKEN;
 });
+
+// ===== build 2026.09.21-83: bare text and /alert over the bridge ================================
+test("bridge: bare text from a linked chat is forwarded (never posted here), strangers stay inert, /alert forwards and answers", async () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  try {
+    const { p, queue } = pushHarness();
+    const mint = p.pushMintCode("uid-lena", false);
+    assert.ok(p.pushBindNow(mint.code, 4242, "Lena").ok);
+    const seen = [];
+    p.setDmBridge((chat, text, opts) => {
+      seen.push([chat, text, opts || null]);
+      if (opts && opts.bare) return text === "fail me" ? { ok: false, error: "slow down" } : text === "quiet" ? { ok: false, error: "not-synced", silent: true } : { ok: true, thread: 1 };
+      if (opts && opts.alert) return { ok: true, text: "\u{1f514} alert #1 · NVDA · price above 200 → fires here" };
+      return { ok: true };
+    });
+    const msg = (chat, text, id) => ({ update_id: id, message: { chat: { id: chat }, from: { first_name: "x" }, text } });
+    const grp = { update_id: 7, message: { chat: { id: 4242, type: "group" }, from: { first_name: "x" }, text: "group chatter" } };
+    queue.push({ result: [msg(4242, "hello desk", 1), msg(9999, "hello from a stranger", 2), msg(4242, "/alert NVDA > 200", 3),
+      msg(4242, "fail me", 4), msg(4242, "quiet", 5), msg(4242, "/help", 6), grp] });
+    const before = p.pushStateNow().queue;
+    await p.pushUpdatesNow();
+    assert.deepEqual(seen.map((s) => [s[0], s[1], s[2]]), [
+      ["4242", "hello desk", { bare: true }], ["4242", "NVDA > 200", { alert: true }],
+      ["4242", "fail me", { bare: true }], ["4242", "quiet", { bare: true }]],
+      "linked bare text and /alert reach the bridge; a stranger's text never does; commands keep their own paths");
+    // Replies: one for /alert, one for the failed send, one for /help. NOT for the delivered line
+    // (the mirror does not echo) and NOT for the silent not-synced case.
+    assert.equal(p.pushStateNow().queue - before, 3, "exactly three replies earned");
+    const pol = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "poller.js"), "utf8");
+    assert.ok(/if \(dmBridge && !txt\.startsWith\("\/"\) && pushRecipients\.has\(String\(chat\)\) && \(m\.chat\.type == null \|\| m\.chat\.type === "private"\)\)/.test(pol), "bare text is gated on the chat being linked AND private, at the source");
+    assert.ok(/if \(res && !res\.ok && !res\.silent\) pushReply/.test(pol), "a silent refusal spends no reply budget");
+  } finally { delete process.env.TG_BOT_TOKEN; }
+});
+
+test("bridge: pushQuietNow reads the recipient's own quiet window", () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  try {
+    const { p } = pushHarness();
+    const mint = p.pushMintCode("uid-lena", false);
+    assert.ok(p.pushBindNow(mint.code, 4343, "Lena").ok);
+    assert.equal(p.pushQuietNow("4343"), false, "no window set");
+    assert.equal(p.pushQuietNow("nope"), false, "unknown chat is never quiet");
+    const h = new Date().getUTCHours();
+    const set = p.pushSetPrefs("4343", { quiet: { from: h, to: (h + 2) % 24, tz: 0 } }, "uid-lena", false);
+    assert.ok(set.ok, JSON.stringify(set));
+    assert.equal(p.pushQuietNow("4343"), true, "inside the window right now");
+    assert.ok(p.pushSetPrefs("4343", { quiet: { from: (h + 3) % 24, to: (h + 5) % 24, tz: 0 } }, "uid-lena", false).ok);
+    assert.equal(p.pushQuietNow("4343"), false, "outside it");
+  } finally { delete process.env.TG_BOT_TOKEN; }
+});

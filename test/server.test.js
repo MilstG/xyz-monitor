@@ -563,3 +563,64 @@ test("docs: the manual is gated, nonce-stamped, build-stamped and audience-speci
   assert.equal(nope.statusCode, 404);
   assert.deepEqual(JSON.parse(nope.body).pages.sort(), ["features", "map", "mechanics", "signals"]);
 });
+
+// ===== build 2026.09.21-83: Telegram sync verb and /alert over the wire =========================
+test("dm: the sync box needs a phone, /alert binds a rule to the conversation it was typed in, and the rules list names it", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const cara = jar(); cara.absorb(await post("/login", { handle: "cara", password: "yet-another-long-pw" }));
+  const members = JSON.parse((await get("/api/access", gus)).body).members;
+  const gusUid = members.find((m) => m.handle === "gus").uid;
+  const T = JSON.parse((await post("/api/dm", { to: gusUid, body: "sync test" }, cara)).body).thread;
+  assert.ok(T > 0);
+  // No TG_BOT_TOKEN in this suite, so nobody has a linked chat: on is refused with the reason,
+  // off is always allowed, and the flag never lands.
+  const on = await post("/api/dm", { thread: T, tgSync: true }, cara);
+  assert.equal(on.statusCode, 400); assert.match(JSON.parse(on.body).error, /link a Telegram/);
+  const off = JSON.parse((await post("/api/dm", { thread: T, tgSync: false }, cara)).body);
+  assert.ok(off.ok && off.tgSync === false, JSON.stringify(off));
+  assert.equal(JSON.parse((await get("/api/dm", cara)).body).threads.find((t) => t.id === T).tgSync, false);
+  // /alert: help and list are private answers; a definition posts into the thread and is bound to it.
+  const help = JSON.parse((await post("/api/dm", { thread: T, alert: "help" }, cara)).body);
+  assert.ok(help.ok && help.private && /\/alert list/.test(help.text) && !help.message);
+  const list0 = JSON.parse((await post("/api/dm", { thread: T, alert: "list" }, cara)).body);
+  assert.ok(list0.ok && /No alerts yet/.test(list0.text));
+  const noMkt = await post("/api/dm", { thread: T, alert: "NVDA > 200" }, cara);
+  assert.equal(noMkt.statusCode, 400); assert.match(JSON.parse(noMkt.body).error, /no market called NVDA/);
+  const bad = await post("/api/dm", { thread: T, alert: "NVDA > abc" }, cara);
+  assert.equal(bad.statusCode, 400); assert.match(JSON.parse(bad.body).error, /not a number/);
+  const set = JSON.parse((await post("/api/dm", { thread: T, alert: "any rvol > 3 unusual tape" }, cara)).body);
+  assert.ok(set.ok && set.rule && set.rule.thread === T, JSON.stringify(set));
+  assert.equal(set.thread, T);
+  assert.equal(set.message.cmd, "alert any rvol > 3 unusual tape", "the definition posts as a command result under the author");
+  assert.match(set.message.body, /alert #\d+ · any market · relative volume above 3 — unusual tape → fires here/);
+  const notIn = await post("/api/dm", { thread: T + 1000, alert: "any rvol > 3" }, cara);
+  assert.equal(notIn.statusCode, 400);
+  // The rules list, for its author, names the conversation; the operator sees the rule without a name they cannot resolve.
+  const mine = JSON.parse((await get("/api/alerts/rules", cara)).body);
+  const rl = mine.rules.find((r) => r.id === set.rule.id);
+  assert.ok(rl && rl.thread === T && rl.threadName === "gus", JSON.stringify(rl));
+  const list1 = JSON.parse((await post("/api/dm", { thread: T, alert: "list" }, cara)).body);
+  assert.match(list1.text, new RegExp("#" + set.rule.id + " · any market · relative volume above 3 — unusual tape → here"));
+  // Someone else cannot remove it; the author can, and the room is told.
+  const theirs = await post("/api/dm", { thread: T, alert: "off " + set.rule.id }, gus);
+  assert.equal(theirs.statusCode, 400); assert.match(JSON.parse(theirs.body).error, /isn.t yours/);
+  const gone = JSON.parse((await post("/api/dm", { thread: T, alert: "off " + set.rule.id }, cara)).body);
+  assert.ok(gone.ok && gone.message && gone.message.cmd === "alert off " + set.rule.id, JSON.stringify(gone));
+  assert.ok(!JSON.parse((await get("/api/alerts/rules", cara)).body).rules.some((r) => r.id === set.rule.id));
+  // The verbs reach a signed-in member only.
+  assert.equal((await post("/api/dm", { thread: T, alert: "list" })).statusCode, 401);
+  // The panel route cannot bind a rule to a conversation the caller is not in.
+  const foreign = await post("/api/alerts/rules", { metric: "px", op: ">", value: 1, thread: T + 1000 }, cara);
+  assert.equal(foreign.statusCode, 400);
+  const own = JSON.parse((await post("/api/alerts/rules", { metric: "px", op: ">", value: 1, thread: T }, cara)).body);
+  assert.ok(own.ok && own.rule.thread === T);
+  assert.ok(JSON.parse((await post("/api/alerts/rules", { del: own.rule.id }, cara)).body).ok);
+  // Source pins for the wire: what the phone gets back from /alert is escaped for parse_mode HTML
+  // (the help text carries literal <ticker> placeholders), fires batch per author, and a member
+  // with any chat in quiet hours holds as a whole.
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(/return a\.ok \? \{ ok: true, text: tgEsc\(a\.text\) \} : \{ ok: false, error: tgEsc\(a\.error\) \};/.test(srv), "/alert replies are escaped at the wire");
+  assert.ok(/const key = rule\.thread \+ "\|" \+ \(rule\.owner \|\| ""\);/.test(srv), "fire batches are per author per conversation");
+  assert.ok(/if \(!targets\.length \|\| targets\.some\(\(c\) => poller\.pushQuietNow && poller\.pushQuietNow\(c\)\)\) continue;/.test(srv), "quiet hours hold the whole member");
+  assert.ok(/poller\.setRuleThread\(id, 0\)/.test(srv), "an author who left the room gets the rule unbound, not dropped");
+});
