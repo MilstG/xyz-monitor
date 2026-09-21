@@ -2805,7 +2805,7 @@ test("audit -67 lows: shutdown ends the right object, admin writes recheck authz
   assert.ok(/tweetCache\.delete\(tweetCache\.keys\(\)\.next\(\)\.value\)/.test(srv) && !/tweetCache\.clear\(\)/.test(srv), "LRU-ish eviction, never a wipe");
   assert.ok(/strict-transport-security/.test(srv), "HSTS behind TLS");
   const acc = fs.readFileSync(path.join(__dirname, "..", "src", "accounts.js"), "utf8");
-  assert.equal((acc.match(/Math\.trunc\(Math\.min\(Math\.max\(\+(o\.)?limit \|\| \d+, 1\), \d+\)\)/g) || []).length, 8, "every limit clamp is an integer (LIMIT ? rejects a REAL)");
+  assert.equal((acc.match(/Math\.trunc\(Math\.min\(Math\.max\(\+(o\.)?limit \|\| \d+, 1\), \d+\)\)/g) || []).length, 9, "every limit clamp is an integer (LIMIT ? rejects a REAL)");
   assert.ok(/catch \(_\) \{ try \{ fs\.unlinkSync\(path\.join\(fileDir, id\)\); \} catch \(_\) \{\} return \{ ok: false, error: "could not store that file" \}; \}/.test(acc), "a failed row insert removes the bytes it would have orphaned");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   assert.ok(/const FUND_DUE_TTL = 22 \* HOUR;/.test(pol) && /const FUND_TTL = 24 \* HOUR, EXT_ERR_TTL/.test(pol) && !/>= FUND_TTL\)/.test(pol), "the two TTLs have two names and the outer one is used");
