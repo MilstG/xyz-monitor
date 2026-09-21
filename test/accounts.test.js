@@ -1495,11 +1495,17 @@ test("telegram sync: one conversation per member, a cursor that starts now, bare
   assert.equal(A.mirrorRows(m.uid, T, 10), null, "a member without the box ticked gets nothing to mirror");
   const dropped = A.send(g.uid, null, "oops", null, { thread: T }); A.drop(g.uid, dropped.id);
   assert.ok(!A.mirrorRows(l.uid, T, 50).rows.some((r) => r.id === dropped.id), "a deleted row is never mirrored");
+  mr = A.mirrorRows(l.uid, T, 50); A.markEscalated(l.uid, T, mr.upTo);
+  const tomb = A.send(g.uid, null, "gone before it was read", null, { thread: T }); A.drop(g.uid, tomb.id);
+  mr = A.mirrorRows(l.uid, T, 10);
+  assert.deepEqual(mr.rows, []); assert.equal(mr.upTo, tomb.id, "a tombstone alone still moves the cursor, so the sweep does not re-read it forever");
+  A.markEscalated(l.uid, T, mr.upTo);
+  assert.ok(A.send(m.uid, null, "fresh, unread, not yet on any phone", null, { thread: T }).ok, "a sender under the burst limit");
 
   // The escalation digest stands down for a synced conversation ONLY while a phone is reachable.
   const nobody = () => false;
   assert.ok(A.pendingEscalations(0, nobody, () => true).every((e) => !(e.uid === l.uid && e.thread === T)), "mirrored: no digest for the synced thread");
-  assert.ok(A.pendingEscalations(0, nobody, () => true).some((e) => e.uid === m.uid && e.thread === T), "…but the others in it still get theirs");
+  assert.ok(A.pendingEscalations(0, nobody, () => true).some((e) => e.uid === g.uid && e.thread === T), "…but the others in it still get theirs");
   assert.ok(A.pendingEscalations(0, nobody, () => false).some((e) => e.uid === l.uid && e.thread === T), "no reachable phone: the digest is the fallback again");
   assert.ok(A.pendingEscalations(0, nobody).some((e) => e.uid === l.uid && e.thread === T), "and the two-argument call behaves as before");
   assert.deepEqual(A.tgSyncAll(), [{ uid: l.uid, thread: T }], "the sweep's worklist is every live mirror");

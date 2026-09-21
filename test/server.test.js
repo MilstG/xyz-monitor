@@ -553,4 +553,18 @@ test("dm: the sync box needs a phone, /alert binds a rule to the conversation it
   assert.ok(!JSON.parse((await get("/api/alerts/rules", cara)).body).rules.some((r) => r.id === set.rule.id));
   // The verbs reach a signed-in member only.
   assert.equal((await post("/api/dm", { thread: T, alert: "list" })).statusCode, 401);
+  // The panel route cannot bind a rule to a conversation the caller is not in.
+  const foreign = await post("/api/alerts/rules", { metric: "px", op: ">", value: 1, thread: T + 1000 }, cara);
+  assert.equal(foreign.statusCode, 400);
+  const own = JSON.parse((await post("/api/alerts/rules", { metric: "px", op: ">", value: 1, thread: T }, cara)).body);
+  assert.ok(own.ok && own.rule.thread === T);
+  assert.ok(JSON.parse((await post("/api/alerts/rules", { del: own.rule.id }, cara)).body).ok);
+  // Source pins for the wire: what the phone gets back from /alert is escaped for parse_mode HTML
+  // (the help text carries literal <ticker> placeholders), fires batch per author, and a member
+  // with any chat in quiet hours holds as a whole.
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(/return a\.ok \? \{ ok: true, text: tgEsc\(a\.text\) \} : \{ ok: false, error: tgEsc\(a\.error\) \};/.test(srv), "/alert replies are escaped at the wire");
+  assert.ok(/const key = rule\.thread \+ "\|" \+ \(rule\.owner \|\| ""\);/.test(srv), "fire batches are per author per conversation");
+  assert.ok(/if \(!targets\.length \|\| targets\.some\(\(c\) => poller\.pushQuietNow && poller\.pushQuietNow\(c\)\)\) continue;/.test(srv), "quiet hours hold the whole member");
+  assert.ok(/poller\.setRuleThread\(id, 0\)/.test(srv), "an author who left the room gets the rule unbound, not dropped");
 });

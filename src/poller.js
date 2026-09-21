@@ -14761,8 +14761,16 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     pushEnqueueNow: (chat, text, force) => pushEnqueue(chat, text, !!force, 0),
     // The inbound half of the same wire: server.js installs the handler that turns /r into a message.
     setDmBridge: (fn) => { dmBridge = typeof fn === "function" ? fn : null; },
-    // Conversation-bound rules: the server installs the poster (build 2026.09.21-83).
+    // Conversation-bound rules: the server installs the poster (build 2026.09.21-83), and unbinds
+    // a rule whose author has left the conversation it was written in (thread 0 = personal).
     setRuleSink: (fn) => { ruleSink = typeof fn === "function" ? fn : null; },
+    setRuleThread: (id, thread) => {
+      const r = alertRules.find((x) => x.id === +id);
+      if (!r) return { ok: false, error: "unknown" };
+      r.thread = Number.isInteger(+thread) && +thread > 0 ? +thread : 0;
+      persistRules();
+      return { ok: true, rule: Object.assign({}, r, { text: ruleLabel(r) }) };
+    },
     // Whether a chat is inside its quiet window right now. The mirror asks before sending a
     // conversation into a sleeping phone: it holds (and catches up compactly later) rather than
     // parking a night's worth of chat in the shared outbox.

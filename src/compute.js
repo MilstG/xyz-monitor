@@ -5595,7 +5595,7 @@ function validateRule(rule) {
   if (rule.cooldownMs != null && (!Number.isFinite(+rule.cooldownMs) || +rule.cooldownMs < 0)) return { ok: false, error: "bad-cooldown" };
   // A conversation id, when the rule fires INTO a chat rather than to its owner's phone. The
   // server decides whether the owner may post there; here it is only a positive integer or nothing.
-  if (rule.thread != null && rule.thread !== 0 && !(Number.isInteger(+rule.thread) && +rule.thread > 0)) return { ok: false, error: "bad-thread" };
+  if (rule.thread != null && rule.thread !== 0 && !((typeof rule.thread === "number" || typeof rule.thread === "string") && Number.isInteger(+rule.thread) && +rule.thread > 0)) return { ok: false, error: "bad-thread" };
   return { ok: true, rule: {
     id: rule.id || null, metric: rule.metric, op: rule.op, value: +rule.value,
     coin: rule.coin || "", uni: rule.uni || "", band: rule.band != null ? +rule.band : null,
@@ -5628,7 +5628,10 @@ const ALERT_METRIC_ALIAS = {
   ema21: "e21d", e21d: "e21d", e21: "e21d",
   ma200: "vsma200", vsma200: "vsma200", "200ma": "vsma200", "200dma": "vsma200", "200d": "vsma200", "200sma": "vsma200", sma200: "vsma200",
 };
-const ALERT_MA_WORD = /^(?:the\s+)?(?:200\s*-?\s*(?:ma|dma|sma|day|d)(?:\s+(?:ma|sma|moving\s+average|average))?|ma\s*200|sma\s*200|200-day)$/i;
+// "200ma", "200dma", "200-day", "200 day moving average", "ma200" — but not a bare "200 day",
+// which is what "> 200 day high" or a note starting with "day" would otherwise turn into.
+const ALERT_MA_WORD = /^(?:the\s+)?(?:200\s*(?:ma|dma|sma|d)|200-day(?:\s+(?:ma|sma|moving\s+average|average))?|200\s+day\s+(?:ma|sma|moving\s+average|average)|(?:ma|sma)\s*200)$/i;
+const alertAlias = (w) => (Object.prototype.hasOwnProperty.call(ALERT_METRIC_ALIAS, w) ? ALERT_METRIC_ALIAS[w] : null);
 function parseAlertCmd(text) {
   const raw = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
   if (!raw || /^(help|\?)$/i.test(raw)) return { ok: true, action: "help" };
@@ -5648,7 +5651,7 @@ function parseAlertCmd(text) {
   // Optional metric word, then the comparison. A metric that is not one is left for the op.
   let metric = "px";
   const mk = p[0].toLowerCase().replace(/^\$/, "");
-  if (ALERT_METRIC_ALIAS[mk] && !/^(above|below|over|under|cross(?:es|ed)?|>|<|>=|<=|=)$/i.test(p[0])) { metric = ALERT_METRIC_ALIAS[mk]; p.shift(); }
+  if (alertAlias(mk) && !/^(above|below|over|under|cross(?:es|ed)?|>|<|>=|<=|=)$/i.test(p[0])) { metric = alertAlias(mk); p.shift(); }
   if (!p.length) return { ok: false, error: "then a comparison and a number: > 200, below 180, crosses 150" };
   // The comparison: symbols or words; "crosses" takes an optional direction word.
   let op = null;

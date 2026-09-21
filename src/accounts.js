@@ -1661,11 +1661,14 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (!rd || !rd.tgSync) return null;
     const floor = Math.max(rd.notifiedMsgId || 0, rd.clearedUpTo || 0);
     const n = Math.trunc(Math.min(Math.max(+limit || 10, 1), 50));
-    const all = S.msgSince.all(t.id, floor, 500).filter((m) => !m.deletedAt);
-    if (!all.length) return { thread: t.id, name: threadName(t, uid), kind: t.kind, rows: [], skipped: 0, upTo: 0 };
+    // upTo is the last row ABOVE the floor, deleted or not: a tombstone is handled by being
+    // skipped, and a cursor that stopped short of one would re-read it on every sweep forever.
+    const raw = S.msgSince.all(t.id, floor, 500);
+    const all = raw.filter((m) => !m.deletedAt);
+    if (!raw.length) return { thread: t.id, name: threadName(t, uid), kind: t.kind, rows: [], skipped: 0, upTo: 0 };
     const rows = all.slice(-n);
     return { thread: t.id, name: threadName(t, uid), kind: t.kind, skipped: all.length - rows.length,
-      upTo: all[all.length - 1].id,
+      upTo: raw[raw.length - 1].id,
       rows: rows.map((m) => ({ id: m.id, sender: m.sender || "", mine: m.sender === uid, via: m.via || null,
         who: m.sender ? ((users.get(m.sender) || {}).display || "—") : "",
         sys: m.sys ? sysLine(m) : "",

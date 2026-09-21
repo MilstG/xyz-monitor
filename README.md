@@ -208,7 +208,7 @@ instant, and the per-IP rate limit stops being a per-user problem.
   else, and the bot tells you what it is now syncing. Sync starts from **now**: the backscroll is
   never replayed into the chat. Your own phone lines are not echoed back; the offline digest
   stands down for a synced conversation while a phone is reachable (unlinked or blocked, it is the
-  fallback again); a chat inside its quiet hours holds, then catches up with the last ten lines
+  fallback again); while any of your chats is inside its quiet hours the mirror holds, then catches up with the last ten lines
   and a count of the rest. The mirror rides the alert outbox (`force`: a conversation you asked
   for live is not an alert, and the hourly alert cap must not park it), and the cursor is the
   same `notifiedMsgId` the digest uses, so the two can never deliver a line twice. Edits,

@@ -2745,6 +2745,9 @@ test("rules: /alert grammar parses what people type, in plain words either way",
   assert.deepEqual(r("crypto d7 < -10").rule, { metric: "d7", op: "<", value: -10, note: "", coin: "", uni: "main" });
   assert.deepEqual(r("list"), { ok: true, action: "list" }); assert.deepEqual(r("off #12"), { ok: true, action: "off", id: 12 });
   assert.deepEqual(r(""), { ok: true, action: "help" }); assert.deepEqual(r("help"), { ok: true, action: "help" });
+  assert.deepEqual(r("NVDA > 200 day high").rule, { metric: "px", op: ">", value: 200, note: "day high", ticker: "NVDA" }, "a bare 'day' after the number is a note, not the moving average");
+  assert.deepEqual(r("NVDA above 200-day").rule.metric, "vsma200", "hyphenated is unambiguous");
+  assert.deepEqual(r("NVDA constructor > 5").ok, false, "a prototype name is not a metric");
   for (const bad of ["NVDA", "NVDA foo 3", "NVDA > abc", "NVDA d1 above 200ma", "off", "> 200"]) {
     const x = r(bad); assert.equal(x.ok, false, bad); assert.ok(x.error && !/unknown-|bad-/.test(x.error), "plain words: " + x.error);
   }
@@ -2756,6 +2759,8 @@ test("rules: /alert grammar parses what people type, in plain words either way",
   assert.equal(validateRule({ metric: "px", op: ">", value: 1 }).rule.thread, 0, "no thread is 0, never null");
   assert.equal(validateRule({ metric: "px", op: ">", value: 1, thread: -3 }).error, "bad-thread");
   assert.equal(validateRule({ metric: "px", op: ">", value: 1, thread: "x" }).error, "bad-thread");
+  assert.equal(validateRule({ metric: "px", op: ">", value: 1, thread: true }).error, "bad-thread", "a boolean is not a conversation id");
+  assert.equal(validateRule({ metric: "px", op: ">", value: 1, thread: "12" }).rule.thread, 12);
   assert.equal(ruleLabel({ coin: "xyz:NVDA", metric: "vsma200", op: "cross_up", value: 0 }), "xyz:NVDA · price crosses up through the 200d MA");
   assert.equal(ruleLabel({ coin: "xyz:NVDA", metric: "vsma200", op: ">", value: 5 }), "xyz:NVDA · % vs 200d MA above 5%", "a non-zero threshold keeps the arithmetic label");
   assert.ok(/\/alert list/.test(ALERT_HELP) && /200ma/.test(ALERT_HELP));
@@ -2792,9 +2797,13 @@ test("rules: the 200-day MA rides the snapshot row, and a conversation-bound rul
   const h1 = p.getTriggers(0, "own-a", false).events.find((e) => e.kind === "rule" && e.metric === "h1");
   assert.ok(h1 && !h1.quiet && !h1.thread, "a panel rule is unchanged");
   assert.equal(fired.length, 1, "the sink is only for bound rules");
+  // Unbinding (the author left the room) turns it into a personal rule, persisted.
+  assert.equal(p.setRuleThread(add.rule.id, 0).rule.thread, 0);
+  assert.equal(p.getRules("own-a", false).rules.find((x) => x.id === add.rule.id).thread, 0);
+  assert.equal(p.setRuleThread(999, 0).ok, false);
   // Delete returns what it removed, so the chat can say which watch is gone.
   const del = p.deleteRule(add.rule.id, "own-a", false);
-  assert.ok(del.ok && del.rule.thread === 42 && /200d MA/.test(del.rule.text));
+  assert.ok(del.ok && del.rule.thread === 0 && /200d MA/.test(del.rule.text));
   // The binding survives a restart with the rule.
   const h2 = ruleHarness();
   h2.p.addRule({ metric: "px", op: ">", value: 1, thread: 42 }, "own-a");

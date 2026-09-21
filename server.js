@@ -1730,19 +1730,22 @@ async function buildServer() {
     if (!me) return { ok: false, error: "This chat is not linked to an account." };
     // /alert from the phone: bound to the conversation this chat mirrors, if any; otherwise a
     // plain personal rule that reaches the phone through the rule class like one set in the panel.
-    if (o.alert) return dmAlertCmd(me, text, ACCOUNTS.tgSyncThread(me.uid), { tg: true });
+    // Everything returned from here rides pushReply with parse_mode HTML: the help text has
+    // literal <ticker> placeholders, and a note, a thread name or an echoed token is member text.
+    // Escaped at the wire, once, never in the answer itself (the browser path escapes its own).
+    if (o.alert) { const a = dmAlertCmd(me, text, ACCOUNTS.tgSyncThread(me.uid), { tg: true }); return a.ok ? { ok: true, text: tgEsc(a.text) } : { ok: false, error: tgEsc(a.error) }; }
     // Bare text (build 2026.09.21-83): into the synced conversation, or nowhere. `silent` rides
     // back so the wire spends no reply on a chat that never opted in.
     if (o.bare) {
       const r = ACCOUNTS.bridgeSyncText(me.uid, text);
       if (r.ok && r.thread) { dmPoke(r.thread); dmMirror(r.thread); dmReplyTarget.set(String(chat), { thread: r.thread, at: Date.now() }); }
-      return r;
+      return r.ok ? { ok: true, thread: r.thread } : { ok: false, error: tgEsc(r.error), silent: !!r.silent };
     }
     const ctx = dmReplyTarget.get(String(chat));
     const thread = (ctx && Date.now() - ctx.at < DM_REPLY_CONTEXT_MS) ? ctx.thread : 0;
     const r = ACCOUNTS.bridgeReply(me.uid, text, thread);
     if (r.ok && r.thread) { dmPoke(r.thread); dmMirror(r.thread); dmReplyTarget.set(String(chat), { thread: r.thread, at: Date.now() }); }
-    return r.ok ? { ok: true, text: "Sent." } : { ok: false, error: r.error };
+    return r.ok ? { ok: true, text: "Sent." } : { ok: false, error: tgEsc(r.error) };
   });
 
   // ===== Telegram sync: the outbound mirror (build 2026.09.21-83) ================================
@@ -1793,8 +1796,11 @@ async function buildServer() {
       let m;
       try { m = ACCOUNTS.mirrorRows(uid, threadId, DM_MIRROR_MAX); } catch (e) { log("dm mirror read failed (isolated): " + (e && e.message)); continue; }
       if (!m || !m.upTo) continue;
-      const targets = poller.pushRecipientsFor(uid).filter((c) => !(poller.pushQuietNow && poller.pushQuietNow(c)));
-      if (!targets.length) continue;
+      // One cursor per member, so one decision per member: if ANY of their chats is inside its
+      // quiet window the whole member holds, and the catch-up after it reaches every chat.
+      // Advancing for the awake chat would silently skip the rows for the sleeping one.
+      const targets = poller.pushRecipientsFor(uid);
+      if (!targets.length || targets.some((c) => poller.pushQuietNow && poller.pushQuietNow(c))) continue;
       // What you typed at the phone is already on the phone.
       const rows = m.rows.filter((r) => !(r.mine && r.via === "telegram"));
       if (rows.length) {
@@ -1866,18 +1872,31 @@ async function buildServer() {
   // The fire. Buffered a tick and posted once per conversation: a roster-wide rule ("any rvol >
   // 3") can trip on twenty names in one scan, and twenty posts would be a wall where one list is
   // the answer — and would trip the per-sender burst limit besides.
-  const ruleFireBuf = new Map();   // thread -> { owner, evs: [] }
+  // "NVDA · price crosses up through the 200d MA — now +3.00%": the rule's own sentence past its
+  // scope (ev.rule is "<scope> · <sentence>"), then the value that tripped it.
+  const sentence = (ev) => { const i = String(ev.rule || "").indexOf(" \u00b7 "); return i >= 0 ? ev.rule.slice(i + 3) : ev.label + " " + ruleOpWord(ev.op) + " " + ev.value; };
+  const ruleFireBuf = new Map();   // "thread|owner" -> { thread, owner, evs: [] } — one post per author per conversation
   let ruleFireArmed = false;
   function ruleFireFlush() {
     ruleFireArmed = false;
-    const batches = [...ruleFireBuf.entries()]; ruleFireBuf.clear();
-    for (const [thread, b] of batches) {
+    const batches = [...ruleFireBuf.values()]; ruleFireBuf.clear();
+    for (const b of batches) {
+      const thread = b.thread;
       // Membership re-checked at fire time: a rule outlives leaving the room, and must not post
-      // into a conversation its author can no longer read.
-      if (!ACCOUNTS.isMember(thread, b.owner)) { log("rule fire skipped: author is no longer in conversation " + thread); continue; }
-      // "NVDA · price crosses up through the 200d MA — now +3.00%": the ticker, then the rule's
-      // own sentence past its scope (ev.rule is "<scope> · <sentence>"), then the value that tripped it.
-      const sentence = (ev) => { const i = String(ev.rule || "").indexOf(" \u00b7 "); return i >= 0 ? ev.rule.slice(i + 3) : ev.label + " " + ruleOpWord(ev.op) + " " + ev.value; };
+      // into a conversation its author can no longer read. Not a silent drop either: the rule is
+      // unbound (it becomes the plain personal rule it would have been) and THIS fire goes to the
+      // author's phone directly, since the event on the wire was already marked quiet.
+      if (!ACCOUNTS.isMember(thread, b.owner)) {
+        const ids = [...new Set(b.evs.map((ev) => ev.ruleId))];
+        for (const id of ids) { try { poller.setRuleThread(id, 0); } catch (_) {} }
+        log("rule fire: author is no longer in conversation " + thread + " — rule(s) " + ids.map((i) => "#" + i).join(" ") + " unbound, fire sent to their phone");
+        if (poller.pushEnqueueNow && poller.pushRecipientsFor) {
+          const text = "\ud83d\udd14 <b>alert</b> (no longer in that conversation \u2014 now a personal alert)\n"
+            + b.evs.map((ev) => tgEsc(ev.t + " \u00b7 " + sentence(ev) + " \u2014 now " + ev.now + (ev.note ? " \u00b7 " + ev.note : ""))).join("\n");
+          for (const chat of poller.pushRecipientsFor(b.owner)) poller.pushEnqueueNow(chat, text, false);
+        }
+        continue;
+      }
       const lines = b.evs.map((ev) => "\ud83d\udd14 " + ev.t + " \u00b7 " + sentence(ev) + " \u2014 now " + ev.now + (ev.note ? " \u00b7 " + ev.note : ""));
       const ids = [...new Set(b.evs.map((ev) => "#" + ev.ruleId))].join(" ");
       const post = ACCOUNTS.send(b.owner, null, lines.join("\n"), null, { thread, cmd: "alert " + ids + " fired" });
@@ -1886,8 +1905,9 @@ async function buildServer() {
     }
   }
   if (poller.setRuleSink) poller.setRuleSink((rule, ev) => {
-    let b = ruleFireBuf.get(rule.thread);
-    if (!b) { b = { owner: rule.owner || "", evs: [] }; ruleFireBuf.set(rule.thread, b); }
+    const key = rule.thread + "|" + (rule.owner || "");
+    let b = ruleFireBuf.get(key);
+    if (!b) { b = { thread: rule.thread, owner: rule.owner || "", evs: [] }; ruleFireBuf.set(key, b); }
     b.evs.push(ev);
     if (!ruleFireArmed) { ruleFireArmed = true; setImmediate(() => { try { ruleFireFlush(); } catch (e) { log("rule fire flush failed (isolated): " + (e && e.message)); } }); }
   });
@@ -2259,6 +2279,12 @@ async function buildServer() {
   fastify.post("/api/alerts/rules", { bodyLimit: 16 * 1024 }, (req, reply) => {
     const b = req.body || {};
     const own = ownerFor(req, reply);
+    // A conversation binding is only ever written by /alert from inside the conversation; the
+    // panel form never sends one, and one arriving here is checked the same way (a member of it).
+    if (b.del == null && b.thread) {
+      const me = meOf(req);
+      if (!me || !ACCOUNTS.isMember(b.thread, me.uid)) return reply.code(400).send({ ok: false, error: "no such conversation" });
+    }
     const r = b.del != null ? poller.deleteRule(b.del, own, isAdmin(req)) : poller.addRule(b, own);
     return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : 400)).send(r);
   });
