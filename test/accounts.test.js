@@ -1469,3 +1469,70 @@ test("security -20: a prior owner handle is adopted as the uid only in the minte
     assert.equal(A.listUsers().length, 6, "every account was still created — only the adoption was refused");
   } finally { A.close(); require("fs").rmSync(A._dir, { recursive: true, force: true }); }
 });
+
+// ===== build 2026.09.21-83: Telegram sync ========================================================
+test("telegram sync: one conversation per member, a cursor that starts now, bare text into it, and the digest stands down", async () => {
+  const { A, g, l, m } = await seedDesk();
+  const T = A.createGroup(g.uid, "Desk", [l.uid, m.uid]).thread;
+  const dm = A.threadFor(g.uid, l.uid, true).id;
+  A.send(g.uid, l.uid, "before the box was ticked");
+
+  assert.equal(A.tgSyncThread(l.uid), 0, "nothing synced by default");
+  assert.equal(A.mirrorRows(l.uid, dm, 10), null, "no sync, no mirror rows — the flag is the gate");
+  assert.deepEqual(A.bridgeSyncText(l.uid, "hello?"), { ok: false, error: "not-synced", silent: true }, "bare text with nothing synced is a silent no-op");
+
+  const on = A.setTgSync(l.uid, dm, true);
+  assert.ok(on.ok && on.tgSync && on.name === "gus", JSON.stringify(on));
+  assert.equal(A.tgSyncThread(l.uid), dm);
+  assert.deepEqual(A.mirrorRows(l.uid, dm, 10).rows, [], "enabling seeds the cursor at the last message: the backscroll is not replayed");
+  assert.ok(A.threads(l.uid).find((t) => t.id === dm).tgSync, "the thread list carries the flag");
+
+  // One at a time: syncing the group unticks the DM.
+  assert.ok(A.setTgSync(l.uid, T, true).ok);
+  assert.equal(A.tgSyncThread(l.uid), T);
+  assert.deepEqual(A.threads(l.uid).map((t) => [t.id, t.tgSync]).sort(), [[dm, false], [T, true]].sort(), "exactly one row is on");
+  assert.ok(!A.setTgSync(m.uid, dm, true).ok, "you cannot sync a conversation you are not in");
+
+  // Bare text from the phone lands in the synced conversation, marked as such.
+  const br = A.bridgeSyncText(l.uid, "from my phone");
+  assert.ok(br.ok && br.thread === T && br.message.via === "telegram", JSON.stringify(br));
+  assert.ok(!A.bridgeSyncText(l.uid, "   ").ok, "an empty line is refused, not posted");
+
+  // The mirror: rows above the cursor, oldest first, the member's own phone lines flagged so the
+  // server never echoes them back, and a bounded catch-up with a count of what it skipped.
+  A.send(g.uid, null, "desk says hi $HOOD", null, { thread: T });
+  A.send(m.uid, null, "table", null, { thread: T, cmd: "top funding 5" });
+  let mr = A.mirrorRows(l.uid, T, 10);
+  assert.equal(mr.name, "Desk");
+  assert.deepEqual(mr.rows.map((r) => [r.who, r.mine, r.via, r.cmd]), [["lena", true, "telegram", ""], ["gus", false, null, ""], ["marco", false, null, "top funding 5"]]);
+  assert.equal(mr.skipped, 0);
+  A.markEscalated(l.uid, T, mr.upTo);
+  assert.deepEqual(A.mirrorRows(l.uid, T, 10).rows, [], "advancing the cursor consumes them");
+  for (let i = 0; i < 15; i++) A.send(g.uid, null, "line " + i, null, { thread: T });
+  mr = A.mirrorRows(l.uid, T, 10);
+  assert.equal(mr.rows.length, 10); assert.equal(mr.skipped, 5); assert.equal(mr.rows[0].body, "line 5", "the LAST ten, and the count of the rest");
+  assert.equal(A.mirrorRows(m.uid, T, 10), null, "a member without the box ticked gets nothing to mirror");
+  const dropped = A.send(g.uid, null, "oops", null, { thread: T }); A.drop(g.uid, dropped.id);
+  assert.ok(!A.mirrorRows(l.uid, T, 50).rows.some((r) => r.id === dropped.id), "a deleted row is never mirrored");
+  mr = A.mirrorRows(l.uid, T, 50); A.markEscalated(l.uid, T, mr.upTo);
+  const tomb = A.send(g.uid, null, "gone before it was read", null, { thread: T }); A.drop(g.uid, tomb.id);
+  mr = A.mirrorRows(l.uid, T, 10);
+  assert.deepEqual(mr.rows, []); assert.equal(mr.upTo, tomb.id, "a tombstone alone still moves the cursor, so the sweep does not re-read it forever");
+  A.markEscalated(l.uid, T, mr.upTo);
+  assert.ok(A.send(m.uid, null, "fresh, unread, not yet on any phone", null, { thread: T }).ok, "a sender under the burst limit");
+
+  // The escalation digest stands down for a synced conversation ONLY while a phone is reachable.
+  const nobody = () => false;
+  assert.ok(A.pendingEscalations(0, nobody, () => true).every((e) => !(e.uid === l.uid && e.thread === T)), "mirrored: no digest for the synced thread");
+  assert.ok(A.pendingEscalations(0, nobody, () => true).some((e) => e.uid === g.uid && e.thread === T), "…but the others in it still get theirs");
+  assert.ok(A.pendingEscalations(0, nobody, () => false).some((e) => e.uid === l.uid && e.thread === T), "no reachable phone: the digest is the fallback again");
+  assert.ok(A.pendingEscalations(0, nobody).some((e) => e.uid === l.uid && e.thread === T), "and the two-argument call behaves as before");
+  assert.deepEqual(A.tgSyncAll(), [{ uid: l.uid, thread: T }], "the sweep's worklist is every live mirror");
+
+  // Leaving the room leaves the flag inert: no thread, no bare-text posting, no worklist entry.
+  A.leaveGroup(l.uid, T);
+  assert.equal(A.tgSyncThread(l.uid), 0);
+  assert.equal(A.bridgeSyncText(l.uid, "still here?").error, "not-synced");
+  assert.deepEqual(A.tgSyncAll(), []);
+  assert.ok(A.setTgSync(l.uid, dm, false).ok && A.tgSyncThread(l.uid) === 0, "off is off");
+});

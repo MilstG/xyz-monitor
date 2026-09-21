@@ -1486,7 +1486,7 @@ test("rule scan: reads the SNAPSHOT payload, so an alert can never disagree with
 });
 
 test("rules survive a restart WITH their edge state, so a redeploy re-announces nothing", () => {
-  const { p, saved } = ruleHarness();
+  const H = ruleHarness(), p = H.p;   // `saved` is a getter: destructured, it would read null once
   p.seedRowNow("AAA", { ticker: "AAA", px: 100, uni: "xyz", ref: { p1h: 100, p4h: 100, p7d: 100, p30d: 100 } });
   p.buildSnapshotNow();
   p.addRule({ metric: "h1", op: ">", value: 5, note: "breakout watch" }, "own-a");
@@ -1507,7 +1507,18 @@ test("rules survive a restart WITH their edge state, so a redeploy re-announces 
   assert.ok(/armed: \[\.\.\.ruleArmed\.keys\(\)\]/.test(st) && /fired: \[\.\.\.ruleLastFire\.entries\(\)\]/.test(st),
     "…which means persisting them");
   assert.ok(p2.hydrateRulesNow);
-  assert.ok(saved === null || true);
+  // …and the restore must actually restore: a stored rule carries uni "" (absent), and the
+  // validator used to reject that on the way back in, so every coin-scoped and roster-wide rule
+  // vanished on every deploy while the source pins above stayed green.
+  const { createPoller } = require("../src/poller");
+  const p3 = createPoller({ dex: "xyz", log: () => {}, version: "test", crypto: false,
+    store: { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {}, insert: () => {}, saveRegime: () => {},
+      loadTriggers: () => null, saveTriggers: () => {}, saveRules: () => {}, loadRules: () => H.saved } });
+  assert.equal(p3.hydrateRulesNow(), 1, "the persisted rule comes back");
+  assert.equal(p3.getRules("own-a", false).rules[0].note, "breakout watch");
+  p3.seedRowNow("AAA", { ticker: "AAA", px: 112, uni: "xyz", ref: { p1h: 100, p4h: 100, p7d: 100, p30d: 100 } });
+  p3.buildSnapshotNow(); p3.ruleScanNow();
+  assert.equal(p3.getTriggers(0, "own-a", false).events.filter((e) => e.kind === "rule").length, 0, "still in breach after the restart: not re-announced");
 });
 
 test("analyst flip fires only on an actual stance change", () => {
@@ -2715,4 +2726,91 @@ test("study wiring 2026.09.20: hourly funding nets the daily base rates, the 5m 
   assert.ok(pol.includes("detectPead(prints, r.dailyRaw, r.px, sd30, r.hourlyRaw, now)"), "PEAD reads the print anchor off the hourly spine");
   assert.ok(pol.includes("meanPairwiseCorr(top.map((r) => r.dailyRaw), REGIME_LOOKBACK, Date.now())"), "the regime correlation excludes the open day");
   assert.ok(/rvolMulti\(hs, RVOL_WINS, nowMs, undefined, r\.uni === "xyz" \? "ET" : undefined\)/.test(pol), "equity rvol is keyed on the ET clock");
+});
+
+// ===== build 2026.09.21-83: /alert grammar, the 200-day metric, and conversation-bound fires ====
+test("rules: /alert grammar parses what people type, in plain words either way", () => {
+  const { parseAlertCmd, validateRule, ruleLabel, ALERT_HELP } = require("../src/compute");
+  const r = (t) => parseAlertCmd(t);
+  assert.deepEqual(r("NVDA > 200").rule, { metric: "px", op: ">", value: 200, note: "", ticker: "NVDA" });
+  assert.deepEqual(r("$nvda below 180").rule, { metric: "px", op: "<", value: 180, note: "", ticker: "NVDA" });
+  assert.deepEqual(r("NVDA crosses 150").rule, { metric: "px", op: "cross_up", value: 150, note: "", ticker: "NVDA" }, "a bare cross is upward");
+  assert.deepEqual(r("NVDA crosses down 150 stop watch").rule, { metric: "px", op: "cross_dn", value: 150, note: "stop watch", ticker: "NVDA" });
+  assert.deepEqual(r("NVDA above 200ma").rule, { metric: "vsma200", op: ">", value: 0, note: "", band: 0.5, ticker: "NVDA" }, "the MA words pin the metric, compare to 0, and carry hysteresis");
+  assert.deepEqual(r("NVDA crosses below the 200 day moving average").rule, { metric: "vsma200", op: "cross_dn", value: 0, note: "", band: 0.5, ticker: "NVDA" });
+  assert.deepEqual(r("HOOD d1 > 5 big day").rule, { metric: "d1", op: ">", value: 5, note: "big day", ticker: "HOOD" });
+  assert.deepEqual(r("btc funding < -20").rule, { metric: "fundAPR", op: "<", value: -20, note: "", ticker: "BTC" });
+  assert.deepEqual(r("any rvol > 3").rule, { metric: "rvol", op: ">", value: 3, note: "", coin: "" }, "any market: no coin, no universe");
+  assert.deepEqual(r("stocks above 200dma").rule, { metric: "vsma200", op: ">", value: 0, note: "", band: 0.5, coin: "", uni: "xyz" });
+  assert.deepEqual(r("crypto d7 < -10").rule, { metric: "d7", op: "<", value: -10, note: "", coin: "", uni: "main" });
+  assert.deepEqual(r("list"), { ok: true, action: "list" }); assert.deepEqual(r("off #12"), { ok: true, action: "off", id: 12 });
+  assert.deepEqual(r(""), { ok: true, action: "help" }); assert.deepEqual(r("help"), { ok: true, action: "help" });
+  assert.deepEqual(r("NVDA > 200 day high").rule, { metric: "px", op: ">", value: 200, note: "day high", ticker: "NVDA" }, "a bare 'day' after the number is a note, not the moving average");
+  assert.deepEqual(r("NVDA above 200-day").rule.metric, "vsma200", "hyphenated is unambiguous");
+  assert.deepEqual(r("NVDA constructor > 5").ok, false, "a prototype name is not a metric");
+  for (const bad of ["NVDA", "NVDA foo 3", "NVDA > abc", "NVDA d1 above 200ma", "off", "> 200"]) {
+    const x = r(bad); assert.equal(x.ok, false, bad); assert.ok(x.error && !/unknown-|bad-/.test(x.error), "plain words: " + x.error);
+  }
+  // Every parsed rule validates once the ticker is a coin, and the thread survives validation.
+  for (const t of ["NVDA > 200", "NVDA above 200ma", "any rvol > 3", "HOOD d1 > 5 note"]) {
+    const rule = Object.assign({}, r(t).rule, { thread: 7 }); if (rule.ticker) { rule.coin = "xyz:" + rule.ticker; delete rule.ticker; }
+    const v = validateRule(rule); assert.ok(v.ok, t + ": " + v.error); assert.equal(v.rule.thread, 7);
+  }
+  assert.equal(validateRule({ metric: "px", op: ">", value: 1 }).rule.thread, 0, "no thread is 0, never null");
+  assert.equal(validateRule({ metric: "px", op: ">", value: 1, thread: -3 }).error, "bad-thread");
+  assert.equal(validateRule({ metric: "px", op: ">", value: 1, thread: "x" }).error, "bad-thread");
+  assert.equal(validateRule({ metric: "px", op: ">", value: 1, thread: true }).error, "bad-thread", "a boolean is not a conversation id");
+  assert.equal(validateRule({ metric: "px", op: ">", value: 1, thread: "12" }).rule.thread, 12);
+  assert.equal(ruleLabel({ coin: "xyz:NVDA", metric: "vsma200", op: "cross_up", value: 0 }), "xyz:NVDA · price crosses up through the 200d MA");
+  assert.equal(ruleLabel({ coin: "xyz:NVDA", metric: "vsma200", op: ">", value: 5 }), "xyz:NVDA · % vs 200d MA above 5%", "a non-zero threshold keeps the arithmetic label");
+  assert.ok(/\/alert list/.test(ALERT_HELP) && /200ma/.test(ALERT_HELP));
+});
+
+test("rules: the 200-day MA rides the snapshot row, and a conversation-bound rule fires into its sink, quiet on the wire", () => {
+  const { p } = ruleHarness();
+  const closes = (v) => Array.from({ length: 205 }, (_, i) => ({ t: i, c: v }));
+  p.seedRowNow("AAA", { ticker: "AAA", px: 95, uni: "xyz", ref: { p1h: 100, p4h: 100, p7d: 100, p30d: 100 }, dailyRaw: closes(100) });
+  p.seedRowNow("BBB", { ticker: "BBB", px: 95, uni: "xyz", ref: { p1h: 100, p4h: 100, p7d: 100, p30d: 100 }, dailyRaw: closes(100).slice(0, 150) });
+  p.buildSnapshotNow();
+  const row = (c) => p.getSnapshot().markets.find((r) => r.coin === c);
+  assert.equal(row("AAA").ma200, 100, "SMA of the last 200 daily closes");
+  assert.equal(row("BBB").ma200, undefined, "under 200 closes: absent, never guessed");
+
+  const fired = [];
+  p.setRuleSink((rule, ev) => fired.push({ rule, ev }));
+  const add = p.addRule({ metric: "vsma200", op: "cross_up", value: 0, band: 0.5, thread: 42 }, "own-a");
+  assert.ok(add.ok && add.rule.thread === 42, JSON.stringify(add));
+  assert.equal(add.rule.text, "AAA · price crosses up through the 200d MA".replace("AAA", "any market"), "a roster-wide rule reads as a sentence");
+  p.ruleScanNow();                                                        // baseline: below the line
+  p.seedRowNow("AAA", { px: 103 }); p.buildSnapshotNow(); p.ruleScanNow();   // reclaim
+  assert.equal(fired.length, 1, "the sink saw the fire");
+  assert.equal(fired[0].rule.id, add.rule.id); assert.equal(fired[0].ev.thread, 42); assert.equal(fired[0].ev.quiet, 1, "bound to a conversation: the post is the delivery, the wire stays quiet");
+  assert.equal(fired[0].ev.coin, "AAA"); assert.ok(/^\+3\.00%$/.test(fired[0].ev.now), fired[0].ev.now);
+  const evs = p.getTriggers(0, "own-a", false).events.filter((e) => e.kind === "rule");
+  assert.equal(evs.length, 1, "…and it is still on the ring for the bell log");
+  assert.ok(!fired.some((f) => f.ev.coin === "BBB"), "no MA, no fire");
+  // An unbound rule never touches the sink and is not quiet.
+  const plain = p.addRule({ metric: "h1", op: ">", value: 5 }, "own-a");
+  assert.equal(plain.rule.thread, 0);
+  p.seedRowNow("AAA", { px: 100 }); p.buildSnapshotNow(); p.ruleScanNow();
+  p.seedRowNow("AAA", { px: 112 }); p.buildSnapshotNow(); p.ruleScanNow();
+  const h1 = p.getTriggers(0, "own-a", false).events.find((e) => e.kind === "rule" && e.metric === "h1");
+  assert.ok(h1 && !h1.quiet && !h1.thread, "a panel rule is unchanged");
+  assert.equal(fired.length, 1, "the sink is only for bound rules");
+  // Unbinding (the author left the room) turns it into a personal rule, persisted.
+  assert.equal(p.setRuleThread(add.rule.id, 0).rule.thread, 0);
+  assert.equal(p.getRules("own-a", false).rules.find((x) => x.id === add.rule.id).thread, 0);
+  assert.equal(p.setRuleThread(999, 0).ok, false);
+  // Delete returns what it removed, so the chat can say which watch is gone.
+  const del = p.deleteRule(add.rule.id, "own-a", false);
+  assert.ok(del.ok && del.rule.thread === 0 && /200d MA/.test(del.rule.text));
+  // The binding survives a restart with the rule.
+  const h2 = ruleHarness();
+  h2.p.addRule({ metric: "px", op: ">", value: 1, thread: 42 }, "own-a");
+  const { createPoller } = require("../src/poller");
+  const p3 = createPoller({ dex: "xyz", log: () => {}, version: "test", crypto: false,
+    store: { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {}, insert: () => {}, saveRegime: () => {},
+      loadTriggers: () => null, saveTriggers: () => {}, saveRules: () => {}, loadRules: () => h2.saved } });
+  p3.hydrateRulesNow();
+  assert.equal(p3.getRules("own-a", false).rules[0].thread, 42, "hydrated with its conversation");
 });

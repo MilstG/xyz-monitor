@@ -150,7 +150,7 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
   const opOpts=(ruleState&&ruleState.ops||['>','<']).map(o=>`<option value="${esc(o)}">${esc((ruleState&&ruleState.opLabels&&ruleState.opLabels[o])||o)}</option>`).join('');
   const srvRules=(ruleState&&ruleState.rules)||[];
   const srvHtml=srvRules.length? srvRules.map(rl=>
-      `<div class="arule"><span>${esc(rl.text||rl.metric)}${rl.mine?'':' <span class="sec" data-tip="written from another browser \u2014 visible because you are admin">(not yours)</span>'}${rl.note?' <span class="sec">'+esc(rl.note)+'</span>':''}</span><span class="ax" data-sdel="${rl.id}" title="delete">\u2715</span></div>`).join('')
+      `<div class="arule"><span>${esc(rl.text||rl.metric)}${rl.mine?'':' <span class="sec" data-tip="written from another browser \u2014 visible because you are admin">(not yours)</span>'}${rl.note?' <span class="sec">'+esc(rl.note)+'</span>':''}${rl.thread?' <span class="sec" data-tip="set with /alert in a conversation \u2014 it fires there, as a message, instead of to your phone">\u2192 '+esc(rl.threadName||'a conversation')+'</span>':''}</span><span class="ax" data-sdel="${rl.id}" title="delete">\u2715</span></div>`).join('')
     : '<div class="sec" style="font-size:12px;padding:4px">You have no rules yet.</div>';
   const otherRules=(ruleState&&ruleState.othersRules)||0;
   const rulesHtml=A.rules.length? A.rules.map(rl=>{ const m=AM_BY[rl.metric];

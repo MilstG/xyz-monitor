@@ -2241,6 +2241,8 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 /* the header's action cluster: one right-aligned group instead of buttons scattered across it */
 .dm-hdact{margin-left:auto;display:inline-flex;gap:6px;align-items:center}
 .dm-hdact .dm-mutebtn{margin-left:0}
+.dm-sync{font-size:11px;color:var(--dim);display:inline-flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap;user-select:none}
+.dm-sync input{margin:0;accent-color:var(--accent)} .dm-sync.off{opacity:.45;cursor:not-allowed}
 /* the Telegram-nudge hint + adopt offer in the rail */
 .dm-tglink{border-top:1px solid var(--border);margin-top:10px;padding:11px 13px 12px}
 .dm-tgtxt{font-family:var(--mono);font-size:10px;color:var(--dim);line-height:1.5;padding-bottom:6px}
