@@ -71,7 +71,7 @@ test("funding heatmap: the now column and the lifted row cap (build 2026.09.20-8
   assert.ok(app.includes("const FH_ROWOPTS=[['25','top 25'],['50','top 50'],['all','all rows']]"), "the client owns the trim");
 });
 
-test("tab nav: \u2190 returns to the tab you were on, \u2302 goes home to Markets (build 2026.09.21-83)", () => {
+test("tab nav: \u2190 returns to the tab you were on, \u2302 goes home to Markets (build 2026.09.21-84)", () => {
   const fs = require("fs"), path = require("path");
   const app = require("./_client").clientSource();
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
