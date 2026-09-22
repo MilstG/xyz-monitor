@@ -2117,7 +2117,8 @@ async function buildServer() {
   fastify.get("/index.html", serveIndex);
 
   // ===== documentation (build 2026.09.21-85) ====================================================
-  // /docs is the manual (public/docs.html) and /docs/ref/<page> the reference pages under docs/.
+  // /docs is the manual (public/docs.html) and /docs/ref/<page> the reference pages under docs/ —
+  // two of them for members (explainer, howto), the rest for whoever wants the engine's detail.
   // Both are HTML the server emits, so they take the two stamps the shell takes: the caller's
   // resolved feature set (a section about a tab this member cannot see is never in the markup they
   // receive — same audience rule as the ribbon) and the CSP nonce on every inline script. Read once
@@ -2142,7 +2143,8 @@ async function buildServer() {
   };
   fastify.get("/docs", serveDocs);
   fastify.get("/docs.html", serveDocs);
-  const DOC_REFS = { explainer: "xyz-monitor-explainer.html", signals: "xyz-monitor-signal-reference.html",
+  const DOC_REFS = { explainer: "xyz-monitor-explainer.html", howto: "xyz-monitor-how-to-use.html",
+                     signals: "xyz-monitor-signal-reference.html",
                      features: "xyz-monitor-features.html",
                      map: "xyz-monitor-map.html", mechanics: "xyz-monitor-mechanics.html" };
   const DOC_REF_HTML = {};

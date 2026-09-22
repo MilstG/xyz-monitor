@@ -549,7 +549,7 @@ test("docs: the manual is gated, nonce-stamped, build-stamped and audience-speci
     }
   }
   // The reference pages under docs/ serve nonce-stamped through the same gate; unknown names 404 and list what exists.
-  for (const page of ["explainer", "signals", "features", "map", "mechanics"]) {
+  for (const page of ["explainer", "howto", "signals", "features", "map", "mechanics"]) {
     const r = await get("/docs/ref/" + page, gus);
     assert.equal(r.statusCode, 200, page);
     assert.match(r.headers["content-type"], /text\/html/);
@@ -561,7 +561,7 @@ test("docs: the manual is gated, nonce-stamped, build-stamped and audience-speci
   assert.equal((await get("/docs/ref/signals")).statusCode, 401, "reference pages sit behind the site gate too");
   const nope = await get("/docs/ref/nope", gus);
   assert.equal(nope.statusCode, 404);
-  assert.deepEqual(JSON.parse(nope.body).pages.sort(), ["explainer", "features", "map", "mechanics", "signals"]);
+  assert.deepEqual(JSON.parse(nope.body).pages.sort(), ["explainer", "features", "howto", "map", "mechanics", "signals"]);
 });
 
 // ===== build 2026.09.21-83: Telegram sync verb and /alert over the wire =========================

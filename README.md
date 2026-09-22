@@ -344,10 +344,11 @@ instant, and the per-IP rate limit stops being a per-user problem.
 
 ## Documentation
 
-Two pages, two audiences: the **explainer** at `/docs/ref/explainer` is the plain-language tour for
-people using the terminal, and the **manual** at `/docs` is the exact reference for people running
-it. The manual's opening points newcomers at the explainer; the explainer points back for
-definitions.
+Three pages, two audiences. For the people using the terminal: the **explainer** at
+`/docs/ref/explainer` (the ideas behind the screens) and **how to use this site** at
+`/docs/ref/howto` (every feature: what it is worth, how to use it properly, a daily routine). For the
+people running it: the **manual** at `/docs`, the exact reference. The manual's opening points
+newcomers at the two member pages; they point back for definitions.
 
 The complete manual ships with the app at **`/docs`** (`public/docs.html`): every tab, every
 column, the drawer, the terminal and chat grammars, alerts and Telegram, the signal engine, data
@@ -368,9 +369,18 @@ on messages) and a short *when it looks wrong*. It carries no operator content �
 variables, no API, no deployment — so it can be handed to a new member whole. Linked from the
 manual's opening, the app footer and every tab's `?` card.
 
+**How to use this site** (`docs/xyz-monitor-how-to-use.html`, served at **`/docs/ref/howto`**) is the
+companion how-to: one block per feature — Markets, the drawer, watchlist and layouts, Trend, Charts
+and Treemap, Sectors, Correlation, Funding, Sessions, Signals, Calendar, News, AI Report, Notes,
+Messages, positions, Ask, alerts and Telegram, the phone — each opening with *the value* (what it is
+worth to you, in one sentence), then numbered *how to use it* steps, the tips people miss, and a
+worked example where one helps. It opens with three daily routines (the five-minute open, the
+positioning read, the weekly review) and closes with ten habits. Same wiring as the explainer:
+DOC_REFS, the manual's opening and further reading, the app footer, the `?` card.
+
 `docs/` also holds the longer reference pages — the feature map, system map, mechanics and signal
 reference — plus the design mocks that preceded the funding heatmap, notes, insiders and
-backtest-target work, and the share-to-chat mock (`xyz-monitor-share-to-chat-mock.html`, now built — see **Share to chat** above). The five reference pages are served at `/docs/ref/explainer`,
+backtest-target work, and the share-to-chat mock (`xyz-monitor-share-to-chat-mock.html`, now built — see **Share to chat** above). The six reference pages are served at `/docs/ref/explainer`, `/docs/ref/howto`,
 `/docs/ref/features`, `/docs/ref/map`,
 `/docs/ref/mechanics` and `/docs/ref/signals` (nonce-stamped, same gate); the mocks are not served.
 
