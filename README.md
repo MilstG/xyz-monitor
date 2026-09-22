@@ -414,8 +414,14 @@ positioning read, the weekly review) and closes with ten habits. Both guides car
 quadrant, a trend ladder with its retest, the sector flow map, a pair spread, a funding heatmap
 slice, the session curves, a signal-card anatomy, the rule edge-trigger, the alert fan-out, and
 mocks of the table, drawer, notes, chat and ask console) and an **In real life** story per feature:
-a concrete situation, what you do, what you decide. Same wiring as the explainer: DOC_REFS, the
-manual's opening and further reading, the app footer, the `?` card.
+a concrete situation, what you do, what you decide. On top of the drawings, both guides carry
+**real screenshots** of the app (`docs/img/*.jpg`, served at `/docs/ref/img/<file>` behind the same
+gate, strict name pattern, 404 otherwise), cropped to the control they explain and annotated with
+numbered callouts whose positions were measured off the live DOM at capture time; each feature in
+the how-to opens with a **Do this** box of one-action steps. Screenshots are taken from a sandbox
+boot of the app with live Hyperliquid data and throwaway accounts, so nothing in them is a real
+member's. Same wiring as the explainer: DOC_REFS, the manual's opening and further reading, the
+app footer, the `?` card.
 
 `docs/` also holds the longer reference pages — the feature map, system map, mechanics and signal
 reference — plus the design mocks that preceded the funding heatmap, notes, insiders and

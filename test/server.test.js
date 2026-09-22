@@ -559,6 +559,17 @@ test("docs: the manual is gated, nonce-stamped, build-stamped and audience-speci
       assert.match(attrs, new RegExp('nonce="' + nonce.replace(/[+/=]/g, "\\$&") + '"'), page + ": inline script stamped");
   }
   assert.equal((await get("/docs/ref/signals")).statusCode, 401, "reference pages sit behind the site gate too");
+  // The guide screenshots: served from docs/img behind the same gate, strict names, 404 for anything else.
+  const firstImg = fs.readdirSync(path.join(__dirname, "..", "docs", "img")).find((f) => /\.jpg$/.test(f));
+  assert.ok(firstImg, "the guides ship at least one screenshot");
+  const img = await get("/docs/ref/img/" + firstImg, gus);
+  assert.equal(img.statusCode, 200);
+  assert.equal(img.headers["content-type"], "image/jpeg");
+  assert.equal(img.headers["cache-control"], "no-cache");
+  assert.equal((await get("/docs/ref/img/" + firstImg)).statusCode, 401, "screenshots sit behind the gate too");
+  assert.equal((await get("/docs/ref/img/nope.jpg", gus)).statusCode, 404);
+  assert.equal((await get("/docs/ref/img/..%2Fxyz-monitor-explainer.html", gus)).statusCode, 404, "no path characters pass the name pattern");
+  assert.equal((await get("/docs/ref/img/shots.json", gus)).statusCode, 404, "only image types are served");
   const nope = await get("/docs/ref/nope", gus);
   assert.equal(nope.statusCode, 404);
   assert.deepEqual(JSON.parse(nope.body).pages.sort(), ["explainer", "features", "howto", "map", "mechanics", "signals"]);

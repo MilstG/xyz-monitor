@@ -1,0 +1,395 @@
+{
+ "markets": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "Stocks | Crypto scope",
+    "x": 3.84,
+    "y": 27.08
+   },
+   {
+    "n": 2,
+    "label": "window",
+    "x": 48.76,
+    "y": 44.25
+   },
+   {
+    "n": 3,
+    "label": "click a header to sort",
+    "x": 21.79,
+    "y": 64.46
+   },
+   {
+    "n": 4,
+    "label": "Filters",
+    "x": 88.06,
+    "y": 44
+   },
+   {
+    "n": 5,
+    "label": "Layouts",
+    "x": 95.28,
+    "y": 44
+   },
+   {
+    "n": 6,
+    "label": "Columns",
+    "x": 4.92,
+    "y": 51.5
+   },
+   {
+    "n": 7,
+    "label": "↓ CSV",
+    "x": 11.68,
+    "y": 51.5
+   },
+   {
+    "n": 8,
+    "label": "type to filter tickers",
+    "x": 10.28,
+    "y": 44
+   },
+   {
+    "n": 9,
+    "label": "status line",
+    "x": 50,
+    "y": 18.33
+   },
+   {
+    "n": 10,
+    "label": "? help",
+    "x": 92.75,
+    "y": 26.58
+   },
+   {
+    "n": 11,
+    "label": "🔔 bell",
+    "x": 96.63,
+    "y": 18.92
+   }
+  ],
+  "w": 1440,
+  "h": 600
+ },
+ "markets-sorted": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "sorted by vs tape",
+    "x": 65.47,
+    "y": 12.07
+   },
+   {
+    "n": 2,
+    "label": "★ star = watchlist",
+    "x": 5.12,
+    "y": 17.45
+   }
+  ],
+  "w": 1440,
+  "h": 470
+ },
+ "filters": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "volume floor (millions)",
+    "x": 53.49,
+    "y": 27.88
+   },
+   {
+    "n": 2,
+    "label": "OI floor",
+    "x": 53.49,
+    "y": 38.11
+   },
+   {
+    "n": 3,
+    "label": "link a wallet (public address)",
+    "x": 59.92,
+    "y": 49.1
+   },
+   {
+    "n": 4,
+    "label": "★ only",
+    "x": 35.34,
+    "y": 67.52
+   },
+   {
+    "n": 5,
+    "label": "◢ noted",
+    "x": 49.68,
+    "y": 67.52
+   },
+   {
+    "n": 6,
+    "label": "⬡ held",
+    "x": 22.01,
+    "y": 67.52
+   }
+  ],
+  "w": 464,
+  "h": 391
+ },
+ "layouts": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "Layouts menu",
+    "x": 56.82,
+    "y": 22.22
+   }
+  ],
+  "w": 308,
+  "h": 333
+ },
+ "columns": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "show / hide / drag to reorder",
+    "x": 14.41,
+    "y": 8.94
+   }
+  ],
+  "w": 164,
+  "h": 604
+ },
+ "drawer": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "the drawer",
+    "x": 50.85,
+    "y": 1.56
+   }
+  ],
+  "w": 468,
+  "h": 900
+ },
+ "help": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "the two guides",
+    "x": 50,
+    "y": 17.77
+   },
+   {
+    "n": 2,
+    "label": "how to read this tab",
+    "x": 50,
+    "y": 27.65
+   }
+  ],
+  "w": 820,
+  "h": 798
+ },
+ "bell": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "the bell panel",
+    "x": 50,
+    "y": 6.21
+   }
+  ],
+  "w": 400,
+  "h": 708
+ },
+ "ask": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "type a question here",
+    "x": 52.95,
+    "y": 86.39
+   },
+   {
+    "n": 2,
+    "label": "the answer",
+    "x": 51.23,
+    "y": 13.61
+   }
+  ],
+  "w": 488,
+  "h": 588
+ },
+ "palette": {
+  "ok": true,
+  "calls": [],
+  "w": 720,
+  "h": 263
+ },
+ "crypto": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "Crypto scope",
+    "x": 8.88,
+    "y": 27.08
+   },
+   {
+    "n": 2,
+    "label": "the regime strip",
+    "x": 50,
+    "y": 34.83
+   }
+  ],
+  "w": 1440,
+  "h": 600
+ },
+ "notes": {
+  "ok": true,
+  "calls": [],
+  "w": 1440,
+  "h": 560
+ },
+ "messages": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "calls ↗ — every stamped call, scored",
+    "x": 13.4,
+    "y": 40.99
+   }
+  ],
+  "w": 1440,
+  "h": 760
+ },
+ "trend": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "long / short side",
+    "x": 6.99,
+    "y": 20.57
+   }
+  ],
+  "w": 1440,
+  "h": 700
+ },
+ "charts": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "GRID or MTF WALL",
+    "x": 9.21,
+    "y": 19.67
+   },
+   {
+    "n": 2,
+    "label": "panes",
+    "x": 19.83,
+    "y": 19.67
+   },
+   {
+    "n": 3,
+    "label": "add ticker…",
+    "x": 43.25,
+    "y": 19.8
+   },
+   {
+    "n": 4,
+    "label": "LINK",
+    "x": 69.6,
+    "y": 19.67
+   }
+  ],
+  "w": 1440,
+  "h": 760
+ },
+ "treemap": {
+  "ok": true,
+  "calls": [],
+  "w": 1440,
+  "h": 760
+ },
+ "sectors": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "flow map / leaders",
+    "x": 56.12,
+    "y": 19.14
+   },
+   {
+    "n": 2,
+    "label": "window",
+    "x": 9.76,
+    "y": 19.14
+   },
+   {
+    "n": 3,
+    "label": "weighting",
+    "x": 25.98,
+    "y": 19.14
+   }
+  ],
+  "w": 1440,
+  "h": 760
+ },
+ "corr": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "top by vol",
+    "x": 21.3,
+    "y": 95.37
+   }
+  ],
+  "w": 1440,
+  "h": 821
+ },
+ "funding": {
+  "ok": true,
+  "calls": [],
+  "w": 1440,
+  "h": 760
+ },
+ "sessions": {
+  "ok": true,
+  "calls": [],
+  "w": 1440,
+  "h": 780
+ },
+ "signals": {
+  "ok": true,
+  "calls": [],
+  "w": 1440,
+  "h": 780
+ },
+ "calendar": {
+  "ok": false,
+  "calls": [],
+  "w": 1440,
+  "h": 900
+ },
+ "news": {
+  "ok": true,
+  "calls": [],
+  "w": 1440,
+  "h": 900
+ },
+ "report": {
+  "ok": true,
+  "calls": [],
+  "w": 1440,
+  "h": 900
+ }
+}
