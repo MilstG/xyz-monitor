@@ -2569,6 +2569,7 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
   padding:7px 0;border-bottom:1px solid var(--grid);cursor:pointer;font-size:12.5px}
 .dm-callrow:hover{background:var(--panel2)}
 .dm-callst{font-family:var(--mono);font-size:11px;white-space:nowrap}
+.dm-callprop{margin-top:4px;padding:4px 8px;border:1px dashed var(--accent-dim);border-radius:6px;display:inline-block}
 .dm-tk-cl{font-style:normal;font-family:var(--mono);font-size:8.5px;letter-spacing:.5px;text-transform:uppercase;color:var(--dim);margin-left:4px}
 .dm-callt{font-family:var(--mono);font-weight:700;color:var(--text);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}   /* an 8+ char ticker must clip, not paint over the body cell */

@@ -1294,3 +1294,45 @@ test("AI admin gate: lockout is per caller with a global backstop — a stranger
     assert.equal(p.checkAdminPassword("s3cret-pw", "10.9.9.9").error, "rate", "distributed guessing hits the aggregate cap");
   } finally { if (prev === undefined) delete process.env.ADMIN_PASSWORD; else process.env.ADMIN_PASSWORD = prev; }
 });
+
+// ===== build 2026.09.22-89: the composer's backup reader =========================================
+test("readCall: a structured reading from the model, budgeted like an ask, cached per text, never trusted beyond its shape", async () => {
+  const prevProv = process.env.AI_PROVIDER, prevKey = process.env.OPENAI_API_KEY;
+  process.env.AI_PROVIDER = "openai"; process.env.OPENAI_API_KEY = "sk-test";
+  try {
+    const calls = [];
+    let answer = '{"side":"short","days":14,"why":"heavy into the print, two weeks"}';
+    const { p } = aiTestPoller({ aiFetch: async (url, opts) => {
+      const body = JSON.parse(opts.body); calls.push(body);
+      return { ok: true, json: async () => ({ choices: [{ message: { content: answer }, finish_reason: "stop" }] }) };
+    } });
+    const who = { owner: "uid-lena", admin: false };
+    const r = await p.readCall("$HOOD looks heavy into the print, two weeks", "HOOD", who);
+    assert.ok(r.ok, JSON.stringify(r));
+    assert.equal(r.side, "short"); assert.equal(r.days, 14); assert.match(r.why, /heavy/);
+    assert.equal(calls.length, 1);
+    const ctx = JSON.parse(calls[0].messages[1].content.replace(/^Context:\n/, ""));
+    assert.equal(ctx.ticker, "HOOD"); assert.ok(ctx.message.includes("heavy") && /^\d{4}-\d{2}-\d{2}$/.test(ctx.today), "the model sees the ticker, the message and today's date");
+    assert.ok(/ONLY a JSON object/.test(calls[0].messages[0].content), "a strict system prompt");
+    assert.equal(r.askUserDayLeft, 4, "one ask burned for a member");
+    // Cached: the same text costs nothing.
+    const r2 = await p.readCall("$HOOD looks heavy into the print, two weeks", "HOOD", who);
+    assert.ok(r2.cached && calls.length === 1);
+    // The shape is enforced: an invented side or an absurd horizon is dropped, not stored.
+    answer = '{"side":"sideways","days":9000,"why":"?"}';
+    const r3 = await p.readCall("$NVDA maybe", "NVDA", who);
+    assert.ok(r3.ok && r3.side === null && r3.days === null, JSON.stringify(r3));
+    answer = "I think it's bullish";
+    const r4 = await p.readCall("$NVDA prose answer", "NVDA", who);
+    assert.equal(r4.ok, false); assert.match(r4.error, /expected shape/);
+    // Admin burns nothing; an empty message reads nothing.
+    const before = p.readCall("", "HOOD", who);
+    assert.equal((await before).ok, false);
+    answer = '{"side":"long","days":null,"why":"breakout"}';
+    const ra = await p.readCall("$HOOD breaking out", "HOOD", { owner: "adm", admin: true });
+    assert.ok(ra.ok && ra.admin && ra.side === "long" && ra.days === null);
+  } finally {
+    if (prevProv == null) delete process.env.AI_PROVIDER; else process.env.AI_PROVIDER = prevProv;
+    if (prevKey == null) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = prevKey;
+  }
+});

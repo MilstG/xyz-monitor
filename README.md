@@ -260,6 +260,21 @@ instant, and the per-IP rate limit stops being a per-user problem.
   the same address), never a reply, and its note travels as an ordinary message right behind it.
   Not in this cut: charts, drawer sections and the other boards (the mock in `docs/` shows where
   the same glyph goes next), and a screen card does not re-run its filters live.
+- **Reading a call** (build 2026.09.22-89) — the words around a `$TICKER` decide the direction and
+  the horizon, from a fixed vocabulary on purpose: a call posts under your name and enters your
+  record, so a wrong guess costs more than no guess. Short words before the ticker: `short`,
+  `shorting`, `sell`, `selling`, `fade`, `fading`, `bearish`, `bear`, `dump`, `dumping`, `puts`,
+  `lower`, `downside`; after it: `short`, `puts`, `lower`, `down`, `bearish`, `dump`. Options
+  read as a trader would: `buy $X puts` is a short, `sell $X puts` is a long, `$X calls` is a long
+  unless sold. Horizons after the ticker: `30d`, `3 days`, `2w`, `2 weeks`, `1mo`, `2 months`,
+  `next week`, `a month`, `eow` / `by friday`, `eom`, `eoy` / `year end`, `by Oct 15`, `by 10/15`
+  (default 7d, cap 365d). The composer's preview names the word it read ("short because of
+  “fade” · horizon from “by Oct 15”"), and the server and the client run a byte-identical reader
+  (a test keeps them in step). **The backup is a proposal, never a post**: when the words decide
+  nothing and the message is more than a few words, the preview offers *ask AI what I mean*
+  (gated by `dm.ask`, admin-only by default; spends one ask, cached per text). The model returns
+  `{side, days, why}` in a strict shape, the chip shows it, and only the sender tapping *apply*
+  makes it ride the send as an explicit override — dropped the moment the text changes.
 - **The call lifecycle** (build 2026.09.22-88) — a call is **open** from the moment it is stamped
   until its **horizon**: seven days by default, or the days written after the ticker (`$HOOD 30d`
   — right after the ticker only, so "$HOOD ran 3d in a row" stays prose; 1 to 365). At the

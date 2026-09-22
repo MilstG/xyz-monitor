@@ -142,6 +142,8 @@ function firstTickerRef(body) {
   return m ? m[1].toUpperCase() : "";
 }
 
+const { callRead } = require("./compute");
+
 function openAccounts(dataDir, opts) {
   const options = opts || {};
   fs.mkdirSync(dataDir, { recursive: true });
@@ -956,13 +958,9 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   // documented rather than clever: short/sell/fade in the 24 chars before the ticker, or
   // short/puts in the 12 after, makes it a short; everything else is a long. One word fixes a
   // miscall; a smarter parser fixes nothing and surprises everyone.
-  function callSide(text, sym) {
-    const t = String(text || ""), i = t.toUpperCase().indexOf("$" + String(sym).toUpperCase());
-    if (i < 0) return "long";
-    const before = t.slice(Math.max(0, i - 24), i);
-    const after = t.slice(i + String(sym).length + 1, i + String(sym).length + 13);
-    return (/(^|\W)(short|sell|fade)(\W|$)/i.test(before) || /^\s*(short|puts)\b/i.test(after)) ? "short" : "long";
-  }
+  // The direction and the horizon come from one reader shared with the composer's preview
+  // (compute.callRead): the words are listed there, and the client shows which one it used.
+  const callSide = (text, sym) => callRead(text, sym).side;
 
   // markFor(coin) -> number|null is injected by the server so this module never reaches into the
   // poller. It reads the same row object the snapshot ships, so a stamped price is by construction
@@ -1353,13 +1351,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   const callHorizonOf = (m) => (m.callH > 0 ? m.callH : CALL_DEFAULT_H);
   // "$HOOD 30d" → 30 days; only when the word sits right after the ticker, so "$HOOD ran 3d in a
   // row" stays prose. Bounded: a horizon past a year is a thesis, not a call.
-  function callHorizonFromText(text, sym) {
-    const re = new RegExp("\\$" + String(sym).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s+(\\d{1,3})d\\b", "i");
-    const m = re.exec(String(text || ""));
-    if (!m) return null;
-    const d = +m[1];
-    return d >= 1 && d <= CALL_MAX_D ? d * CALL_DAY : null;
-  }
+  const callHorizonFromText = (text, sym) => callRead(text, sym).horizonMs;
   // The state of one stamped row, decided at read: closed early (closedAt/closePx on the row), or
   // closed at the horizon once that daily close has printed, or open with the close still ahead.
   function callState(m) {
@@ -1483,7 +1475,9 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       // permanent dead row with no price and no live mark.
       const coin = coinResolve ? coinResolve(sym) : null;
       if (coin) { ref = coin; const px = markFor(coin); refPx = Number.isFinite(px) && px > 0 ? px : null;
-        side = callSide(text, sym); }
+        // An explicit reading from the sender (the composer's applied AI chip) beats the words —
+        // it is still the sender's choice, made before the send, and still bounded here.
+        side = o.callSide === "short" || o.callSide === "long" ? o.callSide : callSide(text, sym); }
     }
     // A quote binds only inside its own conversation: a replyTo naming another thread's message is
     // dropped, not erred — the message still says what it says without the quote.
@@ -1493,7 +1487,8 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       if (rm && rm.thread === t.id && !rm.sys && !rm.deletedAt) replyTo = rm.id;
     }
     const now = Date.now();
-    const callH = ref && sym ? callHorizonFromText(text, sym) : null;
+    const oDays = Math.trunc(+o.callDays);
+    const callH = ref && sym ? (oDays >= 1 && oDays <= CALL_MAX_D ? oDays * CALL_DAY : callHorizonFromText(text, sym)) : null;
     const id = Number(S.msgIns.run(t.id, fromUid, now, text, ref, refPx, side, null, file ? file.id : null, o.via || null, replyTo, cmd, cmdAi, cardJson, callH).lastInsertRowid);
     S.thrTouch.run(id, now, t.id);
     S.readUp.run(t.id, fromUid, id);            // your own message is read by definition

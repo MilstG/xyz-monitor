@@ -37,6 +37,9 @@ const dmState = { me: null, threads: [], members: [], online: new Set(),
   // Chat terminal (build 2026.09.11-69): per-thread lines only this viewer sees (help, errors,
   // "running…"), never sent anywhere; and the one-at-a-time latch for a command in flight.
   localOut: new Map(), cmdBusy: false, cmdLine: '', compIdx: 0,
+  // The composer's call reading (build 2026.09.22-89): a model proposal for the current text, and
+  // the override the sender applied from it — both keyed on the exact text they were made for.
+  callProposal: null, callOverride: null, callAsking: false,
   // Timeframe switches on posted ratio charts: per message, the viewer's own live redraw (tf +
   // svg). Never sent — the posted picture is the record, this is a lens on it.
   rtLive: new Map() };
@@ -415,15 +418,18 @@ async function dmSend(){
     }else{ dmState.err='say something first, then attach'; dmState.sending=false; dmRender(); return; }
   }
 
+  // The override was made for the exact (trimmed) text in the box; a failed send keeps it.
+  const ov=(!dmState.editing&&dmState.callOverride&&dmState.callOverride.text===ta.value.trim())?{side:dmState.callOverride.side||null,days:dmState.callOverride.days||null}:null;
   const body=dmState.editing?{id:dmState.editing,body:text}
-    :t?{thread:t.id,body:text,fileId:fileId,replyTo:dmState.replying||null}
-    :{to:peer,body:text};
+    :t?Object.assign({thread:t.id,body:text,fileId:fileId,replyTo:dmState.replying||null},ov?{call:ov}:{})
+    :Object.assign({to:peer,body:text},ov?{call:ov}:{});
   const res=await dmPost(body);
   dmState.sending=false;
   if(res.ok){
     // Nothing is kept in the box on success; on failure the text stays exactly where it was,
     // because a dropped connection must never eat something somebody typed.
     ta.value=''; dmState.editing=null; dmState.replying=null; dmState.pendingFile=null; dmState.pendingPeer=null;
+    dmState.callOverride=null; dmState.callProposal=null;
     dmDraftSave(dmState.sel,'');
     _dmClearOnNextRender=true;
     // The reply IS the message: merged straight in, no second fetch of the thread list and no
@@ -804,14 +810,100 @@ const DM_DRAFT_KEY='xyz-dm-drafts';
 function dmDrafts(){ try{ return JSON.parse(localStorage.getItem(DM_DRAFT_KEY)||'{}')||{}; }catch(_){ return {}; } }
 // The stamp preview: the mark and the side a $TICKER will carry, read from the live board before
 // the message is sent — the direction rule used to be discoverable only from the sent card.
+// A byte-for-byte port of compute.callRead (server): the words that decide a call's direction
+// and horizon, and which word it was. The test suite holds the two in step.
+const CALL_SHORT_BEFORE=/(^|\W)(short|shorting|sell|selling|fade|fading|bearish|bear|dump|dumping|puts|downside)(\W|$)/i;
+const CALL_SHORT_AFTER=/^[\s,:;\u2014-]*(short|puts|lower|down|bearish|dump)\b/i;
+const CALL_SELL_BEFORE=/(^|\W)(sell|selling|sold|write|writing)(\W|$)/i;
+const CALL_MONTHS={jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,sept:8,oct:9,nov:10,dec:11};
+function dmCallRead(text,sym,nowMs){
+  const t=String(text||''), S=String(sym||'').toUpperCase();
+  const i=S?t.toUpperCase().indexOf('$'+S):-1;
+  if(i<0) return {side:'long',sideWord:null,horizonMs:null,horizonWord:null};
+  const before=t.slice(Math.max(0,i-40),i), after=t.slice(i+S.length+1,i+S.length+41);
+  let side='long', sideWord=null;
+  const optAfter=/^[\s,:;\u2014-]*(?:\$?\d+(?:\.\d+)?\s*)?(puts|calls)\b/i.exec(after);
+  if(optAfter){
+    const sold=CALL_SELL_BEFORE.exec(before);
+    const opt=optAfter[1].toLowerCase();
+    if(opt==='puts'){ side=sold?'long':'short'; sideWord=sold?sold[2]+' \u2026 puts':'puts'; }
+    else { side=sold?'short':'long'; sideWord=sold?sold[2]+' \u2026 calls':'calls'; }
+  } else {
+    const b=CALL_SHORT_BEFORE.exec(before), a=CALL_SHORT_AFTER.exec(after);
+    if(b){ side='short'; sideWord=b[2]; } else if(a){ side='short'; sideWord=a[1]; }
+  }
+  const DAY=86400e3, now=Number.isFinite(+nowMs)?+nowMs:Date.now();
+  let horizonMs=null, horizonWord=null;
+  const days=(d)=>(d>=1&&d<=365?d*DAY:null);
+  const endOfUtcDay=(y,m,d)=>Date.UTC(y,m,d+1)-1;
+  let m;
+  if((m=/^\s*(\d{1,3})\s*(d|days?)\b/i.exec(after))){ horizonMs=days(+m[1]); horizonWord=horizonMs?m[0].trim():null; }
+  else if((m=/^\s*(\d{1,2})\s*(w|wks?|weeks?)\b/i.exec(after))){ horizonMs=days(+m[1]*7); horizonWord=horizonMs?m[0].trim():null; }
+  else if((m=/^\s*(\d{1,2})\s*(mo|months?)\b/i.exec(after))){ horizonMs=days(+m[1]*30); horizonWord=horizonMs?m[0].trim():null; }
+  else if((m=/(?:^|\W)(a week|next week|this week)(?:\W|$)/i.exec(after))){ horizonMs=days(7); horizonWord=m[1]; }
+  else if((m=/(?:^|\W)(a month|next month|this month)(?:\W|$)/i.exec(after))){ horizonMs=days(30); horizonWord=m[1]; }
+  else if((m=/(?:^|\W)(eow|end of (?:the )?week|by friday)(?:\W|$)/i.exec(after))){
+    const d=new Date(now); const dow=d.getUTCDay(); const ahead=((5-dow)+7)%7;   // Friday: the week ends today
+    horizonMs=days(Math.max(1,Math.ceil((endOfUtcDay(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate()+ahead)-now)/DAY))); horizonWord=m[1];
+  }
+  else if((m=/(?:^|\W)(eom|end of (?:the )?month)(?:\W|$)/i.exec(after))){
+    const d=new Date(now); horizonMs=days(Math.max(1,Math.ceil((endOfUtcDay(d.getUTCFullYear(),d.getUTCMonth()+1,0)-now)/DAY))); horizonWord=m[1];
+  }
+  else if((m=/(?:^|\W)(eoy|end of (?:the )?year|year end|year-end)(?:\W|$)/i.exec(after))){
+    const d=new Date(now); horizonMs=days(Math.min(365,Math.max(1,Math.ceil((endOfUtcDay(d.getUTCFullYear(),11,31)-now)/DAY)))); horizonWord=m[1];
+  }
+  else if((m=/(?:^|\W)by\s+(?:([A-Za-z]{3,9})\.?\s+(\d{1,2})|(\d{1,2})\/(\d{1,2}))(?:\W|$)/i.exec(after))){
+    const d=new Date(now);
+    const mon=m[1]?CALL_MONTHS[m[1].slice(0,3).toLowerCase()]:+m[3]-1, day=m[1]?+m[2]:+m[4];
+    if(mon!=null&&mon>=0&&mon<=11&&day>=1&&new Date(Date.UTC(2001,mon,day)).getUTCMonth()===mon){
+      let end=endOfUtcDay(d.getUTCFullYear(),mon,day);
+      if(end<now) end=endOfUtcDay(d.getUTCFullYear()+1,mon,day);
+      horizonMs=days(Math.min(365,Math.max(1,Math.ceil((end-now)/DAY)))); horizonWord=m[0].trim();
+    }
+  }
+  return {side,sideWord,horizonMs,horizonWord};
+}
+// The composer's preview: what the send will stamp, which words decided it, and — when the words
+// decided nothing — an offer to ask the model. An applied reading is the SENDER's choice: it rides
+// the send as an explicit override and is dropped the moment the text changes.
 function dmStampPreview(text){
   const pv=el('dm-stamppv'); if(!pv) return;
   const m=String(text||'').match(/\$([A-Za-z][A-Za-z0-9.\-]{0,9})/); const r=m&&typeof termFind==='function'?termFind(m[1]):null;
-  if(!r){ pv.hidden=true; return; }
-  const up=String(text).toUpperCase(), i=up.indexOf('$'+m[1].toUpperCase());
-  const before=up.slice(Math.max(0,i-24),i), after=up.slice(i+m[1].length+1,i+m[1].length+13);
-  const short=/\b(SHORT|SELL|FADE)\b/.test(before)||/\b(SHORT|PUTS)\b/.test(after);
-  pv.hidden=false; pv.innerHTML='will stamp <b>'+esc(r.ticker)+'</b> at <b>'+fmtPrice(r.px)+'</b> as <b class="'+(short?'neg':'pos')+'">'+(short?'short':'long')+'</b> <span class="sec">('+(short?'because of the word before it':'write short / sell / fade before the ticker for a short')+')</span>';
+  if(!r){ pv.hidden=true; dmState.callOverride=null; return; }
+  const key=String(text).trim();
+  const ov=dmState.callOverride&&dmState.callOverride.text===key?dmState.callOverride:null;
+  if(dmState.callOverride&&!ov) dmState.callOverride=null;   // the words moved under it
+  const read=dmCallRead(text,m[1]);
+  const side=ov&&ov.side?ov.side:read.side, days=ov&&ov.days?ov.days:(read.horizonMs?Math.round(read.horizonMs/86400e3):7);
+  const words=String(text).replace(/\$[A-Za-z][A-Za-z0-9.\-]{0,9}/,'').trim().split(/\s+/).filter(Boolean).length;
+  // Vague = no direction word in a message long enough to have meant one. The horizon has an
+  // honest default; the direction is the claim, and a defaulted direction is the wrong claim.
+  const vague=!ov&&!read.sideWord&&words>=4;
+  const why=ov?'<span class="sec">(AI reading applied'+(ov.why?': '+esc(ov.why):'')+')</span>'
+    :'<span class="sec">('+(read.sideWord?'because of \u201c'+esc(read.sideWord)+'\u201d':'no direction word: long by default')+(read.horizonWord?' \u00b7 horizon from \u201c'+esc(read.horizonWord)+'\u201d':' \u00b7 7d by default')+')</span>';
+  const ask=vague&&dmAskAllowed()?' <button type="button" class="dm-tool" id="dm-callask"'+(dmState.callAsking?' disabled':'')+' title="Ask the model what this message means \u2014 you apply the reading or ignore it; nothing posts on its say-so. Spends one ask.">ask AI what I mean</button>':'';
+  const drop=ov?' <button type="button" class="dm-tool" id="dm-calldrop" title="Back to the words">undo</button>':'';
+  pv.hidden=false; pv.innerHTML='will stamp <b>'+esc(r.ticker)+'</b> at <b>'+fmtPrice(r.px)+'</b> as <b class="'+(side==='short'?'neg':'pos')+'">'+side+'</b> \u00b7 <b>'+days+'d</b> '+why+ask+drop+(dmState.callAsking?' <span class="sec">asking\u2026</span>':'')
+    +(dmState.callProposal&&dmState.callProposal.text===key&&!ov
+      ?'<div class="dm-callprop">AI reads this as <b class="'+(dmState.callProposal.side==='short'?'neg':'pos')+'">'+(dmState.callProposal.side||'no view')+'</b>'+(dmState.callProposal.days?' \u00b7 <b>'+dmState.callProposal.days+'d</b>':'')+(dmState.callProposal.why?' <span class="sec">\u2014 '+esc(dmState.callProposal.why)+'</span>':'')
+        +(dmState.callProposal.side?' <button type="button" class="dm-tool" id="dm-callapply">apply</button>':' <span class="sec">nothing to apply</span>')+' <button type="button" class="dm-tool" id="dm-callignore">ignore</button></div>':'');
+}
+async function dmCallAsk(){
+  const ta=el('dm-input'); if(!ta) return;
+  if(dmState.callAsking) return;
+  const text=ta.value.trim(); const m=String(text).match(/\$([A-Za-z][A-Za-z0-9.\-]{0,9})/); if(!m) return;
+  dmState.callAsking=true; dmStampPreview(ta.value);
+  let d;
+  try{ const r=await fetch('/api/dm/call-read',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:text,sym:m[1]})}); d=await r.json().catch(()=>null); }catch(_){ d=null; }
+  dmState.callAsking=false;
+  if(!d||!d.ok){
+    dmState.callProposal=null; dmStampPreview(ta.value);
+    const why={'ask-user-cap':'your daily asks are used up','ask-daily-cap':'the desk\u2019s daily asks are used up','rate':'too many asks at once \u2014 a moment','feature-gated':'AI readings are switched off for you'}[d&&d.error]||(d&&d.error)||'no answer';
+    if(dmState.sel) dmLocal('\u2717 could not read the call \u2014 '+esc(why),'err'); else pushToast('\u2717 could not read the call \u2014 '+why);
+    return;
+  }
+  dmState.callProposal={text:text,side:d.side,days:d.days,why:d.why||''};
+  dmStampPreview(ta.value);
 }
 function dmDraftSave(id,text){
   if(!id) return;
@@ -1956,6 +2048,10 @@ function dmWire(){
     if(e.target.closest('#dm-mute')){ dmToggleMute(); return; }
     if(e.target.closest('#dm-bnotify')){ dmToggleBoardNotify(); return; }
     if(e.target.id==='dm-tgsync'){ e.preventDefault(); dmToggleTgSync(); return; }
+    if(e.target.id==='dm-callask'){ dmCallAsk(); return; }
+    if(e.target.id==='dm-callapply'){ const p=dmState.callProposal, ta=el('dm-input'); if(p&&ta&&p.text===ta.value.trim()){ dmState.callOverride={text:p.text,side:p.side,days:p.days,why:p.why}; dmState.callProposal=null; dmStampPreview(ta.value); } return; }
+    if(e.target.id==='dm-callignore'){ dmState.callProposal=null; const ta=el('dm-input'); if(ta) dmStampPreview(ta.value); return; }
+    if(e.target.id==='dm-calldrop'){ dmState.callOverride=null; const ta=el('dm-input'); if(ta) dmStampPreview(ta.value); return; }
     if(e.target.closest('#dm-mic')){ dmMicToggle(); return; }
     const mn=e.target.closest('[data-dmmention]');
     if(mn){ dmMentionPick(mn.dataset.dmmention); return; }

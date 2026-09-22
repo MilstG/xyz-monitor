@@ -1642,3 +1642,19 @@ test("calls: seven days by default, a horizon written after the ticker, extend w
   const wb = A.history(g.uid, T).messages.find((m) => m.id === b.id);
   assert.ok(wb.deleted && wb.call && wb.call.closed, "the stamp stands after a delete, lifecycle included");
 });
+
+test("calls -89: an applied reading rides the send as an explicit, bounded override of the words", async () => {
+  const marks = { HOOD: 100 };
+  const A = freshAccounts(marks);
+  const { g, l } = await seedTwo(A);
+  const T = A.threadFor(g.uid, l.uid, true).id;
+  const resolve = (x) => (marks[x] ? x : null);
+  const a = A.send(g.uid, null, "$HOOD looks heavy into the print", resolve, { thread: T, callSide: "short", callDays: 14 });
+  assert.equal(a.message.side, "short", "the override sets the side the words did not");
+  assert.equal(a.message.call.h, 14, "…and the horizon");
+  const b = A.send(g.uid, null, "fade $HOOD 30d", resolve, { thread: T, callSide: "sideways", callDays: 900 });
+  assert.equal(b.message.side, "short", "a bad side value is ignored: the words decide");
+  assert.equal(b.message.call.h, 30, "a horizon past a year is ignored: the words decide");
+  const c = A.send(g.uid, null, "no ticker, no call", resolve, { thread: T, callSide: "short", callDays: 14 });
+  assert.equal(c.message.call, null, "an override without a stamp stamps nothing");
+});

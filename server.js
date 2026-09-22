@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.22-89";
+const VERSION = "2026.09.22-90";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1673,9 +1673,13 @@ async function buildServer() {
           : (b.cmdAi && !featureVisible(flags, "dm.ask", adm)) ? "dm.ask" : null;
         if (closed) return reply.code(403).send({ ok: false, error: "feature-gated", feature: closed });
       }
+      // An applied reading rides as `call: {side, days}` — the sender's explicit choice, made in
+      // the composer before the send; accounts.js bounds both and the words decide otherwise.
+      const co = b.call && typeof b.call === "object" ? b.call : null;
       r = ACCOUNTS.send(me.uid, String(b.to || ""), b.body, coinForSymbol,
         { thread: b.thread || null, fileId: b.fileId == null ? null : String(b.fileId), replyTo: b.replyTo || null,
-          cmd: typeof b.cmd === "string" ? b.cmd : null, cmdAi: !!b.cmdAi });
+          cmd: typeof b.cmd === "string" ? b.cmd : null, cmdAi: !!b.cmdAi,
+          callSide: co && (co.side === "long" || co.side === "short") ? co.side : null, callDays: co && co.days != null ? +co.days : null });
     }
     if (!r.ok) return reply.code(r.retry ? 429 : 400).send(r);
     // Wake everybody in the conversation. The frame carries a sequence number, never the message —
@@ -2845,6 +2849,23 @@ async function buildServer() {
   // prose over the compact market bundle the client sends. Rate-limited + cached server-side.
   // 256 KB body cap — the client ships a compact ~160-name universe bundle here; a legitimate
   // payload is far under this, so the cap only catches oversized/abusive bodies (413).
+  // The composer's backup reader (build 2026.09.22-89): a structured reading of one message's
+  // call, for the sender to apply or ignore. Gated exactly as an ask from a chat (dm.ask over
+  // ai.ask), because it spends the same budget.
+  fastify.post("/api/dm/call-read", { bodyLimit: 8 * 1024 }, async (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    // ai.ask first (the operator's model-spend switch: off means nobody, admin included), then
+    // dm.ask on top, exactly as an ask from a chat composer is gated.
+    if (!featureVisible(poller.getFlags(), "ai.ask", isAdmin(req)))
+      return reply.code(403).send({ ok: false, error: "feature-gated", feature: "ai.ask" });
+    if (!featureVisible(poller.getFlags(), "dm.ask", isAdmin(req)))
+      return reply.code(403).send({ ok: false, error: "feature-gated", feature: "dm.ask" });
+    const b = req.body || {};
+    const sym = String(b.sym || "").toUpperCase().slice(0, 16);
+    if (!coinForSymbol(sym)) return reply.code(400).send({ ok: false, error: "no market called " + (sym || "?") + " on the board" });
+    return poller.readCall(String(b.text || ""), sym, aiWho(req, reply));
+  });
   fastify.post("/api/ask", { bodyLimit: 256 * 1024 }, async (req, reply) => {
     reply.header("cache-control", "no-store");
     const b = req.body || {};
