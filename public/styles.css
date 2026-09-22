@@ -740,6 +740,13 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .help-modal .hlp-sub{color:var(--muted);font-size:12px;margin-bottom:14px;line-height:1.5}
 .hlp-sub .hlp-docs{color:var(--accent);white-space:nowrap;margin-left:4px}
 .hlp-sub .hlp-docs:hover{text-decoration:underline}
+/* the two member guides, one click from every tab's ? card */
+.help-modal .hlp-guides{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:0 0 14px}
+.help-modal .hlp-guides a{display:block;padding:9px 12px;border:1px solid var(--border);border-radius:6px;background:var(--panel2);color:var(--text);text-decoration:none}
+.help-modal .hlp-guides a:hover{border-color:var(--accent);text-decoration:none}
+.help-modal .hlp-guides a b{display:block;font-family:var(--disp);font-size:12.5px;color:var(--accent);margin-bottom:2px}
+.help-modal .hlp-guides a span{display:block;font-size:11.5px;color:var(--muted);line-height:1.45}
+@media(max-width:560px){.help-modal .hlp-guides{grid-template-columns:1fr}}
 .help-modal .hlp-h{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:var(--accent);margin:16px 0 5px}
 .help-modal .hlp-h:first-of-type{margin-top:8px}
 .help-modal p{font-size:12.5px;line-height:1.62;color:var(--text);margin:0 0 8px}
