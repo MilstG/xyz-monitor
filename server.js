@@ -2160,6 +2160,20 @@ async function buildServer() {
     if (!h) return reply.code(404).header("cache-control", "no-store").send({ error: "no such reference page", pages: Object.keys(DOC_REF_HTML) });
     return reply.header("cache-control", "no-cache").type("text/html; charset=utf-8").send(h);
   });
+  // The screenshots the member guides embed live under docs/img/ and are served here, behind the
+  // same gate as the pages that reference them. A strict name pattern is the whole path check —
+  // no dots, no slashes, so nothing outside the folder can be named — and an unknown file is a
+  // plain 404. no-cache like the pages: a redeploy that swaps a screenshot must show the new one.
+  const DOC_IMG_DIR = path.join(__dirname, "docs", "img");
+  const DOC_IMG_TYPES = { jpg: "image/jpeg", png: "image/png", webp: "image/webp", svg: "image/svg+xml" };
+  fastify.get("/docs/ref/img/:file", (req, reply) => {
+    const m = /^([a-z0-9-]{1,80})\.(jpg|png|webp|svg)$/.exec(String(req.params.file || ""));
+    if (!m) return reply.code(404).header("cache-control", "no-store").send({ error: "no such image" });
+    let buf;
+    try { buf = fs.readFileSync(path.join(DOC_IMG_DIR, m[0])); }
+    catch (_e) { return reply.code(404).header("cache-control", "no-store").send({ error: "no such image" }); }
+    return reply.header("cache-control", "no-cache").type(DOC_IMG_TYPES[m[2]]).send(buf);
+  });
 
   fastify.get("/api/snapshot", (req, reply) =>
     serveCached(req, reply, poller.getSnapshot(), { ts: 0, dataTs: 0, benchCoin: null, markets: [] }));
