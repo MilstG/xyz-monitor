@@ -1381,6 +1381,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const m = S.msgById.get(+id);
     if (!m || m.sender !== uid) return { ok: false, error: "that isn't your call" };
     if (!m.ref || !(m.refPx > 0)) return { ok: false, error: "that message carries no call" };
+    if (m.deletedAt) return { ok: false, error: "that message was deleted — its call runs to its horizon" };
     const st = callState(m);
     if (st.closed) return { ok: false, error: st.early ? "already closed" : "that call closed at its horizon" };
     const px = markFor(m.ref);
@@ -1392,10 +1393,14 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const m = S.msgById.get(+id);
     if (!m || m.sender !== uid) return { ok: false, error: "that isn't your call" };
     if (!m.ref || !(m.refPx > 0)) return { ok: false, error: "that message carries no call" };
+    if (m.deletedAt) return { ok: false, error: "that message was deleted — its call runs to its horizon" };
     const d = Math.trunc(+days);
     if (!(d >= 1 && d <= CALL_MAX_D)) return { ok: false, error: "a horizon is 1 to " + CALL_MAX_D + " days" };
     const st = callState(m);
     if (st.closed) return { ok: false, error: st.early ? "already closed" : "that call closed at its horizon" };
+    // Extend means extend: a shorter horizon would re-score the call against a close it has
+    // already lived past. Shortening is what "close early" is for.
+    if (d * CALL_DAY <= st.horizonMs) return { ok: false, error: "that is not longer than the current " + Math.round(st.horizonMs / CALL_DAY) + "-day horizon" };
     const hzTs = m.ts + d * CALL_DAY;
     const p = pxHistory(m.ref, hzTs);
     if (p != null && isFinite(p) && p > 0) return { ok: false, error: "a " + d + "-day horizon has already passed for this call" };

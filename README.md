@@ -266,7 +266,9 @@ instant, and the per-IP rate limit stops being a per-user problem.
   horizon, the first daily close at or past it becomes the call's **final** result and the call
   stops moving with the mark. The author can **close early** at the live mark (the hover bar on
   their own stamp, or the calls board) and **extend** an open call by a week at a time, never to a
-  horizon whose close has already printed. Before this, a call was scored live forever and the
+  horizon whose close has already printed (never shorter: shortening is what close-early is for).
+  The horizon is part of the stamp: editing the words later does not move it. Before this, a call
+  was scored live forever and the
   record read as a lifetime of moving numbers. **The record is the closed calls**: a call counts
   once, at its final; open calls are counted, not scored ("running" is the honest word for a number
   still moving); the fixed 1d/7d yardsticks stay beside it. The stamp says "closes Sep 24 (7d)" or

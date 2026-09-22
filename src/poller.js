@@ -13005,7 +13005,10 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
     }
     const sc = signalsCache;
     if (sc && sc.count > 0) {
-      const top = (sc.signals || []).slice(0, 3).map((g) => dgEsc(g.tk || g.ticker || g.coin || "?") + (g.psd ? " " + dgEsc(g.psd) : "") + (Number.isFinite(g.score) ? " " + Math.round(g.score) : "")).filter(Boolean);
+      // A card's side lives on its claim (or its play, before a claim opens) — the same fields the
+      // Signals tab and the terminal read.
+      const sideOf = (g) => (g.claim0 && g.claim0.side) || (g.play && g.play.side) || g.psd || "";
+      const top = (sc.signals || []).slice(0, 3).map((g) => dgEsc(g.tk || g.ticker || g.coin || "?") + (sideOf(g) ? " " + dgEsc(sideOf(g)) : "") + (Number.isFinite(g.score) ? " " + Math.round(g.score) : "")).filter(Boolean);
       parts.push(""); parts.push("<b>Signals</b> \u00b7 " + sc.count + " live" + (top.length ? " \u00b7 top: " + top.join(", ") : ""));
     }
     const ec = earnCache;
@@ -14788,6 +14791,9 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     pushEnqueueNow: (chat, text, force) => pushEnqueue(chat, text, !!force, 0),
     // The inbound half of the same wire: server.js installs the handler that turns /r into a message.
     setDmBridge: (fn) => { dmBridge = typeof fn === "function" ? fn : null; },
+    // harness: seed the caches the desk digest reads, without a poll
+    setSignalsCacheNow: (c) => { signalsCache = c; },
+    dailyCacheSetNow: (d) => { dailyCache = d; return dailyCache; },
     // Conversation-bound rules: the server installs the poster (build 2026.09.21-83), and unbinds
     // a rule whose author has left the conversation it was written in (thread 0 = personal).
     setRuleSink: (fn) => { ruleSink = typeof fn === "function" ? fn : null; },
@@ -14861,6 +14867,10 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       const dc = dailyCache; if (!dc || !dc.daily) return null;
       const arr = dc.daily[coin]; if (!arr || !arr.length) return null;
       const now = Date.now();
+      // The wire's daily series is a WINDOW (crypto ~92 bars, equities 370d): an instant before
+      // its first bar is not "the first bar", it is unknown. Answering with the oldest bar made
+      // an old call's "frozen" close roll forward every day as the window slid.
+      if (atTs < arr[0][0]) return null;
       for (const b of arr) {
         const closeAt = b[0] + DAY;
         if (closeAt >= atTs) { if (closeAt > now) return null; const c = +b[1]; return Number.isFinite(c) && c > 0 ? c : null; }

@@ -1228,6 +1228,16 @@ test("messages -66: the desk digest is per-recipient, deterministic, and off unt
   assert.ok(/<b>Record<\/b> · calls closed in the last 30d\ngus 1 · 100% right · avg \+4\.1% · best \$NVDA \+4\.1% · 1 open/.test(text), "the record is the closed calls, windowed, with the best and the open count: " + text);
   assert.ok(!text.includes("Earnings today"), "no earnings cache, no earnings section — absent, never fabricated");
   assert.ok(!text.includes("Signals"), "no signals cache, no signals line");
+  // The signals line names the side the way the Signals tab does: from the claim, else the play.
+  p.setSignalsCacheNow({ count: 2, signals: [{ ticker: "META", score: 41, claim0: { side: "long" } }, { ticker: "UNI", score: 33, play: { side: "short" } }] });
+  const t2 = p.deskTextNow("u1", now);
+  assert.ok(/<b>Signals<\/b> · 2 live · top: META long 41, UNI short 33/.test(t2), "signals with their side: " + t2);
+  // A horizon before the daily window's first bar is unknown, never "the oldest bar".
+  const dc = p.dailyCacheSetNow({ daily: { "xyz:OLD": [[now - 5 * DAY, 100], [now - 4 * DAY, 101], [now - 3 * DAY, 102]] } });
+  void dc;
+  assert.equal(p.dailyCloseAt("xyz:OLD", now - 30 * DAY), null, "before the window: unknown");
+  assert.equal(p.dailyCloseAt("xyz:OLD", now - 4.5 * DAY), 100, "inside the window: the first close at or past the instant");
+  assert.equal(p.dailyCloseAt("xyz:OLD", now + DAY), null, "in the future: not yet");
 });
 
 test("ai report: Anthropic body — effort on models that take it, cached system block, max_tokens stop is a named failure", async () => {

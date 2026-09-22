@@ -1610,6 +1610,7 @@ test("calls: seven days by default, a horizon written after the ticker, extend w
   const ts = A.history(g.uid, T).messages.find((m) => m.id === a.id).ts;
   closes.set("HOOD@" + (ts + 10 * DAY), 105);
   assert.ok(!A.callExtend(g.uid, a.id, 10).ok, "a 10-day horizon whose close already printed cannot be chosen");
+  assert.ok(!A.callExtend(g.uid, a.id, 20).ok, "extend means extend: 20 is not longer than the current 30");
   assert.equal(A.callExtend(g.uid, a.id, 60).message.call.h, 60, "extended to 60 days");
   // Close early: the author only, at the live mark, once.
   marks.HOOD = 92;
@@ -1633,7 +1634,10 @@ test("calls: seven days by default, a horizon written after the ticker, extend w
   const rw = A.calls(g.uid, { windowMs: 30 * DAY });
   assert.equal(rw.summary.find((x) => x.uid === g.uid).n, 1, "the 60-day close 40 days ago is outside a 30-day window; the early close (now) is inside");
   assert.equal(rw.calls.length, rec.calls.length, "the window scopes the record, never the rows");
-  // The wire carries the lifecycle, and a deleted call keeps it.
+  // The wire carries the lifecycle, and a deleted call keeps it — but cannot be closed or extended.
+  const c2 = A.send(g.uid, null, "long $HOOD one more", resolve, { thread: T });
+  A.drop(g.uid, c2.id);
+  assert.ok(!A.callClose(g.uid, c2.id).ok && !A.callExtend(g.uid, c2.id, 14).ok, "a deleted message's call runs to its horizon");
   A.drop(g.uid, b.id);
   const wb = A.history(g.uid, T).messages.find((m) => m.id === b.id);
   assert.ok(wb.deleted && wb.call && wb.call.closed, "the stamp stands after a delete, lifecycle included");
