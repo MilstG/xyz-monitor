@@ -371,7 +371,7 @@ the build stamp is at the top. Signed-out visitors get the login page, like ever
 
 `docs/` holds the longer reference pages — the feature map, system map, mechanics and signal
 reference — plus the design mocks that preceded the funding heatmap, notes, insiders and
-backtest-target work, and the share-to-chat mock (`xyz-monitor-share-to-chat-mock.html`, now built — see **Share to chat** above). The four reference pages are served at `/docs/ref/features`, `/docs/ref/map`,
+backtest-target work, the share-to-chat mock (`xyz-monitor-share-to-chat-mock.html`, now built — see **Share to chat** above) and the call-targets mock (`xyz-monitor-call-targets-mock.html`: "$INTC to 32 by Oct 15" as a tracked target that resolves on hit, miss or an invalidation level — a proposal, not yet built). The four reference pages are served at `/docs/ref/features`, `/docs/ref/map`,
 `/docs/ref/mechanics` and `/docs/ref/signals` (nonce-stamped, same gate); the mocks are not served.
 
 ## Project layout
