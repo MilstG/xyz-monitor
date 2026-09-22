@@ -70,7 +70,7 @@ ol.steps{list-style:none;counter-reset:s;padding:0;margin:14px 0 18px}
 ol.steps>li{counter-increment:s;position:relative;padding:12px 14px 12px 52px;border:1px solid var(--border);border-radius:8px;background:var(--panel);margin:8px 0}
 ol.steps>li::before{content:counter(s);position:absolute;left:14px;top:11px;width:24px;height:24px;border-radius:50%;
   display:grid;place-items:center;font-family:var(--mono);font-size:12px;color:var(--bg);background:var(--accent);font-weight:600}
-ol.steps>li b{display:block;margin-bottom:2px}
+ol.steps>li>b:first-child{display:block;margin-bottom:2px}
 
 /* idea + screen cards */
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;margin:14px 0 18px}
@@ -289,19 +289,28 @@ instead of minutes, and everyone is looking at the same numbers at the same time
   <li><b>Set the analysis window.</b> The <code>1h · 4h · 1d · 7d · 30d</code> selector re-anchors
   every window-relative column at once — vs S&amp;P, vs tape, ΔOI, Squeeze, Carry, Avg Range, RVOL
   all answer "over <i>this</i> window". Most confusion about a number is a window you forgot you set.</li>
-<figure class="shot" data-shot="markets"><span class="ex">screenshot — the real app</span><div class="shotwrap"><img src="/docs/ref/img/markets.jpg" alt="The Markets table" loading="lazy"><span class="dot" style="left:3.84%;top:18.06%">1</span><span class="dot" style="left:48.76%;top:29.5%">2</span><span class="dot" style="left:21.79%;top:42.97%">3</span><span class="dot" style="left:88.06%;top:29.33%">4</span><span class="dot" style="left:95.28%;top:29.33%">5</span><span class="dot" style="left:4.92%;top:34.33%">6</span><span class="dot" style="left:11.68%;top:34.33%">7</span><span class="dot" style="left:10.28%;top:29.33%">8</span><span class="dot" style="left:50%;top:12.22%">9</span><span class="dot" style="left:92.75%;top:17.72%">10</span><span class="dot" style="left:96.63%;top:12.61%">11</span></div><ol class="shotkey"><li><span class="n">1</span><span>Stocks | Crypto scope</span></li><li><span class="n">2</span><span>window</span></li><li><span class="n">3</span><span>click a header to sort</span></li><li><span class="n">4</span><span>Filters</span></li><li><span class="n">5</span><span>Layouts</span></li><li><span class="n">6</span><span>Columns</span></li><li><span class="n">7</span><span>↓ CSV</span></li><li><span class="n">8</span><span>type to filter tickers</span></li><li><span class="n">9</span><span>status line</span></li><li><span class="n">10</span><span>? help</span></li><li><span class="n">11</span><span>🔔 bell</span></li></ol><figcaption><b>This is the screen you land on.</b> The numbered dots are the controls the steps talk about.</figcaption></figure>
+<figure class="shot" data-shot="markets"><span class="ex">screenshot — the real app</span><div class="shotwrap"><img src="/docs/ref/img/markets.jpg" alt="The Markets table" loading="lazy"><span class="dot" style="left:3.84%;top:27.08%">1</span><span class="dot" style="left:48.76%;top:44.25%">2</span><span class="dot" style="left:21.79%;top:64.46%">3</span><span class="dot" style="left:88.06%;top:44%">4</span><span class="dot" style="left:95.28%;top:44%">5</span><span class="dot" style="left:4.92%;top:51.5%">6</span><span class="dot" style="left:11.68%;top:51.5%">7</span><span class="dot" style="left:10.28%;top:44%">8</span><span class="dot" style="left:50%;top:18.33%">9</span><span class="dot" style="left:92.75%;top:26.58%">10</span><span class="dot" style="left:96.63%;top:18.92%">11</span></div><ol class="shotkey"><li><span class="n">1</span><span>Stocks | Crypto scope</span></li><li><span class="n">2</span><span>window</span></li><li><span class="n">3</span><span>click a header to sort</span></li><li><span class="n">4</span><span>Filters</span></li><li><span class="n">5</span><span>Layouts</span></li><li><span class="n">6</span><span>Columns</span></li><li><span class="n">7</span><span>↓ CSV</span></li><li><span class="n">8</span><span>type to filter tickers</span></li><li><span class="n">9</span><span>status line</span></li><li><span class="n">10</span><span>? help</span></li><li><span class="n">11</span><span>🔔 bell</span></li></ol><figcaption><b>This is the screen you land on.</b> The numbered dots are the controls the steps talk about.</figcaption></figure>
+
+
+
 
 
   <li><b>Hover anything that puzzles you.</b> Every number in the app explains itself on hover:
   exact inputs, the window it was measured over, the sample size behind it. Press <kbd>?</kbd> for
   the "how to read this tab" card, which links into the manual.</li>
-<figure class="shot" data-shot="help"><span class="ex">screenshot — the real app</span><div class="shotwrap"><img src="/docs/ref/img/help.jpg" alt="The help card" loading="lazy"><span class="dot" style="left:50%;top:21.42%">1</span><span class="dot" style="left:50%;top:30.18%">2</span></div><ol class="shotkey"><li><span class="n">1</span><span>the two guides</span></li><li><span class="n">2</span><span>how to read this tab</span></li></ol><figcaption><b>The <kbd>?</kbd> card.</b> The two guides sit at the top; under them, how to read the tab you are on.</figcaption></figure>
+<figure class="shot narrow" data-shot="help"><span class="ex">screenshot — the real app</span><div class="shotwrap"><img src="/docs/ref/img/help.jpg" alt="The help card" loading="lazy"><span class="dot" style="left:50%;top:17.77%">1</span><span class="dot" style="left:50%;top:27.65%">2</span></div><ol class="shotkey"><li><span class="n">1</span><span>the two guides</span></li><li><span class="n">2</span><span>how to read this tab</span></li></ol><figcaption><b>The <kbd>?</kbd> card.</b> The two guides sit at the top; under them, how to read the tab you are on.</figcaption></figure>
+
+
+
 
 
   <li><b>Open a name.</b> Click a row (or press <kbd>Enter</kbd> on a highlighted one) and the
   ticker drawer slides in: candles, positioning, event risk, co-movers, news, the signal record,
   your notes. That name becomes the <b>focused ticker</b> — every other tab now opens on it.</li>
-<figure class="shot" data-shot="drawer"><span class="ex">screenshot — the real app</span><div class="shotwrap"><img src="/docs/ref/img/drawer.jpg" alt="The ticker drawer" loading="lazy"><span class="dot" style="left:84.03%;top:1.56%">1</span></div><ol class="shotkey"><li><span class="n">1</span><span>the drawer</span></li></ol><figcaption><b>The drawer.</b> One name, everything the site knows about it, on one scroll.</figcaption></figure>
+<figure class="shot tall" data-shot="drawer"><span class="ex">screenshot — the real app</span><div class="shotwrap"><img src="/docs/ref/img/drawer.jpg" alt="The ticker drawer" loading="lazy"><span class="dot" style="left:50.85%;top:1.56%">1</span></div><ol class="shotkey"><li><span class="n">1</span><span>the drawer</span></li></ol><figcaption><b>The drawer.</b> One name, everything the site knows about it, on one scroll.</figcaption></figure>
+
+
+
 
 
   <li><b>Star a few names.</b> <b>★</b> pins a market to your watchlist, floats it to the top of
@@ -396,7 +405,10 @@ instead of minutes, and everyone is looking at the same numbers at the same time
 <text x="412" y="114" fill="#8A93A0" font-size="11">Casc · 24h Liqs · the regime strip live here</text>
 </svg><figcaption><b>Idea 1, drawn.</b> Two universes, two benchmarks, two sets of columns. If a column vanished, you crossed the wall.</figcaption></figure>
 
-<figure class="shot" data-shot="crypto"><span class="ex">screenshot — the real app</span><div class="shotwrap"><img src="/docs/ref/img/crypto.jpg" alt="The Markets table in crypto scope with the regime strip" loading="lazy"><span class="dot" style="left:8.88%;top:18.06%">1</span><span class="dot" style="left:50%;top:23.22%">2</span></div><ol class="shotkey"><li><span class="n">1</span><span>Crypto scope</span></li><li><span class="n">2</span><span>the regime strip</span></li></ol><figcaption><b>Crypto scope, live.</b> BTC is the benchmark, the regime strip appears, the session columns are gone.</figcaption></figure>
+<figure class="shot" data-shot="crypto"><span class="ex">screenshot — the real app</span><div class="shotwrap"><img src="/docs/ref/img/crypto.jpg" alt="The Markets table in crypto scope with the regime strip" loading="lazy"><span class="dot" style="left:8.88%;top:27.08%">1</span><span class="dot" style="left:50%;top:34.83%">2</span></div><ol class="shotkey"><li><span class="n">1</span><span>Crypto scope</span></li><li><span class="n">2</span><span>the regime strip</span></li></ol><figcaption><b>Crypto scope, live.</b> BTC is the benchmark, the regime strip appears, the session columns are gone.</figcaption></figure>
+
+
+
 <figure class="fig"><span class="ex">anatomy of a signal card</span><div class="mock"><div class="card">
 <div class="l"><span class="n">1</span><span class="pill ev">FUNDING EXTREME</span><span style="color:var(--text)">HOOD · crowd paying near its monthly max</span><span style="margin-left:auto;color:var(--faint)">fired 2h ago · claim @ 113.90 · 4d 21h left</span></div>
 <div class="l"><span class="n">2</span><span style="color:var(--muted)">own base rate</span><span><b>n 23</b></span><span>median <b class="down">−3.1%</b></span><span>hit <b>65%</b></span><span>exp <b>+0.9R</b></span><span>horizon <b>5d</b></span><span class="pill">★ prime</span></div>
@@ -677,7 +689,10 @@ navigates.</div>
 </div>
 <p class="sec" style="font-size:13px;margin-top:8px">Two notes, two stamps. Each is read against today's mark, so the second one already tells you it was the better call. Editing either would change the words only — the stamp stays.</p><figcaption><b>What a stamped note looks like.</b> The move since is computed at read time from the snapshot; nothing about the note itself changes.</figcaption></figure>
 
-<figure class="shot" data-shot="messages"><span class="ex">screenshot — the real app</span><div class="shotwrap"><img src="/docs/ref/img/messages.jpg" alt="A conversation with stamped calls" loading="lazy"><span class="dot" style="left:58.93%;top:74.67%">1</span><span class="dot" style="left:13.4%;top:15.61%">2</span></div><ol class="shotkey"><li><span class="n">1</span><span>type here — $TICKER stamps the price</span></li><li><span class="n">2</span><span>calls ↗ — every stamped call, scored</span></li></ol><figcaption><b>A conversation, live.</b> Every <code>$TICKER</code> is stamped with the price it was sent at.</figcaption></figure>
+<figure class="shot" data-shot="messages"><span class="ex">screenshot — the real app</span><div class="shotwrap"><img src="/docs/ref/img/messages.jpg" alt="A conversation with stamped calls" loading="lazy"><span class="dot" style="left:13.4%;top:40.99%">1</span></div><ol class="shotkey"><li><span class="n">1</span><span>calls ↗ — every stamped call, scored</span></li></ol><figcaption><b>A conversation, live.</b> Every <code>$TICKER</code> is stamped with the price it was sent at.</figcaption></figure>
+
+
+
 
 </section>
 
@@ -754,7 +769,10 @@ settings can quiet <i>your</i> phone without ever editing the record of what fir
 <text x="530" y="129" fill="#8A93A0" font-size="10.5">with the tab closed</text>
 </svg><figcaption>One stream, four channels, each with its own filter.</figcaption></figure>
 
-<figure class="shot" data-shot="bell"><span class="ex">screenshot — the real app</span><div class="shotwrap"><img src="/docs/ref/img/bell.jpg" alt="The bell panel" loading="lazy"><span class="dot" style="left:85.9%;top:15.89%">1</span></div><ol class="shotkey"><li><span class="n">1</span><span>the bell panel</span></li></ol><figcaption><b>The bell panel, live.</b></figcaption></figure>
+<figure class="shot tall" data-shot="bell"><span class="ex">screenshot — the real app</span><div class="shotwrap"><img src="/docs/ref/img/bell.jpg" alt="The bell panel" loading="lazy"><span class="dot" style="left:50%;top:6.21%">1</span></div><ol class="shotkey"><li><span class="n">1</span><span>the bell panel</span></li></ol><figcaption><b>The bell panel, live.</b></figcaption></figure>
+
+
+
 
 
 <div class="cards">
