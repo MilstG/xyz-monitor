@@ -10319,6 +10319,49 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (h === "whale") return p[1] == null || p[1].toLowerCase() === "season" || /^[A-Za-z0-9]{1,12}$/.test(p[1]);
     return !!(tickerSet && tickerSet.has(H));   // <TICKER> or <TICKER> <field>
   }
+  // ---- reading a call from prose (build 2026.09.22-89) ------------------------------------------------
+  // The grammar's backup, never its replacement: when the words around a $TICKER do not settle the
+  // direction or the horizon, the composer can ask the model for a reading. The answer is a
+  // PROPOSAL the sender taps to apply; nothing posts on the model's say-so. Same budgets and the
+  // same transport as an ask; cached per text so a retype costs nothing.
+  const READ_SYS = "You read one trading chat message and extract the CALL it makes about the named ticker. Respond with ONLY a JSON object, no prose: "
+    + "{\"side\": \"long\"|\"short\"|null, \"days\": integer|null, \"why\": string}. "
+    + "side: the direction the author expects the price to move (bullish/upside/buy/breakout = long; bearish/downside/sell/fade/short/puts = short); null when the message expresses no view. "
+    + "days: the horizon in days if the author names or clearly implies one (a date, 'by earnings' with no date = null, 'this week' = 7, 'a month' = 30, 'year end' = days to Dec 31 from context.today); null when none. Cap 365. "
+    + "why: at most 12 words naming the words you read. Never invent a view: an uncertain or two-sided message is side null.";
+  const readCache = new Map();
+  async function readCall(text, sym, who) {
+    const owner = who && who.owner, admin = !!(who && who.admin);
+    const withBudget = (r) => Object.assign(r, { askPerDay: ASK_REPORTS_PER_DAY, askDayLeft: askDayLeft() }, admin ? { admin: true } : aiUserQuota(owner));
+    const msg = String(text || "").trim().slice(0, 1200), S = String(sym || "").toUpperCase();
+    if (!msg || !S) return withBudget({ ok: false, error: "nothing to read" });
+    if (!AI_KEY() && !aiFetch) return withBudget({ ok: false, disabled: true, error: "AI needs an API key on the server (OPENAI_API_KEY / ANTHROPIC_API_KEY)" });
+    const key = S + "|" + msg.toLowerCase().replace(/\s+/g, " ");
+    const cached = readCache.get(key);
+    if (cached && Date.now() - cached.at < ASK_CACHE_TTL) return withBudget(Object.assign({ cached: true }, cached.res));
+    const now = Date.now();
+    while (askHits.length && askHits[0] < now - ASK_WINDOW_MS) askHits.shift();
+    if (askHits.length >= ASK_MAX_PER_WINDOW) return withBudget({ ok: false, error: "rate", retryMs: ASK_WINDOW_MS - (now - askHits[0]) });
+    if (!admin) {
+      if (aiUserQuota(owner).askUserDayLeft <= 0) return withBudget({ ok: false, error: "ask-user-cap" });
+      if (!askDayLeft()) return withBudget({ ok: false, error: "ask-daily-cap" });
+    }
+    askHits.push(now);
+    const payload = { ticker: S, message: msg, today: new Date(now).toISOString().slice(0, 10) };
+    let c = await callModel(AI_MODEL, payload, { system: READ_SYS, maxTokens: 1200, effort: "low" });
+    if (!c.ok) c = await callModel(AI_MODEL_FALLBACK, payload, { system: READ_SYS, maxTokens: 1200, effort: "low" });
+    if (!c.ok) return withBudget({ ok: false, error: c.error || "model error" });
+    if (!admin) { askDay.count++; aiUserBurnAsk(owner); } persistAiReports();
+    let j = null;
+    try { const m = /\{[\s\S]*\}/.exec(String(c.text || "")); j = m ? JSON.parse(m[0]) : null; } catch (_) { j = null; }
+    if (!j || typeof j !== "object") return withBudget({ ok: false, error: "the model did not answer in the expected shape" });
+    const side = j.side === "long" || j.side === "short" ? j.side : null;
+    const days = Number.isInteger(+j.days) && +j.days >= 1 && +j.days <= 365 ? +j.days : null;
+    const res = { ok: true, side, days, why: String(j.why || "").slice(0, 120) };
+    readCache.set(key, { at: now, res });
+    if (readCache.size > 500) readCache.delete(readCache.keys().next().value);
+    return withBudget(res);
+  }
   async function askBoard(q, ctx, who) {
     const admin = !!(who && who.admin), owner = (who && who.owner) || null;
     const withBudget = (r) => Object.assign(r, { askPerDay: ASK_REPORTS_PER_DAY, askDayLeft: askDayLeft() },
@@ -14749,6 +14792,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       return vis.all ? signalsCache : scopedBody("sig", signalsCache, vis);
     },
     askBoard,   // terminal Tier-3: NL question -> planner query or grounded analyst answer
+    readCall,   // the composer's backup reader: a structured call from prose, applied only by the sender
     resetAiDay,   // terminal admin command: zero the daily report budget (ADMIN_PASSWORD-gated)
     checkAdminPassword,   // shared ADMIN_PASSWORD verify (+ lockout) — backs the AI unlock route
     anthropicEffortOk,    // which Anthropic model lines accept output_config.effort (test seam)
