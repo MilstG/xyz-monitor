@@ -1,0 +1,915 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Milst Screener · how to use this site</title>
+<meta name="referrer" content="same-origin">
+<meta name="description" content="How to use every feature of Milst Screener properly, and why each one is worth your time: a friendly, step-by-step guide for people using the terminal.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#0E1116">
+<style>
+:root{
+  color-scheme:dark;
+  --bg:#0E1116; --panel:#151A21; --panel2:#1B222B; --border:#262E39;
+  --text:#E8E3D7; --muted:#8A93A0; --faint:#4C5662; --dim:#7A8592;
+  --accent:#E3A53C; --accent-dim:#8a6a28; --blue:#6f93c9;
+  --up:#46B97E; --down:#E5604D;
+  --mono:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;
+  --disp:'Space Grotesk',system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:70px}
+body{margin:0;background:var(--bg);color:var(--text);font-family:var(--disp);font-size:15.5px;line-height:1.68;-webkit-font-smoothing:antialiased}
+a{color:var(--blue);text-decoration:none}
+a:hover{text-decoration:underline}
+code,kbd,.mono{font-family:var(--mono)}
+code{font-size:.88em;background:var(--panel2);border:1px solid var(--border);border-radius:3px;padding:1px 5px;overflow-wrap:anywhere}
+kbd{font-size:.82em;background:var(--panel2);border:1px solid var(--faint);border-bottom-width:2px;border-radius:4px;padding:1px 6px;white-space:nowrap}
+b,strong{font-weight:600}
+h1,h2,h3,h4{font-family:var(--disp);line-height:1.24;margin:0;font-weight:600}
+h1{font-size:30px;letter-spacing:-.01em;margin-bottom:8px}
+h2{font-size:23px;margin:58px 0 8px;padding-top:22px;border-top:1px solid var(--border)}
+h2 .num{font-family:var(--mono);font-size:13px;color:var(--accent);margin-right:10px;letter-spacing:.06em}
+h3{font-size:17px;margin:34px 0 6px;color:var(--text)}
+h3 .pill{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin-left:10px;vertical-align:middle;font-weight:500}
+p{margin:0 0 12px}
+ul,ol{margin:0 0 14px;padding-left:22px}
+li{margin:5px 0}
+.lede{color:var(--muted);font-size:17px;max-width:72ch}
+.sec{color:var(--muted)}
+.up{color:var(--up)} .down{color:var(--down)} .amber{color:var(--accent)}
+
+.top{position:sticky;top:0;z-index:8;display:flex;align-items:center;gap:14px;
+  padding:11px 30px;background:rgba(14,17,22,.94);backdrop-filter:blur(8px);border-bottom:1px solid var(--border)}
+.wordmark{font-family:var(--mono);font-size:12.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);white-space:nowrap}
+.wordmark .bk{color:var(--text);margin-left:6px}
+.wordmark .doc{color:var(--faint);margin-left:10px}
+.top .build{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--faint);white-space:nowrap}
+.top .back{font-size:12.5px;border:1px solid var(--border);border-radius:5px;padding:4px 10px;color:var(--muted);white-space:nowrap}
+.top .back:hover{color:var(--text);border-color:var(--faint);text-decoration:none}
+
+.page{max-width:920px;margin:0 auto;padding:28px 30px 90px}
+
+.jump{display:flex;flex-wrap:wrap;gap:6px;margin:22px 0 4px;padding:14px;background:var(--panel);border:1px solid var(--border);border-radius:8px}
+.jump a{font-family:var(--mono);font-size:11.5px;color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:3px 9px;background:var(--panel2)}
+.jump a:hover{color:var(--text);border-color:var(--accent-dim);text-decoration:none}
+
+.chip{display:inline-block;font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;
+  border:1px solid var(--faint);border-radius:3px;padding:1px 6px;margin-left:7px;vertical-align:middle;color:var(--muted);white-space:nowrap;font-weight:500}
+.chip.adm{color:var(--accent);border-color:var(--accent-dim)}
+
+/* the feature block: value → how → tips */
+.feat{border:1px solid var(--border);border-radius:10px;background:var(--panel);padding:16px 18px 6px;margin:12px 0 22px}
+.feat .value{display:flex;gap:10px;align-items:flex-start;margin:0 0 12px;padding:10px 12px;background:var(--panel2);border-radius:7px;border-left:3px solid var(--accent)}
+.feat .value .k{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);white-space:nowrap;padding-top:4px}
+.feat .value p{margin:0;font-size:15px}
+.feat .k2{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);margin:14px 0 4px}
+.feat ol.how{margin:0 0 10px;padding-left:0;list-style:none;counter-reset:h}
+.feat ol.how>li{counter-increment:h;position:relative;padding:4px 0 4px 34px;margin:0}
+.feat ol.how>li::before{content:counter(h);position:absolute;left:0;top:6px;width:22px;height:22px;border-radius:50%;
+  display:grid;place-items:center;font-family:var(--mono);font-size:11.5px;color:var(--bg);background:var(--accent);font-weight:600}
+.feat ul.tips{margin:0 0 12px;padding-left:0;list-style:none}
+.feat ul.tips>li{padding:3px 0 3px 22px;position:relative;color:var(--muted);font-size:14.5px}
+.feat ul.tips>li::before{content:"→";position:absolute;left:2px;color:var(--accent);font-family:var(--mono)}
+.feat ul.tips>li b{color:var(--text)}
+.feat .ex{font-size:14px;color:var(--muted);background:var(--panel2);border-radius:6px;padding:10px 12px;margin:6px 0 12px}
+.feat .ex b{color:var(--text)}
+.feat .ex .k{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);display:block;margin-bottom:3px}
+
+.tw{overflow-x:auto;margin:10px -2px 18px;-webkit-overflow-scrolling:touch}
+table{border-collapse:collapse;width:100%;font-size:14px;min-width:480px}
+th,td{text-align:left;vertical-align:top;padding:8px 10px;border-bottom:1px solid var(--border)}
+th{color:var(--muted);font-weight:600;font-size:11px;letter-spacing:.06em;text-transform:uppercase;background:var(--panel)}
+td:first-child{white-space:nowrap;font-family:var(--mono);font-size:13px}
+tr:hover td{background:rgba(255,255,255,.015)}
+
+.note{border-left:3px solid var(--accent-dim);background:var(--panel);padding:11px 15px;border-radius:0 6px 6px 0;margin:14px 0;color:var(--muted);font-size:14.5px}
+.note b{color:var(--text)}
+.note.warn{border-left-color:var(--down)}
+
+.routine{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin:14px 0 18px}
+.routine .r{border:1px solid var(--border);border-radius:8px;background:var(--panel);padding:13px 15px}
+.routine .r h4{font-size:14.5px;margin:0 0 6px}
+.routine .r ol{margin:0;padding-left:20px;color:var(--muted);font-size:14px}
+
+footer.docfoot{max-width:920px;margin:0 auto;padding:18px 30px 46px;color:var(--dim);font-size:12.5px;border-top:1px solid var(--border)}
+
+@media(max-width:720px){
+  body{font-size:15px}
+  .top{padding:9px 14px;gap:9px}
+  .top .build{display:none}
+  .page{padding:18px 14px 70px}
+  h2{margin-top:42px}
+  .feat{padding:14px 13px 4px}
+  footer.docfoot{padding:16px 14px 40px}
+}
+@media print{.top,.jump{display:none}.page{max-width:none;padding:0}.feat{break-inside:avoid}}
+</style>
+</head>
+<body>
+
+<div class="top">
+  <span class="wordmark"><span>Milst</span><span class="bk">Screener</span><span class="doc">How to use this site</span></span>
+  <span class="build" title="server build serving this page">build {{build}}</span>
+  <a class="back" href="/">← back to the terminal</a>
+</div>
+
+<div class="page">
+
+<h1>How to use this site</h1>
+<p class="lede">Feature by feature: what it is worth to you, how to use it properly, and the small habits
+that make it pay. Read it top to bottom once, then come back to whichever section you are standing in.
+If you want the ideas behind the app first, read the <a href="/docs/ref/explainer">explainer</a>; if you
+want the exact definition of a number, the <a href="/docs">manual</a> has it.</p>
+<p class="sec" style="font-size:13.5px">Nothing here is investment advice. The site measures and shows;
+what you do with it is yours.</p>
+
+<nav class="jump" aria-label="Jump to a section">
+  <a href="#routine">A daily routine</a>
+  <a href="#markets">Markets table</a>
+  <a href="#drawer">Ticker drawer</a>
+  <a href="#watchlist">Watchlist &amp; layouts</a>
+  <a href="#trend">Trend</a>
+  <a href="#charts">Charts &amp; Treemap</a>
+  <a href="#sectors">Sectors</a>
+  <a href="#corr">Correlation</a>
+  <a href="#funding">Funding</a>
+  <a href="#sessions">Sessions</a>
+  <a href="#signals">Signals</a>
+  <a href="#calendar">Calendar</a>
+  <a href="#news">News</a>
+  <a href="#report">AI Report</a>
+  <a href="#notes">Notes</a>
+  <a href="#messages">Messages</a>
+  <a href="#positions">Your positions</a>
+  <a href="#ask">Ask</a>
+  <a href="#alerts">Alerts &amp; Telegram</a>
+  <a href="#phone">Phone</a>
+  <a href="#habits">Habits</a>
+</nav>
+
+<!-- ============================================================ -->
+<section id="routine">
+<h2><span class="num">00</span>A daily routine, if you want one</h2>
+<p>You do not have to use everything. Most people settle into one of these three loops; each takes a
+few minutes and touches four or five features. Pick one, and let the rest of this page fill in the
+detail.</p>
+
+<div class="routine">
+  <div class="r"><h4>The five-minute open</h4><ol>
+    <li>Markets, window <code>1d</code>, sort by <b>vs tape</b>.</li>
+    <li>Glance at the <b>1d movers</b> chips and the action strip's HEATING list.</li>
+    <li>Calendar: who reports today, what macro prints today.</li>
+    <li>Bell: anything fired overnight?</li>
+    <li>Open one name, write one line in Notes.</li>
+  </ol></div>
+  <div class="r"><h4>The positioning read</h4><ol>
+    <li>Funding heatmap, 8h: who is paying, and is it building or fading?</li>
+    <li>Markets, sort by <b>Squeeze</b> and by <b>OI/Vol</b>.</li>
+    <li>Sectors flow map: which theme is being bought with conviction.</li>
+    <li>Correlation: is the trade you like already the trade you have?</li>
+    <li>Set a rule on the level you care about.</li>
+  </ol></div>
+  <div class="r"><h4>The weekly review</h4><ol>
+    <li>Sessions: is the overnight edge still there net of funding?</li>
+    <li>Signals: search your favourite names' claim histories.</li>
+    <li>Messages › <b>calls ↗</b>: how are your calls scoring?</li>
+    <li>Notes: re-read what you thought, with the move since.</li>
+    <li>Trim the watchlist. Save the layout.</li>
+  </ol></div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="markets">
+<h2><span class="num">01</span>The Markets table</h2>
+
+<div class="feat">
+  <div class="value"><span class="k">Value</span><p>One screen that answers "what is the tape doing,
+  and which names are doing something different" — with every number pre-computed so the page is
+  instant and everyone sees the same thing.</p></div>
+
+  <div class="k2">How to use it</div>
+  <ol class="how">
+    <li><b>Pick your scope first.</b> <b>Stocks | Crypto</b> at the top. Nothing carries across the wall,
+    so if a column looks empty, check which side you are on.</li>
+    <li><b>Set the window</b> (<code>1h · 4h · 1d · 7d · 30d</code>). Every column that says "over the window"
+    moves together: vs S&amp;P, vs tape, ΔOI, Squeeze, Carry, Avg Range, RVOL. Use <code>1d</code> for the day,
+    <code>7d</code> for the week's story, <code>30d</code> for positioning that has had time to build.</li>
+    <li><b>Sort by clicking a header.</b> Click again to flip. The most useful sorts are not price
+    changes: try <b>vs tape</b> (who is strong on a weak day), <b>RVOL</b> (who is being traded unusually),
+    <b>ΔOI</b> (where money is arriving) and <b>Squeeze</b>.</li>
+    <li><b>Filter the noise.</b> <b>Filters</b> holds volume and open-interest floors (in millions;
+    <code>500k</code> and <code>2.5b</code> work too). A floor of a few million in 24h volume removes the
+    names you could not exit at size.</li>
+    <li><b>Show the columns you actually use.</b> <b>Columns</b> shows, hides and drag-reorders. Several
+    useful ones are hidden by default: the moving averages, VWAP, the intraday opens, DownCap.</li>
+    <li><b>Hover before you conclude.</b> Every cell tells you its inputs, its window and its sample
+    size. A shaded cell scales with the size of the move, so a wall of deep red 7d cells <i>is</i> the
+    breadth read.</li>
+    <li><b>Export</b> with <b>↓ CSV</b> — you get exactly the rows, columns, sort and filters on screen.</li>
+  </ol>
+
+  <div class="k2">The two lenses most people miss</div>
+  <ul class="tips">
+    <li><b>group → sectors / industries.</b> The same table with one row per sector. Each cell is the
+    weighted average of the rows you are showing — and <b>Best · Worst</b> tells you whether the sector
+    number is everyone or one name dragging the rest. Click a group row to drill into its members.</li>
+    <li><b>The action strip</b> under the table (click <b>▸ Action</b>). <b>HEATING</b> is what is
+    starting: acceleration confirmed by flow. <b>COOLING</b> is what is still ahead of the tape but has
+    stopped moving — with a high momentum score that is the take-profit read. <b>STRONGEST BID</b> is
+    who got bought on the dip in the last four hours.</li>
+  </ul>
+
+  <div class="ex"><span class="k">Worked example</span>Window <code>7d</code>, sort <b>vs tape</b>
+  descending, volume floor <code>5</code>. The top of the table is what held up when the tape did not.
+  Now hover the ΔOI cell on the top three: <code>longs+</code> means new money confirmed it,
+  <code>squeeze</code> means it was shorts covering — a different trade entirely.</div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="drawer">
+<h2><span class="num">02</span>The ticker drawer</h2>
+
+<div class="feat">
+  <div class="value"><span class="k">Value</span><p>Everything the site knows about one name, on one
+  scroll, so you stop tab-hopping to build a picture.</p></div>
+
+  <div class="k2">How to use it</div>
+  <ol class="how">
+    <li><b>Open it</b> by clicking a row, pressing <kbd>Enter</kbd> on a highlighted row, or
+    <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>K</kbd> and typing the ticker.</li>
+    <li><b>Read it top to bottom.</b> Header and event risk first (is there an earnings print or a macro
+    event inside your horizon?), then <b>where the 30d return happened</b> (off-hours vs cash session),
+    then the metrics grid, then candles and the OI / funding history, then news and the signal
+    record.</li>
+    <li><b>Use the focus chip.</b> Opening a name sets the <b>◎ focused ticker</b>. Now Trend, Charts,
+    Report and Correlation open on that same name — click the chip in the status line to reopen the
+    drawer from anywhere.</li>
+    <li><b>Write while you are there.</b> The Notes panel sits above the charts. That is on purpose:
+    everything else in the drawer is the server's read; the note is yours.</li>
+  </ol>
+
+  <ul class="tips">
+    <li><b>The 30d split is the underrated panel.</b> A name that made all its return overnight is a
+    different hold from one that made it during the session — and the funding you pay to hold
+    overnight is right beside it.</li>
+    <li><b>Co-movers and hedges</b> are computed on 90 days of daily returns. Before you add a name,
+    check whether it is a co-mover of something you already hold.</li>
+    <li><b>The signal record</b> is the out-of-sample history of every claim the engine made on this
+    name. A name with a poor record is a name where the engine's flags deserve less weight.</li>
+    <li><b>The URL follows you.</b> <code>#t=NVDA</code> in the address bar is a shareable link
+    straight to this drawer.</li>
+  </ul>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="watchlist">
+<h2><span class="num">03</span>Watchlist and saved layouts</h2>
+
+<div class="feat">
+  <div class="value"><span class="k">Value</span><p>The table shaped the way <i>you</i> read it, on
+  every device, without redoing it each morning.</p></div>
+
+  <div class="k2">How to use it</div>
+  <ol class="how">
+    <li><b>Star names</b> with the <b>★</b> beside the ticker. Starred names float to the top of the
+    table; <b>★ only</b> in Filters shows nothing else. The watchlist follows your account, so your
+    phone has it too.</li>
+    <li><b>Arrange the table once</b> — columns, order, sort, window, volume/OI floors, ★-only.</li>
+    <li><b>Layouts → save</b>, and give it a name that says what it is for: <i>positioning</i>,
+    <i>open</i>, <i>swing</i>.</li>
+    <li><b>Switch layouts</b> from the same menu. A <b>•</b> beside the active name means you have
+    drifted from what you saved; save again or switch back.</li>
+  </ol>
+
+  <ul class="tips">
+    <li><b>Make a layout per question, not per day.</b> A "positioning" layout with Funding, ΔOI, Squeeze,
+    OI/Vol and Carry; a "strength" layout with vs tape, RVOL, DownCap and Momentum. Switching layouts
+    is faster than re-sorting.</li>
+    <li><b>Saved layouts sync; the <i>active</i> one does not.</b> Your phone can run its own layout
+    while the desktop runs another — that is deliberate, not a bug.</li>
+    <li><b>New columns are never dropped from an old layout.</b> When the app adds a column, your
+    saved view gains it (hidden if it is hidden by default) rather than silently losing it.</li>
+    <li>The ticker search box is <i>not</i> part of a layout — it is meant to be typed and cleared.</li>
+  </ul>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="trend">
+<h2><span class="num">04</span>Trend</h2>
+
+<div class="feat">
+  <div class="value"><span class="k">Value</span><p>Separates "it went up" from "it is trending" — and
+  points at the pullback, which is where an entry with a defined risk actually lives.</p></div>
+
+  <div class="k2">How to use it</div>
+  <ol class="how">
+    <li><b>Pick a side</b> — the long board or the short board.</li>
+    <li><b>Read the score.</b> Each name gets a rung per timeframe (daily, 12h, 4h, 1h); green means
+    price is above a stacked EMA 13/21 ribbon on that rung. <b>4/4</b> is an established trend on every
+    timeframe; <b>2–3/4</b> usually means the higher timeframes lead and the lower ones are pulling back.</li>
+    <li><b>Look for RETEST.</b> The badge means price just probed into the ribbon while the close held
+    the right side — the continuation pullback. The volume multiple beside it tells you whether the
+    level is being fought (≥2×) or quietly respected (~1×).</li>
+    <li><b>Check Width and Age.</b> Two 4/4 trends are not the same trade when one rides a hair-thin
+    ribbon and the other a wide one. <b>Age</b> is how many days the daily rung has been stacked — a day-3
+    trend is an entry, a day-40 trend is a chase. The board ranks fresh-first for exactly that reason.</li>
+    <li><b>Click the chart button</b> on a row to see the rung with the ribbon and the retest zone drawn
+    at the ladder's own levels.</li>
+  </ol>
+
+  <ul class="tips">
+    <li><b>Δ21</b> is the live distance from the hourly EMA21 — your proximity-to-entry number.</li>
+    <li>The badge you see is the same condition that becomes a signal in the ledger. The board and the
+    signal cannot disagree.</li>
+    <li>A name missing a rung (too little history) is excluded, not guessed — the header counts them.</li>
+  </ul>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="charts">
+<h2><span class="num">05</span>Charts and Treemap</h2>
+
+<div class="feat">
+  <div class="value"><span class="k">Value</span><p>Charts: compare <i>shapes</i> across names or across
+  timeframes without opening eight drawers. Treemap: the whole universe in one glance, sized by what
+  matters to you.</p></div>
+
+  <div class="k2">Charts, how to use it</div>
+  <ol class="how">
+    <li><b>GRID</b> puts up to eight names side by side. Choose <b>panes</b> (4, 6 or 8), then type into
+    <b>add ticker…</b> to fill them; each pane keeps its own timeframe.</li>
+    <li><b>MTF WALL</b> puts one name across timeframes — the same day seen at 15m, 1h, 4h and 1d (more
+    rungs with more panes).</li>
+    <li><b>LINK</b> shares the crosshair and zoom across panes (always on in the wall), so hovering one
+    bar lines up the same moment everywhere. <b>RESET</b> returns every pane to its default window.</li>
+    <li><b>EMA</b> overlays two moving averages of your choosing on every pane; <b>SAVE</b> keeps the
+    whole arrangement as a named chart layout for this browser.</li>
+  </ol>
+  <ul class="tips">
+    <li>Short timeframes read the local 5-minute archive; 4h and above read the deep daily archive.
+    Each pane says which — they are never blended in one chart.</li>
+    <li>Warm-up bars for an EMA stay empty rather than plotting an unconverged line.</li>
+  </ul>
+
+  <div class="k2">Treemap, how to use it</div>
+  <ol class="how">
+    <li>Choose <b>size</b> — 24h volume or open interest. Volume shows where the activity is; OI shows
+    where the positioning is.</li>
+    <li>Choose the <b>window</b> — colour is the move over it.</li>
+    <li>Click a tile to open the name.</li>
+  </ol>
+  <ul class="tips">
+    <li>Size by <b>OI</b> and window <b>7d</b> is the fastest way to see where a week of red actually hurt.</li>
+  </ul>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="sectors">
+<h2><span class="num">06</span>Sectors</h2>
+
+<div class="feat">
+  <div class="value"><span class="k">Value</span><p>Tells you which <i>theme</i> is being bought or sold
+  — and whether the theme trades as one block or as a bucket of stock picks.</p></div>
+
+  <div class="k2">How to use it</div>
+  <ol class="how">
+    <li><b>Start on the flow map.</b> Each bubble is a sector. Right = money flowing in with conviction
+    (price plus open interest); up = activity (volume plus volatility); size = 24h volume.
+    <b>Top-right is accumulation, top-left is distribution</b>, the bottom half is quiet.</li>
+    <li><b>Flip to Leaders</b> to see who is beating the benchmark (right) and whether the lead is
+    growing (up) or fading. "Catching up" is where early rotation shows; "Cooling" is where leadership
+    goes to die.</li>
+    <li><b>Read Cohesion</b> on the rotation board. High = the label trades as one thing, so any member
+    will do; low = a stock-picker's sector where the name matters more than the theme.</li>
+    <li><b>Click a bubble</b> for its members with their own contribution to the composite.</li>
+    <li><b>Try equal-weight.</b> By volume, a mega-cap can be the whole sector's story; equal-weight
+    shows whether the rest agree.</li>
+  </ol>
+
+  <ul class="tips">
+    <li>The <b>sector × sector correlation</b> matrix catches one risk factor wearing two names —
+    Semis and Software moving together is one bet, not two.</li>
+    <li><b>Grouping</b> switches from GICS sectors to curated industries (Semis vs Software vs Memory).
+    Industries are display-only; the signal engine keeps pooling on the eleven sectors.</li>
+  </ul>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="corr">
+<h2><span class="num">07</span>Correlation</h2>
+
+<div class="feat">
+  <div class="value"><span class="k">Value</span><p>Stops you from owning the same trade three times
+  under three tickers — and shows you the natural hedge when you want one.</p></div>
+
+  <div class="k2">How to use it</div>
+  <ol class="how">
+    <li><b>Matrix.</b> Names are cluster-ordered, so the blocks along the diagonal are real co-movement
+    families. Hover a cell for the correlation <i>and the number of days behind it</i> — a ±0.9 on twelve
+    days is noise. Use the focus search to isolate a few names; widen or narrow with <i>top by vol</i>.</li>
+    <li><b>Click a cell</b> for the pair view: the hedge ratio (β, units of B per unit of A), the spread
+    between them with its mean and ±1σ band, and the z-score. Beyond ±1.5–2 one side is rich or cheap
+    against the other. The rolling correlation underneath says whether the relationship is stable
+    enough to trust.</li>
+    <li><b>Click a ticker label</b> for its co-movers (proxies and contagion) on one side and its natural
+    hedges on the other.</li>
+    <li><b>COMP/G</b> overlays several names rebased to 100 at an anchor you choose — presets, a date, or
+    drag the amber line. <b>Spread mode</b> shows each name minus the basket of the visible names.</li>
+    <li><b>Ratio</b> draws synthetic pair candles (A divided by B) with a properly honest EMA200 — drawn
+    only where 200 bars exist. BTC may face a stock here, aligned on the hours both traded.</li>
+  </ol>
+
+  <div class="ex"><span class="k">Worked example</span>You like a long in a chip name and already hold
+  another one. Click the matrix cell for the pair: a 0.85 correlation on 90 days with the spread at
+  +1.8σ says the one you want is already rich against the one you own. That is a pair trade, not a
+  second long.</div>
+
+  <ul class="tips">
+    <li>Type <code>comp AAPL MSFT NVDA</code> or <code>ratio NVDA/BTC 4h</code> into the Ask console to
+    jump straight to these views.</li>
+  </ul>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="funding">
+<h2><span class="num">08</span>Funding heatmap</h2>
+
+<div class="feat">
+  <div class="value"><span class="k">Value</span><p>Carry is a cost or an income on every perp you
+  hold. This screen shows who is paying, across the whole book, over days — so you can see crowding
+  building or fading rather than a single number.</p></div>
+
+  <div class="k2">How to use it</div>
+  <ol class="how">
+    <li><b>Read the colours.</b> <b class="down">Red = longs pay</b> (the crowd is long; holding costs
+    money). <b class="up">Green = longs receive</b>. Every row is also labelled with its signed number,
+    so you never depend on colour alone.</li>
+    <li><b>Pick a resolution</b> — 1h, 8h or 24h. In the default <b>annualized</b> unit, the timeframe is
+    only a zoom: one market reads one number on every grid.</li>
+    <li><b>Compare now against the mean.</b> Each row ends with its window mean and its <b>current</b>
+    funding in the same unit. Current above mean = carry building; below = fading.</li>
+    <li><b>Sort</b> by carry side, by |carry|, on the mean or on the now column.</li>
+    <li><b>Switch to per-bucket</b> only when you want the actual amount a 1× long paid over a bucket —
+    that unit changes with the timeframe (about 8× larger per 8h than per 1h).</li>
+  </ol>
+
+  <ul class="tips">
+    <li><b>Hatched cells are honest gaps</b> — the data covered under half the bucket's hours. They are
+    never drawn as "flat", because a gap and a genuinely flat market mean opposite things to anyone
+    sizing a position.</li>
+    <li>The newest column is always the last <i>complete</i> bucket.</li>
+    <li>Rows rank by open interest; show top 25, 50 or everything.</li>
+  </ul>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="sessions">
+<h2><span class="num">09</span>Sessions</h2>
+
+<div class="feat">
+  <div class="value"><span class="k">Value</span><p>Answers <i>when</i> the returns actually happen —
+  overnight, over the weekend, or during the cash session — net of the funding it costs to be there.</p></div>
+
+  <div class="k2">How to use it</div>
+  <ol class="how">
+    <li><b>Start with the decomposition.</b> Three equity curves: what an overnight hold (close→open), a
+    weekend hold and a cash-session hold each paid, pooled across the equity universe.</li>
+    <li><b>Watch the shaded band.</b> That is the running funding drag. An edge that dies inside the band
+    is a donation.</li>
+    <li><b>Read the clocks</b> — hour-of-day activity in each market's own norm, the funding clock, the
+    day-of-week heatmap — with sample-size humility; hover for the breadth behind every point.</li>
+  </ol>
+
+  <ul class="tips">
+    <li>A rising overnight curve against a flat cash curve is the classic overnight effect. The drawer's
+    <b>where the 30d return happened</b> panel is the same question asked of one name.</li>
+    <li>Panels that need more history than exists yet stay empty rather than showing thin data.</li>
+    <li>None of this exists in crypto scope — a 24/7 tape has no sessions.</li>
+  </ul>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="signals">
+<h2><span class="num">10</span>Signals</h2>
+
+<div class="feat">
+  <div class="value"><span class="k">Value</span><p>A ranked list of unusual conditions with their
+  <i>measured</i> history attached — and a public record of how every past flag turned out, so you can
+  decide how much to trust the next one.</p></div>
+
+  <div class="k2">How to read a card</div>
+  <ol class="how">
+    <li><b>Line 1</b> — the event, a plain-language reading, when it appeared, and the claim it is scored
+    against (the frozen mark and the time to resolution).</li>
+    <li><b>Line 2</b> — the evidence, always in the same order: scope · n · median outcome · hit rate ·
+    expectancy · horizon. <b>n</b> is the number that matters. A pill saying <i>unproven</i> means no
+    history; <i>neg exp</i> means past occurrences lost money on average.</li>
+    <li><b>Line 3</b> — the mechanical play: side, target, the level that voids it, reward:risk. These are
+    frozen when the claim opens and never move.</li>
+    <li><b>Line 4</b> — the one corroborating thing to watch.</li>
+  </ol>
+
+  <div class="k2">How to use it</div>
+  <ol class="how">
+    <li><b>Sort by score, but read n first.</b> Score is unusualness now plus historical edge; a high
+    score on n=3 is a story, not a base rate.</li>
+    <li><b>Prefer ★ prime</b> — ≥60% hit, positive expectancy and sound structure at fire time.</li>
+    <li><b>Mind the decay.</b> A signal past its claimed horizon dims (amber) and drops at twice the
+    horizon. A stale signal is not a signal.</li>
+    <li><b>Check the earnings guard.</b> A card flagged for a print inside the horizon has its evidence
+    capped, on purpose, and says so.</li>
+    <li><b>Search a ticker</b> to see its complete claim-by-claim history — what fired, at what mark, what
+    it claimed, what happened. Do this before you trust any card on that name.</li>
+    <li><b>Look at the accuracy panel</b> occasionally: live hit vs claimed, the profit factor (which
+    catches the 55%-hit signal that still loses money), and the calibration buckets that audit the
+    ranking itself.</li>
+  </ol>
+
+  <ul class="tips">
+    <li><b>⇄</b> on a card means long and short fired on the same name — flagged, and nobody gets a
+    confluence bonus.</li>
+    <li>Confluence (several same-side conditions on one name) only earns a bonus once the record proves
+    agreement helps. It is measured, not assumed.</li>
+    <li>The Actionable tab<span class="chip adm">operator-only by default</span> is the subset of these
+    claims that are <i>at</i> their trigger right now, with reward:risk net of funding.</li>
+  </ul>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="calendar">
+<h2><span class="num">11</span>Calendar</h2>
+
+<div class="feat">
+  <div class="value"><span class="k">Value</span><p>The two things that reliably blow up a
+  well-reasoned position: an earnings print and a macro release. This is where you see them coming,
+  and how this name has behaved through prints before.</p></div>
+
+  <div class="k2">How to use it</div>
+  <ol class="how">
+    <li><b>Upcoming</b> — the next two weeks of earnings for the universe, grouped by day with the session:
+    <b>BMO</b> before the open, <b>AMC</b> after the close. Starred names float to the top of each day.</li>
+    <li><b>Reported</b> — the last two days stay on the tab with actual vs estimate, beat/miss, and the
+    print's own reaction candle. The tape's verdict is the move beside the EPS verdict; they often disagree.</li>
+    <li><b>Reaction study</b> — for each name: how many prints, the average and median move the next
+    session, how often up vs down, gap behaviour, and the move as a multiple of the name's usual daily
+    range. That last one is the sizing number.</li>
+    <li><b>Macro rows</b> — FOMC, CPI, payrolls, PPI, retail sales, GDP, PCE, with the prior print shown
+    ahead of the release and prior → actual after.</li>
+  </ol>
+
+  <ul class="tips">
+    <li>You do not have to open the tab to be warned: the <b>E</b> badge on the Markets ticker cell
+    (solid = today, hollow = tomorrow) and the macro banner under the nav read the same calendar.</li>
+    <li>Indices, FX, commodities and baskets never report — the coverage line says how many names are
+    eligible so absence is not a mystery.</li>
+  </ul>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="news">
+<h2><span class="num">12</span>News</h2>
+
+<div class="feat">
+  <div class="value"><span class="k">Value</span><p>Answers "why is this moving" without leaving the
+  site — headlines tied to names in the universe, the macro tape and SEC filings on one feed.</p></div>
+
+  <div class="k2">How to use it</div>
+  <ol class="how">
+    <li><b>Filter by ticker</b> with <kbd>/</kbd>. The drawer's news panel is the same feed, already
+    filtered to the open name.</li>
+    <li><b>Read the badges.</b> Amber = earnings within a week; red = an open signal on that name;
+    <b>FL</b> = an SEC filing, with material forms marked.</li>
+    <li>The window is 72 hours. Older is history, not news.</li>
+  </ol>
+  <ul class="tips">
+    <li>Type <code>news nvda</code> in the Ask console for the same slice as a table.</li>
+    <li>Material filings can also reach you as an alert class — turn it on in the bell.</li>
+  </ul>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="report">
+<h2><span class="num">13</span>AI Report</h2>
+
+<div class="feat">
+  <div class="value"><span class="k">Value</span><p>The whole board on one name, written out in
+  sentences — with scenarios priced, an action block whose expected value is checked by the server, and
+  a track record of its own past reads.</p></div>
+
+  <div class="k2">How to use it</div>
+  <ol class="how">
+    <li><b>Open it</b> from the drawer's <b>AI report →</b>, the Report tab with a focused ticker, or
+    <kbd>Shift</kbd>+<kbd>Enter</kbd> in the command palette.</li>
+    <li><b>Read the picture and the flags first</b>, then the scenarios. The colour follows the money:
+    an adverse scenario renders red even if the model called it a "target".</li>
+    <li><b>Weigh the action block</b> the way you weigh a card: its EV-at-entry is computed server-side,
+    and a plan that prices negative is downgraded to <i>wait</i> before it reaches you.</li>
+    <li><b>Check the track record</b> at the bottom — every directional read is ledgered and graded out
+    of sample like any signal.</li>
+    <li><b>Regenerate</b> only when something material changed; the button unlocks on a cooldown or on a
+    moved mark, a fresh signal or a print.</li>
+  </ol>
+
+  <ul class="tips">
+    <li>Reports are shared: the first person to generate one caches it for everyone. Generation is
+    capped per person and per group per day, so do not spend it on a name nothing happened to.</li>
+    <li>Sector and basket reports exist too: <code>report sector Semis</code>,
+    <code>report basket AAPL MSFT NVDA</code>.</li>
+    <li>It is a reading of numbers other tabs already show. If it cites something you cannot find on
+    the board, that is a reason to trust it less, not more.</li>
+  </ul>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="notes">
+<h2><span class="num">14</span>Notes</h2>
+
+<div class="feat">
+  <div class="value"><span class="k">Value</span><p>Your own thinking on a name, stamped with the price
+  it was written at — so next month you read "wrote it at 113.90 · +4.0% since" instead of trying to
+  remember what you meant.</p></div>
+
+  <div class="k2">How to use it</div>
+  <ol class="how">
+    <li><b>Open the drawer</b> on a name and click <b>＋ note</b> in the Notes panel above the charts.</li>
+    <li><b>Write what you actually think</b> — a level, a reason, a rule for yourself. One honest line
+    beats a paragraph of hedging.</li>
+    <li><b>Tag it</b> with <code>#tags</code> in the body: <code>#thesis</code>, <code>#level</code>,
+    <code>#mistake</code>. Tags are read out of the text, so you never have to manage them.</li>
+    <li><b>Save.</b> The note is stamped with the mark and the time, once.</li>
+    <li><b>Find it again</b> on the Notes tab<span class="chip adm">operator-only by default</span> —
+    newest first, searchable over bodies and tickers, filterable by tag — or by the <b>◢</b> post-it in
+    the Markets ticker cell (bright within a week, dimmer to a month, hollow after). <b>◢ noted</b> in
+    Filters narrows the table to names you have written on.</li>
+  </ol>
+
+  <ul class="tips">
+    <li><b>Editing changes the words and nothing else.</b> The timestamp and the price stand, and the
+    edit is disclosed. If your view changed, write a new note — that is the record you will want.</li>
+    <li>A name rotated out of the universe keeps its note, greyed and labelled.</li>
+    <li>Writing needs the operator to have turned on note-writing for you; reading the tab never grants
+    the pen.</li>
+    <li>A call in Messages can be written into the notes book with one click, keeping its stamp.</li>
+  </ul>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="messages">
+<h2><span class="num">15</span>Messages</h2>
+
+<div class="feat">
+  <div class="value"><span class="k">Value</span><p>A conversation where every call carries the price it
+  was made at, forever. The group's shared record — with the board's own tables postable straight into
+  the thread.</p></div>
+
+  <div class="k2">How to use it</div>
+  <ol class="how">
+    <li><b>Pick a conversation</b> in the rail: a one-to-one with a member, a group, or a topic board
+    anyone can join. Groups are created from the rail with a name; topic boards are standing posts for
+    an idea, a ticker thesis, a theme.</li>
+    <li><b>Name tickers with a dollar sign.</b> <code>$HOOD</code> is stamped with the price at the moment
+    you send it, and every later read shows the move since. Write <code>short $HOOD</code> and it scores as
+    a short; everything else scores as a long.</li>
+    <li><b>Post a table instead of describing one.</b> <code>/top funding 5</code>, <code>/nvda</code>,
+    <code>/screen rvol&gt;2</code>, <code>/earnings today</code> — the result lands in the thread under your
+    name, badged <i>computed</i>. <code>/help</code> shows you the verbs privately.</li>
+    <li><b>Share a piece of the board.</b> Hover a cell on Markets for the <b>⤴</b> at its corner, hover the
+    ticker cell for the row, right-click for cell · row · this screen, or press <kbd>s</kbd> on a
+    highlighted row. The sheet previews the card, picks the conversation, takes a note, and can quote it
+    as a call.</li>
+    <li><b>Bind an alert to the conversation.</b> <code>/alert NVDA &gt; 200</code>,
+    <code>/alert NVDA crosses down 180</code>, <code>/alert any rvol &gt; 3</code> — when it fires, the fire
+    posts here. <code>/alert list</code>, <code>/alert off &lt;id&gt;</code>.</li>
+    <li><b>Review the record.</b> <b>calls ↗</b> in the rail lists every stamped call with the
+    direction-adjusted move since and at fixed 1-day and 7-day horizons, per person. Click a person to
+    filter to their calls. Deleting a call removes the words, never the stamp or the score.</li>
+  </ol>
+
+  <div class="k2">Getting it on your phone</div>
+  <ul class="tips">
+    <li><b>Escalation.</b> An unread message reaches your linked Telegram after five minutes — unless you
+    are online, or the thread is muted. An <b>@mention</b> or a message about a ticker on your
+    <b>watch</b> list (the per-person list in the rail, separate from ★) goes immediately and pierces
+    a mute.</li>
+    <li><b>Telegram sync (⇄)</b> in a conversation's header mirrors that one conversation both ways:
+    every message lands on your phone as it happens, and plain text you send the bot posts here under
+    your name. One conversation at a time.</li>
+    <li><b>Browser notifications</b> — enable them in the rail and unread messages arrive with the tab
+    closed.</li>
+  </ul>
+
+  <ul class="tips">
+    <li>Replies quote one line and click back; pins sit in a strip at the top; reactions are a small
+    fixed set; drafts survive a reload; a conversation exports as JSON.</li>
+    <li>Attachments: images and plain-text notes, checked by the server itself, not by what the file
+    claims to be. Paste a screenshot straight into the box.</li>
+    <li>A call can be armed as a price alert at its stamp — fires when the market crosses back through
+    the level it was called at — or written into your notes book with one click.</li>
+  </ul>
+
+  <div class="note warn"><b>Read this once.</b> On this deployment the operator can read every
+  conversation, including ones they are not in. Every such read is written to an audit log the operator
+  panel shows. Write accordingly.</div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="positions">
+<h2><span class="num">16</span>Your positions on the board</h2>
+
+<div class="feat">
+  <div class="value"><span class="k">Value</span><p>See what you actually hold next to what the board
+  says about it — the ⬡ beside the ticker, a Position column, and a panel in the drawer with the
+  trend read right beside your side.</p></div>
+
+  <div class="k2">How to use it</div>
+  <ol class="how">
+    <li><b>Filters › Positions</b>: paste your Hyperliquid wallet's <b>public address</b> and click
+    <b>Link</b>.</li>
+    <li>A <b>⬡</b> appears beside every name you hold, in the side's colour; the <b>Position</b> column
+    shows side, notional at the live mark and the move since entry.</li>
+    <li><b>⬡ held</b> in Filters narrows the table to your book.</li>
+    <li>In the drawer, the Position panel shows size, entry, leverage, liquidation, margin, funding paid
+    since open, and unrealised P&amp;L and ROE off the live mark.</li>
+  </ol>
+  <ul class="tips">
+    <li><b>Public address only.</b> The app reads the public clearinghouse state and can never sign. It
+    cannot trade for you, and nothing you paste here could let it.</li>
+    <li>Your wallet is polled only while somebody is looking at it; the numbers you see move with the
+    live mark between polls.</li>
+  </ul>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="ask">
+<h2><span class="num">17</span>Ask — the terminal and the palette</h2>
+
+<div class="feat">
+  <div class="value"><span class="k">Value</span><p>Any question the board can answer, answered in one
+  line instead of a sort, a filter and a scroll — and a jump to any name or tab without touching the
+  mouse.</p></div>
+
+  <div class="k2">The command palette</div>
+  <ol class="how">
+    <li><kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>K</kbd>, type a ticker or a tab name.</li>
+    <li><kbd>Enter</kbd> opens the drawer (or the tab). <kbd>Shift</kbd>+<kbd>Enter</kbd> opens the AI
+    report for that ticker.</li>
+  </ol>
+
+  <div class="k2">The Ask console</div>
+  <ol class="how">
+    <li>Press <kbd>~</kbd> or click <b>▸_ Ask</b> at the bottom right.</li>
+    <li>Type a ticker for its card, <code>ticker field</code> for one number, or a verb:</li>
+  </ol>
+  <div class="tw"><table>
+    <thead><tr><th>Type</th><th>Get</th></tr></thead>
+    <tbody>
+    <tr><td>top funding 5 · bottom d7 10</td><td>Any column ranked. Also <code>gainers</code>, <code>losers</code>, <code>trending</code>.</td></tr>
+    <tr><td>screen funding&gt;20 &amp; squeeze&gt;50</td><td>A filter across the board. Fields join with <code>&amp;</code>.</td></tr>
+    <tr><td>breadth · sectors d7</td><td>Tape health; sector performance over a window.</td></tr>
+    <tr><td>earnings tomorrow · news nvda 10</td><td>Calendar and headlines.</td></tr>
+    <tr><td>vs nvda amd · corr nvda amd · diverge nvda</td><td>Compare two names; correlation and hedge β; a name decoupling from its benchmark.</td></tr>
+    <tr><td>comp … · ratio A/B 4h · report nvda</td><td>Opens the matching view.</td></tr>
+    <tr><td>whats above the 200dma · most crowded shorts</td><td>Plain English, translated into the grammar — the translation is echoed so you can learn it.</td></tr>
+    </tbody>
+  </table></div>
+  <ul class="tips">
+    <li><kbd>Tab</kbd> completes verbs, fields and tickers. <kbd>↑</kbd> <kbd>↓</kbd> walk your history.
+    <code>help</code> shows the verb card.</li>
+    <li>Plain-English aliases work: <code>apr</code> → funding, <code>sqz</code> → squeeze,
+    <code>week</code> → d7, <code>ytd</code> → vs year open, <code>relvol</code> → rvol.</li>
+    <li>Anything the local grammar cannot parse goes to the AI leg, which is metered for the group. The
+    <b>ask</b> chip shows what is left today. Local verbs never spend it.</li>
+  </ul>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="alerts">
+<h2><span class="num">18</span>Alerts and Telegram</h2>
+
+<div class="feat">
+  <div class="value"><span class="k">Value</span><p>You do not have to watch the screen. Tell the
+  server what matters and it tells you — in the tab, on your phone, or as a morning brief.</p></div>
+
+  <div class="k2">Set a rule (two minutes)</div>
+  <ol class="how">
+    <li>Click the <b>🔔</b> bell in the status line, open <b>Rules</b>.</li>
+    <li>Ticker (leave blank for <i>any market</i>) · metric · above / below · threshold. Thresholds are in
+    the metric's own unit: <code>5</code> means 5%, <code>50</code> means 50M.</li>
+    <li>Save. It is evaluated on the server against the same snapshot the board renders, so it fires
+    with no tab open. One crossing is one alert (there is a cooldown), and you can hold up to 60.</li>
+  </ol>
+  <div class="ex"><span class="k">Rules that earn their keep</span>
+  <b>any · funding percentile · &gt; 90</b> — a market's crowd is paying near its monthly max.<br>
+  <b>any · relative volume · &gt; 3</b> — something is being traded that is not normally traded.<br>
+  <b>NVDA · price · &lt; 180</b> — your level, without staring at it.<br>
+  <b>any · ΔOI 1d · &gt; 15</b> — money arrived somewhere today.</div>
+
+  <div class="k2">Link Telegram (once)</div>
+  <ol class="how">
+    <li>Bell → <b>Delivery</b> → <b>link</b>. The panel shows a single-use code (ten minutes).</li>
+    <li>Send <code>/start CODE</code> to the deployment's bot. It replies <i>Linked</i>.</li>
+    <li>Pick the alert classes you want on your phone and set quiet hours (a local range like
+    <code>23-7</code>). <b>test</b> sends a probe.</li>
+  </ol>
+
+  <div class="k2">Choose what reaches you</div>
+  <ul class="tips">
+    <li><b>On by default:</b> new setups on the actionable board (with your own EV / reward:risk /
+    lateness thresholds and per-name mutes), ledger outcomes (a void taken, a target reached, a horizon
+    resolved), and your rules.</li>
+    <li><b>Opt in:</b> trend changes, 200-day crosses, material SEC filings, earnings on names you have a
+    claim on, macro prints, a flipped AI stance, tape-wide crowding extremes, feed outages. Each shows
+    how often it actually fires, so you can judge the noise before you subscribe.</li>
+    <li><b>Scheduled sends:</b> the <b>morning brief</b> (daily, at your hour), the <b>Landscape</b>
+    commentary a few times a week, and a <b>desk digest</b> of your own calls and how they are scoring.
+    Set the hour and the days per send.</li>
+  </ul>
+  <ul class="tips">
+    <li><b>Recent</b> in the bell is the server's own record — it survives a refresh, a closed tab and a
+    redeploy. Clearing it only hides it in this browser.</li>
+    <li>Delivery is paced (a message every few seconds, a cap per hour): held, not dropped, and
+    disclosed in the panel.</li>
+    <li><code>/stop</code> to the bot unlinks, always — control of the Telegram account outranks any
+    session.</li>
+  </ul>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="phone">
+<h2><span class="num">19</span>On a phone</h2>
+
+<div class="feat">
+  <div class="value"><span class="k">Value</span><p>The same site, installed as an app, with a column set
+  that fits the screen and notifications that work with it closed.</p></div>
+  <div class="k2">How to use it</div>
+  <ol class="how">
+    <li><b>Install it:</b> browser menu → <i>Add to home screen</i>.</li>
+    <li><b>Accept the mobile preset</b> the first time (ticker, price, 24h, 7d, funding, ΔOI, volume).
+    Every other column is one toggle away in <b>Columns</b>, and once you arrange it yourself the app
+    never overrides you.</li>
+    <li><b>Keep a phone layout.</b> Which layout is active is per device by design, so save one called
+    <i>phone</i> and leave it.</li>
+    <li><b>Turn on notifications</b> in the Messages rail for unread messages with the tab closed, and
+    link Telegram in the bell for alerts.</li>
+  </ol>
+  <ul class="tips">
+    <li>Your watchlist and saved layouts are already there — they follow the account.</li>
+    <li>Nothing is cached on the device on purpose, so you are never looking at yesterday's page.</li>
+  </ul>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="habits">
+<h2><span class="num">20</span>Ten habits that make it pay</h2>
+<ol>
+  <li><b>Check the window before you react to a number.</b> Most "that can't be right" moments are a
+  window you forgot you set.</li>
+  <li><b>Hover before you conclude.</b> The sample size and the inputs are one hover away on every cell.</li>
+  <li><b>Sort by vs tape, not by 24h.</b> Relative strength on a red day is the read that matters.</li>
+  <li><b>Read n before score</b> on every signal card.</li>
+  <li><b>Search a name's claim history</b> before you trust a card on it.</li>
+  <li><b>Look at the funding heatmap before you hold anything overnight.</b> Carry is a cost you can see coming.</li>
+  <li><b>Check correlation before you add a name.</b> The third chip stock is not a third idea.</li>
+  <li><b>Write the note now,</b> at the price. Future you will read it with the move since.</li>
+  <li><b>Let rules watch levels</b> so you do not have to.</li>
+  <li><b>Trust the record, read the card.</b> The out-of-sample ledger is the part of this site that
+  cannot flatter you.</li>
+</ol>
+
+<h3>Where to go from here</h3>
+<ul>
+  <li><a href="/docs/ref/explainer">The explainer</a> — the ideas behind the screens, in one read.</li>
+  <li><a href="/docs">The complete manual</a> — the exact definition of every column, control and alert.
+  Press <kbd>?</kbd> on any tab for the section that matches it.</li>
+</ul>
+</section>
+
+</div>
+<footer class="docfoot">Milst Screener · how to use this site · <a href="/docs/ref/explainer">explainer</a> · <a href="/docs">the complete manual</a> · <a href="/">back to the app</a></footer>
+</body>
+</html>

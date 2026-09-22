@@ -747,6 +747,7 @@ function openHelp(){
   const title=tb?tb.textContent.trim().replace(/\s*\d+\s*$/,''):(TAB_TITLES[v]||v);
   m.innerHTML=`<div class="hlp-head">How to read: ${esc(title)}<button class="btn xtiny" id="helpclose" title="close">\u2715</button></div>`
     +`<div class="hlp-sub">What each element means and \u2014 more importantly \u2014 how to interpret it. Every number in the app also explains itself on hover; this is the map. Nothing here is investment advice. <a class="hlp-docs" href="/docs#tab-${esc(v)}" target="_blank" rel="noopener" title="the complete manual \u2014 every tab, column, command, alert and setting, in a page of its own">full documentation \u2197</a></div>`
+    +`<div class="hlp-guides"><a href="/docs/ref/howto" target="_blank" rel="noopener"><b>How to use this site \u2197</b><span>Every feature: what it is worth, how to use it properly, a daily routine.</span></a><a href="/docs/ref/explainer" target="_blank" rel="noopener"><b>Explainer \u2197</b><span>What each screen is for and what the numbers say, in plain words.</span></a></div>`
     +(HELP[v]||`<div class="hlp-h">${esc(title)}</div><p>${esc((tb&&tb.title)||'')||'No explainer written for this tab yet.'}</p>`)
     +HELP_KEYS;
   bg.hidden=false; m.hidden=false; m.scrollTop=0; overlayPush('help', closeHelp);

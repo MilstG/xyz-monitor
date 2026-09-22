@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Milst Screener · what it does, in plain words</title>
+<meta name="referrer" content="same-origin">
+<meta name="description" content="A plain-language tour of Milst Screener for the people who use it: what every screen is for, what the numbers mean, and what the terminal will and will not do.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#0E1116">
+<style>
+:root{
+  color-scheme:dark;
+  --bg:#0E1116; --panel:#151A21; --panel2:#1B222B; --border:#262E39;
+  --text:#E8E3D7; --muted:#8A93A0; --faint:#4C5662; --dim:#7A8592;
+  --accent:#E3A53C; --accent-dim:#8a6a28; --blue:#6f93c9;
+  --up:#46B97E; --down:#E5604D;
+  --mono:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;
+  --disp:'Space Grotesk',system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:66px}
+body{margin:0;background:var(--bg);color:var(--text);font-family:var(--disp);font-size:15px;line-height:1.66;-webkit-font-smoothing:antialiased}
+a{color:var(--blue);text-decoration:none}
+a:hover{text-decoration:underline}
+code,kbd,.mono{font-family:var(--mono)}
+code{font-size:.88em;background:var(--panel2);border:1px solid var(--border);border-radius:3px;padding:1px 5px;overflow-wrap:anywhere}
+kbd{font-size:.82em;background:var(--panel2);border:1px solid var(--faint);border-bottom-width:2px;border-radius:4px;padding:1px 6px;white-space:nowrap}
+b,strong{font-weight:600}
+h1,h2,h3{font-family:var(--disp);line-height:1.24;margin:0;font-weight:600}
+h1{font-size:28px;letter-spacing:-.01em;margin-bottom:8px}
+h2{font-size:22px;margin:54px 0 6px;padding-top:20px;border-top:1px solid var(--border)}
+h2 .num{font-family:var(--mono);font-size:13px;color:var(--accent);margin-right:10px;letter-spacing:.06em}
+h3{font-size:16px;margin:26px 0 6px;color:var(--accent)}
+p{margin:0 0 12px}
+ul,ol{margin:0 0 14px;padding-left:22px}
+li{margin:4px 0}
+.lede{color:var(--muted);font-size:16px;max-width:74ch}
+.sec{color:var(--muted)}
+.dim{color:var(--dim)}
+.up{color:var(--up)} .down{color:var(--down)} .amber{color:var(--accent)}
+
+/* top bar */
+.top{position:sticky;top:0;z-index:8;display:flex;align-items:center;gap:14px;
+  padding:11px 30px;background:rgba(14,17,22,.94);backdrop-filter:blur(8px);border-bottom:1px solid var(--border)}
+.wordmark{font-family:var(--mono);font-size:12.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);white-space:nowrap}
+.wordmark .bk{color:var(--text);margin-left:6px}
+.wordmark .doc{color:var(--faint);margin-left:10px}
+.top .build{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--faint);white-space:nowrap}
+.top .back{font-size:12.5px;border:1px solid var(--border);border-radius:5px;padding:4px 10px;color:var(--muted);white-space:nowrap}
+.top .back:hover{color:var(--text);border-color:var(--faint);text-decoration:none}
+
+.page{max-width:1000px;margin:0 auto;padding:26px 30px 90px}
+
+/* jump list */
+.jump{display:flex;flex-wrap:wrap;gap:6px;margin:20px 0 4px;padding:14px;background:var(--panel);border:1px solid var(--border);border-radius:8px}
+.jump a{font-family:var(--mono);font-size:11.5px;color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:3px 9px;background:var(--panel2)}
+.jump a:hover{color:var(--text);border-color:var(--accent-dim);text-decoration:none}
+
+/* chips */
+.chip{display:inline-block;font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;
+  border:1px solid var(--faint);border-radius:3px;padding:1px 6px;margin-left:7px;vertical-align:middle;color:var(--muted);white-space:nowrap}
+.chip.adm{color:var(--accent);border-color:var(--accent-dim)}
+
+/* steps */
+ol.steps{list-style:none;counter-reset:s;padding:0;margin:14px 0 18px}
+ol.steps>li{counter-increment:s;position:relative;padding:12px 14px 12px 52px;border:1px solid var(--border);border-radius:8px;background:var(--panel);margin:8px 0}
+ol.steps>li::before{content:counter(s);position:absolute;left:14px;top:11px;width:24px;height:24px;border-radius:50%;
+  display:grid;place-items:center;font-family:var(--mono);font-size:12px;color:var(--bg);background:var(--accent);font-weight:600}
+ol.steps>li b{display:block;margin-bottom:2px}
+
+/* idea + screen cards */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;margin:14px 0 18px}
+.card{border:1px solid var(--border);border-radius:8px;background:var(--panel);padding:13px 15px}
+.card h4{margin:0 0 4px;font-size:14.5px;font-weight:600;font-family:var(--disp)}
+.card p{margin:0;color:var(--muted);font-size:13.5px;line-height:1.55}
+.card p+p{margin-top:7px}
+.card .when{display:block;margin-top:7px;font-family:var(--mono);font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.06em}
+
+/* tables */
+.tw{overflow-x:auto;margin:10px -2px 18px;-webkit-overflow-scrolling:touch}
+table{border-collapse:collapse;width:100%;font-size:13.5px;min-width:520px}
+th,td{text-align:left;vertical-align:top;padding:8px 10px;border-bottom:1px solid var(--border)}
+th{color:var(--muted);font-weight:600;font-size:11px;letter-spacing:.06em;text-transform:uppercase;background:var(--panel)}
+td:first-child{white-space:nowrap;font-weight:600}
+tr:hover td{background:rgba(255,255,255,.015)}
+table.reads td:first-child{font-family:var(--mono);font-weight:500;color:var(--text)}
+table.reads td:nth-child(2){color:var(--muted)}
+
+/* callouts */
+.note{border-left:3px solid var(--accent-dim);background:var(--panel);padding:11px 15px;border-radius:0 6px 6px 0;margin:14px 0;color:var(--muted);font-size:14px}
+.note b{color:var(--text)}
+.warn{border-left-color:var(--down)}
+
+dl.faq{margin:10px 0 0}
+dl.faq dt{font-weight:600;margin-top:14px}
+dl.faq dd{margin:3px 0 0;color:var(--muted);font-size:14px}
+
+footer.docfoot{max-width:1000px;margin:0 auto;padding:18px 30px 46px;color:var(--dim);font-size:12.5px;border-top:1px solid var(--border)}
+
+@media(max-width:720px){
+  body{font-size:14.5px}
+  .top{padding:9px 14px;gap:9px}
+  .top .build{display:none}
+  .page{padding:18px 14px 70px}
+  h2{margin-top:40px}
+  footer.docfoot{padding:16px 14px 40px}
+}
+@media print{.top,.jump{display:none}.page{max-width:none;padding:0}}
+</style>
+</head>
+<body>
+
+<div class="top">
+  <span class="wordmark"><span>Milst</span><span class="bk">Screener</span><span class="doc">Explainer</span></span>
+  <span class="build" title="server build serving this page">build {{build}}</span>
+  <a class="back" href="/">← back to the terminal</a>
+</div>
+
+<div class="page">
+
+<h1>What this thing does, in plain words</h1>
+<p class="lede">A tour of the terminal for the people who use it: what each screen is for, what the
+numbers actually say, what is yours to keep, and what the app deliberately will not do. No setup,
+no configuration, no code — that is the <a href="/docs">complete manual</a>. Start here, go there
+when you want the exact definition of a column.</p>
+<p class="sec" style="font-size:13.5px">Nothing here is investment advice. Everything below is a
+description of what the software computes and shows.</p>
+
+<nav class="jump" aria-label="Jump to a section">
+  <a href="#what">What it is</a>
+  <a href="#first">First ten minutes</a>
+  <a href="#ideas">Six ideas</a>
+  <a href="#screens">The screens</a>
+  <a href="#numbers">Reading the numbers</a>
+  <a href="#yours">What is yours</a>
+  <a href="#ask">Asking instead of hunting</a>
+  <a href="#alerts">Being told</a>
+  <a href="#keys">Keyboard &amp; phone</a>
+  <a href="#limits">What it won't do</a>
+  <a href="#wrong">When it looks wrong</a>
+  <a href="#next">Where to go next</a>
+</nav>
+
+<!-- ============================================================ -->
+<section id="what">
+<h2><span class="num">01</span>What it is</h2>
+
+<p>Milst Screener watches the perpetual futures markets on Hyperliquid's <code>xyz</code> dex —
+synthetic perps that track US and foreign stocks, indices, FX, commodities and baskets — plus a
+second, separate universe of the main-dex crypto perps. It is a <b>read-only monitor</b>: it shows
+you what the tape is doing, keeps a record of the conditions it flagged, and tells you when
+something you asked about happens. It cannot place an order, and it never holds a key that could.</p>
+
+<p>The design has one central idea, and knowing it explains most of what you will see:
+<b>the heavy work happens once, on the server</b>. A small process polls Hyperliquid, archives
+candles, samples open interest, computes every feature and caches the result. Your browser reads a
+single finished snapshot. Nobody's browser talks to the exchange, so the page opens in seconds
+instead of minutes, and everyone is looking at the same numbers at the same time.</p>
+
+<div class="cards">
+  <div class="card"><h4>The snapshot</h4><p>The market table is rebuilt about every 15 seconds and
+  served whole. The <code>updated</code> field in the status line is the <i>server's</i> last
+  successful poll — not your last refresh.</p></div>
+  <div class="card"><h4>The live stream</h4><p>While the status line reads <code>push live</code>,
+  the server tells your browser the moment something changed and the browser fetches it. The
+  refresh selector is the fallback for when that stream drops.</p></div>
+  <div class="card"><h4>The archive</h4><p>Open interest, funding history, candles, the signal
+  ledger, your notes and messages live on a disk that survives restarts. A redeploy serves a warm
+  table within a poll or two.</p></div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="first">
+<h2><span class="num">02</span>Your first ten minutes</h2>
+
+<ol class="steps">
+  <li><b>Sign in.</b> You get in through a single-use invite link from the operator, pick a handle
+  and a password, and that account is yours across devices. Forgot it? The reset code goes to your
+  linked Telegram.</li>
+
+  <li><b>Land on Markets and pick a scope.</b> The <b>Stocks | Crypto</b> pills at the top switch
+  between the two universes. They never mix. Whichever you pick is remembered for next time.</li>
+
+  <li><b>Set the analysis window.</b> The <code>1h · 4h · 1d · 7d · 30d</code> selector re-anchors
+  every window-relative column at once — vs S&amp;P, vs tape, ΔOI, Squeeze, Carry, Avg Range, RVOL
+  all answer "over <i>this</i> window". Most confusion about a number is a window you forgot you set.</li>
+
+  <li><b>Hover anything that puzzles you.</b> Every number in the app explains itself on hover:
+  exact inputs, the window it was measured over, the sample size behind it. Press <kbd>?</kbd> for
+  the "how to read this tab" card, which links into the manual.</li>
+
+  <li><b>Open a name.</b> Click a row (or press <kbd>Enter</kbd> on a highlighted one) and the
+  ticker drawer slides in: candles, positioning, event risk, co-movers, news, the signal record,
+  your notes. That name becomes the <b>focused ticker</b> — every other tab now opens on it.</li>
+
+  <li><b>Star a few names.</b> <b>★</b> pins a market to your watchlist, floats it to the top of
+  the table, and follows your account onto your phone.</li>
+
+  <li><b>Arrange the table once, then save it.</b> The ⚙ column menu shows, hides and reorders
+  columns; <b>Layouts</b> saves that arrangement (columns, sort, window, filters, ★-only) under a
+  name you choose. Phones start from a mobile preset and can keep their own layout.</li>
+
+  <li><b>Ask a question instead of hunting.</b> Press <kbd>~</kbd> (or the <b>▸_ Ask</b> button) and
+  type <code>top funding 5</code>, <code>nvda</code>, <code>most crowded shorts</code>,
+  <code>whats above the 200dma</code>.</li>
+
+  <li><b>Set one alert.</b> The <b>🔔</b> bell in the status line holds your rules: ticker, metric,
+  above/below, threshold. It is evaluated on the server against the same snapshot the board renders,
+  so it fires with no tab open. Link Telegram there and it reaches your phone.</li>
+
+  <li><b>Write one note.</b> In the drawer, above the charts. It is stamped with the price it was
+  written at, so every later read says "wrote it at 113.90 · +4.0% since". That one field is the
+  whole point.</li>
+</ol>
+</section>
+
+<!-- ============================================================ -->
+<section id="ideas">
+<h2><span class="num">03</span>Six ideas that explain every screen</h2>
+
+<div class="cards">
+  <div class="card">
+    <h4>1 · Two universes, one wall</h4>
+    <p>Stocks and crypto are separate worlds with separate benchmarks (the S&amp;P 500 perp; BTC),
+    separate histories and separate visibility. Session concepts — gaps, overnight holds, cash
+    sessions — do not exist on a 24/7 tape and simply vanish in crypto scope.</p>
+    <span class="when">why a column disappeared</span>
+  </div>
+
+  <div class="card">
+    <h4>2 · The window re-anchors everything</h4>
+    <p>One control, many columns. A "squeeze of 70" is a 70 <i>over the window you chose</i>. The
+    action strip, the sector cells and the CSV export all describe exactly the rows and window on
+    screen.</p>
+    <span class="when">why two people see different numbers</span>
+  </div>
+
+  <div class="card">
+    <h4>3 · One number, one code path</h4>
+    <p>A level, a score or a record is computed once on the server and restated everywhere. The
+    board, the drawer, the alert and the Telegram message cannot disagree, because none of them
+    recomputes. Your browser only re-times the live mark.</p>
+    <span class="when">why the alert matches the card</span>
+  </div>
+
+  <div class="card">
+    <h4>4 · A dash is a dash</h4>
+    <p>Missing history, an unqualified baseline, a retired data series — all render as an explicit
+    blank. Never a guess, never an interpolation, never a zero standing in for "we don't know".</p>
+    <span class="when">why crypto shows dashes past MA20</span>
+  </div>
+
+  <div class="card">
+    <h4>5 · A signal is a condition, not a prediction</h4>
+    <p>Every flagged condition is ranked by how unusual it is now plus what happened the last times
+    it occurred — with the sample size, the median outcome and the hit rate stated on the card. Each
+    one is ledgered at the mark it fired at and scored out of sample afterwards. The card is the part
+    to read; the record is the part to trust.</p>
+    <span class="when">how to weigh anything the engine says</span>
+  </div>
+
+  <div class="card">
+    <h4>6 · Prose carries its price</h4>
+    <p>A note or a message that names a ticker is stamped with the mark at the moment it was
+    written. Editing rewrites the words and nothing else — the timestamp and the stamp stand, and the
+    edit is disclosed. A call cannot quietly become a better call.</p>
+    <span class="when">why notes beat a text file</span>
+  </div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="screens">
+<h2><span class="num">04</span>The screens, and when to open each</h2>
+<p>Every tab is one question asked of the same rows. Tabs marked <span class="chip adm">operator-only by default</span>
+ship closed to the group; if you cannot see one, it is not hidden from you by accident — the
+operator has not opened it, and its data routes refuse too.</p>
+
+<h3>The tape</h3>
+<div class="cards">
+  <div class="card"><h4>Markets</h4><p>The home board: one row per market, ~40 columns, sortable,
+  filterable, exportable. Everything else in the app is a different cut of these rows.</p>
+  <span class="when">start here, always</span></div>
+
+  <div class="card"><h4>Ticker drawer</h4><p>One name, every surface at once: candles, where the 30d
+  return happened, positioning, event risk, co-movers and hedges, fundamentals, news, your notes,
+  the signal record.</p><span class="when">"tell me about this name"</span></div>
+
+  <div class="card"><h4>Trend</h4><p>An EMA 13/21 ladder on four timeframes per name, scored 0–4 by
+  how many agree, ranked into long and short boards. <b>RETEST</b> marks the pullback into the
+  ribbon.</p><span class="when">"what is actually trending, and where is the entry"</span></div>
+
+  <div class="card"><h4>Charts</h4><p>Up to eight names side by side, or one name across timeframes
+  in a multi-timeframe wall, with linked crosshair and zoom.</p>
+  <span class="when">comparing shapes, not numbers</span></div>
+
+  <div class="card"><h4>Treemap</h4><p>The universe as tiles: area is volume or open interest,
+  colour is the move over your window.</p><span class="when">the ten-second read of the day</span></div>
+
+  <div class="card"><h4>Sectors</h4><p>Where capital is flowing: a rotation flow map, leaders,
+  cohesion (does the label trade as one block?) and a sector × sector correlation matrix.</p>
+  <span class="when">"which theme is being bought"</span></div>
+
+  <div class="card"><h4>Correlation</h4><p>What moves with what: a cluster-ordered matrix, pair
+  detail with hedge β and a spread z-score, co-movers and natural hedges, rebased overlays and
+  synthetic ratio candles.</p><span class="when">before you double a bet you already have</span></div>
+
+  <div class="card"><h4>Funding</h4><p>Carry across the whole book over calendar time. Red = longs
+  pay, green = longs receive; a bucket with too little data is hatched, never drawn as flat. Each row
+  ends with its window mean beside its current funding.</p>
+  <span class="when">"is the crowd paying more or less than it was"</span></div>
+
+  <div class="card"><h4>Sessions</h4><p>When the returns actually happen: overnight vs cash vs
+  weekend holds as equity curves, net of the funding drag, plus hour-of-day and day-of-week
+  clocks.</p><span class="when">"when should I be holding this"</span></div>
+</div>
+
+<h3>Signals and setups</h3>
+<div class="cards">
+  <div class="card"><h4>Signals</h4><p>Unusual conditions, ranked and audited. Every card states the
+  evidence in one fixed grammar — sample size, median outcome, hit rate, expectancy, horizon — plus
+  the mechanical side, void and target. Search any ticker for its whole claim-by-claim history.</p>
+  <span class="when">"what is unusual right now, and has it ever mattered"</span></div>
+
+  <div class="card"><h4>Actionable<span class="chip adm">operator</span></h4><p>Only the names
+  sitting <i>at</i> a trigger right now, with the entry, invalidation and target you would actually
+  use — and reward:risk stated net of expected funding.</p>
+  <span class="when">the morning list</span></div>
+
+  <div class="card"><h4>Focus<span class="chip adm">operator</span></h4><p>Six equities, stamped once
+  at the cash open and then frozen for the day. A compressed morning scan that deliberately never
+  reshuffles because a number ticked.</p><span class="when">first fifteen minutes of the US day</span></div>
+
+  <div class="card"><h4>Backtest<span class="chip adm">operator</span></h4><p>Cross-sectional
+  long/short tests on the daily returns already in your browser, with an out-of-sample split, costs
+  and funding — plus the running duel between the two momentum scores.</p>
+  <span class="when">"does this ranking rule hold up"</span></div>
+</div>
+
+<h3>Context and calendar</h3>
+<div class="cards">
+  <div class="card"><h4>Calendar</h4><p>Earnings for the next two weeks with the session (before the
+  open, after the close), prints from the last two days with beat/miss and the reaction move, each
+  name's own earnings reaction study, and the macro prints — FOMC, CPI, payrolls, PPI, retail sales,
+  GDP, PCE.</p><span class="when">before you size anything into a print</span></div>
+
+  <div class="card"><h4>News</h4><p>72 hours of headlines tied to names in the universe, merged with
+  the macro tape and SEC filings, badged where a name has earnings or an open signal.</p>
+  <span class="when">"why is this moving"</span></div>
+
+  <div class="card"><h4>Housing · Liquidity<span class="chip adm">operator</span></h4><p>The macro
+  backdrop: mortgage rates, starts, supply and non-QM spreads; and Fed net liquidity with the TGA
+  and reverse-repo drains.</p><span class="when">the weather behind the tape</span></div>
+
+  <div class="card"><h4>Congress · Insiders<span class="chip adm">operator</span></h4><p>STOCK Act
+  disclosures (amounts are the disclosed band, never a point figure) and SEC Form 4 transactions
+  (exact shares, exact price, exact date), both sorted by when the market learned.</p>
+  <span class="when">who was buying their own name</span></div>
+</div>
+
+<h3>Your own work</h3>
+<div class="cards">
+  <div class="card"><h4>AI Report</h4><p>Everything the server holds on one name compiled into a
+  written read: the picture, what the data says, scenarios with computed reward:risk, a mandatory
+  action block, what would change the read. Every number it cites is a number another tab shows, and
+  every directional read is ledgered and graded like any other claim.</p>
+  <span class="when">when you want it in sentences</span></div>
+
+  <div class="card"><h4>Notes<span class="chip adm">operator</span></h4><p>Every note you have
+  written, newest first, searchable and filterable by the <code>#tags</code> in the bodies. Each one
+  carries the mark it was written at and the move since. A name rotated out of the universe keeps its
+  note.</p><span class="when">"what did I think last time"</span></div>
+
+  <div class="card"><h4>Messages</h4><p>Conversations between account holders where a
+  <code>$TICKER</code> is stamped with the price at the moment you sent it — so a call reads "sent at
+  113.90 · +4.0%" forever. <b>calls ↗</b> collects every stamped message with its scored move, per
+  person. Slash commands post live tables into the thread; you can mirror a conversation to
+  Telegram both ways.</p><span class="when">the group's shared record</span></div>
+
+  <div class="card"><h4>Funds<span class="chip adm">operator</span></h4><p>Tracked 13F filers with
+  their books and quarter-over-quarter deltas. Positioning history filed up to 45 days late — never
+  the current book, and labelled as such.</p><span class="when">slow money, read slowly</span></div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="numbers">
+<h2><span class="num">05</span>Reading the numbers you will meet most</h2>
+<p>Exact formulas live in the <a href="/docs#markets">manual</a> and on every hover. These are the
+plain-English readings.</p>
+
+<div class="tw">
+<table class="reads">
+<thead><tr><th>What you see</th><th>What it is telling you</th></tr></thead>
+<tbody>
+<tr><td>Funding (APR)</td><td><b class="down">Positive/red = longs pay</b> to hold the position — the
+crowd is long and carry is a cost. <b class="up">Negative/green = longs get paid</b>. A ▴/▾ flag means
+today's rate sits at the top or bottom decile of this market's own last month.</td></tr>
+<tr><td>Prem</td><td>How far the perp has dislocated from its oracle price, in basis points. When the
+underlying cash market is closed, a persistent premium <i>is</i> the off-hours price discovery.</td></tr>
+<tr><td>ΔOI + its tag</td><td>Whether money is arriving or leaving, read against price:
+<code>longs+</code> new money confirming · <code>squeeze</code> shorts covering, not fresh demand ·
+<code>shorts+</code> new money pressing lower · <code>unwind</code> longs deleveraging. Open interest
+is symmetric, so which side owns it is always an inference — and the hover says so.</td></tr>
+<tr><td>RVOL</td><td>Volume against the same clock hours over the past month. 1.0× is normal
+<i>for this time of day</i>; 2×+ is genuinely elevated. The session shape cannot masquerade as a
+signal.</td></tr>
+<tr><td>Momentum · MOM+</td><td>A self-normalizing −100…+100 score, comparable across a sleepy FX
+pair and a violent synthetic. MOM+ is the challenger being scored head-to-head against it every day,
+in public, on the Backtest tab.</td></tr>
+<tr><td>Squeeze</td><td>How loaded the short-squeeze spring is: shorts paying, open interest
+building, price pressing the 30-day high. Zero whenever funding is positive — no crowded shorts, no
+squeeze.</td></tr>
+<tr><td>Carry</td><td>Funding per unit of volatility: how much you are paid for taking the unpopular
+side, adjusted for how wild the ride is.</td></tr>
+<tr><td>vs S&amp;P · vs tape</td><td>Excess return over the benchmark, and over the universe median.
+On a day when everything is red, "vs tape" is the honest relative-strength read.</td></tr>
+<tr><td>OI / Vol</td><td>Positioning divided by turnover. ≥2 means crowded positioning that cannot
+exit quickly; under 0.5 is fresh churn.</td></tr>
+<tr><td>DownCap · Hit%</td><td>How much of the tape's drop this name eats on red bars, and how
+consistently. A flattering DownCap with a low Hit% means a couple of lucky bars carried it.</td></tr>
+<tr><td>vs VWAP</td><td>Where price sits against the month's volume-weighted average — roughly,
+whether recent buyers are in profit or trapped.</td></tr>
+<tr><td>Beta</td><td>How much of the benchmark's move this name typically takes: above 1 amplifies,
+below 1 dampens, negative moves inverse.</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>Badges in the ticker cell</h3>
+<div class="tw">
+<table class="reads">
+<thead><tr><th>Mark</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td>★ / ☆</td><td>Watchlist. Follows your account across devices.</td></tr>
+<tr><td>E</td><td>Earnings: solid = reports today, hollow = tomorrow. After the print it becomes a
+scoreboard — beat/miss and the day's move.</td></tr>
+<tr><td>◢</td><td>You have a note on this name. Bright within a week, dimmer to a month, a hollow
+outline after; a count past one. Hover for the first line and the move since.</td></tr>
+<tr><td>⬡</td><td>Your linked wallet holds a position here, in the side's colour.</td></tr>
+<tr><td>◆ Casc</td><td>Crypto: a liquidation cascade in the last 24 hours. Red = longs were
+liquidated, green = shorts.</td></tr>
+<tr><td>Amber rail</td><td>A foreign-listed name whose home exchange is open right now; the
+microline counts down to the next open or close.</td></tr>
+</tbody>
+</table>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="yours">
+<h2><span class="num">06</span>What is yours, and where it lives</h2>
+
+<div class="tw">
+<table>
+<thead><tr><th>Thing</th><th>What it does</th><th>Where it lives</th></tr></thead>
+<tbody>
+<tr><td>★ Watchlist</td><td>Pins names to the top of the table and to the ★-only filter.</td>
+<td>Your account — the same on phone and desktop.</td></tr>
+<tr><td>Saved layouts</td><td>Named table views: columns and order, sort, window, volume/OI filters,
+★-only. A • means the live view has drifted from the saved one.</td>
+<td>Your account. Which layout is <i>active</i> stays per browser on purpose, so a phone can run its own.</td></tr>
+<tr><td>Notes</td><td>Your prose on a name, price-stamped, tagged, searchable.</td>
+<td>The server, on disk — not this browser's storage.</td></tr>
+<tr><td>Alerts and rules</td><td>Up to 60 personal metric rules, evaluated server-side with no tab
+open, plus which alert classes reach you.</td><td>The server; delivery to your browser and your linked Telegram.</td></tr>
+<tr><td>Linked wallet</td><td>A Hyperliquid <b>public address</b> that overlays your open positions
+onto the board and the drawer.</td><td>Your account. Read-only: the app reads public state and can never sign.</td></tr>
+<tr><td>Messages</td><td>Conversations, price stamps, your calls record.</td>
+<td>The server. <b>On this deployment the operator can read every conversation</b>, and every such read is logged.</td></tr>
+<tr><td>Per-browser only</td><td>Tab order, the active layout, theme and density, the funding unit,
+the analysis window and refresh cadence, terminal history, chat drafts.</td>
+<td>This browser. Nothing here syncs, by design.</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="note"><b>Deep links are shareable.</b> The address bar follows you: <code>#sectors</code>
+opens a tab, <code>#t=NVDA</code> opens that name's drawer. Paste one into an open tab and it
+navigates.</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="ask">
+<h2><span class="num">07</span>Asking instead of hunting</h2>
+
+<p>Press <kbd>~</kbd> or click <b>▸_ Ask</b>. The console runs over the rows already in your browser,
+so answers are instant. <kbd>Tab</kbd> completes verbs, fields and tickers; <kbd>↑</kbd> <kbd>↓</kbd>
+walk your history; every result names the rows it ran on.</p>
+
+<div class="tw">
+<table class="reads">
+<thead><tr><th>Type this</th><th>Get</th></tr></thead>
+<tbody>
+<tr><td>nvda</td><td>The name's card — price, day move, funding, OI, squeeze, momentum, vs tape.</td></tr>
+<tr><td>nvda funding</td><td>One column on one name.</td></tr>
+<tr><td>top funding 5</td><td>Any column ranked, plus <code>gainers</code>, <code>losers</code>, <code>trending</code>.</td></tr>
+<tr><td>screen rvol&gt;2 &amp; squeeze&gt;50</td><td>A filter across the board, fields joined with <code>&amp;</code>.</td></tr>
+<tr><td>breadth · sectors</td><td>How healthy the tape is; which sectors are working.</td></tr>
+<tr><td>earnings today · news nvda</td><td>The calendar and the 72-hour headline window.</td></tr>
+<tr><td>vs nvda amd · corr nvda amd</td><td>Side-by-side compare; correlation and hedge β.</td></tr>
+<tr><td>comp AAPL MSFT NVDA · ratio NVDA/BTC 4h</td><td>Rebased overlays; synthetic pair candles.</td></tr>
+<tr><td>report nvda</td><td>Open or generate the written analyst read.</td></tr>
+<tr><td>most crowded shorts · hows the tape</td><td>Plain English — common questions are translated
+into the grammar and the translation is echoed back so you can see what it ran.</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="note">Anything the local grammar cannot parse goes to the AI leg, where the operator has
+enabled it. That leg is metered: the <code>ask</code> chip shows the group's remaining calls for the
+day, and a 🔒 means generation is locked until an operator unlocks it. Local verbs never touch the
+budget.</div>
+
+<h3>The same verbs, in a conversation</h3>
+<p>In any Messages thread, type <code>/</code> and the verb — <code>/top funding 5</code>,
+<code>/nvda</code>, <code>/screen rvol&gt;2</code>, <code>/earnings today</code> — and the result
+posts into the thread under your name, badged <i>computed</i>, so the group reads one table instead
+of six people opening the panel. Two extras only exist here:</p>
+<ul>
+  <li><code>/alert NVDA &gt; 200</code>, <code>/alert NVDA crosses down 180</code>,
+  <code>/alert any rvol &gt; 3</code> — a threshold rule bound to <i>that conversation</i>: when it
+  fires, the fire posts there. <code>/alert list</code> and <code>/alert off &lt;id&gt;</code> manage them.</li>
+  <li><code>/share &lt;ticker&gt;</code>, or the ⤴ that appears when you hover a cell — posts any
+  cell, row or screen of the markets table as a data card, optionally quoted as a call.</li>
+</ul>
+</section>
+
+<!-- ============================================================ -->
+<section id="alerts">
+<h2><span class="num">08</span>Being told, instead of watching</h2>
+
+<p>The <b>🔔</b> bell lives in the status line, so it is reachable from every tab. One event stream
+feeds every channel — the in-tab toast, the bell panel, Telegram, browser push — so a channel's
+settings can quiet <i>your</i> phone without ever editing the record of what fired.</p>
+
+<div class="cards">
+  <div class="card"><h4>Your own rules</h4><p>Ticker (or blank for any market) · metric · above or
+  below · threshold. Price, the window returns, funding and its percentile, premium, volume, open
+  interest, relative volume, ΔOI, liquidations. Evaluated on the server against the same snapshot the
+  board renders, with an arm band and a cooldown so one crossing is one alert.</p></div>
+
+  <div class="card"><h4>Classes you opt into</h4><p>Setups and ledger outcomes are on by default.
+  Trend changes, 200-day crosses, material SEC filings, earnings on names you have a claim open on,
+  macro prints, a flipped AI stance, tape-wide crowding extremes and feed outages are each a switch,
+  shown with how often they actually fire.</p></div>
+
+  <div class="card"><h4>Telegram</h4><p>Link once from the bell (a single-use code, ten minutes),
+  then pick classes and quiet hours. Unread messages escalate to your phone after five minutes —
+  unless you are online, or the thread is muted, or someone @mentioned you, which pierces the
+  mute.</p></div>
+
+  <div class="card"><h4>Scheduled reading</h4><p>A morning brief (indices, movers, sectors,
+  positioning, earnings, macro, headlines), a written market commentary a few times a week, and a
+  deterministic per-person desk digest of your own calls and how they are scoring. You set the hour
+  and the days.</p></div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="keys">
+<h2><span class="num">09</span>Keyboard and phone</h2>
+
+<div class="tw">
+<table>
+<thead><tr><th>Key</th><th>Does</th></tr></thead>
+<tbody>
+<tr><td><kbd>/</kbd></td><td>Jump to this tab's search box.</td></tr>
+<tr><td><kbd>j</kbd> <kbd>k</kbd> <kbd>Enter</kbd></td><td>Walk the table (or the message rail) and open the highlighted row.</td></tr>
+<tr><td><kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>K</kbd></td><td>Command palette — type a ticker or a tab name. <kbd>Shift</kbd>+<kbd>Enter</kbd> opens that ticker's AI report.</td></tr>
+<tr><td><kbd>~</kbd></td><td>The terminal.</td></tr>
+<tr><td><kbd>s</kbd></td><td>Share the focused row into a conversation.</td></tr>
+<tr><td><kbd>?</kbd></td><td>How to read the tab you are on.</td></tr>
+<tr><td><kbd>Esc</kbd></td><td>Close the top-most thing — drawer, menu, palette, help — one level at a time.</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>On a phone, add the site to your home screen and it runs as an app. The first visit starts from a
+mobile column preset (ticker, price, 24h, 7d, funding, ΔOI, volume); every other column is one toggle
+away, and once you arrange it yourself the app never overrides your arrangement. Notifications for
+messages work with the tab closed once you enable them in the Messages rail.</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="limits">
+<h2><span class="num">10</span>What it will not do</h2>
+
+<p>Knowing the edges saves more time than any feature.</p>
+<ul>
+  <li><b>It cannot trade.</b> A linked wallet is a public address. The app reads public state and
+  holds nothing that could sign an order.</li>
+  <li><b>It does not predict.</b> A signal is an unusual condition with a measured history attached,
+  ranked. Where there is no history the card says <i>unproven</i>; where the history lost money it
+  says <i>neg exp</i> and ranks it as noise.</li>
+  <li><b>It does not fill gaps.</b> Crypto history is kept for 31 days by design, so long moving
+  averages and year-to-date columns there honestly show dashes.</li>
+  <li><b>Some data is old on purpose.</b> 13F books are quarter-end positions filed up to 45 days
+  late; congressional disclosures land up to 45 days after the trade; ETF composition trails by a
+  month or two. Each is labelled where it is shown.</li>
+  <li><b>Some data is context, not truth.</b> Aggregated liquidations and cross-exchange open
+  interest describe the wider market, not the Hyperliquid book, and say so on the panel.</li>
+  <li><b>Open-interest attribution is an inference.</b> OI is symmetric; "longs building" is a
+  reading of price against OI, and the hover always tells you what it rests on.</li>
+  <li><b>The AI is a reader, not an oracle.</b> It is a synthesis of numbers other tabs already show,
+  it is capped per person and per group per day, and its directional reads are graded out of sample
+  like every other claim.</li>
+  <li><b>Messages are not private from the operator</b> on this deployment. Every operator read is
+  written to an audit log that is shown in the admin panel. Write accordingly.</li>
+  <li><b>It is not advice.</b> Every screen describes what the software measured.</li>
+</ul>
+</section>
+
+<!-- ============================================================ -->
+<section id="wrong">
+<h2><span class="num">11</span>When something looks wrong</h2>
+
+<dl class="faq">
+  <dt>The dot beside the wordmark is amber.</dt>
+  <dd>The <i>server's</i> data has gone stale — its poller stalled. Your connection is fine; the
+  numbers are just older than they should be. Red means your browser cannot reach the server at all.</dd>
+
+  <dt>A column is full of dashes.</dt>
+  <dd>There is not enough history to answer honestly — a new listing, a crypto name past the 31-day
+  retention, or a window longer than the data. The app will not interpolate to look complete.</dd>
+
+  <dt>A number here disagrees with a number there.</dt>
+  <dd>It usually isn't the same question: check the analysis window, the scope pill, and whether you
+  are in the group lens. Everything else is computed once on the server and restated, so genuine
+  disagreement would be a bug worth reporting.</dd>
+
+  <dt>A tab I was told about isn't in the ribbon.</dt>
+  <dd>The operator has not opened that feature to the group. Ask them — it is one switch, no deploy.</dd>
+
+  <dt>My phone shows different columns than my desktop.</dt>
+  <dd>By design. Phones start from the mobile preset, and which layout is <i>active</i> is per
+  browser. Your saved layouts and watchlist do sync.</dd>
+
+  <dt>The build stamp looks old.</dt>
+  <dd>The status line's <code>build</code> is the server's. If it does not match the latest delivery,
+  the deploy is stale — that is an operator question, not a browser one.</dd>
+
+  <dt>My note "moved" after I edited it.</dt>
+  <dd>It did not. The timestamp and the price stamp are written once; only the words changed, and the
+  edit is disclosed.</dd>
+</dl>
+</section>
+
+<!-- ============================================================ -->
+<section id="next">
+<h2><span class="num">12</span>Where to go next</h2>
+<ul>
+  <li><a href="/docs/ref/howto">How to use this site</a> — feature by feature: what each is worth, how
+  to use it properly, worked examples, and a daily routine.</li>
+  <li><a href="/docs">The complete manual</a> — every tab, every column, every control, the alert
+  classes, the API, the configuration and the security model. Search it with <kbd>/</kbd>.</li>
+  <li><a href="/docs/ref/signals">Signal, study &amp; shadow reference</a> — every event and threshold
+  the engine fires on.</li>
+  <li><a href="/docs/ref/mechanics">Mechanics</a> — the computations behind the columns and studies.</li>
+  <li><a href="/docs/ref/features">Feature map</a> — every feature with its scope and audience.</li>
+  <li><a href="/docs/ref/map">System map</a> — how the lanes, stores and surfaces connect.</li>
+  <li>In the app: <kbd>?</kbd> on any tab, and a hover on any number.</li>
+</ul>
+<p class="sec">This page describes the app as of the build stamped at the top. Where it summarises,
+the manual is the longer answer and the code is the source of truth.</p>
+</section>
+
+</div>
+<footer class="docfoot">Milst Screener · explainer · <a href="/docs/ref/howto">how to use this site</a> · <a href="/docs">the complete manual</a> · <a href="/">back to the app</a></footer>
+</body>
+</html>
