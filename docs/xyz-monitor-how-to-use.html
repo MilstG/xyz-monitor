@@ -108,6 +108,57 @@ footer.docfoot{max-width:920px;margin:0 auto;padding:18px 30px 46px;color:var(--
   footer.docfoot{padding:16px 14px 40px}
 }
 @media print{.top,.jump{display:none}.page{max-width:none;padding:0}.feat{break-inside:avoid}}
+
+/* ---- figures ---- */
+figure.fig{margin:14px 0 20px;padding:14px 16px 10px;border:1px solid var(--border);border-radius:8px;background:var(--panel2)}
+figure.fig>svg{display:block;width:100%;height:auto;max-width:100%}
+figure.fig figcaption{font-size:12.5px;color:var(--muted);margin-top:8px;line-height:1.5}
+figure.fig figcaption b{color:var(--text)}
+figure.fig .ex{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);display:block;margin-bottom:6px}
+.mock{font-family:var(--mono);font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);overflow:hidden}
+.mock .bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:8px 10px;border-bottom:1px solid var(--border)}
+.mock .seg{display:inline-flex;border:1px solid var(--border);border-radius:4px;overflow:hidden}
+.mock .seg span{padding:2px 7px;color:var(--muted);border-right:1px solid var(--border)}
+.mock .seg span:last-child{border-right:0}
+.mock .seg span.on{background:var(--accent);color:var(--bg);font-weight:600}
+.mock .btn{padding:2px 8px;border:1px solid var(--border);border-radius:4px;color:var(--muted)}
+.mock .lbl{color:var(--faint);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em}
+.mock .call{position:relative;display:inline-block}
+.mock .call::after{content:attr(data-n);position:absolute;top:-9px;right:-9px;width:16px;height:16px;border-radius:50%;background:var(--accent);color:var(--bg);font-size:10px;font-weight:700;display:grid;place-items:center}
+.mock table{min-width:0;width:100%;font-size:12px}
+.mock th,.mock td{padding:5px 8px;border-bottom:1px solid var(--border);white-space:nowrap;font-family:var(--mono);font-weight:400}
+.mock th{font-size:10px;color:var(--faint);background:var(--panel);letter-spacing:.06em}
+.mock td:first-child{font-weight:600}
+.mock .hl td{background:rgba(227,165,60,.07)}
+.mock td.up{color:var(--up)} .mock td.down{color:var(--down)}
+.mock td.win{box-shadow:inset 0 -2px 0 var(--accent)}
+.mock .row{display:flex;gap:10px;align-items:baseline;padding:7px 10px;border-bottom:1px solid var(--border)}
+.mock .row:last-child{border-bottom:0}
+.mock .k{color:var(--faint);min-width:64px;font-size:10.5px;text-transform:uppercase;letter-spacing:.06em}
+.mock .card{padding:10px 12px}
+.mock .l{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;padding:3px 0}
+.mock .l .n{width:18px;height:18px;border-radius:50%;background:var(--accent);color:var(--bg);font-size:10px;font-weight:700;display:grid;place-items:center;flex:none}
+.mock .pill{border:1px solid var(--faint);border-radius:3px;padding:0 5px;font-size:10px;color:var(--muted)}
+.mock .pill.ev{border-color:var(--accent);color:var(--accent)}
+.mock .stamp{color:var(--accent)}
+.mock .msg{padding:8px 12px;border-bottom:1px solid var(--border)}
+.mock .msg .who{color:var(--accent);font-weight:600}
+.mock .msg .t{color:var(--faint);font-size:10.5px;margin-left:6px}
+.mock .msg .body{margin-top:2px}
+.mock .msg .tick{border-bottom:1px dotted var(--accent);color:var(--text)}
+.mock .msg .since{font-size:11px;color:var(--muted);margin-top:2px}
+.callouts{display:flex;flex-wrap:wrap;gap:6px 14px;margin:8px 0 0;padding:0;list-style:none;font-size:12.5px;color:var(--muted)}
+.callouts li{display:flex;gap:6px;align-items:baseline}
+.callouts .n{width:16px;height:16px;border-radius:50%;background:var(--accent);color:var(--bg);font-size:10px;font-weight:700;display:grid;place-items:center;flex:none;font-family:var(--mono)}
+.callouts b{color:var(--text)}
+
+/* ---- real-life examples ---- */
+.irl{margin:12px 0 14px;padding:12px 14px 12px 16px;border:1px solid var(--border);border-left:3px solid var(--up);border-radius:0 8px 8px 0;background:var(--panel2);font-size:14.5px;line-height:1.6}
+.irl .k{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--up);display:block;margin-bottom:4px}
+.irl p{margin:0 0 6px;color:var(--muted)}
+.irl p:last-child{margin-bottom:0}
+.irl b{color:var(--text)}
+.irl .so{color:var(--text)}
 </style>
 </head>
 <body>
@@ -213,6 +264,41 @@ detail.</p>
     breadth read.</li>
     <li><b>Export</b> with <b>↓ CSV</b> — you get exactly the rows, columns, sort and filters on screen.</li>
   </ol>
+<figure class="fig"><span class="ex">mock of the markets table</span><div class="mock">
+<div class="bar"><span class="call" data-n="1"><span class="seg"><span class="on">Stocks</span><span>Crypto</span></span></span>
+<span class="lbl">window</span><span class="call" data-n="2"><span class="seg"><span>1h</span><span>4h</span><span class="on">1d</span><span>7d</span><span>30d</span></span></span>
+<span class="lbl">group</span><span class="seg"><span class="on">stocks</span><span>sectors</span><span>industries</span></span>
+<span style="margin-left:auto"></span>
+<span class="call" data-n="4"><span class="btn">Filters •</span></span>
+<span class="call" data-n="5"><span class="btn">Layouts</span></span>
+<span class="call" data-n="6"><span class="btn">Columns</span></span>
+<span class="btn">↓ CSV</span></div>
+<table><thead><tr><th>ticker</th><th>price</th><th>funding</th><th class="call" data-n="3">vs tape ▾</th><th>ΔOI 1d</th><th>RVOL</th><th>squeeze</th></tr></thead>
+<tbody>
+<tr class="hl"><td>★ HOOD <span style="color:var(--accent)">E</span></td><td>113.90</td><td class="down">+58%</td><td class="up">+4.2%</td><td class="up">+9% longs+</td><td>2.4×</td><td>12</td></tr>
+<tr><td>☆ NVDA <span style="color:var(--accent)">◢</span></td><td>184.20</td><td class="down">+14%</td><td class="up">+2.1%</td><td class="up">+3% longs+</td><td>1.1×</td><td>4</td></tr>
+<tr><td>☆ TSLA</td><td>402.10</td><td class="up">−6%</td><td class="down">−1.8%</td><td class="down">−4% unwind</td><td>0.8×</td><td>0</td></tr>
+<tr><td>☆ PLTR</td><td>151.30</td><td class="up">−31%</td><td class="up">+0.6%</td><td class="up">+11% shorts+</td><td>1.6×</td><td>71</td></tr>
+</tbody></table>
+</div>
+<ul class="callouts">
+<li><span class="n">1</span><span><b>Scope</b> — stocks or crypto, never both.</span></li>
+<li><span class="n">2</span><span><b>Window</b> — every "over the window" column moves together.</span></li>
+<li><span class="n">3</span><span><b>Sort</b> — click a header; click again to flip.</span></li>
+<li><span class="n">4</span><span><b>Filters</b> — volume/OI floors, ★ only, ◢ noted, ⬡ held. The dot means one is active.</span></li>
+<li><span class="n">5</span><span><b>Layouts</b> — save the arrangement under a name.</span></li>
+<li><span class="n">6</span><span><b>Columns</b> — show, hide, drag to reorder.</span></li>
+</ul><figcaption>The toolbar and the columns you will use most. Sorted here by <b>vs tape</b> on a red day: HOOD is green against the tape with unusual volume and new longs arriving — that is the row to open, not the biggest gainer.</figcaption></figure>
+<figure class="fig"><span class="ex">example — illustrative numbers</span><div class="mock">
+<div class="bar"><span class="lbl">same row, two windows</span></div>
+<table><thead><tr><th>window</th><th>vs S&amp;P</th><th>vs tape</th><th>ΔOI</th><th>squeeze</th><th>carry</th><th>RVOL</th><th style="color:var(--faint)">24h (fixed)</th><th style="color:var(--faint)">funding (now)</th></tr></thead>
+<tbody>
+<tr><td><span class="seg"><span class="on">1d</span></span></td><td class="win up">+1.4%</td><td class="win up">+2.1%</td><td class="win up">+3%</td><td class="win">4</td><td class="win">0.12</td><td class="win">1.1×</td><td class="up">+2.6%</td><td class="down">+14%</td></tr>
+<tr><td><span class="seg"><span class="on">7d</span></span></td><td class="win down">−0.8%</td><td class="win up">+5.9%</td><td class="win up">+18%</td><td class="win">37</td><td class="win">0.31</td><td class="win" style="color:var(--faint)">—</td><td class="up">+2.6%</td><td class="down">+14%</td></tr>
+</tbody></table>
+</div>
+<figcaption>Underlined cells follow the window selector. The 24h change and the live funding rate do not — they are what they are. RVOL shows a dash on 7d/30d rather than a fake number.</p><figcaption><b>The window re-anchors everything.</b> Same name, same moment, two windows — every underlined column changed because the question changed.</figcaption></figure>
+
 
   <div class="k2">The two lenses most people miss</div>
   <ul class="tips">
@@ -224,11 +310,48 @@ detail.</p>
     stopped moving — with a high momentum score that is the take-profit read. <b>STRONGEST BID</b> is
     who got bought on the dip in the last four hours.</li>
   </ul>
+<figure class="fig"><span class="ex">example — illustrative numbers</span><svg viewBox="0 0 760 300" role="img" aria-label="The four open-interest regimes: price up or down against OI up or down" font-family="JetBrains Mono,ui-monospace,Menlo,monospace" font-size="12">
+<defs><marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8A93A0"/></marker></defs>
+<g transform="translate(120,20)">
+<rect x="0" y="0" width="250" height="120" rx="6" fill="#151A21" stroke="#46B97E"/>
+<text x="14" y="26" fill="#46B97E" font-weight="600" font-size="13">longs+</text>
+<text x="14" y="46" fill="#E8E3D7" font-size="11.5">price ↑ · OI ↑</text>
+<text x="14" y="66" fill="#8A93A0" font-size="11">new money is buying and staying —</text>
+<text x="14" y="82" fill="#8A93A0" font-size="11">the move is being confirmed</text>
+<text x="14" y="106" fill="#4C5662" font-size="10.5">hover: does funding corroborate?</text>
+<rect x="260" y="0" width="250" height="120" rx="6" fill="#151A21" stroke="#E3A53C"/>
+<text x="274" y="26" fill="#E3A53C" font-weight="600" font-size="13">squeeze</text>
+<text x="274" y="46" fill="#E8E3D7" font-size="11.5">price ↑ · OI ↓</text>
+<text x="274" y="66" fill="#8A93A0" font-size="11">shorts are covering — positions</text>
+<text x="274" y="82" fill="#8A93A0" font-size="11">closing, not fresh demand</text>
+<text x="274" y="106" fill="#4C5662" font-size="10.5">runs hard, ends with the covering</text>
+<rect x="0" y="130" width="250" height="120" rx="6" fill="#151A21" stroke="#E3A53C"/>
+<text x="14" y="156" fill="#E3A53C" font-weight="600" font-size="13">unwind</text>
+<text x="14" y="176" fill="#E8E3D7" font-size="11.5">price ↓ · OI ↓</text>
+<text x="14" y="196" fill="#8A93A0" font-size="11">longs are deleveraging — the crowd</text>
+<text x="14" y="212" fill="#8A93A0" font-size="11">is leaving, not pressing</text>
+<text x="14" y="236" fill="#4C5662" font-size="10.5">often an ending, not a beginning</text>
+<rect x="260" y="130" width="250" height="120" rx="6" fill="#151A21" stroke="#E5604D"/>
+<text x="274" y="156" fill="#E5604D" font-weight="600" font-size="13">shorts+</text>
+<text x="274" y="176" fill="#E8E3D7" font-size="11.5">price ↓ · OI ↑</text>
+<text x="274" y="196" fill="#8A93A0" font-size="11">new money is selling and staying —</text>
+<text x="274" y="212" fill="#8A93A0" font-size="11">the downside is being pressed</text>
+<text x="274" y="236" fill="#4C5662" font-size="10.5">hover: does funding corroborate?</text>
+</g>
+<text x="60" y="80" text-anchor="middle" fill="#8A93A0" font-size="11">price</text>
+<text x="60" y="96" text-anchor="middle" fill="#46B97E" font-size="11">↑ up</text>
+<text x="60" y="210" text-anchor="middle" fill="#8A93A0" font-size="11">price</text>
+<text x="60" y="226" text-anchor="middle" fill="#E5604D" font-size="11">↓ down</text>
+<text x="245" y="290" text-anchor="middle" fill="#8A93A0" font-size="11">OI ↑ building</text>
+<text x="505" y="290" text-anchor="middle" fill="#8A93A0" font-size="11">OI ↓ shrinking</text>
+</svg><figcaption><b>The ΔOI tag.</b> Price and open interest together tell you who is doing what. The two green-bordered boxes are new money; the amber ones are old money leaving. Same price move, opposite meaning.</figcaption></figure>
+
 
   <div class="ex"><span class="k">Worked example</span>Window <code>7d</code>, sort <b>vs tape</b>
   descending, volume floor <code>5</code>. The top of the table is what held up when the tape did not.
   Now hover the ΔOI cell on the top three: <code>longs+</code> means new money confirmed it,
   <code>squeeze</code> means it was shorts covering — a different trade entirely.</div>
+<div class="irl"><span class="k">In real life — a red Tuesday</span><p>It is 9:45 ET and the tape is down 1.5%. Sorting by 24h just shows you who fell least. Instead you set the window to <b>1d</b> and sort <b>vs tape</b> descending.</p><p>Three names are green against a red tape. The top one, HOOD, also shows <b>RVOL 2.4×</b> and <b>ΔOI +9% longs+</b>: it is being bought, with size, while everything else is sold.</p><p><span class='so'>So:</span> that is the one name you open. The action strip's HEATING list agrees. You have found the day's relative-strength candidate in about forty seconds, without a single hover.</p></div>
 </div>
 </section>
 
@@ -254,6 +377,20 @@ detail.</p>
     <li><b>Write while you are there.</b> The Notes panel sits above the charts. That is on purpose:
     everything else in the drawer is the server's read; the note is yours.</li>
   </ol>
+<figure class="fig"><span class="ex">map of the drawer</span><div class="mock">
+<div class="row"><span class="k">header</span><span>name · price · day move · sector · session · <span style="color:var(--accent)">E</span> badge · <span style="color:var(--blue)">AI report →</span></span></div>
+<div class="row"><span class="k">notes</span><span>yours, above everything the server says · <span class="stamp">wrote it at 113.90 · +4.0% since</span></span></div>
+<div class="row"><span class="k">position</span><span>if your wallet holds it: side · size · entry · liq · funding paid · P&amp;L off the live mark</span></div>
+<div class="row"><span class="k">30d split</span><span>where the return happened: <span class="up">+6.2% off-hours</span> · <span style="color:var(--muted)">−0.4% cash session</span></span></div>
+<div class="row"><span class="k">event risk</span><span>next print in 3d (AMC) · reaction study: n 12 · median |move| 7.1% · 2.3× usual range</span></div>
+<div class="row"><span class="k">metrics</span><span>every column for this name, including the hidden ones</span></div>
+<div class="row"><span class="k">co-movers</span><span>90d price · top co-movers · top hedges</span></div>
+<div class="row"><span class="k">candles</span><span>hourly OHLCV · 1–60 days · frozen claim levels drawn on the chart</span></div>
+<div class="row"><span class="k">OI · funding</span><span>history sparklines · this hour's funding stated</span></div>
+<div class="row"><span class="k">news</span><span>the last 72h on this name</span></div>
+<div class="row"><span class="k">record</span><span>every claim the engine ever made here, and how it resolved · hit 61% (n 18)</span></div>
+</div><figcaption>The drawer, top to bottom. The order is deliberate: what could hurt you (event risk) and what you thought last time (notes) come before the charts.</figcaption></figure>
+
 
   <ul class="tips">
     <li><b>The 30d split is the underrated panel.</b> A name that made all its return overnight is a
@@ -266,6 +403,7 @@ detail.</p>
     <li><b>The URL follows you.</b> <code>#t=NVDA</code> in the address bar is a shareable link
     straight to this drawer.</li>
   </ul>
+<div class="irl"><span class="k">In real life — sizing before you click buy</span><p>You open HOOD from the table. <b>Event risk</b> says it reports Thursday after the close; the reaction study shows a median move of <b>7.1%</b> the next session, <b>2.3× its usual range</b>. The <b>30d split</b> says most of this month's return came off-hours.</p><p><span class='so'>So:</span> any position is sized for a 7% gap, not a 3% day. You decide either to close before Thursday, or to hold half size through the print on purpose. Either way the decision was made <i>before</i> the trade, with numbers, in one scroll.</p></div>
 </div>
 </section>
 
@@ -299,6 +437,7 @@ detail.</p>
     saved view gains it (hidden if it is hidden by default) rather than silently losing it.</li>
     <li>The ticker search box is <i>not</i> part of a layout — it is meant to be typed and cleared.</li>
   </ul>
+<div class="irl"><span class="k">In real life — twelve names, two questions</span><p>You actively follow twelve names. You star them. Then you save two layouts: <b>positioning</b> (Funding, ΔOI, Squeeze, OI/Vol, Carry) and <b>strength</b> (vs tape, RVOL, DownCap, Momentum).</p><p>Monday on the phone: <b>★ only</b> plus the <i>positioning</i> layout is your whole book's crowding on one screen. At the desk, the <i>strength</i> layout is where the ideas come from.</p><p><span class='so'>So:</span> no more rebuilding the table every morning, and the phone stays on its own compact layout while the desktop keeps the wide one.</p></div>
 </div>
 </section>
 
@@ -325,6 +464,42 @@ detail.</p>
     <li><b>Click the chart button</b> on a row to see the rung with the ribbon and the retest zone drawn
     at the ladder's own levels.</li>
   </ol>
+<figure class="fig"><span class="ex">example — illustrative numbers</span><svg viewBox="0 0 760 250" role="img" aria-label="A trend row: four rungs scored 3 of 4 with a RETEST badge, and a candle chart showing price pulling back into the EMA ribbon and holding" font-family="JetBrains Mono,ui-monospace,Menlo,monospace" font-size="12">
+<rect x="8" y="10" width="330" height="80" rx="6" fill="#151A21" stroke="#262E39"/>
+<text x="22" y="34" fill="#E8E3D7" font-weight="600" font-size="13">NVDA</text>
+<text x="70" y="34" fill="#8A93A0" font-size="11">score</text><text x="108" y="34" fill="#E3A53C" font-weight="600" font-size="13">3/4</text>
+<rect x="140" y="20" width="58" height="18" rx="3" fill="none" stroke="#E3A53C"/><text x="169" y="33" text-anchor="middle" fill="#E3A53C" font-size="10" font-weight="600">RETEST</text>
+<text x="206" y="33" fill="#8A93A0" font-size="10.5">1.1× vol</text>
+<rect x="22" y="48" width="46" height="18" rx="3" fill="#46B97E" opacity=".85"/><text x="45" y="61" text-anchor="middle" fill="#0E1116" font-size="10.5" font-weight="600">D1</text><text x="45" y="82" text-anchor="middle" fill="#4C5662" font-size="9.5">stacked</text><rect x="76" y="48" width="46" height="18" rx="3" fill="#46B97E" opacity=".85"/><text x="99" y="61" text-anchor="middle" fill="#0E1116" font-size="10.5" font-weight="600">H12</text><text x="99" y="82" text-anchor="middle" fill="#4C5662" font-size="9.5">stacked</text><rect x="130" y="48" width="46" height="18" rx="3" fill="#46B97E" opacity=".85"/><text x="153" y="61" text-anchor="middle" fill="#0E1116" font-size="10.5" font-weight="600">H4</text><text x="153" y="82" text-anchor="middle" fill="#4C5662" font-size="9.5">stacked</text><rect x="184" y="48" width="46" height="18" rx="3" fill="#E3A53C" opacity=".85"/><text x="207" y="61" text-anchor="middle" fill="#0E1116" font-size="10.5" font-weight="600">H1</text><text x="207" y="82" text-anchor="middle" fill="#4C5662" font-size="9.5">dipping</text>
+<text x="250" y="61" fill="#8A93A0" font-size="10.5">width 0.9%</text>
+<text x="250" y="76" fill="#8A93A0" font-size="10.5">age 4d · Δ21 −0.3%</text>
+<text x="8" y="112" fill="#8A93A0" font-size="11">Three rungs agree; the hourly dips into the ribbon while the close holds EMA21 → the continuation pullback.</text>
+<g transform="translate(8,126)">
+<rect x="0" y="0" width="744" height="116" rx="6" fill="#151A21" stroke="#262E39"/>
+<text x="12" y="18" fill="#4C5662" font-size="10.5">H1 · EMA 13 (bright) / EMA 21 (dim) — the ribbon is the zone between them</text>
+<path d="M20,96 C120,92 200,74 300,60 S480,40 560,36 S680,30 730,28" fill="none" stroke="#E3A53C" stroke-width="2"/>
+<path d="M20,102 C120,100 200,84 300,70 S480,50 560,46 S680,40 730,38" fill="none" stroke="#E3A53C" stroke-width="2" opacity=".45"/>
+<g stroke-width="1.5">
+<line x1="60" y1="100" x2="60" y2="84" stroke="#46B97E"/><rect x="56" y="88" width="8" height="8" fill="#46B97E"/>
+<line x1="110" y1="94" x2="110" y2="78" stroke="#46B97E"/><rect x="106" y="80" width="8" height="10" fill="#46B97E"/>
+<line x1="160" y1="86" x2="160" y2="66" stroke="#46B97E"/><rect x="156" y="68" width="8" height="12" fill="#46B97E"/>
+<line x1="210" y1="80" x2="210" y2="56" stroke="#46B97E"/><rect x="206" y="58" width="8" height="14" fill="#46B97E"/>
+<line x1="260" y1="66" x2="260" y2="44" stroke="#46B97E"/><rect x="256" y="46" width="8" height="12" fill="#46B97E"/>
+<line x1="310" y1="58" x2="310" y2="36" stroke="#46B97E"/><rect x="306" y="38" width="8" height="14" fill="#46B97E"/>
+<line x1="360" y1="52" x2="360" y2="30" stroke="#46B97E"/><rect x="356" y="32" width="8" height="10" fill="#46B97E"/>
+<line x1="410" y1="56" x2="410" y2="30" stroke="#E5604D"/><rect x="406" y="36" width="8" height="14" fill="#E5604D"/>
+<line x1="460" y1="60" x2="460" y2="40" stroke="#E5604D"/><rect x="456" y="44" width="8" height="12" fill="#E5604D"/>
+<line x1="510" y1="58" x2="510" y2="40" stroke="#E5604D"/><rect x="506" y="44" width="8" height="8" fill="#E5604D"/>
+<line x1="560" y1="54" x2="560" y2="34" stroke="#46B97E"/><rect x="556" y="36" width="8" height="12" fill="#46B97E"/>
+<line x1="610" y1="44" x2="610" y2="24" stroke="#46B97E"/><rect x="606" y="26" width="8" height="12" fill="#46B97E"/>
+</g>
+<rect x="440" y="28" width="90" height="30" rx="4" fill="none" stroke="#E3A53C" stroke-dasharray="3 3"/>
+<text x="485" y="76" text-anchor="middle" fill="#E3A53C" font-size="10.5" font-weight="600">retest zone</text>
+<text x="485" y="90" text-anchor="middle" fill="#8A93A0" font-size="10">probed the ribbon, closed above it</text>
+<text x="732" y="18" text-anchor="end" fill="#8A93A0" font-size="10.5">≥2× vol = fought · ~1× = respected</text>
+</g>
+</svg><figcaption><b>A 3/4 with a RETEST.</b> The three higher rungs are stacked; the hourly has dipped into the EMA 13/21 ribbon and closed above it. The volume multiple beside the badge says whether the level is being fought or quietly respected.</figcaption></figure>
+
 
   <ul class="tips">
     <li><b>Δ21</b> is the live distance from the hourly EMA21 — your proximity-to-entry number.</li>
@@ -332,6 +507,7 @@ detail.</p>
     signal cannot disagree.</li>
     <li>A name missing a rung (too little history) is excluded, not guessed — the header counts them.</li>
   </ul>
+<div class="irl"><span class="k">In real life — the pullback, not the chase</span><p>NVDA sits on the long board at <b>3/4</b>, <b>RETEST · 1.1× vol</b>, <b>age 4d</b>, <b>Δ21 −0.3%</b>. The daily, 12h and 4h are stacked; the hourly just dipped into the ribbon and held.</p><p>Four days old means it is an entry, not a chase. 1.1× volume means nobody is fighting the level. Δ21 says price is a third of a percent from the hourly EMA21 — the level you would risk against.</p><p><span class='so'>So:</span> you buy near the hourly EMA21 with the void just under the ribbon. A defined-risk pullback in an established trend, found in one glance, rather than a day-40 trend you would be chasing.</p></div>
 </div>
 </section>
 
@@ -371,6 +547,7 @@ detail.</p>
   <ul class="tips">
     <li>Size by <b>OI</b> and window <b>7d</b> is the fastest way to see where a week of red actually hurt.</li>
   </ul>
+<div class="irl"><span class="k">In real life — is it the stock or the sector?</span><p>MU drops 3% in an hour. Before deciding it is a Micron story you open Charts, <b>GRID</b>, four panes: MU, NVDA, AMD, AVGO, 1h, <b>LINK</b> on.</p><p>Hovering the red bar on MU lines up the same hour on all four: they all dropped together. That is a semis move, not a Micron move — and the treemap sized by OI, window 1d, shows the whole tile block red.</p><p><span class='so'>So:</span> you do not go looking for Micron news that is not there; you look at what hit the sector.</p></div>
 </div>
 </section>
 
@@ -396,6 +573,30 @@ detail.</p>
     <li><b>Try equal-weight.</b> By volume, a mega-cap can be the whole sector's story; equal-weight
     shows whether the rest agree.</li>
   </ol>
+<figure class="fig"><span class="ex">example — illustrative numbers</span><svg viewBox="0 0 760 290" role="img" aria-label="The sector flow map: capital direction across, activity heat up, bubble size is 24h volume" font-family="JetBrains Mono,ui-monospace,Menlo,monospace" font-size="12">
+<defs><marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8A93A0"/></marker></defs>
+<g transform="translate(70,14)">
+<rect x="0" y="0" width="600" height="230" fill="#151A21" stroke="#262E39" rx="4"/>
+<line x1="300" y1="0" x2="300" y2="230" stroke="#262E39" stroke-dasharray="4 4"/>
+<line x1="0" y1="115" x2="600" y2="115" stroke="#262E39" stroke-dasharray="4 4"/>
+<text x="590" y="16" text-anchor="end" fill="#46B97E" font-size="11" font-weight="600">ACCUMULATION</text>
+<text x="590" y="30" text-anchor="end" fill="#8A93A0" font-size="10">money in, with conviction</text>
+<text x="10" y="16" fill="#E5604D" font-size="11" font-weight="600">DISTRIBUTION</text>
+<text x="10" y="30" fill="#8A93A0" font-size="10">money out, with activity</text>
+<text x="10" y="222" fill="#4C5662" font-size="10.5">quiet selling</text>
+<text x="590" y="222" text-anchor="end" fill="#4C5662" font-size="10.5">quiet buying</text>
+<circle cx="470" cy="60" r="30" fill="#46B97E" fill-opacity=".25" stroke="#46B97E"/><text x="470" y="64" text-anchor="middle" fill="#E8E3D7" font-size="11">Semis</text>
+<circle cx="400" cy="92" r="16" fill="#46B97E" fill-opacity=".25" stroke="#46B97E"/><text x="400" y="96" text-anchor="middle" fill="#E8E3D7" font-size="10">Energy</text>
+<circle cx="120" cy="50" r="24" fill="#E5604D" fill-opacity=".25" stroke="#E5604D"/><text x="120" y="54" text-anchor="middle" fill="#E8E3D7" font-size="10.5">Software</text>
+<circle cx="220" cy="160" r="14" fill="#8A93A0" fill-opacity=".2" stroke="#8A93A0"/><text x="220" y="164" text-anchor="middle" fill="#E8E3D7" font-size="10">Staples</text>
+<circle cx="360" cy="180" r="18" fill="#8A93A0" fill-opacity=".2" stroke="#8A93A0"/><text x="360" y="184" text-anchor="middle" fill="#E8E3D7" font-size="10">Banks</text>
+<circle cx="520" cy="150" r="12" fill="#46B97E" fill-opacity=".2" stroke="#46B97E"/><text x="520" y="154" text-anchor="middle" fill="#E8E3D7" font-size="10">FX</text>
+</g>
+<text x="370" y="276" text-anchor="middle" fill="#8A93A0" font-size="11">← money out · capital direction (price + OI conviction) · money in →</text>
+<text x="34" y="130" text-anchor="middle" fill="#8A93A0" font-size="11" transform="rotate(-90 34 130)">activity heat (volume + volatility) ↑</text>
+<text x="670" y="256" text-anchor="end" fill="#4C5662" font-size="10.5">bubble = 24h volume</text>
+</svg><figcaption><b>The flow map.</b> Semis top-right: money arriving with conviction and activity. Software top-left: activity too, but money leaving. Banks and Staples are simply quiet. The bubble is the day's volume.</figcaption></figure>
+
 
   <ul class="tips">
     <li>The <b>sector × sector correlation</b> matrix catches one risk factor wearing two names —
@@ -403,6 +604,7 @@ detail.</p>
     <li><b>Grouping</b> switches from GICS sectors to curated industries (Semis vs Software vs Memory).
     Industries are display-only; the signal engine keeps pooling on the eleven sectors.</li>
   </ul>
+<div class="irl"><span class="k">In real life — buying the theme vs picking the name</span><p>The map shows <b>Semis</b> in the accumulation corner and <b>Software</b> in distribution. On the rotation board, Semis has <b>Cohesion 0.78</b>; Software has <b>0.31</b>.</p><p>High cohesion means the semis are moving as one block — any liquid semi gets you the theme. Low cohesion in software means the label is meaningless; some names are being bought and some dumped under the same word.</p><p><span class='so'>So:</span> for semis you pick by liquidity and take the theme. For software you click the bubble, look at the members' contributions, and pick the one actually in the flow. Same tab, two different ways to act.</p></div>
 </div>
 </section>
 
@@ -430,6 +632,26 @@ detail.</p>
     <li><b>Ratio</b> draws synthetic pair candles (A divided by B) with a properly honest EMA200 — drawn
     only where 200 bars exist. BTC may face a stock here, aligned on the hours both traded.</li>
   </ol>
+<figure class="fig"><span class="ex">example — illustrative numbers</span><svg viewBox="0 0 760 246" role="img" aria-label="A beta-adjusted spread between two names with its mean and one-sigma band; the latest point sits at plus 1.8 sigma" font-family="JetBrains Mono,ui-monospace,Menlo,monospace" font-size="12">
+<g transform="translate(50,14)">
+<rect x="0" y="0" width="690" height="170" fill="#151A21" stroke="#262E39" rx="4"/>
+<rect x="0" y="55" width="690" height="60" fill="#6f93c9" fill-opacity=".12"/>
+<line x1="0" y1="85" x2="690" y2="85" stroke="#6f93c9" stroke-width="1.5"/>
+<line x1="0" y1="55" x2="690" y2="55" stroke="#6f93c9" stroke-dasharray="3 3" opacity=".7"/>
+<line x1="0" y1="115" x2="690" y2="115" stroke="#6f93c9" stroke-dasharray="3 3" opacity=".7"/>
+<path d="M10,90 L60,98 L110,80 L160,72 L210,96 L260,110 L310,100 L360,84 L410,70 L460,78 L510,62 L560,50 L610,40 L660,32" fill="none" stroke="#E8E3D7" stroke-width="2"/>
+<circle cx="660" cy="32" r="5" fill="#E3A53C" stroke="#0E1116" stroke-width="2"/>
+<text x="650" y="26" text-anchor="end" fill="#E3A53C" font-size="11" font-weight="600">now: +1.8σ</text>
+<text x="8" y="80" fill="#6f93c9" font-size="10.5">mean</text>
+<text x="8" y="50" fill="#6f93c9" font-size="10.5" opacity=".8">+1σ</text>
+<text x="8" y="128" fill="#6f93c9" font-size="10.5" opacity=".8">−1σ</text>
+<text x="680" y="160" text-anchor="end" fill="#8A93A0" font-size="10.5">90 days</text>
+</g>
+<text x="50" y="206" fill="#8A93A0" font-size="11">spread = ln(A) − β·ln(B). Above the band A is rich against B; below the band, cheap.</text>
+<text x="50" y="222" fill="#8A93A0" font-size="11">Beyond ±1.5–2σ a pair trade starts to make sense — but only if the rolling correlation</text>
+<text x="50" y="238" fill="#8A93A0" font-size="11">underneath says the relationship is stable enough to trust.</text>
+</svg><figcaption><b>The pair view.</b> The spread between two names, with its mean and the ±1σ band. The latest point at +1.8σ says A is unusually rich against B right now.</figcaption></figure>
+
 
   <div class="ex"><span class="k">Worked example</span>You like a long in a chip name and already hold
   another one. Click the matrix cell for the pair: a 0.85 correlation on 90 days with the spread at
@@ -440,6 +662,7 @@ detail.</p>
     <li>Type <code>comp AAPL MSFT NVDA</code> or <code>ratio NVDA/BTC 4h</code> into the Ask console to
     jump straight to these views.</li>
   </ul>
+<div class="irl"><span class="k">In real life — the second chip stock</span><p>You are long NVDA and like AMD too. In the matrix, the NVDA–AMD cell reads <b>ρ 0.85 on 90 days</b>. Click it: the spread sits at <b>+1.8σ</b> — AMD is rich against NVDA.</p><p>Adding AMD would be the same bet twice, and at a bad relative price. The hedges panel for NVDA shows the name that has moved against it most consistently.</p><p><span class='so'>So:</span> either you skip AMD, or you turn it into a pair (short the rich one, long the cheap one) — or you keep NVDA and cut some beta with the hedge. What you do not do is buy AMD thinking it is a new idea.</p></div>
 </div>
 </section>
 
@@ -465,6 +688,18 @@ detail.</p>
     <li><b>Switch to per-bucket</b> only when you want the actual amount a 1× long paid over a bucket —
     that unit changes with the timeframe (about 8× larger per 8h than per 1h).</li>
   </ol>
+<figure class="fig"><span class="ex">example — illustrative numbers</span><svg viewBox="0 0 760 210" role="img" aria-label="A funding heatmap: rows are markets, columns are 8-hour buckets, red means longs pay, green means longs receive, a hatched cell is a data gap, and each row ends with its window mean and current funding" font-family="JetBrains Mono,ui-monospace,Menlo,monospace" font-size="12">
+<defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" stroke="#4C5662" stroke-width="1.5"/></pattern></defs>
+<text x="14" y="30" fill="#4C5662" font-size="10">8h buckets →</text>
+<text x="458" y="30" text-anchor="middle" fill="#4C5662" font-size="10">mean</text>
+<text x="518" y="30" text-anchor="middle" fill="#E3A53C" font-size="10">now</text>
+<line x1="426" y1="18" x2="426" y2="176" stroke="#262E39"/>
+<text x="14" y="61" fill="#E8E3D7" font-weight="600" font-size="11.5">HOOD</text><rect x="70" y="44" width="56" height="26" rx="2" fill="#E5604D" fill-opacity="0.61"/><text x="98" y="61" text-anchor="middle" fill="#E8E3D7" font-size="10.5">+42%</text><rect x="130" y="44" width="56" height="26" rx="2" fill="#E5604D" fill-opacity="0.68"/><text x="158" y="61" text-anchor="middle" fill="#E8E3D7" font-size="10.5">+48%</text><rect x="190" y="44" width="56" height="26" rx="2" fill="#E5604D" fill-opacity="0.76"/><text x="218" y="61" text-anchor="middle" fill="#E8E3D7" font-size="10.5">+55%</text><rect x="250" y="44" width="56" height="26" rx="2" fill="#E5604D" fill-opacity="0.82"/><text x="278" y="61" text-anchor="middle" fill="#E8E3D7" font-size="10.5">+61%</text><rect x="310" y="44" width="56" height="26" rx="2" fill="#E5604D" fill-opacity="0.80"/><text x="338" y="61" text-anchor="middle" fill="#E8E3D7" font-size="10.5">+58%</text><rect x="370" y="44" width="56" height="26" rx="2" fill="#E5604D" fill-opacity="0.82"/><text x="398" y="61" text-anchor="middle" fill="#E8E3D7" font-size="10.5">+64%</text><text x="458" y="61" text-anchor="middle" fill="#8A93A0" font-size="11">+58%</text><text x="518" y="61" text-anchor="middle" fill="#E5604D" font-size="11" font-weight="600">+71%</text><text x="14" y="93" fill="#E8E3D7" font-weight="600" font-size="11.5">TSLA</text><rect x="70" y="76" width="56" height="26" rx="2" fill="#E5604D" fill-opacity="0.33"/><text x="98" y="93" text-anchor="middle" fill="#E8E3D7" font-size="10.5">+18%</text><rect x="130" y="76" width="56" height="26" rx="2" fill="#E5604D" fill-opacity="0.38"/><text x="158" y="93" text-anchor="middle" fill="#E8E3D7" font-size="10.5">+22%</text><rect x="190" y="76" width="56" height="26" rx="2" fill="#E5604D" fill-opacity="0.29"/><text x="218" y="93" text-anchor="middle" fill="#E8E3D7" font-size="10.5">+15%</text><rect x="250" y="76" width="56" height="26" rx="2" fill="#E5604D" fill-opacity="0.22"/><text x="278" y="93" text-anchor="middle" fill="#E8E3D7" font-size="10.5">+9%</text><rect x="310" y="76" width="56" height="26" rx="2" fill="#E5604D" fill-opacity="0.17"/><text x="338" y="93" text-anchor="middle" fill="#E8E3D7" font-size="10.5">+4%</text><rect x="370" y="76" width="56" height="26" rx="2" fill="#46B97E" fill-opacity="0.15"/><text x="398" y="93" text-anchor="middle" fill="#E8E3D7" font-size="10.5">-3%</text><text x="458" y="93" text-anchor="middle" fill="#8A93A0" font-size="11">+11%</text><text x="518" y="93" text-anchor="middle" fill="#46B97E" font-size="11" font-weight="600">-6%</text><text x="14" y="125" fill="#E8E3D7" font-weight="600" font-size="11.5">SPX</text><rect x="70" y="108" width="56" height="26" rx="2" fill="#E5604D" fill-opacity="0.14"/><text x="98" y="125" text-anchor="middle" fill="#E8E3D7" font-size="10.5">+2%</text><rect x="130" y="108" width="56" height="26" rx="2" fill="#E5604D" fill-opacity="0.13"/><text x="158" y="125" text-anchor="middle" fill="#E8E3D7" font-size="10.5">+1%</text><rect x="190" y="108" width="56" height="26" rx="2" fill="#E5604D" fill-opacity="0.15"/><text x="218" y="125" text-anchor="middle" fill="#E8E3D7" font-size="10.5">+3%</text><rect x="250" y="108" width="56" height="26" rx="2" fill="#E5604D" fill-opacity="0.14"/><text x="278" y="125" text-anchor="middle" fill="#E8E3D7" font-size="10.5">+2%</text><rect x="310" y="108" width="56" height="26" rx="2" fill="#E5604D" fill-opacity="0.13"/><text x="338" y="125" text-anchor="middle" fill="#E8E3D7" font-size="10.5">+1%</text><rect x="370" y="108" width="56" height="26" rx="2" fill="#E5604D" fill-opacity="0.14"/><text x="398" y="125" text-anchor="middle" fill="#E8E3D7" font-size="10.5">+2%</text><text x="458" y="125" text-anchor="middle" fill="#8A93A0" font-size="11">+2%</text><text x="518" y="125" text-anchor="middle" fill="#E5604D" font-size="11" font-weight="600">+1%</text><text x="14" y="157" fill="#E8E3D7" font-weight="600" font-size="11.5">PLTR</text><rect x="70" y="140" width="56" height="26" rx="2" fill="#46B97E" fill-opacity="0.26"/><text x="98" y="157" text-anchor="middle" fill="#E8E3D7" font-size="10.5">-12%</text><rect x="130" y="140" width="56" height="26" rx="2" fill="#46B97E" fill-opacity="0.35"/><text x="158" y="157" text-anchor="middle" fill="#E8E3D7" font-size="10.5">-20%</text><rect x="190" y="140" width="56" height="26" rx="2" fill="#46B97E" fill-opacity="0.45"/><text x="218" y="157" text-anchor="middle" fill="#E8E3D7" font-size="10.5">-28%</text><rect x="250" y="140" width="56" height="26" rx="2" fill="url(#hatch)" stroke="#262E39"/><text x="278" y="157" text-anchor="middle" fill="#4C5662" font-size="9.5">gap</text><rect x="310" y="140" width="56" height="26" rx="2" fill="#46B97E" fill-opacity="0.53"/><text x="338" y="157" text-anchor="middle" fill="#E8E3D7" font-size="10.5">-35%</text><rect x="370" y="140" width="56" height="26" rx="2" fill="#46B97E" fill-opacity="0.48"/><text x="398" y="157" text-anchor="middle" fill="#E8E3D7" font-size="10.5">-31%</text><text x="458" y="157" text-anchor="middle" fill="#8A93A0" font-size="11">-25%</text><text x="518" y="157" text-anchor="middle" fill="#46B97E" font-size="11" font-weight="600">-22%</text>
+<text x="14" y="196" fill="#E5604D" font-size="11">■ red = longs pay (crowded long)</text>
+<text x="230" y="196" fill="#46B97E" font-size="11">■ green = longs receive</text>
+<text x="400" y="196" fill="#8A93A0" font-size="11">▨ hatched = under half the hours covered</text>
+</svg><figcaption><b>A slice of the heatmap.</b> HOOD has paid longs' funding all week and is paying more now than its mean — crowding building. PLTR is the mirror: shorts are paying, and one bucket is hatched because the data covered under half its hours. The <b>now</b> column is this hour's rate off the live snapshot.</figcaption></figure>
+
 
   <ul class="tips">
     <li><b>Hatched cells are honest gaps</b> — the data covered under half the bucket's hours. They are
@@ -473,6 +708,7 @@ detail.</p>
     <li>The newest column is always the last <i>complete</i> bucket.</li>
     <li>Rows rank by open interest; show top 25, 50 or everything.</li>
   </ul>
+<div class="irl"><span class="k">In real life — what the overnight actually costs</span><p>You are long HOOD and it is Thursday. Its row on the 8h grid has been red all week; the window mean is <b>+58%</b> and the now column is <b>+71%</b>. The crowd is paying more every day to be long.</p><p>71% annualized is roughly <b>0.2% of notional per day</b>. On a name you expect to move 2–3% a week, that is a real slice of the expected return going out the door.</p><p><span class='so'>So:</span> you either accept the cost knowingly, size down, or wait for the now column to fall back under the mean before adding. The point is you saw the bill before it arrived.</p></div>
 </div>
 </section>
 
@@ -493,6 +729,25 @@ detail.</p>
     <li><b>Read the clocks</b> — hour-of-day activity in each market's own norm, the funding clock, the
     day-of-week heatmap — with sample-size humility; hover for the breadth behind every point.</li>
   </ol>
+<figure class="fig"><span class="ex">example — illustrative numbers</span><svg viewBox="0 0 760 240" role="img" aria-label="Equity curves for overnight, cash-session and weekend holds; the overnight curve rises while cash is flat, and a shaded band shows the funding drag" font-family="JetBrains Mono,ui-monospace,Menlo,monospace" font-size="12">
+<g transform="translate(50,14)">
+<rect x="0" y="0" width="690" height="180" fill="#151A21" stroke="#262E39" rx="4"/>
+<line x1="0" y1="120" x2="690" y2="120" stroke="#262E39"/>
+<text x="4" y="116" fill="#4C5662" font-size="10">100</text>
+<path d="M10,120 L690,120 L690,138 L10,120 Z" fill="#E5604D" fill-opacity=".14"/>
+<text x="600" y="150" fill="#E5604D" font-size="10.5">funding drag</text>
+<path d="M10,120 C120,110 200,96 300,80 S480,56 560,48 S650,38 690,30" fill="none" stroke="#46B97E" stroke-width="2"/>
+<text x="600" y="30" fill="#46B97E" font-size="11" font-weight="600">overnight</text>
+<path d="M10,120 C120,124 200,116 300,122 S480,118 560,124 S650,120 690,118" fill="none" stroke="#6f93c9" stroke-width="2"/>
+<text x="600" y="108" fill="#6f93c9" font-size="11" font-weight="600">cash session</text>
+<path d="M10,120 C120,118 200,112 300,108 S480,104 560,100 S650,98 690,96" fill="none" stroke="#8A93A0" stroke-width="2" stroke-dasharray="4 3"/>
+<text x="600" y="88" fill="#8A93A0" font-size="11" font-weight="600">weekend</text>
+<text x="4" y="174" fill="#4C5662" font-size="10">180 days, one equal-weight bet per boundary, compounded</text>
+</g>
+<text x="50" y="216" fill="#8A93A0" font-size="11">The classic overnight effect: the return accrues close→open while the cash session goes nowhere.</text>
+<text x="50" y="232" fill="#8A93A0" font-size="11">The edge only counts above the red band — the band is what holding overnight costs in funding.</text>
+</svg><figcaption><b>The decomposition.</b> Overnight holds compounded into a rising curve while cash-session holds went nowhere. The red band is the funding it cost to be there — the edge is what is left above it.</figcaption></figure>
+
 
   <ul class="tips">
     <li>A rising overnight curve against a flat cash curve is the classic overnight effect. The drawer's
@@ -500,6 +755,7 @@ detail.</p>
     <li>Panels that need more history than exists yet stay empty rather than showing thin data.</li>
     <li>None of this exists in crypto scope — a 24/7 tape has no sessions.</li>
   </ul>
+<div class="irl"><span class="k">In real life — the cautious habit that was costing money</span><p>You have been flattening at 4pm ET on principle — no overnight risk. The decomposition says overnight holds returned about <b>+6%</b> over the period, net of the funding band, while the cash session was <b>flat</b>.</p><p><span class='so'>So:</span> your caution has been selling the part of the day that paid and keeping the part that did not. You do not have to change everything — but the drawer's 30d split on your own names is now the first thing you check before deciding when to hold.</p></div>
 </div>
 </section>
 
@@ -523,6 +779,19 @@ detail.</p>
     frozen when the claim opens and never move.</li>
     <li><b>Line 4</b> — the one corroborating thing to watch.</li>
   </ol>
+<figure class="fig"><span class="ex">anatomy of a signal card</span><div class="mock"><div class="card">
+<div class="l"><span class="n">1</span><span class="pill ev">FUNDING EXTREME</span><span style="color:var(--text)">HOOD · crowd paying near its monthly max</span><span style="margin-left:auto;color:var(--faint)">fired 2h ago · claim @ 113.90 · 4d 21h left</span></div>
+<div class="l"><span class="n">2</span><span style="color:var(--muted)">own base rate</span><span><b>n 23</b></span><span>median <b class="down">−3.1%</b></span><span>hit <b>65%</b></span><span>exp <b>+0.9R</b></span><span>horizon <b>5d</b></span><span class="pill">★ prime</span></div>
+<div class="l"><span class="n">3</span><span class="down">SHORT</span><span>target <b>110.4</b></span><span>void <b>117.2</b></span><span>R:R <b>1.9</b></span><span style="color:var(--faint)">frozen at fire</span></div>
+<div class="l"><span class="n">4</span><span style="color:var(--muted)">watch: OI still building on the long side — the fuel for the unwind</span></div>
+</div></div>
+<ul class="callouts">
+<li><span class="n">1</span><span><b>What and when</b> — the event, the reading, and the mark the claim is scored against.</span></li>
+<li><span class="n">2</span><span><b>The evidence</b> — read <b>n</b> first. 23 occurrences is a base rate; 3 is a story.</span></li>
+<li><span class="n">3</span><span><b>The mechanical play</b> — side, target, the level that voids it. Never moves after it fires.</span></li>
+<li><span class="n">4</span><span><b>One thing to watch</b> — the corroboration that would confirm or kill it.</span></li>
+</ul><figcaption>The four lines, in order, on every card. Line 2 is where you slow down.</figcaption></figure>
+
 
   <div class="k2">How to use it</div>
   <ol class="how">
@@ -548,6 +817,7 @@ detail.</p>
     <li>The Actionable tab<span class="chip adm">operator-only by default</span> is the subset of these
     claims that are <i>at</i> their trigger right now, with reward:risk net of funding.</li>
   </ul>
+<div class="irl"><span class="k">In real life — a card worth acting on, and one that is not</span><p>Card A: <b>FUNDING EXTREME · HOOD · short</b>, <b>n 23</b>, hit 65%, +0.9R, ★ prime, void 117.2. You search HOOD's history: 18 past claims, 61% hit. That is a base rate.</p><p>Card B, higher score: <b>BREAKOUT · a thin FX pair · long</b>, <b>n 3</b>, <i>unproven</i>. The score is high because the condition is very unusual, not because it has ever paid.</p><p><span class='so'>So:</span> A gets sized to its void (117.2, about 3% away) and B gets ignored — or watched, to see whether it earns a record. The score ordered them; <b>n</b> decided.</p></div>
 </div>
 </section>
 
@@ -572,6 +842,22 @@ detail.</p>
     <li><b>Macro rows</b> — FOMC, CPI, payrolls, PPI, retail sales, GDP, PCE, with the prior print shown
     ahead of the release and prior → actual after.</li>
   </ol>
+<figure class="fig"><span class="ex">example — illustrative numbers</span><svg viewBox="0 0 760 162" role="img" aria-label="An earnings reaction study: twelve past prints shown as bars of next-session move, with the median and the usual daily range marked" font-family="JetBrains Mono,ui-monospace,Menlo,monospace" font-size="12">
+<g transform="translate(50,14)">
+<rect x="0" y="0" width="690" height="100" fill="#151A21" stroke="#262E39" rx="4"/>
+<line x1="0" y1="70" x2="690" y2="70" stroke="#262E39"/>
+<rect x="0" y="62" width="690" height="16" fill="#8A93A0" fill-opacity=".12"/>
+<g>
+<rect x="30" y="34" width="22" height="36" rx="2" fill="#46B97E"/><rect x="80" y="70" width="22" height="30" rx="2" fill="#E5604D"/><rect x="130" y="12" width="22" height="58" rx="2" fill="#46B97E"/><rect x="180" y="70" width="22" height="12" rx="2" fill="#E5604D"/>
+<rect x="230" y="40" width="22" height="30" rx="2" fill="#46B97E"/><rect x="280" y="70" width="22" height="44" rx="2" fill="#E5604D"/><rect x="330" y="26" width="22" height="44" rx="2" fill="#46B97E"/><rect x="380" y="70" width="22" height="8" rx="2" fill="#E5604D"/>
+<rect x="430" y="44" width="22" height="26" rx="2" fill="#46B97E"/><rect x="480" y="18" width="22" height="52" rx="2" fill="#46B97E"/><rect x="530" y="70" width="22" height="26" rx="2" fill="#E5604D"/><rect x="580" y="30" width="22" height="40" rx="2" fill="#46B97E"/>
+</g>
+<line x1="620" y1="28" x2="690" y2="28" stroke="#E3A53C" stroke-dasharray="3 3"/><text x="686" y="24" text-anchor="end" fill="#E3A53C" font-size="10.5">median |move| 7.1%</text>
+</g>
+<text x="50" y="134" fill="#8A93A0" font-size="11">n 12 · 8 up / 4 down · median |move| 7.1% · <tspan fill="#E8E3D7" font-weight="600">2.3× the usual daily range</tspan> (the shaded band, ±3.1%)</text>
+<text x="50" y="150" fill="#8A93A0" font-size="11">That multiple is how much smaller you size into the print than on an ordinary day.</text>
+</svg><figcaption><b>A reaction study.</b> Twelve past prints as next-session moves, with the median and the name's usual daily range for scale. The multiple of usual range is the sizing number.</figcaption></figure>
+
 
   <ul class="tips">
     <li>You do not have to open the tab to be warned: the <b>E</b> badge on the Markets ticker cell
@@ -579,6 +865,7 @@ detail.</p>
     <li>Indices, FX, commodities and baskets never report — the coverage line says how many names are
     eligible so absence is not a mystery.</li>
   </ul>
+<div class="irl"><span class="k">In real life — Sunday night planning</span><p>You open Calendar. Four of your starred names report this week. <b>PLTR is Tuesday AMC</b>; its reaction study says median <b>9%</b>, up 5 / down 7, <b>2.8× usual range</b>. FOMC is Wednesday 2pm.</p><p>Your 'short PLTR' idea just became 'short PLTR <i>after</i> the print, or half size into it with the 9% as the risk number'. And nothing new goes on Wednesday afternoon.</p><p><span class='so'>So:</span> the week's plan takes five minutes, and the E badges on Markets will keep reminding you as each day arrives.</p></div>
 </div>
 </section>
 
@@ -602,6 +889,7 @@ detail.</p>
     <li>Type <code>news nvda</code> in the Ask console for the same slice as a table.</li>
     <li>Material filings can also reach you as an alert class — turn it on in the bell.</li>
   </ul>
+<div class="irl"><span class="k">In real life — why is this down?</span><p>TSLA is −4% at 10:10 ET with nothing obvious on the tape. You press <kbd>/</kbd>, type TSLA in the news filter: an <b>FL</b>-badged 8-K landed twenty minutes ago.</p><p><span class='so'>So:</span> you have the reason in ten seconds without opening another site — and if you had the <i>filing</i> alert class on, you would have known before the price told you.</p></div>
 </div>
 </section>
 
@@ -636,6 +924,7 @@ detail.</p>
     <li>It is a reading of numbers other tabs already show. If it cites something you cannot find on
     the board, that is a reason to trust it less, not more.</li>
   </ul>
+<div class="irl"><span class="k">In real life — five minutes before a meeting</span><p>You type <code>report HOOD</code>. The picture: crowded long, funding at its monthly max, price pressing a level with three signals open. Scenarios priced. The action block says <b>wait</b> — the EV of entering here priced negative, so the server downgraded the plan before it reached you.</p><p>At the bottom: seven past reads on this name, five right.</p><p><span class='so'>So:</span> you do not chase it into the meeting. The report did not tell you what will happen; it told you what the board already said, in sentences, and refused to dress up a bad entry.</p></div>
 </div>
 </section>
 
@@ -661,6 +950,14 @@ detail.</p>
     the Markets ticker cell (bright within a week, dimmer to a month, hollow after). <b>◢ noted</b> in
     Filters narrows the table to names you have written on.</li>
   </ol>
+<figure class="fig"><span class="ex">mock of the notes panel</span><div class="mock">
+<div class="msg"><span class="who">HOOD</span><span class="t">Aug 30 · <span class="stamp">wrote it at 113.90</span> · <span class="up">+4.0% since</span></span>
+<div class="body">Held the 110 shelf twice on rising OI. If it loses 108 the thesis is wrong. <span style="color:var(--blue)">#level #thesis</span></div></div>
+<div class="msg"><span class="who">HOOD</span><span class="t">Sep 14 · <span class="stamp">wrote it at 121.40</span> · <span class="down">−2.5% since</span></span>
+<div class="body">Crowd now paying 58% to be long. Not adding here. <span style="color:var(--blue)">#funding</span></div></div>
+</div>
+<figcaption>Two notes, two stamps. Each is read against today's mark, so the second one already tells you it was the better call. Editing either would change the words only — the stamp stays.</figcaption></figure>
+
 
   <ul class="tips">
     <li><b>Editing changes the words and nothing else.</b> The timestamp and the price stand, and the
@@ -670,6 +967,7 @@ detail.</p>
     the pen.</li>
     <li>A call in Messages can be written into the notes book with one click, keeping its stamp.</li>
   </ul>
+<div class="irl"><span class="k">In real life — your own record, kept honest</span><p>Aug 30: you wrote on HOOD, at 113.90, <i>"if it loses 108 the thesis is wrong"</i>. Sep 14 it is 121 and paying 58% funding; you write <i>"not adding here"</i>.</p><p>A month later you re-read both. The first is <b>+4.0% since</b>, the second <b>−2.5% since</b>. The second call was the better one, and you can see it without remembering anything.</p><p><span class='so'>So:</span> the note book becomes the one place your reasoning is stored at the price it was made — which is the only way to learn whether your reasoning is any good.</p></div>
 </div>
 </section>
 
@@ -704,6 +1002,18 @@ detail.</p>
     direction-adjusted move since and at fixed 1-day and 7-day horizons, per person. Click a person to
     filter to their calls. Deleting a call removes the words, never the stamp or the score.</li>
   </ol>
+<figure class="fig"><span class="ex">mock of a conversation</span><div class="mock">
+<div class="msg"><span class="who">cara</span><span class="t">14:02</span>
+<div class="body">adding <span class="tick">$HOOD</span> here, shelf held again</div>
+<div class="since">sent at <span class="stamp">113.90</span> · <span class="up">+4.0%</span> · long call</div></div>
+<div class="msg"><span class="who">gus</span><span class="t">14:05</span>
+<div class="body">short <span class="tick">$PLTR</span> into the print, crowd is paid to be short and still isn't</div>
+<div class="since">sent at <span class="stamp">151.30</span> · <span class="down">−1.2%</span> · short call</div></div>
+<div class="msg"><span class="who">cara</span><span class="t">14:06 · <span style="color:var(--accent)">computed</span></span>
+<div class="body" style="color:var(--muted)">/top funding 3<br>HOOD +58% · SMCI +41% · COIN +36%</div></div>
+</div>
+<figcaption>The stamp is written by the server at send time and never moves. <code>short $PLTR</code> scores as a short, so its "since" is signed the right way. The third message is a command result — a live table posted into the thread.</figcaption></figure>
+
 
   <div class="k2">Getting it on your phone</div>
   <ul class="tips">
@@ -730,6 +1040,7 @@ detail.</p>
   <div class="note warn"><b>Read this once.</b> On this deployment the operator can read every
   conversation, including ones they are not in. Every such read is written to an audit log the operator
   panel shows. Write accordingly.</div>
+<div class="irl"><span class="k">In real life — no argument about who said what</span><p>2pm: cara posts <code>adding $HOOD here</code> — stamped 113.90. gus answers <code>short $PLTR into the print</code> — stamped 151.30. Someone types <code>/top funding 3</code> and the live table lands in the thread for everyone.</p><p>A week later, <b>calls ↗</b> shows cara <b>+4.0%</b> at the 7-day mark and gus <b>−1.2%</b>. Nobody has to remember prices, nobody can edit a call into a better one, and the group's record just accrues.</p><p><span class='so'>So:</span> the chat is where the desk thinks out loud — and the stamps make it the desk's track record too.</p></div>
 </div>
 </section>
 
@@ -758,6 +1069,7 @@ detail.</p>
     <li>Your wallet is polled only while somebody is looking at it; the numbers you see move with the
     live mark between polls.</li>
   </ul>
+<div class="irl"><span class="k">In real life — your book next to the board's opinion</span><p>You link your wallet. A green <b>⬡</b> appears on HOOD (long) and a red one on PLTR (short). <b>⬡ held</b> narrows the table to just those.</p><p>In the HOOD drawer the Position panel shows entry 109.20, liquidation 96.40, funding paid since open −$38 — and right beside it, the trend board reads 3/4 long. You are on the ladder's side. In PLTR you are being <i>paid</i> to be short: funding since open +$12.</p><p><span class='so'>So:</span> one screen tells you where your risk is, what it is costing, and whether the board agrees with you — without opening the exchange.</p></div>
 </div>
 </section>
 
@@ -802,6 +1114,18 @@ detail.</p>
     <li>Anything the local grammar cannot parse goes to the AI leg, which is metered for the group. The
     <b>ask</b> chip shows what is left today. Local verbs never spend it.</li>
   </ul>
+<figure class="fig"><span class="ex">mock of the ask console</span><div class="mock">
+<div class="row"><span style="color:var(--accent)">▸</span><span>most crowded shorts</span></div>
+<div class="row"><span style="color:var(--faint)">→</span><span style="color:var(--muted)">bottom funding 10</span></div>
+<table><thead><tr><th>#</th><th>ticker</th><th>funding</th><th>ΔOI 7d</th><th>squeeze</th></tr></thead>
+<tbody><tr><td>1</td><td>PLTR</td><td class="up">−31%</td><td class="up">+11%</td><td>71</td></tr>
+<tr><td>2</td><td>MSTR</td><td class="up">−19%</td><td class="up">+6%</td><td>44</td></tr>
+<tr><td>3</td><td>RIVN</td><td class="up">−12%</td><td class="down">−2%</td><td>0</td></tr></tbody></table>
+<div class="row"><span style="color:var(--faint)">ran on 143 rows · stocks · window 7d</span></div>
+</div>
+<p class="sec" style="font-size:13px;margin-top:8px">Plain English in, the grammar echoed back (<code>→ bottom funding 10</code>) so you learn the verb, and the rows it ran on stated at the bottom. Nothing here spent the AI budget.</figcaption></figure>
+
+<div class="irl"><span class="k">In real life — three questions, twenty seconds</span><p><code>~</code> <b>most crowded shorts</b> → the ten most negative funding names. <b>who reports tomorrow</b> → the calendar slice. <b>nvda vs amd</b> → the two side by side.</p><p><span class='so'>So:</span> the sort–filter–scroll loop for each of those would have taken a minute apiece. Learn five verbs and the board answers you instead of the other way round.</p></div>
 </div>
 </section>
 
@@ -821,6 +1145,22 @@ detail.</p>
     <li>Save. It is evaluated on the server against the same snapshot the board renders, so it fires
     with no tab open. One crossing is one alert (there is a cooldown), and you can hold up to 60.</li>
   </ol>
+<figure class="fig"><span class="ex">example — illustrative numbers</span><svg viewBox="0 0 760 200" role="img" aria-label="How a rule fires: price crosses the threshold once and fires once; it must fall back through the arm band before it can fire again, and a cooldown applies" font-family="JetBrains Mono,ui-monospace,Menlo,monospace" font-size="12">
+<g transform="translate(50,14)">
+<rect x="0" y="0" width="690" height="140" fill="#151A21" stroke="#262E39" rx="4"/>
+<line x1="0" y1="60" x2="690" y2="60" stroke="#E3A53C" stroke-width="1.5"/>
+<text x="6" y="54" fill="#E3A53C" font-size="10.5">threshold 200</text>
+<rect x="0" y="60" width="690" height="18" fill="#E3A53C" fill-opacity=".1"/>
+<text x="684" y="90" text-anchor="end" fill="#4C5662" font-size="10">arm band — must fall back through here to re-arm</text>
+<path d="M10,110 L80,100 L140,92 L200,70 L240,52 L280,48 L320,58 L360,56 L400,70 L440,84 L480,74 L520,66 L560,52 L600,44 L660,40" fill="none" stroke="#E8E3D7" stroke-width="2"/>
+<circle cx="220" cy="61" r="6" fill="#46B97E" stroke="#0E1116" stroke-width="2"/><text x="220" y="36" text-anchor="middle" fill="#46B97E" font-size="11" font-weight="600">fires once</text>
+<circle cx="320" cy="58" r="5" fill="none" stroke="#4C5662" stroke-width="1.5"/><text x="320" y="118" text-anchor="middle" fill="#4C5662" font-size="10.5">dips below but not through the band → no re-fire, no chatter</text>
+<circle cx="546" cy="60" r="6" fill="#46B97E" stroke="#0E1116" stroke-width="2"/><text x="546" y="36" text-anchor="middle" fill="#46B97E" font-size="11" font-weight="600">fires again</text>
+<text x="420" y="104" text-anchor="end" fill="#4C5662" font-size="10.5">re-armed here ↑</text>
+</g>
+<text x="50" y="178" fill="#8A93A0" font-size="11">One crossing, one alert. A 30-minute cooldown per rule and market sits on top — a price chopping at your level never floods you.</text>
+</svg><figcaption><b>How a rule fires.</b> Once per crossing, re-armed only after price falls back through the band — so a level being chopped around does not become twenty messages.</figcaption></figure>
+
   <div class="ex"><span class="k">Rules that earn their keep</span>
   <b>any · funding percentile · &gt; 90</b> — a market's crowd is paying near its monthly max.<br>
   <b>any · relative volume · &gt; 3</b> — something is being traded that is not normally traded.<br>
@@ -847,6 +1187,26 @@ detail.</p>
     commentary a few times a week, and a <b>desk digest</b> of your own calls and how they are scoring.
     Set the hour and the days per send.</li>
   </ul>
+<figure class="fig"><span class="ex">how alerts reach you</span><svg viewBox="0 0 760 150" role="img" aria-label="One event stream from the server fans out to the bell, in-tab toasts, Telegram and browser push; each channel filters for itself" font-family="JetBrains Mono,ui-monospace,Menlo,monospace" font-size="12">
+<defs><marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#4C5662"/></marker></defs>
+<rect x="20" y="45" width="200" height="60" rx="6" fill="#151A21" stroke="#E3A53C"/>
+<text x="120" y="70" text-anchor="middle" fill="#E3A53C" font-weight="600">one event stream</text>
+<text x="120" y="88" text-anchor="middle" fill="#8A93A0" font-size="11">setups · ledger · rules · trend · …</text>
+<g stroke="#4C5662" stroke-width="1.5" fill="none" marker-end="url(#ar4)">
+<path d="M222,75 C300,75 300,25 356,25"/><path d="M222,75 C300,75 300,58 356,58"/><path d="M222,75 C300,75 300,92 356,92"/><path d="M222,75 C300,75 300,125 356,125"/>
+</g>
+<g font-size="11.5">
+<rect x="360" y="12" width="150" height="26" rx="4" fill="#151A21" stroke="#262E39"/><text x="435" y="29" text-anchor="middle" fill="#E8E3D7">🔔 bell panel</text>
+<rect x="360" y="45" width="150" height="26" rx="4" fill="#151A21" stroke="#262E39"/><text x="435" y="62" text-anchor="middle" fill="#E8E3D7">in-tab toasts</text>
+<rect x="360" y="79" width="150" height="26" rx="4" fill="#151A21" stroke="#262E39"/><text x="435" y="96" text-anchor="middle" fill="#E8E3D7">Telegram</text>
+<rect x="360" y="112" width="150" height="26" rx="4" fill="#151A21" stroke="#262E39"/><text x="435" y="129" text-anchor="middle" fill="#E8E3D7">browser push</text>
+</g>
+<text x="530" y="29" fill="#8A93A0" font-size="10.5">the record — everything, always</text>
+<text x="530" y="62" fill="#8A93A0" font-size="10.5">setups and void hits only</text>
+<text x="530" y="96" fill="#8A93A0" font-size="10.5">your classes · quiet hours · caps</text>
+<text x="530" y="129" fill="#8A93A0" font-size="10.5">with the tab closed</text>
+</svg><figcaption>One stream, four channels. Muting Telegram never edits the record in the bell.</figcaption></figure>
+
   <ul class="tips">
     <li><b>Recent</b> in the bell is the server's own record — it survives a refresh, a closed tab and a
     redeploy. Clearing it only hides it in this browser.</li>
@@ -855,6 +1215,7 @@ detail.</p>
     <li><code>/stop</code> to the bot unlinks, always — control of the Telegram account outranks any
     session.</li>
   </ul>
+<div class="irl"><span class="k">In real life — acting on the rule, not the feeling</span><p>You write two rules: <b>HOOD · price · &lt; 108</b> (the level your own note said would void the thesis) and <b>any · funding percentile · &gt; 90</b>. You link Telegram, quiet hours <code>23-7</code>.</p><p>Wednesday 3:12pm, phone buzzes: <i>HOOD 107.80 &lt; 108</i>. You are not watching the screen. You do what you said you would do three weeks ago, at the price you said.</p><p><span class='so'>So:</span> the rule turned a plan into an action, and the funding-percentile rule keeps handing you the crowded-trade names without you hunting for them.</p></div>
 </div>
 </section>
 
@@ -880,6 +1241,7 @@ detail.</p>
     <li>Your watchlist and saved layouts are already there — they follow the account.</li>
     <li>Nothing is cached on the device on purpose, so you are never looking at yesterday's page.</li>
   </ul>
+<div class="irl"><span class="k">In real life — ninety seconds in a queue</span><p>You open the app from the home screen. <b>★ only</b> is on, the <i>phone</i> layout shows ticker, price, 24h, funding, ΔOI. The bell has a badge: a setup fired on a starred name.</p><p>Tap the alert → the drawer → event risk clear, funding fine, note from last week says the level to watch. You decide, and put the phone away.</p><p><span class='so'>So:</span> the same numbers as the desk, sized for a thumb, with the decision already framed by what you wrote last time.</p></div>
 </div>
 </section>
 

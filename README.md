@@ -394,8 +394,13 @@ and Treemap, Sectors, Correlation, Funding, Sessions, Signals, Calendar, News, A
 Messages, positions, Ask, alerts and Telegram, the phone — each opening with *the value* (what it is
 worth to you, in one sentence), then numbered *how to use it* steps, the tips people miss, and a
 worked example where one helps. It opens with three daily routines (the five-minute open, the
-positioning read, the weekly review) and closes with ten habits. Same wiring as the explainer:
-DOC_REFS, the manual's opening and further reading, the app footer, the `?` card.
+positioning read, the weekly review) and closes with ten habits. Both guides carry inline figures
+(pure SVG/CSS, no scripts, the app's own colours — a data-flow map, the two-universe wall, the ΔOI
+quadrant, a trend ladder with its retest, the sector flow map, a pair spread, a funding heatmap
+slice, the session curves, a signal-card anatomy, the rule edge-trigger, the alert fan-out, and
+mocks of the table, drawer, notes, chat and ask console) and an **In real life** story per feature:
+a concrete situation, what you do, what you decide. Same wiring as the explainer: DOC_REFS, the
+manual's opening and further reading, the app footer, the `?` card.
 
 `docs/` also holds the longer reference pages — the feature map, system map, mechanics and signal
 reference — plus the design mocks that preceded the funding heatmap, notes, insiders and
