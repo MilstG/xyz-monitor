@@ -110,6 +110,57 @@ footer.docfoot{max-width:1000px;margin:0 auto;padding:18px 30px 46px;color:var(-
   footer.docfoot{padding:16px 14px 40px}
 }
 @media print{.top,.jump{display:none}.page{max-width:none;padding:0}}
+
+/* ---- figures ---- */
+figure.fig{margin:14px 0 20px;padding:14px 16px 10px;border:1px solid var(--border);border-radius:8px;background:var(--panel2)}
+figure.fig>svg{display:block;width:100%;height:auto;max-width:100%}
+figure.fig figcaption{font-size:12.5px;color:var(--muted);margin-top:8px;line-height:1.5}
+figure.fig figcaption b{color:var(--text)}
+figure.fig .ex{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);display:block;margin-bottom:6px}
+.mock{font-family:var(--mono);font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);overflow:hidden}
+.mock .bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:8px 10px;border-bottom:1px solid var(--border)}
+.mock .seg{display:inline-flex;border:1px solid var(--border);border-radius:4px;overflow:hidden}
+.mock .seg span{padding:2px 7px;color:var(--muted);border-right:1px solid var(--border)}
+.mock .seg span:last-child{border-right:0}
+.mock .seg span.on{background:var(--accent);color:var(--bg);font-weight:600}
+.mock .btn{padding:2px 8px;border:1px solid var(--border);border-radius:4px;color:var(--muted)}
+.mock .lbl{color:var(--faint);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em}
+.mock .call{position:relative;display:inline-block}
+.mock .call::after{content:attr(data-n);position:absolute;top:-9px;right:-9px;width:16px;height:16px;border-radius:50%;background:var(--accent);color:var(--bg);font-size:10px;font-weight:700;display:grid;place-items:center}
+.mock table{min-width:0;width:100%;font-size:12px}
+.mock th,.mock td{padding:5px 8px;border-bottom:1px solid var(--border);white-space:nowrap;font-family:var(--mono);font-weight:400}
+.mock th{font-size:10px;color:var(--faint);background:var(--panel);letter-spacing:.06em}
+.mock td:first-child{font-weight:600}
+.mock .hl td{background:rgba(227,165,60,.07)}
+.mock td.up{color:var(--up)} .mock td.down{color:var(--down)}
+.mock td.win{box-shadow:inset 0 -2px 0 var(--accent)}
+.mock .row{display:flex;gap:10px;align-items:baseline;padding:7px 10px;border-bottom:1px solid var(--border)}
+.mock .row:last-child{border-bottom:0}
+.mock .k{color:var(--faint);min-width:64px;font-size:10.5px;text-transform:uppercase;letter-spacing:.06em}
+.mock .card{padding:10px 12px}
+.mock .l{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;padding:3px 0}
+.mock .l .n{width:18px;height:18px;border-radius:50%;background:var(--accent);color:var(--bg);font-size:10px;font-weight:700;display:grid;place-items:center;flex:none}
+.mock .pill{border:1px solid var(--faint);border-radius:3px;padding:0 5px;font-size:10px;color:var(--muted)}
+.mock .pill.ev{border-color:var(--accent);color:var(--accent)}
+.mock .stamp{color:var(--accent)}
+.mock .msg{padding:8px 12px;border-bottom:1px solid var(--border)}
+.mock .msg .who{color:var(--accent);font-weight:600}
+.mock .msg .t{color:var(--faint);font-size:10.5px;margin-left:6px}
+.mock .msg .body{margin-top:2px}
+.mock .msg .tick{border-bottom:1px dotted var(--accent);color:var(--text)}
+.mock .msg .since{font-size:11px;color:var(--muted);margin-top:2px}
+.callouts{display:flex;flex-wrap:wrap;gap:6px 14px;margin:8px 0 0;padding:0;list-style:none;font-size:12.5px;color:var(--muted)}
+.callouts li{display:flex;gap:6px;align-items:baseline}
+.callouts .n{width:16px;height:16px;border-radius:50%;background:var(--accent);color:var(--bg);font-size:10px;font-weight:700;display:grid;place-items:center;flex:none;font-family:var(--mono)}
+.callouts b{color:var(--text)}
+
+/* ---- real-life examples ---- */
+.irl{margin:12px 0 14px;padding:12px 14px 12px 16px;border:1px solid var(--border);border-left:3px solid var(--up);border-radius:0 8px 8px 0;background:var(--panel2);font-size:14.5px;line-height:1.6}
+.irl .k{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--up);display:block;margin-bottom:4px}
+.irl p{margin:0 0 6px;color:var(--muted)}
+.irl p:last-child{margin-bottom:0}
+.irl b{color:var(--text)}
+.irl .so{color:var(--text)}
 </style>
 </head>
 <body>
@@ -172,6 +223,34 @@ instead of minutes, and everyone is looking at the same numbers at the same time
   ledger, your notes and messages live on a disk that survives restarts. A redeploy serves a warm
   table within a poll or two.</p></div>
 </div>
+<figure class="fig"><span class="ex">how data reaches you</span><svg viewBox="0 0 760 170" role="img" aria-label="Data flow: Hyperliquid to the server to a cached snapshot to every browser" font-family="JetBrains Mono,ui-monospace,Menlo,monospace" font-size="12">
+<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#4C5662"/></marker></defs>
+<rect x="8" y="40" width="140" height="70" rx="6" fill="#151A21" stroke="#262E39"/>
+<text x="78" y="68" text-anchor="middle" fill="#E8E3D7" font-weight="600">Hyperliquid</text>
+<text x="78" y="86" text-anchor="middle" fill="#8A93A0" font-size="11">prices · funding · OI</text>
+<text x="78" y="100" text-anchor="middle" fill="#8A93A0" font-size="11">candles</text>
+<line x1="150" y1="75" x2="196" y2="75" stroke="#4C5662" stroke-width="2" marker-end="url(#ar)"/>
+<text x="173" y="64" text-anchor="middle" fill="#4C5662" font-size="10">once</text>
+<rect x="200" y="22" width="220" height="106" rx="6" fill="#151A21" stroke="#E3A53C"/>
+<text x="310" y="46" text-anchor="middle" fill="#E3A53C" font-weight="600">the server</text>
+<text x="310" y="66" text-anchor="middle" fill="#E8E3D7" font-size="11">polls · archives · computes</text>
+<text x="310" y="82" text-anchor="middle" fill="#8A93A0" font-size="11">momentum, vol, funding history,</text>
+<text x="310" y="96" text-anchor="middle" fill="#8A93A0" font-size="11">signals, sectors, sessions…</text>
+<text x="310" y="116" text-anchor="middle" fill="#8A93A0" font-size="11">→ one cached snapshot, ~15 s</text>
+<line x1="422" y1="75" x2="468" y2="75" stroke="#4C5662" stroke-width="2" marker-end="url(#ar)"/>
+<text x="445" y="64" text-anchor="middle" fill="#4C5662" font-size="10">push</text>
+<g>
+<rect x="472" y="18" width="130" height="34" rx="5" fill="#151A21" stroke="#262E39"/><text x="537" y="40" text-anchor="middle" fill="#E8E3D7">your desktop</text>
+<rect x="472" y="58" width="130" height="34" rx="5" fill="#151A21" stroke="#262E39"/><text x="537" y="80" text-anchor="middle" fill="#E8E3D7">your phone</text>
+<rect x="472" y="98" width="130" height="34" rx="5" fill="#151A21" stroke="#262E39"/><text x="537" y="120" text-anchor="middle" fill="#E8E3D7">everyone else</text>
+</g>
+<text x="682" y="60" text-anchor="middle" fill="#8A93A0" font-size="11">same numbers,</text>
+<text x="682" y="76" text-anchor="middle" fill="#8A93A0" font-size="11">same moment,</text>
+<text x="682" y="92" text-anchor="middle" fill="#8A93A0" font-size="11">no waiting</text>
+<line x1="78" y1="150" x2="682" y2="150" stroke="#262E39"/>
+<text x="8" y="166" fill="#4C5662" font-size="10.5">browsers never talk to the exchange — the rate limit is the server's problem, not yours</text>
+</svg><figcaption><b>Why the page is instant and why everyone sees the same number.</b> The exchange is asked once; you read a finished snapshot.</figcaption></figure>
+
 </section>
 
 <!-- ============================================================ -->
@@ -217,6 +296,7 @@ instead of minutes, and everyone is looking at the same numbers at the same time
   written at, so every later read says "wrote it at 113.90 · +4.0% since". That one field is the
   whole point.</li>
 </ol>
+<div class="irl"><span class="k">In real life — one real morning</span><p>9:40 ET. You open Markets, window <b>1d</b>, sort <b>vs tape</b>. HOOD is green on a red tape with unusual volume. You press <kbd>Enter</kbd>: the drawer says it reports Thursday, median reaction 7%. You write one line in Notes: <i>"strong on a weak tape, print Thursday, no size into it."</i> Stamped at 113.90.</p><p>You set one rule — <b>HOOD price &lt; 108</b> — and close the laptop. That was six minutes, and the site will now do the watching.</p></div>
 </section>
 
 <!-- ============================================================ -->
@@ -272,6 +352,35 @@ instead of minutes, and everyone is looking at the same numbers at the same time
     <span class="when">why notes beat a text file</span>
   </div>
 </div>
+<figure class="fig"><span class="ex">the two universes</span><svg viewBox="0 0 760 150" role="img" aria-label="Two universes separated by a wall: stocks with the S&amp;P 500 benchmark, crypto with BTC" font-family="JetBrains Mono,ui-monospace,Menlo,monospace" font-size="12">
+<rect x="8" y="14" width="356" height="110" rx="6" fill="#151A21" stroke="#262E39"/>
+<text x="24" y="38" fill="#6f93c9" font-weight="600" font-size="13">STOCKS</text>
+<text x="24" y="60" fill="#E8E3D7" font-size="11.5">benchmark: S&amp;P 500 perp</text>
+<text x="24" y="78" fill="#8A93A0" font-size="11">sessions: gap · overnight · cash · home exchange</text>
+<text x="24" y="96" fill="#8A93A0" font-size="11">history: deep daily archive · YTD · MA200</text>
+<text x="24" y="114" fill="#8A93A0" font-size="11">Calendar, Sessions, Sectors live here</text>
+<rect x="374" y="6" width="12" height="126" rx="2" fill="#E3A53C" opacity=".85"/>
+<text x="380" y="142" text-anchor="middle" fill="#E3A53C" font-size="10.5">the wall</text>
+<rect x="396" y="14" width="356" height="110" rx="6" fill="#151A21" stroke="#262E39"/>
+<text x="412" y="38" fill="#E3A53C" font-weight="600" font-size="13">CRYPTO</text>
+<text x="412" y="60" fill="#E8E3D7" font-size="11.5">benchmark: BTC</text>
+<text x="412" y="78" fill="#8A93A0" font-size="11">24/7 tape — no sessions, no gaps</text>
+<text x="412" y="96" fill="#8A93A0" font-size="11">history: 31 days → dashes past MA20, no YTD</text>
+<text x="412" y="114" fill="#8A93A0" font-size="11">Casc · 24h Liqs · the regime strip live here</text>
+</svg><figcaption><b>Idea 1, drawn.</b> Two universes, two benchmarks, two sets of columns. If a column vanished, you crossed the wall.</figcaption></figure>
+<figure class="fig"><span class="ex">anatomy of a signal card</span><div class="mock"><div class="card">
+<div class="l"><span class="n">1</span><span class="pill ev">FUNDING EXTREME</span><span style="color:var(--text)">HOOD · crowd paying near its monthly max</span><span style="margin-left:auto;color:var(--faint)">fired 2h ago · claim @ 113.90 · 4d 21h left</span></div>
+<div class="l"><span class="n">2</span><span style="color:var(--muted)">own base rate</span><span><b>n 23</b></span><span>median <b class="down">−3.1%</b></span><span>hit <b>65%</b></span><span>exp <b>+0.9R</b></span><span>horizon <b>5d</b></span><span class="pill">★ prime</span></div>
+<div class="l"><span class="n">3</span><span class="down">SHORT</span><span>target <b>110.4</b></span><span>void <b>117.2</b></span><span>R:R <b>1.9</b></span><span style="color:var(--faint)">frozen at fire</span></div>
+<div class="l"><span class="n">4</span><span style="color:var(--muted)">watch: OI still building on the long side — the fuel for the unwind</span></div>
+</div></div>
+<ul class="callouts">
+<li><span class="n">1</span><span><b>What and when</b> — the event, the reading, and the mark the claim is scored against.</span></li>
+<li><span class="n">2</span><span><b>The evidence</b> — read <b>n</b> first. 23 occurrences is a base rate; 3 is a story.</span></li>
+<li><span class="n">3</span><span><b>The mechanical play</b> — side, target, the level that voids it. Never moves after it fires.</span></li>
+<li><span class="n">4</span><span><b>One thing to watch</b> — the corroboration that would confirm or kill it.</span></li>
+</ul><figcaption><b>Idea 5, drawn.</b> Every signal renders in the same four lines. Read line 2 before anything else.</figcaption></figure>
+
 </section>
 
 <!-- ============================================================ -->
@@ -393,6 +502,19 @@ operator has not opened it, and its data routes refuse too.</p>
 <h2><span class="num">05</span>Reading the numbers you will meet most</h2>
 <p>Exact formulas live in the <a href="/docs#markets">manual</a> and on every hover. These are the
 plain-English readings.</p>
+<figure class="fig"><span class="ex">example — illustrative numbers</span><svg viewBox="0 0 760 120" role="img" aria-label="Funding read as a scale: negative and green means longs are paid, positive and red means longs pay; flags mark the top and bottom decile of the market's own month" font-family="JetBrains Mono,ui-monospace,Menlo,monospace" font-size="12">
+<defs><linearGradient id="fg" x1="0" x2="1"><stop offset="0" stop-color="#46B97E"/><stop offset=".5" stop-color="#151A21"/><stop offset="1" stop-color="#E5604D"/></linearGradient></defs>
+<rect x="40" y="40" width="680" height="22" rx="4" fill="url(#fg)" opacity=".8"/>
+<line x1="380" y1="30" x2="380" y2="72" stroke="#E8E3D7"/>
+<text x="380" y="88" text-anchor="middle" fill="#8A93A0" font-size="11">0% — nobody pays</text>
+<text x="40" y="30" fill="#46B97E" font-size="11" font-weight="600">−  longs receive</text>
+<text x="40" y="88" fill="#8A93A0" font-size="10.5">crowd is short · you are paid to be long</text>
+<text x="720" y="30" text-anchor="end" fill="#E5604D" font-size="11" font-weight="600">longs pay  +</text>
+<text x="720" y="88" text-anchor="end" fill="#8A93A0" font-size="10.5">crowd is long · holding costs money</text>
+<text x="700" y="112" text-anchor="end" fill="#E3A53C" font-size="10.5">▴ = top decile of this market's own month</text>
+<text x="60" y="112" fill="#E3A53C" font-size="10.5">▾ = bottom decile</text>
+</svg><figcaption><b>Funding, as a scale.</b> The sign tells you who pays; the flag tells you whether it is extreme for <i>this</i> market. Red on the table means the crowd is long and paying for it.</figcaption></figure>
+
 
 <div class="tw">
 <table class="reads">
@@ -407,6 +529,41 @@ underlying cash market is closed, a persistent premium <i>is</i> the off-hours p
 <code>longs+</code> new money confirming · <code>squeeze</code> shorts covering, not fresh demand ·
 <code>shorts+</code> new money pressing lower · <code>unwind</code> longs deleveraging. Open interest
 is symmetric, so which side owns it is always an inference — and the hover says so.</td></tr>
+<tr><td>the four tags, drawn</td><td><svg viewBox="0 0 760 300" style="max-width:560px;display:block" role="img" aria-label="The four open-interest regimes: price up or down against OI up or down" font-family="JetBrains Mono,ui-monospace,Menlo,monospace" font-size="12">
+<defs><marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8A93A0"/></marker></defs>
+<g transform="translate(120,20)">
+<rect x="0" y="0" width="250" height="120" rx="6" fill="#151A21" stroke="#46B97E"/>
+<text x="14" y="26" fill="#46B97E" font-weight="600" font-size="13">longs+</text>
+<text x="14" y="46" fill="#E8E3D7" font-size="11.5">price ↑ · OI ↑</text>
+<text x="14" y="66" fill="#8A93A0" font-size="11">new money is buying and staying —</text>
+<text x="14" y="82" fill="#8A93A0" font-size="11">the move is being confirmed</text>
+<text x="14" y="106" fill="#4C5662" font-size="10.5">hover: does funding corroborate?</text>
+<rect x="260" y="0" width="250" height="120" rx="6" fill="#151A21" stroke="#E3A53C"/>
+<text x="274" y="26" fill="#E3A53C" font-weight="600" font-size="13">squeeze</text>
+<text x="274" y="46" fill="#E8E3D7" font-size="11.5">price ↑ · OI ↓</text>
+<text x="274" y="66" fill="#8A93A0" font-size="11">shorts are covering — positions</text>
+<text x="274" y="82" fill="#8A93A0" font-size="11">closing, not fresh demand</text>
+<text x="274" y="106" fill="#4C5662" font-size="10.5">runs hard, ends with the covering</text>
+<rect x="0" y="130" width="250" height="120" rx="6" fill="#151A21" stroke="#E3A53C"/>
+<text x="14" y="156" fill="#E3A53C" font-weight="600" font-size="13">unwind</text>
+<text x="14" y="176" fill="#E8E3D7" font-size="11.5">price ↓ · OI ↓</text>
+<text x="14" y="196" fill="#8A93A0" font-size="11">longs are deleveraging — the crowd</text>
+<text x="14" y="212" fill="#8A93A0" font-size="11">is leaving, not pressing</text>
+<text x="14" y="236" fill="#4C5662" font-size="10.5">often an ending, not a beginning</text>
+<rect x="260" y="130" width="250" height="120" rx="6" fill="#151A21" stroke="#E5604D"/>
+<text x="274" y="156" fill="#E5604D" font-weight="600" font-size="13">shorts+</text>
+<text x="274" y="176" fill="#E8E3D7" font-size="11.5">price ↓ · OI ↑</text>
+<text x="274" y="196" fill="#8A93A0" font-size="11">new money is selling and staying —</text>
+<text x="274" y="212" fill="#8A93A0" font-size="11">the downside is being pressed</text>
+<text x="274" y="236" fill="#4C5662" font-size="10.5">hover: does funding corroborate?</text>
+</g>
+<text x="60" y="80" text-anchor="middle" fill="#8A93A0" font-size="11">price</text>
+<text x="60" y="96" text-anchor="middle" fill="#46B97E" font-size="11">↑ up</text>
+<text x="60" y="210" text-anchor="middle" fill="#8A93A0" font-size="11">price</text>
+<text x="60" y="226" text-anchor="middle" fill="#E5604D" font-size="11">↓ down</text>
+<text x="245" y="290" text-anchor="middle" fill="#8A93A0" font-size="11">OI ↑ building</text>
+<text x="505" y="290" text-anchor="middle" fill="#8A93A0" font-size="11">OI ↓ shrinking</text>
+</svg></td></tr>
 <tr><td>RVOL</td><td>Volume against the same clock hours over the past month. 1.0× is normal
 <i>for this time of day</i>; 2×+ is genuinely elevated. The session shape cannot masquerade as a
 signal.</td></tr>
@@ -483,6 +640,14 @@ the analysis window and refresh cadence, terminal history, chat drafts.</td>
 <div class="note"><b>Deep links are shareable.</b> The address bar follows you: <code>#sectors</code>
 opens a tab, <code>#t=NVDA</code> opens that name's drawer. Paste one into an open tab and it
 navigates.</div>
+<figure class="fig"><span class="ex">mock of the notes panel</span><div class="mock">
+<div class="msg"><span class="who">HOOD</span><span class="t">Aug 30 · <span class="stamp">wrote it at 113.90</span> · <span class="up">+4.0% since</span></span>
+<div class="body">Held the 110 shelf twice on rising OI. If it loses 108 the thesis is wrong. <span style="color:var(--blue)">#level #thesis</span></div></div>
+<div class="msg"><span class="who">HOOD</span><span class="t">Sep 14 · <span class="stamp">wrote it at 121.40</span> · <span class="down">−2.5% since</span></span>
+<div class="body">Crowd now paying 58% to be long. Not adding here. <span style="color:var(--blue)">#funding</span></div></div>
+</div>
+<p class="sec" style="font-size:13px;margin-top:8px">Two notes, two stamps. Each is read against today's mark, so the second one already tells you it was the better call. Editing either would change the words only — the stamp stays.</p><figcaption><b>What a stamped note looks like.</b> The move since is computed at read time from the snapshot; nothing about the note itself changes.</figcaption></figure>
+
 </section>
 
 <!-- ============================================================ -->
@@ -538,6 +703,26 @@ of six people opening the panel. Two extras only exist here:</p>
 <p>The <b>🔔</b> bell lives in the status line, so it is reachable from every tab. One event stream
 feeds every channel — the in-tab toast, the bell panel, Telegram, browser push — so a channel's
 settings can quiet <i>your</i> phone without ever editing the record of what fired.</p>
+<figure class="fig"><span class="ex">how alerts reach you</span><svg viewBox="0 0 760 150" role="img" aria-label="One event stream from the server fans out to the bell, in-tab toasts, Telegram and browser push; each channel filters for itself" font-family="JetBrains Mono,ui-monospace,Menlo,monospace" font-size="12">
+<defs><marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#4C5662"/></marker></defs>
+<rect x="20" y="45" width="200" height="60" rx="6" fill="#151A21" stroke="#E3A53C"/>
+<text x="120" y="70" text-anchor="middle" fill="#E3A53C" font-weight="600">one event stream</text>
+<text x="120" y="88" text-anchor="middle" fill="#8A93A0" font-size="11">setups · ledger · rules · trend · …</text>
+<g stroke="#4C5662" stroke-width="1.5" fill="none" marker-end="url(#ar4)">
+<path d="M222,75 C300,75 300,25 356,25"/><path d="M222,75 C300,75 300,58 356,58"/><path d="M222,75 C300,75 300,92 356,92"/><path d="M222,75 C300,75 300,125 356,125"/>
+</g>
+<g font-size="11.5">
+<rect x="360" y="12" width="150" height="26" rx="4" fill="#151A21" stroke="#262E39"/><text x="435" y="29" text-anchor="middle" fill="#E8E3D7">🔔 bell panel</text>
+<rect x="360" y="45" width="150" height="26" rx="4" fill="#151A21" stroke="#262E39"/><text x="435" y="62" text-anchor="middle" fill="#E8E3D7">in-tab toasts</text>
+<rect x="360" y="79" width="150" height="26" rx="4" fill="#151A21" stroke="#262E39"/><text x="435" y="96" text-anchor="middle" fill="#E8E3D7">Telegram</text>
+<rect x="360" y="112" width="150" height="26" rx="4" fill="#151A21" stroke="#262E39"/><text x="435" y="129" text-anchor="middle" fill="#E8E3D7">browser push</text>
+</g>
+<text x="530" y="29" fill="#8A93A0" font-size="10.5">the record — everything, always</text>
+<text x="530" y="62" fill="#8A93A0" font-size="10.5">setups and void hits only</text>
+<text x="530" y="96" fill="#8A93A0" font-size="10.5">your classes · quiet hours · caps</text>
+<text x="530" y="129" fill="#8A93A0" font-size="10.5">with the tab closed</text>
+</svg><figcaption>One stream, four channels, each with its own filter.</figcaption></figure>
+
 
 <div class="cards">
   <div class="card"><h4>Your own rules</h4><p>Ticker (or blank for any market) · metric · above or
@@ -559,6 +744,7 @@ settings can quiet <i>your</i> phone without ever editing the record of what fir
   positioning, earnings, macro, headlines), a written market commentary a few times a week, and a
   deterministic per-person desk digest of your own calls and how they are scoring. You set the hour
   and the days.</p></div>
+<div class="irl"><span class="k">In real life — what a rule feels like</span><p>You write <b>any · relative volume · &gt; 3</b>. Nothing happens for two days. Thursday 11:04 your phone says <i>SMCI RVOL 3.4×</i>. You open the drawer: an 8-K twenty minutes ago, ΔOI shorts+. You had no position and now you have a reason to look — that is all a rule is for.</p></div>
 </div>
 </section>
 
