@@ -1,0 +1,313 @@
+{
+ "markets": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "Stocks | Crypto scope",
+    "x": 3.84,
+    "y": 18.06,
+    "w": 5.04,
+    "h": 3.11
+   },
+   {
+    "n": 2,
+    "label": "window",
+    "x": 48.76,
+    "y": 29.5,
+    "w": 17.02,
+    "h": 3.56
+   },
+   {
+    "n": 3,
+    "label": "click a header to sort",
+    "x": 21.79,
+    "y": 42.97,
+    "w": 4.26,
+    "h": 2.83
+   },
+   {
+    "n": 4,
+    "label": "Filters",
+    "x": 88.06,
+    "y": 29.33,
+    "w": 6.11,
+    "h": 3.89
+   },
+   {
+    "n": 5,
+    "label": "Layouts",
+    "x": 95.28,
+    "y": 29.33,
+    "w": 6.94,
+    "h": 3.89
+   },
+   {
+    "n": 6,
+    "label": "Columns",
+    "x": 4.92,
+    "y": 34.33,
+    "w": 7.33,
+    "h": 3.89
+   },
+   {
+    "n": 7,
+    "label": "↓ CSV",
+    "x": 11.68,
+    "y": 34.33,
+    "w": 4.81,
+    "h": 3.89
+   },
+   {
+    "n": 8,
+    "label": "type to filter tickers",
+    "x": 10.28,
+    "y": 29.33,
+    "w": 18.06,
+    "h": 3.89
+   },
+   {
+    "n": 9,
+    "label": "status line",
+    "x": 50,
+    "y": 12.22,
+    "w": 97.5,
+    "h": 3.89
+   },
+   {
+    "n": 10,
+    "label": "? help",
+    "x": 92.75,
+    "y": 17.72,
+    "w": 2.33,
+    "h": 3.22
+   },
+   {
+    "n": 11,
+    "label": "🔔 bell",
+    "x": 96.63,
+    "y": 12.61,
+    "w": 2.15,
+    "h": 2.11
+   }
+  ]
+ },
+ "markets-sorted": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "sorted by vs tape",
+    "x": 65.47,
+    "y": 42.97,
+    "w": 9.16,
+    "h": 2.83
+   },
+   {
+    "n": 2,
+    "label": "★ star = watchlist",
+    "x": 5.12,
+    "y": 45.78,
+    "w": 7.59,
+    "h": 2.78
+   }
+  ]
+ },
+ "filters": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "volume floor (millions)",
+    "x": 80.3,
+    "y": 37.78,
+    "w": 5.42,
+    "h": 3.44
+   },
+   {
+    "n": 2,
+    "label": "OI floor",
+    "x": 80.3,
+    "y": 42.22,
+    "w": 5.42,
+    "h": 3.44
+   },
+   {
+    "n": 3,
+    "label": "link a wallet (public address)",
+    "x": 82.37,
+    "y": 47,
+    "w": 6.84,
+    "h": 3.22
+   },
+   {
+    "n": 4,
+    "label": "★ only",
+    "x": 74.46,
+    "y": 55,
+    "w": 3.72,
+    "h": 5.11
+   },
+   {
+    "n": 5,
+    "label": "◢ noted",
+    "x": 79.08,
+    "y": 55,
+    "w": 4.41,
+    "h": 5.11
+   },
+   {
+    "n": 6,
+    "label": "⬡ held",
+    "x": 70.17,
+    "y": 55,
+    "w": 3.76,
+    "h": 5.11
+   }
+  ]
+ },
+ "layouts": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "Layouts menu",
+    "x": 90.76,
+    "y": 33.89,
+    "w": 15.97,
+    "h": 23.67
+   }
+  ]
+ },
+ "columns": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "show / hide / drag to reorder",
+    "x": 1.64,
+    "y": 38.89,
+    "w": 13.89,
+    "h": 60
+   }
+  ]
+ },
+ "drawer": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "the drawer",
+    "x": 84.03,
+    "y": 1.56,
+    "w": 31.94,
+    "h": 100
+   }
+  ]
+ },
+ "help": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "the two guides",
+    "x": 50,
+    "y": 21.42,
+    "w": 49.31,
+    "h": 7.82
+   },
+   {
+    "n": 2,
+    "label": "how to read this tab",
+    "x": 50,
+    "y": 30.18,
+    "w": 49.31,
+    "h": 1.44
+   }
+  ]
+ },
+ "bell": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "the bell panel",
+    "x": 85.9,
+    "y": 15.89,
+    "w": 23.61,
+    "h": 72
+   }
+  ]
+ },
+ "ask": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "type a question here",
+    "x": 84.06,
+    "y": 91.11,
+    "w": 27.44,
+    "h": 4.33
+   },
+   {
+    "n": 2,
+    "label": "the answer",
+    "x": 83.47,
+    "y": 43.56,
+    "w": 30.42,
+    "h": 46.33
+   }
+  ]
+ },
+ "palette": {
+  "ok": true,
+  "calls": []
+ },
+ "crypto": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "Crypto scope",
+    "x": 8.88,
+    "y": 18.06,
+    "w": 5.04,
+    "h": 3.11
+   },
+   {
+    "n": 2,
+    "label": "the regime strip",
+    "x": 50,
+    "y": 23.22,
+    "w": 97.5,
+    "h": 4.33
+   }
+  ]
+ },
+ "notes": {
+  "ok": true,
+  "calls": []
+ },
+ "messages": {
+  "ok": true,
+  "calls": [
+   {
+    "n": 1,
+    "label": "type here — $TICKER stamps the price",
+    "x": 58.93,
+    "y": 74.67,
+    "w": 67.03,
+    "h": 4.33
+   },
+   {
+    "n": 2,
+    "label": "calls ↗ — every stamped call, scored",
+    "x": 13.4,
+    "y": 15.61,
+    "w": 2.93,
+    "h": 1.22
+   }
+  ]
+ }
+}
