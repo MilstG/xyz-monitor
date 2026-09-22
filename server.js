@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.21-87";
+const VERSION = "2026.09.22-88";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -2142,7 +2142,8 @@ async function buildServer() {
   };
   fastify.get("/docs", serveDocs);
   fastify.get("/docs.html", serveDocs);
-  const DOC_REFS = { signals: "xyz-monitor-signal-reference.html", features: "xyz-monitor-features.html",
+  const DOC_REFS = { explainer: "xyz-monitor-explainer.html", signals: "xyz-monitor-signal-reference.html",
+                     features: "xyz-monitor-features.html",
                      map: "xyz-monitor-map.html", mechanics: "xyz-monitor-mechanics.html" };
   const DOC_REF_HTML = {};
   for (const [k, f] of Object.entries(DOC_REFS)) { const h = loadDocPage(path.join(__dirname, "docs", f)); if (h) DOC_REF_HTML[k] = h; }

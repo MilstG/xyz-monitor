@@ -344,6 +344,11 @@ instant, and the per-IP rate limit stops being a per-user problem.
 
 ## Documentation
 
+Two pages, two audiences: the **explainer** at `/docs/ref/explainer` is the plain-language tour for
+people using the terminal, and the **manual** at `/docs` is the exact reference for people running
+it. The manual's opening points newcomers at the explainer; the explainer points back for
+definitions.
+
 The complete manual ships with the app at **`/docs`** (`public/docs.html`): every tab, every
 column, the drawer, the terminal and chat grammars, alerts and Telegram, the signal engine, data
 sources and retention, the HTTP API, every environment variable, deployment, the security model, a
@@ -352,9 +357,21 @@ the way the shell is: the caller's resolved feature set is injected so a section
 member cannot see is not in the markup they receive, every inline script carries the CSP nonce, and
 the build stamp is at the top. Signed-out visitors get the login page, like everything else.
 
-`docs/` holds the longer reference pages — the feature map, system map, mechanics and signal
+The **explainer** (`docs/xyz-monitor-explainer.html`, served at **`/docs/ref/explainer`**) is the
+same app told to the people who use it rather than to the people who run it: what the terminal is,
+a first-ten-minutes walkthrough, the six ideas that explain every screen, one card per tab saying
+*when you would open it*, the plain-English reading of the columns you meet most (funding, ΔOI,
+RVOL, squeeze, carry, OI/Vol…), what is yours and whether it syncs, the ask/chat grammars by
+example, alerts, the keyboard card, an honest **what it will not do** (no orders, no predictions,
+31-day crypto retention, 45-day 13F and PTR lag, OI attribution as inference, operator read-through
+on messages) and a short *when it looks wrong*. It carries no operator content — no environment
+variables, no API, no deployment — so it can be handed to a new member whole. Linked from the
+manual's opening, the app footer and every tab's `?` card.
+
+`docs/` also holds the longer reference pages — the feature map, system map, mechanics and signal
 reference — plus the design mocks that preceded the funding heatmap, notes, insiders and
-backtest-target work, and the share-to-chat mock (`xyz-monitor-share-to-chat-mock.html`, now built — see **Share to chat** above). The four reference pages are served at `/docs/ref/features`, `/docs/ref/map`,
+backtest-target work, and the share-to-chat mock (`xyz-monitor-share-to-chat-mock.html`, now built — see **Share to chat** above). The five reference pages are served at `/docs/ref/explainer`,
+`/docs/ref/features`, `/docs/ref/map`,
 `/docs/ref/mechanics` and `/docs/ref/signals` (nonce-stamped, same gate); the mocks are not served.
 
 ## Project layout
