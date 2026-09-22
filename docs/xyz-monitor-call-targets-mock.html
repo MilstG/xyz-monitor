@@ -1,0 +1,318 @@
+<meta charset="utf-8">
+<title>Call Targets</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ── tokens lifted verbatim from public/styles.css: the mock has to read as the app, not as a deck ── */
+:root{
+  --bg:#0E1116; --panel:#151A21; --panel2:#1B222B; --border:#262E39;
+  --text:#E8E3D7; --muted:#7E8794; --faint:#4C5662; --dim:#5b6570;
+  --accent:#E3A53C; --accent-dim:#8a6a28; --blue:#6f93c9;
+  --up:#46B97E; --down:#E5604D; --grid:#1A212A;
+  --mono:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;
+  --disp:'Space Grotesk',system-ui,sans-serif;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:var(--disp);-webkit-font-smoothing:antialiased;font-feature-settings:"tnum" 1}
+body{padding-block:22px 70px;padding-inline:20px;max-width:1180px;margin:0 auto;font-variant-numeric:tabular-nums}
+.pos{color:var(--up)} .neg{color:var(--down)} .sec{color:var(--muted)} .na{color:var(--faint)}
+b{font-weight:600} a{color:var(--blue)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.mockhd{border-bottom:1px solid var(--border);padding-bottom:16px;margin-bottom:22px}
+.eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin:0 0 8px}
+h1{font-size:27px;font-weight:700;letter-spacing:-.4px;margin:0 0 10px;text-wrap:balance}
+.lede{color:var(--muted);font-size:13.5px;line-height:1.62;max-width:70ch;margin:0}
+.lede b{color:var(--text);font-weight:500}
+.mockchip{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--blue);border:1px solid var(--blue);border-radius:3px;padding:2px 7px;opacity:.9}
+.frame{border:1px dashed var(--accent-dim);border-radius:12px;padding:16px 18px 20px;margin:0 0 8px;position:relative}
+.frame::before{content:"live prototype";position:absolute;top:-8px;left:16px;background:var(--bg);padding:0 7px;font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent-dim)}
+.frame.still::before{content:"still"}
+.hint{font-family:var(--mono);font-size:11px;color:var(--faint);margin:0 0 14px;line-height:1.6}
+.hint kbd{border:1px solid var(--border);border-radius:3px;padding:0 5px;color:var(--muted)}
+.s-sec{margin:30px 0 12px;font-size:13px;line-height:1.4}
+.s-sec .t{color:var(--accent);font-weight:600;letter-spacing:.3px}
+.s-sec .d{color:var(--muted);font-weight:400;font-size:12px}
+.s-cap{color:var(--muted);font-size:11.5px;margin-top:11px;line-height:1.62;max-width:82ch}
+.s-cap b{color:var(--text);font-weight:600}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+@media (max-width:760px){.two{grid-template-columns:1fr}}
+
+/* ── app classes, copied from styles.css ── */
+.dm-log{padding:12px 14px 8px;display:flex;flex-direction:column;gap:8px;background:var(--panel);border:1px solid var(--border);border-radius:10px}
+.dm-msg{max-width:78%;min-width:0;position:relative;display:flex;flex-direction:column;align-items:flex-start}
+.dm-msg.out{align-self:flex-end;align-items:flex-end}
+.dm-meta{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin:0 0 3px}
+.dm-b{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:8px 11px;font-size:13px;line-height:1.5;border-bottom-left-radius:5px;overflow-wrap:anywhere}
+.dm-msg.out .dm-b{background:rgba(227,165,60,.07);border-color:rgba(227,165,60,.32);border-bottom-left-radius:12px;border-bottom-right-radius:5px}
+.dm-tk{display:flex;align-items:center;gap:12px;margin-top:7px;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);cursor:pointer;min-width:280px}
+.dm-tk:hover{border-color:var(--accent-dim)}
+.dm-tk-s{font-family:var(--mono);font-weight:600;font-size:13px}
+.dm-tk-m{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:2px}
+.dm-tk-d{margin-left:auto;font-family:var(--mono);font-size:14px;font-weight:600}
+.dm-dir{font-family:var(--mono);font-size:9px;letter-spacing:.5px;text-transform:uppercase;margin-left:6px;padding:1px 5px;border:1px solid currentColor;border-radius:3px;vertical-align:1px}
+.dm-tool{background:none;border:none;color:var(--muted);font-family:var(--mono);font-size:9.5px;cursor:pointer;padding:0;text-decoration:underline}
+.dm-tool:hover{color:var(--accent)}
+.dm-cmp{border-top:1px solid var(--border);padding:11px 14px;display:flex;gap:9px;align-items:flex-end;margin-top:8px}
+.dm-cmp textarea{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-family:var(--disp);font-size:13px;color:var(--text);min-height:38px;resize:vertical}
+.dm-cmp textarea:focus{outline:none;border-color:var(--accent-dim)}
+.btn{background:var(--panel2);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:11px;padding:6px 11px;border-radius:6px;cursor:pointer}
+.btn.primary{background:var(--accent);color:#1a1205;border-color:var(--accent);font-weight:600}
+.dm-stamppv{font-family:var(--mono);font-size:11px;color:var(--muted);padding:6px 14px 0}
+.dm-stamppv b{color:var(--text)}
+.mk-chip{font-family:var(--mono);font-size:10px;color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:1px 6px}
+.dm-callrow{display:grid;grid-template-columns:64px 1fr auto 96px 64px 64px 56px 150px;gap:10px;align-items:center;padding:7px 0;border-bottom:1px solid var(--grid);font-size:12.5px;font-family:var(--mono)}
+.dm-callrow:hover{background:var(--panel2)}
+.dm-callhead{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);font-weight:600}
+.dm-callsum{display:flex;gap:12px;align-items:center;padding:6px 8px;border:1px solid var(--border);border-radius:8px;font-family:var(--mono);font-size:11.5px;margin-bottom:8px;background:var(--panel2)}
+.dm-callsum .grow{flex:1;font-weight:600;font-family:var(--disp);font-size:13px}
+
+/* ════════════════════════════════════════════════════════════════════════
+   NEW — everything below this line is the feature's own CSS proposal.
+   ════════════════════════════════════════════════════════════════════════ */
+
+/* ── the target row under a stamp: where it is going, by when, and how far along.
+      The bar is the PRICE progress (sent → target), the tick under it is the TIME used:
+      the two together are the whole question — is it ahead of its clock or behind it. ── */
+.tg{margin-top:6px;padding-top:6px;border-top:1px dashed var(--border);font-family:var(--mono);font-size:10.5px;color:var(--muted);min-width:280px}
+.tg-h{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.tg-h .arrow{color:var(--accent)}
+.tg-h b{color:var(--text)}
+.tg-h .st{margin-left:auto;font-size:9px;letter-spacing:.5px;text-transform:uppercase;padding:1px 6px;border-radius:3px;border:1px solid currentColor}
+.tg-h .st.open{color:var(--blue)} .tg-h .st.hit{color:var(--up)} .tg-h .st.miss{color:var(--down)} .tg-h .st.inv{color:var(--down)} .tg-h .st.early{color:var(--muted)}
+.tg-bar{position:relative;height:6px;border-radius:3px;background:var(--grid);margin:6px 0 3px;overflow:visible}
+.tg-bar .fill{position:absolute;left:0;top:0;bottom:0;border-radius:3px;background:var(--up);transition:width .3s}
+.tg-bar .fill.neg{background:var(--down)}   /* the wrong way: the same bar, painted red, sized by how far against */
+.tg-bar .stop{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--down);opacity:.7}
+.tg-bar .clock{position:absolute;top:8px;width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid var(--faint);transform:translateX(-50%)}
+.tg-f{display:flex;gap:10px;flex-wrap:wrap;font-size:10.5px}
+.tg-f .grow{flex:1}
+.tg-f .pace.ahead{color:var(--up)} .tg-f .pace.behind{color:var(--down)}
+/* the composer's target chip: the sentence the grammar understood, with the numbers it will store */
+.tg-pv{display:inline-flex;align-items:center;gap:8px;margin-left:10px;padding:2px 8px;border:1px solid var(--accent-dim);border-radius:5px;color:var(--text)}
+.tg-pv .k{color:var(--muted)}
+.tg-pv.err{border-color:rgba(229,96,77,.5);color:var(--down)}
+/* the board's target column */
+.dm-calltg{font-size:11px;white-space:nowrap}
+.dm-calltg .mini{display:inline-block;width:46px;height:4px;border-radius:2px;background:var(--grid);vertical-align:middle;margin-right:5px;position:relative;overflow:hidden}
+.dm-calltg .mini i{position:absolute;left:0;top:0;bottom:0;background:var(--up)}
+.dm-calltg .mini i.neg{background:var(--down)}
+/* the phone */
+.phone{width:min(100%,360px);background:#111;border:1px solid #2a2a2a;border-radius:22px;padding:16px 12px;margin:0 auto}
+.tgb{background:#1f2a35;border-radius:12px 12px 12px 3px;padding:8px 10px;font-family:system-ui,sans-serif;font-size:13px;line-height:1.45;color:#e8e8e8;margin-bottom:8px}
+.tgb pre{font-family:var(--mono);font-size:11px;margin:4px 0 0;white-space:pre-wrap;color:#dfe6ee}
+.tgb .t{display:block;text-align:right;font-size:10px;color:#8a98a8;margin-top:3px}
+/* the clock slider */
+.clockrow{display:flex;align-items:center;gap:12px;font-family:var(--mono);font-size:11px;color:var(--muted);margin:0 0 12px}
+.clockrow input{flex:1;accent-color:var(--accent)}
+.clockrow b{color:var(--text);min-width:120px}
+.spec{border:1px solid var(--border);border-radius:10px;background:var(--panel);padding:14px 16px}
+.spec pre{font-family:var(--mono);font-size:11.5px;line-height:1.55;margin:0;overflow-x:auto;color:var(--text)}
+.spec pre .c{color:var(--faint)} .spec pre .k{color:var(--accent)}
+ul.pts{margin:0;padding-left:18px;color:var(--muted);font-size:12.5px;line-height:1.7;max-width:86ch}
+ul.pts li b{color:var(--text)}
+ul.pts li code{font-family:var(--mono);font-size:11px;color:var(--text);background:var(--panel2);padding:1px 5px;border-radius:3px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="mockhd">
+  <p class="eyebrow">Design mock · messages × calls</p>
+  <h1>Call targets: "INTC to 32 by Oct 15", tracked to the day it resolves</h1>
+  <p class="lede">A call today is a direction and a horizon: it closes when the clock runs out. A <b>target</b> is a stronger claim — a price <b>and</b> a date — and it resolves on whichever comes first: the mark reaches the level (<b>hit</b>), the date passes (<b>miss</b>), or an optional invalidation level prints first (<b>wrong</b>). The stamp grows a progress row that answers the only question anyone asks about a target: how far along is it, and is it ahead of its clock or behind it.</p>
+  <p style="margin:14px 0 0"><span class="mockchip">◆ mock · synthetic prices, nothing is wired to live data</span></p>
+</div>
+
+<div class="s-sec"><span class="t">1 · Writing one</span> &nbsp;<span class="d">the composer — the grammar is a sentence, the preview shows what it understood</span></div>
+<p class="hint">Edit the message · the preview chip re-parses as you type · try <kbd>$INTC to 32 by Oct 15</kbd> · <kbd>$INTC 32 in 3w</kbd> · <kbd>short $TSLA to 300 by 10/31 unless 360</kbd> · <kbd>$BTC 120k by year end</kbd></p>
+<div class="frame">
+  <div class="dm-log" style="padding:0;gap:0">
+    <div class="dm-stamppv" id="pv"></div>
+    <div class="dm-cmp"><textarea id="ta" rows="2">I think $INTC goes to 32 by Oct 15, wrong under 27</textarea><button class="btn primary">send</button></div>
+  </div>
+  <p class="s-cap"><b>What the grammar takes.</b> A ticker, then <b>to</b> / <b>→</b> / nothing, a price (<code>32</code>, <code>$32.50</code>, <code>120k</code>), then a deadline: <b>by</b> a date (<code>Oct 15</code>, <code>10/15</code>, <code>2026-10-15</code>, <code>Friday</code>, <code>year end</code>) or <b>in</b> a span (<code>3w</code>, <code>10d</code>, <code>2 months</code>). An optional <b>unless</b> / <b>wrong under</b> / <b>stop</b> level. Direction is inferred from the target (above the mark = long, below = short) and the existing <code>short</code> words still win. Anything the grammar cannot read stays a plain call with the 7-day horizon — never a wrong target.</p>
+</div>
+
+<div class="s-sec"><span class="t">2 · In the conversation</span> &nbsp;<span class="d">the stamp grows a target row — drag the clock to watch four targets resolve</span></div>
+<div class="frame">
+  <div class="clockrow"><span>days since sent</span><input type="range" id="clock" min="0" max="30" value="6"><b id="clocklbl">day 6</b></div>
+  <div class="dm-log" id="log"></div>
+  <p class="s-cap"><b>Reading the row.</b> The bar is <b>price progress</b> from the sent mark to the target (red and leftward when the mark went the wrong way); the small triangle under it is <b>time used</b>. Bar ahead of the triangle: ahead of its clock. A red tick on the bar is the invalidation level. The right-hand number stays the raw move since sent, exactly as a plain call; the status pill says what the target did: <b>open</b>, <b>hit</b> (with how early), <b>missed</b> (with how close it got), <b>wrong</b> (the stop printed first), or <b>closed early</b> by the author.</p>
+</div>
+
+<div class="s-sec"><span class="t">3 · The calls board</span> &nbsp;<span class="d">a target column, and a record that can finally be binary</span></div>
+<div class="frame still">
+  <div class="dm-callsum"><span class="grow">MilstG</span><span class="sec">4 closed · 2 open</span><span class="pos">75% right</span><span class="pos">avg +6.2%</span><span class="sec" title="targets resolved: hit / miss / wrong">targets 2 / 1 / 0</span><span class="sec">median time to hit 9d</span></div>
+  <div class="dm-callsum"><span class="grow">Taladro</span><span class="sec">3 closed · 1 open</span><span class="neg">33% right</span><span class="neg">avg −1.1%</span><span class="sec">targets 0 / 2 / 1</span></div>
+  <div class="dm-callrow dm-callhead"><span>call</span><span>message</span><span>who · when</span><span>status</span><span>sent</span><span>now / close</span><span>move</span><span>target</span></div>
+  <div class="dm-callrow"><span><span class="pos">▲</span> INTC</span><span>I think $INTC goes to 32 by Oct 15…</span><span class="sec">MilstG · DM · 2d ago</span><span class="pos">open · 23d</span><span>28.90</span><span>30.10</span><span class="pos">+4.2%</span><span class="dm-calltg"><span class="mini"><i style="width:39%"></i></span>32 by 10/15 · 39%</span></div>
+  <div class="dm-callrow"><span><span class="pos">▲</span> HOOD</span><span>$HOOD 125 in 2w</span><span class="sec">MilstG · #desk · 11d ago</span><span class="pos">hit ✓ · 3d early</span><span>113.90</span><span>125.00</span><span class="pos">+9.7%</span><span class="dm-calltg"><span class="mini"><i style="width:100%"></i></span>125 · hit 10/01</span></div>
+  <div class="dm-callrow"><span><span class="neg">▼</span> TSLA</span><span>short $TSLA to 300 by 10/31 unless 360</span><span class="sec">Taladro · #desk · 9d ago</span><span class="neg">wrong ✗</span><span>341.55</span><span>360.20</span><span class="neg">+5.5%</span><span class="dm-calltg"><span class="mini"><i class="neg" style="width:45%"></i></span>300 · stop 360 hit</span></div>
+  <div class="dm-callrow"><span><span class="pos">▲</span> BE</span><span>$BE 36 by Sep 19</span><span class="sec">Taladro · DM · 14d ago</span><span class="sec">missed · got 71% there</span><span>31.00</span><span>34.55</span><span class="pos">+11.5%</span><span class="dm-calltg"><span class="mini"><i style="width:71%"></i></span>36 by 09/19 · 71%</span></div>
+  <p class="s-cap"><b>Two records, honestly separated.</b> The % record stays what it is today (was the direction right at the close, and by how much). Targets add a second, <b>binary</b> record — hit / miss / wrong — that a plain call cannot have, because it never said where it was going. A missed target that got 71% of the way is still a miss on the binary record and still +11.5% on the move record; both are true, and the board says both. Median time-to-hit is the number nobody has today and everybody would use.</p>
+</div>
+
+<div class="s-sec"><span class="t">4 · Where it fires</span> &nbsp;<span class="d">the conversation, the phone, the digest</span></div>
+<div class="frame still">
+  <div class="two">
+    <div>
+      <div class="dm-log">
+        <div class="dm-msg"><div class="dm-meta"><b style="color:#E3A53C">MilstG</b> · 10:42 · <span class="mk-chip">target</span></div>
+          <div class="dm-b">🎯 <b>$HOOD hit 125</b> — target reached 3 days early · sent 113.90 on Sep 18, +9.7% · <span class="sec">the call closed at the target</span></div></div>
+        <div class="dm-msg"><div class="dm-meta"><b style="color:#46B97E">Taladro</b> · 16:00 · <span class="mk-chip">target</span></div>
+          <div class="dm-b">✗ <b>$TSLA short wrong</b> — 360 printed before 300 · sent 341.55 on Sep 13 · <span class="sec">closed at the stop, +5.5% against</span></div></div>
+        <div class="dm-msg"><div class="dm-meta"><b style="color:#46B97E">Taladro</b> · 16:00 · <span class="mk-chip">target</span></div>
+          <div class="dm-b">⌛ <b>$BE missed 36</b> — the Sep 19 deadline passed at 34.55, 71% of the way · <span class="sec">closed at the deadline's close, +11.5%</span></div></div>
+      </div>
+      <p class="s-cap">A resolution posts <b>into the conversation the call was made in</b>, under the author's name, as a command result — the same road a bound <code>/alert</code> fire takes today, so a synced phone mirrors it and the digest nudges the rest. Nothing new on the wire.</p>
+    </div>
+    <div>
+      <div class="phone">
+        <div class="tgb"><b>MilstScreener</b><br><b>Desk digest</b> · 2026-09-22<pre>
+Targets · open
+▲ $INTC MilstG → 32 by 10/15 · 39% there · 23d left · ahead
+▼ $NVDA Taladro → 165 by 10/03 · 12% there · 11d left · behind
+
+Resolved this week
+✓ $HOOD 125 hit 3d early · ✗ $TSLA stop 360 · ⌛ $BE missed 36 (71%)
+
+Record · last 30d
+MilstG 4 closed · 75% right · targets 2/1/0 · median hit 9d
+Taladro 3 closed · 33% right · targets 0/2/1</pre><span class="t">07:00</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="s-sec"><span class="t">5 · What this pins down</span></div>
+<div class="spec">
+<pre><span class="c">// three columns on the stamped row, beside callH / closedAt / closePx from the lifecycle</span>
+<span class="k">tgPx</span>    REAL      <span class="c">// the target level; direction follows from its side of refPx unless the words say otherwise</span>
+<span class="k">tgBy</span>    INTEGER   <span class="c">// the deadline: end of that day, in the member's timezone, stored as UTC ms</span>
+<span class="k">tgStop</span>  REAL      <span class="c">// optional invalidation level; NULL = none</span>
+<span class="k">tgRes</span>   TEXT      <span class="c">// 'hit' | 'miss' | 'wrong' | 'early', written ONCE by the resolver; NULL while open</span>
+<span class="k">tgAt</span>    INTEGER   <span class="c">// when it resolved; closePx is the price it resolved at (target, stop, or the deadline's close)</span>
+
+<span class="c">// resolution, checked on the 5-minute bars the level scanner already reads (and the daily close for the deadline):</span>
+<span class="c">//   hit   — a bar's high (long) / low (short) reaches tgPx before tgBy and before tgStop ever prints</span>
+<span class="c">//   wrong — a bar reaches tgStop first</span>
+<span class="c">//   miss  — the daily close of tgBy prints with neither touched; closePx = that close</span>
+<span class="c">//   early — the author closed it (the lifecycle's close), closePx = the live mark</span>
+<span class="c">// progress (client, live): (mark − refPx) / (tgPx − refPx), clamped to [−1, 1]; time used: (now − ts) / (tgBy − ts)</span></pre>
+</div>
+<ul class="pts" style="margin-top:12px">
+  <li><b>A target is a call with more said.</b> Same row, same stamp, same record; the lifecycle's horizon becomes the deadline, and the horizon close becomes the deadline close. Nothing about plain calls changes.</li>
+  <li><b>Hits are intraday, misses are at the close.</b> A target is a level, and levels are touched, not closed through: the 5-minute bars the level alerts already scan decide a hit or a stop. The deadline is a date, and dates end at the close. Both rules are the ones a trader would state unprompted.</li>
+  <li><b>The resolver is the level scanner.</b> A target registers the same way a stamp's ⚑ alert does today (a bound rule at the level), so a hit fires through the alert engine into the conversation with no second scanner. The deadline check rides the daily-close tick that prints the 7d horizons.</li>
+  <li><b>The record grows a second column, it does not replace one.</b> hit / miss / wrong per person, median time-to-hit, and the plain % record beside them. A missed target is a miss and a +11.5% at the same time.</li>
+  <li><b>Extend and close early still work.</b> Extending a target moves its deadline; closing it early resolves it as "early" at the mark, which is neither a hit nor a miss — the binary record leaves it out.</li>
+</ul>
+
+<div class="s-sec"><span class="t">6 · What is missing before this ships</span></div>
+<ul class="pts">
+  <li><b>Touch or close for a hit.</b> The mock says intraday touch on 5-minute bars. A wick through the level for one bar is a hit under that rule; some desks would want a close through it. One switch per deployment, or a word in the grammar (<code>close above 32</code>).</li>
+  <li><b>Time zones for "by Oct 15".</b> The deadline is the end of that day in the author's zone (the alerts panel already knows it). A member with no zone set gets ET, and the stamp says which.</li>
+  <li><b>Crypto never closes.</b> The deadline close for a coin is the 00:00 UTC daily close the spine already keeps; hits work the same.</li>
+  <li><b>Editing.</b> A target's numbers are part of the stamp and stay immutable under an edit, exactly as the price stamp does today. Change the target by closing early and writing a new one.</li>
+  <li><b>Partial credit.</b> Deliberately none on the binary record. The % record already gives it.</li>
+</ul>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const MARK={INTC:28.90,HOOD:113.90,TSLA:341.55,BE:31.00,BTC:112400,NVDA:176.40};
+  const MON={jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11};
+  const now=new Date(2026,8,22);
+  // ── the grammar, as the client's stamp preview would run it ──
+  function parseTarget(text){
+    const m=/\$([A-Za-z][A-Za-z0-9.\-]{0,9})\b/.exec(text); if(!m) return {err:'no $TICKER'};
+    const tk=m[1].toUpperCase(), mark=MARK[tk]; if(!mark) return {err:'no market called '+tk+' on the board'};
+    const rest=text.slice(m.index+m[0].length);
+    const px=/^\s*(?:goes\s+to|to|→|->|at)?\s*\$?(\d+(?:\.\d+)?)\s*(k)?\b/i.exec(rest); if(!px) return {tk,mark,plain:true};
+    const target=+px[1]*(px[2]?1000:1);
+    let by=null, byTxt='';
+    const after=rest.slice(px.index+px[0].length);
+    let d=/\bby\s+(year\s*end|friday|monday|(\d{4})-(\d{2})-(\d{2})|(\d{1,2})\/(\d{1,2})|([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2}))/i.exec(after);
+    if(d){
+      if(/year/i.test(d[1])) by=new Date(2026,11,31);
+      else if(/friday/i.test(d[1])){ by=new Date(now); by.setDate(now.getDate()+((5-now.getDay()+7)%7||7)); }
+      else if(/monday/i.test(d[1])){ by=new Date(now); by.setDate(now.getDate()+((1-now.getDay()+7)%7||7)); }
+      else if(d[2]) by=new Date(+d[2],+d[3]-1,+d[4]);
+      else if(d[5]) by=new Date(2026,+d[5]-1,+d[6]);
+      else if(d[7]&&MON[d[7].toLowerCase()]!=null) by=new Date(2026,MON[d[7].toLowerCase()],+d[8]);
+    } else {
+      const sp=/\bin\s+(\d+)\s*(d|days?|w|weeks?|m|months?)\b/i.exec(after);
+      if(sp){ const n=+sp[1], u=sp[2][0].toLowerCase(); by=new Date(now); if(u==='d') by.setDate(now.getDate()+n); else if(u==='w') by.setDate(now.getDate()+7*n); else by.setMonth(now.getMonth()+n); }
+    }
+    if(!by) return {tk,mark,target,err:'a target needs a deadline: by Oct 15 · in 3w'};
+    if(by<=now) return {tk,mark,target,err:'that deadline has already passed'};
+    byTxt=by.toLocaleDateString('en-US',{month:'short',day:'numeric'});
+    const st=/\b(?:unless|wrong\s+(?:under|over|above|below)|stop|invalid(?:ated)?\s+(?:under|over|above|below))\s+\$?(\d+(?:\.\d+)?)\s*(k)?/i.exec(after);
+    const stop=st?+st[1]*(st[2]?1000:1):null;
+    const shortWord=/\b(short|sell|fade|puts)\b/i.test(text);
+    const side=shortWord?'short':(target<mark?'short':'long');
+    if((side==='long'&&target<=mark)||(side==='short'&&target>=mark)) return {tk,mark,target,err:side+' to '+target+' is behind the mark ('+mark+')'};
+    if(stop!=null&&((side==='long'&&stop>=mark)||(side==='short'&&stop<=mark))) return {tk,mark,target,err:'the stop sits on the wrong side of the mark'};
+    const days=Math.round((by-now)/86400e3);
+    return {tk,mark,target,by,byTxt,days,stop,side,need:(target/mark-1)*100};
+  }
+  function preview(){
+    const r=parseTarget($('ta').value);
+    if(r.err&&!r.tk){ $('pv').innerHTML='<span class="sec">'+esc(r.err)+'</span>'; return; }
+    if(r.plain){ $('pv').innerHTML='will stamp <b>'+esc(r.tk)+'</b> at <b>'+r.mark+'</b> as <b class="pos">long</b> <span class="sec">· plain call, 7d horizon — add "to 32 by Oct 15" for a target</span>'; return; }
+    if(r.err){ $('pv').innerHTML='will stamp <b>'+esc(r.tk)+'</b> at <b>'+r.mark+'</b> <span class="tg-pv err">'+esc(r.err)+'</span>'; return; }
+    $('pv').innerHTML='will stamp <b>'+esc(r.tk)+'</b> at <b>'+r.mark+'</b> as <b class="'+(r.side==='short'?'neg':'pos')+'">'+r.side+'</b>'
+      +'<span class="tg-pv"><span class="k">target</span><b>'+r.target+'</b><span class="k">'+(r.need>=0?'+':'')+r.need.toFixed(1)+'%</span><span class="k">by</span><b>'+esc(r.byTxt)+'</b><span class="k">'+r.days+'d</span>'
+      +(r.stop!=null?'<span class="k">wrong at</span><b>'+r.stop+'</b>':'')+'</span>';
+  }
+  $('ta').addEventListener('input',preview); preview();
+
+  // ── four synthetic targets under the clock ──
+  const T=[
+    {tk:'INTC',who:'MilstG',side:'long',sent:28.90,target:32,stop:27,days:23,body:'I think $INTC goes to 32 by Oct 15, wrong under 27',path:d=>28.90*(1+0.006*d+0.012*Math.sin(d/1.7))},
+    {tk:'HOOD',who:'MilstG',side:'long',sent:113.90,target:125,stop:null,days:14,body:'$HOOD 125 in 2w',path:d=>113.90*(1+0.011*d+0.006*Math.sin(d))},
+    {tk:'TSLA',who:'Taladro',side:'short',sent:341.55,target:300,stop:360,days:39,body:'short $TSLA to 300 by 10/31 unless 360',path:d=>341.55*(1+0.007*d-0.01*Math.sin(d/2))},
+    {tk:'BE',who:'Taladro',side:'long',sent:31.00,target:36,stop:null,days:8,body:'$BE 36 by Sep 19',path:d=>31.00*(1+0.02*Math.min(d,7)-0.004*Math.max(0,d-7))},
+  ];
+  const fmt=v=>String(+(+v).toPrecision(5));
+  function resolve(t,day){
+    // walk the days: the first bar through the stop or the target decides; the deadline decides last
+    let hitDay=null, stopDay=null;
+    for(let d=1; d<=day; d++){
+      const px=t.path(d);
+      const reached=t.side==='long'?px>=t.target:px<=t.target;
+      const stopped=t.stop!=null&&(t.side==='long'?px<=t.stop:px>=t.stop);
+      if(stopped&&stopDay==null&&hitDay==null) stopDay=d;
+      if(reached&&hitDay==null&&stopDay==null) hitDay=d;
+      if(stopDay!=null||hitDay!=null) break;
+    }
+    if(stopDay!=null&&stopDay<=t.days) return {res:'wrong',at:stopDay,px:t.stop};
+    if(hitDay!=null&&hitDay<=t.days) return {res:'hit',at:hitDay,px:t.target};
+    if(day>=t.days) return {res:'miss',at:t.days,px:t.path(t.days)};
+    return {res:'open',at:day,px:t.path(day)};
+  }
+  function row(t,day){
+    const r=resolve(t,day), px=r.px;
+    const raw=px/t.sent-1, adj=t.side==='short'?-raw:raw;
+    const prog=Math.max(-1,Math.min(1,(px-t.sent)/(t.target-t.sent)));
+    const used=Math.min(1,r.at/t.days);
+    const pace=r.res==='open'?(prog>=used?'ahead':'behind'):'';
+    const dateOf=d=>new Date(now.getTime()-(day-d)*86400e3).toLocaleDateString('en-US',{month:'short',day:'numeric'});
+    const pill=r.res==='open'?'<span class="st open">open</span>':r.res==='hit'?'<span class="st hit">hit · '+(t.days-r.at)+'d early</span>':r.res==='wrong'?'<span class="st inv">wrong · stop '+t.stop+'</span>':'<span class="st miss">missed · '+Math.round(Math.max(0,prog)*100)+'% there</span>';
+    const stopPos=t.stop!=null?Math.max(-1,Math.min(1,(t.stop-t.sent)/(t.target-t.sent))):null;
+    const foot=r.res==='open'
+      ?'<span>'+Math.round(Math.max(0,prog)*100)+'% there</span><span>'+(t.days-r.at)+'d left</span><span class="pace '+pace+'">'+pace+' of its clock</span><span class="grow"></span><span>needs '+(t.side==='long'?'+':'')+((t.target/px-1)*100).toFixed(1)+'% more</span>'
+      :'<span>resolved '+dateOf(r.at)+' at '+fmt(px)+'</span><span class="grow"></span><span>'+(r.res==='hit'?'closed at the target':r.res==='wrong'?'closed at the stop':'closed at the deadline’s close')+'</span>';
+    return '<div class="dm-msg'+(t.who==='MilstG'?' out':'')+'"><div class="dm-meta">'+(t.who==='MilstG'?'':'<b style="color:#46B97E">'+t.who+'</b> · ')+'day 0</div>'
+      +'<div class="dm-b">'+esc(t.body)
+      +'<div class="dm-tk"><div><div class="dm-tk-s">'+t.tk+'<span class="dm-dir '+(t.side==='short'?'neg':'pos')+'">'+t.side+'</span></div><div class="dm-tk-m">sent at '+fmt(t.sent)+' · '+(r.res==='open'?'now '+fmt(px):'closed at '+fmt(px))+'</div>'
+      +'<div class="tg"><div class="tg-h"><span class="arrow">→</span><b>'+t.target+'</b><span>by '+dateOf(t.days)+'</span>'+(t.stop!=null?'<span>· wrong at <b>'+t.stop+'</b></span>':'')+pill+'</div>'
+      +'<div class="tg-bar"><div class="fill'+(prog<0?' neg':'')+'" style="width:'+Math.round(Math.abs(prog)*100)+'%"></div>'+(stopPos!=null&&stopPos<0?'<div class="stop" style="left:0"></div>':'')+'<div class="clock" style="left:'+Math.round(used*100)+'%"></div></div>'
+      +'<div class="tg-f">'+foot+'</div></div></div>'
+      +'<span class="dm-tk-d '+(adj>0?'pos':adj<0?'neg':'sec')+'">'+(raw>0?'+':'')+(raw*100).toFixed(1)+'%</span></div></div></div>';
+  }
+  function paint(){ const day=+$('clock').value; $('clocklbl').textContent='day '+day+' · '+new Date(now.getTime()+(day-6)*86400e3).toLocaleDateString('en-US',{month:'short',day:'numeric'}); $('log').innerHTML=T.map(t=>row(t,day)).join(''); }
+  $('clock').addEventListener('input',paint); paint();
+})();
+</script>

@@ -659,3 +659,27 @@ test("dm: a card posts with a server-rendered body, an optional note behind it, 
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   assert.ok(/CLIENT_MODULES = \(\(\) => \{ try \{ return fs\.readdirSync/.test(srv), "modules are discovered from the directory, so share.js ships precompressed and stamped");
 });
+
+// ===== build 2026.09.22-88: closing and extending a call over the wire =========================
+test("dm: close and extend are the author's verbs on an open call; a stamp needs a live mark to close", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const cara = jar(); cara.absorb(await post("/login", { handle: "cara", password: "yet-another-long-pw" }));
+  const members = JSON.parse((await get("/api/access", gus)).body).members;
+  const gusUid = members.find((m) => m.handle === "gus").uid;
+  // No markets in this suite, so $NVDA never stamps: the verbs refuse a message that carries no call.
+  const plain = JSON.parse((await post("/api/dm", { to: gusUid, body: "long $NVDA 30d" }, cara)).body);
+  assert.ok(plain.ok && plain.message.ref === null && plain.message.call === null);
+  const noCall = await post("/api/dm", { callClose: plain.message.id }, cara);
+  assert.equal(noCall.statusCode, 400); assert.match(JSON.parse(noCall.body).error, /carries no call/);
+  const noCall2 = await post("/api/dm", { callExtend: plain.message.id, days: 14 }, cara);
+  assert.equal(noCall2.statusCode, 400);
+  const theirs = await post("/api/dm", { callClose: plain.message.id }, gus);
+  assert.equal(theirs.statusCode, 400); assert.match(JSON.parse(theirs.body).error, /isn.t your call/);
+  assert.equal((await post("/api/dm", { callClose: plain.message.id })).statusCode, 401);
+  // The calls board reports the lifecycle fields and the default horizon.
+  const board = JSON.parse((await get("/api/dm/calls", cara)).body);
+  assert.equal(board.defaultHorizonD, 7);
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(/ACCOUNTS\.calls\(uid, \{ limit: 100, windowMs: 30 \* 86400e3 \}\)/.test(srv), "the digest's record is the last 30 days of closed calls");
+  assert.ok(/r = ACCOUNTS\.callClose\(me\.uid, b\.callClose\); if \(r\.ok\) dmPoke\(r\.thread, \{ refresh: Number\(r\.thread\) \}\);/.test(srv), "a close tells the room to re-pull the row");
+});

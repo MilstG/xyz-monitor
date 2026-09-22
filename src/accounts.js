@@ -239,6 +239,9 @@ CREATE TABLE IF NOT EXISTS dm_msg (
   fileId TEXT,                     -- attachment, when the message carried one
   via TEXT,                        -- 'telegram' when it came in over the bridge, else NULL
   card TEXT,                       -- a shared screener card (JSON, validated by compute.validateCard); body holds its text rendering
+  callH INTEGER,                   -- a call's horizon in ms (NULL = the 7d default); the author may extend it while open
+  closedAt INTEGER,                -- an EARLY close by the author, at closePx; otherwise a call closes at its horizon's daily close
+  closePx REAL,
   pinnedAt INTEGER,                -- a desk channel wants the current levels at the top
   pinnedBy TEXT,
   replyTo INTEGER,                 -- quoted message id, same thread — threading without threads
@@ -354,7 +357,7 @@ CREATE TABLE IF NOT EXISTS dm_webpush (
   const ADDED_COLUMNS = {
     dm_thread: [["kind", "TEXT NOT NULL DEFAULT 'dm'"], ["pairKey", "TEXT"], ["title", "TEXT"], ["createdBy", "TEXT"]],
     dm_msg: [["sys", "TEXT"], ["fileId", "TEXT"], ["via", "TEXT"], ["pinnedAt", "INTEGER"], ["pinnedBy", "TEXT"], ["replyTo", "INTEGER"], ["side", "TEXT"],
-      ["cmd", "TEXT"], ["cmdAi", "INTEGER"], ["card", "TEXT"]],
+      ["cmd", "TEXT"], ["cmdAi", "INTEGER"], ["card", "TEXT"], ["callH", "INTEGER"], ["closedAt", "INTEGER"], ["closePx", "REAL"]],
     dm_read: [["hiddenUpTo", "INTEGER NOT NULL DEFAULT 0"], ["clearedUpTo", "INTEGER NOT NULL DEFAULT 0"],
       ["boardNotify", "INTEGER NOT NULL DEFAULT 0"], ["tgSync", "INTEGER NOT NULL DEFAULT 0"]],
   };
@@ -437,7 +440,9 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     memAll: db.prepare("SELECT * FROM dm_member WHERE thread = ?"),
     memLeave: db.prepare("UPDATE dm_member SET leftAt = ? WHERE thread = ? AND uid = ? AND leftAt IS NULL"),
 
-    msgIns: db.prepare("INSERT INTO dm_msg (thread, sender, ts, body, ref, refPx, side, sys, fileId, via, replyTo, cmd, cmdAi, card) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"),
+    msgIns: db.prepare("INSERT INTO dm_msg (thread, sender, ts, body, ref, refPx, side, sys, fileId, via, replyTo, cmd, cmdAi, card, callH) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"),
+    callSetH: db.prepare("UPDATE dm_msg SET callH = ? WHERE id = ? AND sender = ?"),
+    callClose: db.prepare("UPDATE dm_msg SET closedAt = ?, closePx = ? WHERE id = ? AND sender = ? AND closedAt IS NULL"),
     msgById: db.prepare("SELECT * FROM dm_msg WHERE id = ?"),
     msgEdit: db.prepare("UPDATE dm_msg SET body = ?, ref = ?, editedAt = ? WHERE id = ? AND sender = ? AND deletedAt IS NULL"),
     msgDrop: db.prepare("UPDATE dm_msg SET deletedAt = ?, body = '', fileId = NULL, card = NULL WHERE id = ? AND sender = ?"),
@@ -1094,7 +1099,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   // way for the membership story to drift from the message history.
   function sysMessage(threadId, actor, kind, detail) {
     const now = Date.now();
-    const id = Number(S.msgIns.run(+threadId, actor || "", now, String(detail || ""), null, null, null, kind, null, null, null, null, null, null).lastInsertRowid);
+    const id = Number(S.msgIns.run(+threadId, actor || "", now, String(detail || ""), null, null, null, kind, null, null, null, null, null, null, null).lastInsertRowid);
     S.thrTouch.run(id, now, +threadId);
     return id;
   }
@@ -1338,6 +1343,70 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       ref: gone ? null : (q.ref || null), deleted: gone };
   }
   const cardParse = (j) => { try { const c = JSON.parse(j); return c && typeof c === "object" ? c : null; } catch (_) { return null; } };
+  // ---- the call lifecycle (build 2026.09.22-88) ----------------------------------------------------
+  // A call is open from the moment it is stamped until its HORIZON — seven days by default, or the
+  // number of days written after the ticker ("$HOOD 30d") — at which point the first daily close
+  // at or past the horizon becomes its final score and it stops moving with the mark. The author
+  // may close it early at the live mark, or extend it while it is still open. Before this, a call
+  // was scored live forever and the record read as a lifetime of moving numbers.
+  const CALL_DAY = 86400e3, CALL_DEFAULT_H = 7 * CALL_DAY, CALL_MAX_D = 365;
+  const callHorizonOf = (m) => (m.callH > 0 ? m.callH : CALL_DEFAULT_H);
+  // "$HOOD 30d" → 30 days; only when the word sits right after the ticker, so "$HOOD ran 3d in a
+  // row" stays prose. Bounded: a horizon past a year is a thesis, not a call.
+  function callHorizonFromText(text, sym) {
+    const re = new RegExp("\\$" + String(sym).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s+(\\d{1,3})d\\b", "i");
+    const m = re.exec(String(text || ""));
+    if (!m) return null;
+    const d = +m[1];
+    return d >= 1 && d <= CALL_MAX_D ? d * CALL_DAY : null;
+  }
+  // The state of one stamped row, decided at read: closed early (closedAt/closePx on the row), or
+  // closed at the horizon once that daily close has printed, or open with the close still ahead.
+  function callState(m) {
+    if (!m || !m.ref || !(m.refPx > 0)) return null;
+    const h = callHorizonOf(m), hzTs = m.ts + h;
+    if (m.closedAt) return { closed: true, early: true, closeTs: m.closedAt, closePx: m.closePx > 0 ? m.closePx : null, horizonMs: h };
+    const p = pxHistory(m.ref, hzTs);
+    if (p != null && isFinite(p) && p > 0) return { closed: true, early: false, closeTs: hzTs, closePx: p, horizonMs: h };
+    return { closed: false, early: false, closeTs: hzTs, closePx: null, horizonMs: h };
+  }
+  const callAdj = (m, px) => (px > 0 && m.refPx > 0 ? ((m.side === "short" ? -1 : 1) * (px / m.refPx - 1)) : null);
+  function callWire(m) {
+    const st = callState(m);
+    if (!st) return null;
+    return { h: Math.round(st.horizonMs / CALL_DAY), closed: st.closed, early: st.early, closeTs: st.closeTs, closePx: st.closePx,
+      final: st.closed ? callAdj(m, st.closePx) : null };
+  }
+  function callClose(uid, id) {
+    const m = S.msgById.get(+id);
+    if (!m || m.sender !== uid) return { ok: false, error: "that isn't your call" };
+    if (!m.ref || !(m.refPx > 0)) return { ok: false, error: "that message carries no call" };
+    if (m.deletedAt) return { ok: false, error: "that message was deleted — its call runs to its horizon" };
+    const st = callState(m);
+    if (st.closed) return { ok: false, error: st.early ? "already closed" : "that call closed at its horizon" };
+    const px = markFor(m.ref);
+    if (!(px > 0)) return { ok: false, error: "no live mark for " + m.ref + " right now" };
+    S.callClose.run(Date.now(), px, +id, uid);
+    return { ok: true, thread: m.thread, message: wire(S.msgById.get(+id), uid) };
+  }
+  function callExtend(uid, id, days) {
+    const m = S.msgById.get(+id);
+    if (!m || m.sender !== uid) return { ok: false, error: "that isn't your call" };
+    if (!m.ref || !(m.refPx > 0)) return { ok: false, error: "that message carries no call" };
+    if (m.deletedAt) return { ok: false, error: "that message was deleted — its call runs to its horizon" };
+    const d = Math.trunc(+days);
+    if (!(d >= 1 && d <= CALL_MAX_D)) return { ok: false, error: "a horizon is 1 to " + CALL_MAX_D + " days" };
+    const st = callState(m);
+    if (st.closed) return { ok: false, error: st.early ? "already closed" : "that call closed at its horizon" };
+    // Extend means extend: a shorter horizon would re-score the call against a close it has
+    // already lived past. Shortening is what "close early" is for.
+    if (d * CALL_DAY <= st.horizonMs) return { ok: false, error: "that is not longer than the current " + Math.round(st.horizonMs / CALL_DAY) + "-day horizon" };
+    const hzTs = m.ts + d * CALL_DAY;
+    const p = pxHistory(m.ref, hzTs);
+    if (p != null && isFinite(p) && p > 0) return { ok: false, error: "a " + d + "-day horizon has already passed for this call" };
+    S.callSetH.run(d * CALL_DAY, +id, uid);
+    return { ok: true, thread: m.thread, message: wire(S.msgById.get(+id), uid) };
+  }
   function wire(m, uid) {
     return { id: m.id, thread: m.thread, mine: m.sender === uid,
       replyTo: m.replyTo || null, reply: m.replyTo ? replyPreview(m.replyTo, uid) : null,
@@ -1357,6 +1426,9 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       // A shared screener card (build 2026.09.21-84): the client renders it from the JSON; the
       // body is its text rendering, which is what search, export and the phone read.
       card: (m.deletedAt || !m.card) ? null : cardParse(m.card),
+      // The call's lifecycle: horizon in days, open or closed (early or at the horizon), the
+      // close price and the final direction-adjusted result. Survives a delete: the stamp stands.
+      call: m.ref ? callWire(m) : null,
       file: m.deletedAt ? null : fileWire(m.fileId),
       reactions: m.deletedAt ? null : reactionsOf(m.id, uid) };
   }
@@ -1421,7 +1493,8 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       if (rm && rm.thread === t.id && !rm.sys && !rm.deletedAt) replyTo = rm.id;
     }
     const now = Date.now();
-    const id = Number(S.msgIns.run(t.id, fromUid, now, text, ref, refPx, side, null, file ? file.id : null, o.via || null, replyTo, cmd, cmdAi, cardJson).lastInsertRowid);
+    const callH = ref && sym ? callHorizonFromText(text, sym) : null;
+    const id = Number(S.msgIns.run(t.id, fromUid, now, text, ref, refPx, side, null, file ? file.id : null, o.via || null, replyTo, cmd, cmdAi, cardJson, callH).lastInsertRowid);
     S.thrTouch.run(id, now, t.id);
     S.readUp.run(t.id, fromUid, id);            // your own message is read by definition
     return { ok: true, id, thread: t.id, message: wire(S.msgById.get(id), fromUid) };
@@ -1814,14 +1887,21 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
         const p = pxHistory(m.ref, m.ts + msFwd);
         return p != null && isFinite(p) && p > 0 ? p / at - 1 : null; };
       const chg1 = hz(DAY), chg7 = hz(7 * DAY);
+      // Lifecycle: an open call moves with the mark; a closed one is frozen at its close price,
+      // and `chg`/`adj`/`px` read that close, so the row and the record stop drifting.
+      const st = has ? callState(m) : null;
+      const closed = !!(st && st.closed), endPx = closed ? st.closePx : (ok ? live : null);
+      const chgNow = endPx > 0 ? endPx / at - 1 : null;
       out.push({
         id: m.id, thread: m.thread, ts: m.ts,
         senderUid: m.sender, sender: (users.get(m.sender) || {}).display || "—",
         threadName: t ? threadName(t, uid) : "—", kind: t ? t.kind : "dm",
         body: m.deletedAt ? "" : m.body, deleted: !!m.deletedAt,
-        ref: m.ref, refPx: has ? at : null, px: ok ? live : null, side,
-        chg: ok ? live / at - 1 : null, adj: adjOf(ok ? live / at - 1 : null),
+        ref: m.ref, refPx: has ? at : null, px: endPx > 0 ? endPx : null, livePx: ok ? live : null, side,
+        chg: chgNow, adj: adjOf(chgNow),
         chg1, adj1: adjOf(chg1), chg7, adj7: adjOf(chg7),
+        closed, early: !!(st && st.early), closeTs: st ? st.closeTs : null, horizonD: st ? Math.round(st.horizonMs / DAY) : null,
+        ageMs: Date.now() - m.ts,
       });
     }
     // The summary is per person, because "who is right" is the only question a call record
@@ -1833,21 +1913,32 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     // "50% right, avg -0.2%" because both had dipped on their first daily close. A fixed horizon
     // is a fair yardstick for comparing people; it is not what "right" means to the person reading
     // the row, so it no longer replaces the live read — it sits next to it, labelled.
+    // The RECORD is the closed calls (build 2026.09.22-88): a call counts once it has closed,
+    // at its final result, inside `windowMs` when the caller gives one (the digest asks for the
+    // last 30 days; the board reads the lifetime). Open calls are counted, not scored — "running"
+    // is the honest word for a number that is still moving. The fixed 1d/7d yardsticks stay
+    // beside it over every call whose close has printed.
+    const winMs = Number.isFinite(+o.windowMs) && +o.windowMs > 0 ? +o.windowMs : null;
+    const nowTs = Date.now();
     const byWho = new Map();
     const tally = (e, k, v) => { if (v == null) return; const b = e[k]; b.n++; if (v > 0) b.up++; b.sum += v; };
     for (const c of out) {
-      if (c.adj == null && c.adj1 == null && c.adj7 == null) continue;
-      const e = byWho.get(c.senderUid) || { uid: c.senderUid, who: c.sender, live: { n: 0, up: 0, sum: 0 }, h1: { n: 0, up: 0, sum: 0 }, h7: { n: 0, up: 0, sum: 0 } };
-      tally(e, "live", c.adj); tally(e, "h1", c.adj1); tally(e, "h7", c.adj7);
+      const e = byWho.get(c.senderUid) || { uid: c.senderUid, who: c.sender, open: 0, closed: { n: 0, up: 0, sum: 0 }, best: null, worst: null, h1: { n: 0, up: 0, sum: 0 }, h7: { n: 0, up: 0, sum: 0 } };
+      if (c.closed && c.adj != null && (!winMs || c.closeTs >= nowTs - winMs)) {
+        tally(e, "closed", c.adj);
+        if (!e.best || c.adj > e.best.adj) e.best = { ref: c.ref, adj: c.adj };
+        if (!e.worst || c.adj < e.worst.adj) e.worst = { ref: c.ref, adj: c.adj };
+      } else if (!c.closed && c.refPx != null) e.open++;
+      tally(e, "h1", c.adj1); tally(e, "h7", c.adj7);
       byWho.set(c.senderUid, e);
     }
     const rec = (b) => (b.n ? { n: b.n, upPct: b.up / b.n, avg: b.sum / b.n } : null);
     const summary = [...byWho.values()].map((e) => {
-      const live = rec(e.live);
-      return { uid: e.uid, who: e.who, n: live ? live.n : 0, upPct: live ? live.upPct : null, avg: live ? live.avg : null,
-        h1: rec(e.h1), h7: rec(e.h7) };
-    }).sort((a, b) => b.n - a.n);
-    return { ok: true, calls: out, summary };
+      const cl = rec(e.closed);
+      return { uid: e.uid, who: e.who, open: e.open, n: cl ? cl.n : 0, upPct: cl ? cl.upPct : null, avg: cl ? cl.avg : null,
+        best: e.best, worst: e.worst, h1: rec(e.h1), h7: rec(e.h7) };
+    }).filter((e) => e.n || e.open).sort((a, b) => (b.n - a.n) || (b.open - a.open));
+    return { ok: true, calls: out, summary, windowMs: winMs, defaultHorizonD: CALL_DEFAULT_H / DAY };
   }
 
   // ---- export ---------------------------------------------------------------------------------------
@@ -2062,7 +2153,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     createGroup, addMembers, removeMember, leaveGroup, renameGroup, deleteGroup,
     createBoard, joinBoard, listBoards, setTweetSource,
     react, REACTIONS, putFile, readFile, removeFile, sweepFiles, sweepRetention, bridgeReply,
-    watchList, setWatch, pin, pinsOf, calls, exportThread,
+    watchList, setWatch, pin, pinsOf, calls, callClose, callExtend, exportThread,
     prefsGet, prefsPut,
     walletGet, walletSet, walletDrop, walletsAll,
     adminThreads, adminHistory, adminSearch, adminAuditLog,

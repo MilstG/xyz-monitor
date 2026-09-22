@@ -12963,43 +12963,72 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
   const dgEsc = (x) => String(x == null ? "" : x).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const dgPct = (v) => ((v == null || !isFinite(v)) ? "\u2014" : ((v >= 0 ? "+" : "") + (v * 100).toFixed(1) + "%"));
   const dgTk = (ref) => String(ref || "").split(":").pop();
+  // The digest (rewritten build 2026.09.22-88): open calls with their age, levels and close date;
+  // the calls that closed in the last week with their final result; the record over the last 30
+  // days of CLOSED calls per person; the newest signals with their side; earnings today; and the
+  // day's movers split by book. A section with nothing to say is absent, never a header alone.
+  const dgDay = (ts) => { try { return new Date(ts).toISOString().slice(5, 10).replace("-", "/"); } catch (_) { return ""; } };
+  const dgAge = (ms) => (ms < 3600e3 ? Math.max(1, Math.round(ms / 60e3)) + "m" : ms < 86400e3 ? Math.round(ms / 3600e3) + "h" : Math.round(ms / 86400e3) + "d");
+  const dgPx = (v) => (v == null || !isFinite(v) ? "\u2014" : String(+(+v).toPrecision(6)));
   function deskDigestText(owner, now) {
     const parts = ["<b>Desk digest</b> \u00b7 " + new Date(now).toISOString().slice(0, 10)];
     if (deskSource && owner) {
       let c = null; try { c = deskSource(owner); } catch (_) { c = null; }
-      if (c && c.ok && c.calls && c.calls.length) {
-        parts.push("");
-        parts.push("<b>Calls</b> (newest, direction-adjusted \u2014 positive means the call is right)");
-        for (const x of c.calls.slice(0, 6))
-          parts.push((x.side === "short" ? "\u25bc" : "\u25b2") + " $" + dgEsc(dgTk(x.ref)) + " " + dgEsc(x.sender)
-            + " \u00b7 " + dgPct(x.adj) + (x.adj1 != null ? " \u00b7 1d " + dgPct(x.adj1) : "")
-            + (x.adj7 != null ? " \u00b7 7d " + dgPct(x.adj7) : "") + (x.deleted ? " \u00b7 deleted" : ""));
-        for (const e of (c.summary || []).slice(0, 4))
-          parts.push(dgEsc(e.who) + ": " + e.n + " call" + (e.n === 1 ? "" : "s")
-            + (e.upPct != null ? " \u00b7 " + Math.round(e.upPct * 100) + "% right \u00b7 avg " + dgPct(e.avg) : "")
-            + (e.h7 ? " \u00b7 7d " + Math.round(e.h7.upPct * 100) + "% " + dgPct(e.h7.avg) : (e.h1 ? " \u00b7 1d " + Math.round(e.h1.upPct * 100) + "% " + dgPct(e.h1.avg) : "")));
+      if (c && c.ok && Array.isArray(c.calls) && c.calls.length) {
+        const glyph = (x) => (x.side === "short" ? "\u25bc" : "\u25b2");
+        const open = c.calls.filter((x) => !x.closed && x.refPx != null);
+        const closedWeek = c.calls.filter((x) => x.closed && x.closeTs != null && now - x.closeTs <= 7 * 86400e3 && x.adj != null);
+        if (open.length) {
+          parts.push("");
+          parts.push("<b>Open calls</b> \u00b7 live, direction-adjusted \u00b7 age \u00b7 sent \u2192 now");
+          for (const x of open.slice(0, 6))
+            parts.push(glyph(x) + " $" + dgEsc(dgTk(x.ref)) + " " + dgEsc(x.sender) + " \u00b7 " + dgPct(x.adj)
+              + " \u00b7 " + dgAge(x.ageMs != null ? x.ageMs : now - x.ts) + " \u00b7 " + dgPx(x.refPx) + " \u2192 " + dgPx(x.px)
+              + (x.closeTs ? " \u00b7 closes " + dgDay(x.closeTs) : "") + (x.deleted ? " \u00b7 deleted" : ""));
+          if (open.length > 6) parts.push("+" + (open.length - 6) + " more open");
+        }
+        if (closedWeek.length) {
+          parts.push("");
+          parts.push("<b>Closed this week</b> \u00b7 final" + (closedWeek.some((x) => x.early) ? " (\u2298 = closed early)" : ""));
+          parts.push(closedWeek.slice(0, 8).map((x) => glyph(x) + " $" + dgEsc(dgTk(x.ref)) + " " + dgEsc(x.sender) + " " + dgPct(x.adj) + (x.adj > 0 ? " \u2713" : x.adj < 0 ? " \u2717" : "") + (x.early ? " \u2298" : "")).join(" \u00b7 "));
+        }
+        const rec = (c.summary || []).filter((e) => e.n);
+        if (rec.length) {
+          parts.push("");
+          parts.push("<b>Record</b> \u00b7 calls closed in the last " + Math.round((c.windowMs || 30 * 86400e3) / 86400e3) + "d");
+          for (const e of rec.slice(0, 4))
+            parts.push(dgEsc(e.who) + " " + e.n + " \u00b7 " + Math.round(e.upPct * 100) + "% right \u00b7 avg " + dgPct(e.avg)
+              + (e.best ? " \u00b7 best $" + dgEsc(dgTk(e.best.ref)) + " " + dgPct(e.best.adj) : "")
+              + (e.open ? " \u00b7 " + e.open + " open" : ""));
+        }
       }
+    }
+    const sc = signalsCache;
+    if (sc && sc.count > 0) {
+      // A card's side lives on its claim (or its play, before a claim opens) — the same fields the
+      // Signals tab and the terminal read.
+      const sideOf = (g) => (g.claim0 && g.claim0.side) || (g.play && g.play.side) || g.psd || "";
+      const top = (sc.signals || []).slice(0, 3).map((g) => dgEsc(g.tk || g.ticker || g.coin || "?") + (sideOf(g) ? " " + dgEsc(sideOf(g)) : "") + (Number.isFinite(g.score) ? " " + Math.round(g.score) : "")).filter(Boolean);
+      parts.push(""); parts.push("<b>Signals</b> \u00b7 " + sc.count + " live" + (top.length ? " \u00b7 top: " + top.join(", ") : ""));
     }
     const ec = earnCache;
     if (ec && Array.isArray(ec.entries)) {
       const today = ec.entries.filter((e) => { try { return earnDayDiff(e.d, now) === 0; } catch (_) { return false; } });
       if (today.length) { parts.push("");
-        parts.push("<b>Earnings today</b>: " + today.slice(0, 10).map((e) => dgEsc(e.t) + (e.s ? " (" + dgEsc(e.s) + ")" : "")).join(", ")
+        parts.push("<b>Earnings today</b> \u00b7 " + today.slice(0, 10).map((e) => dgEsc(e.t) + (e.s ? " (" + dgEsc(e.s) + ")" : "")).join(", ")
           + (today.length > 10 ? " +" + (today.length - 10) + " more" : "")); }
-    }
-    const sc = signalsCache;
-    if (sc && sc.count > 0) {
-      const names = (sc.signals || []).slice(0, 3).map((g) => dgEsc(g.tk || g.ticker || g.coin || "?")).filter(Boolean);
-      parts.push(""); parts.push("<b>Signals live</b>: " + sc.count + (names.length ? " \u00b7 " + names.join(", ") : ""));
     }
     const sn = snapshotCache;
     if (sn && Array.isArray(sn.markets)) {
-      const rows2 = sn.markets.filter((m) => m.d1 != null && isFinite(m.d1) && m.ticker && !m.delisted);
-      if (rows2.length >= 6) {
+      const f1 = (m) => dgEsc(m.ticker) + " " + ((m.d1 >= 0 ? "+" : "") + (+m.d1).toFixed(1) + "%");
+      const book = (label, rows2) => {
+        if (rows2.length < 6) return "";
         const st = [...rows2].sort((a, b) => b.d1 - a.d1);
-        const f1 = (m) => dgEsc(m.ticker) + " " + ((m.d1 >= 0 ? "+" : "") + (+m.d1).toFixed(1) + "%");
-        parts.push(""); parts.push("<b>24h</b> \u00b7 " + st.slice(0, 3).map(f1).join(", ") + " \u00b7 " + st.slice(-3).reverse().map(f1).join(", "));
-      }
+        return label + " " + st.slice(0, 3).map(f1).join(", ") + " / " + st.slice(-3).reverse().map(f1).join(", ");
+      };
+      const ok = (m) => m.d1 != null && isFinite(m.d1) && m.ticker && !m.delisted;
+      const lines = [book("stocks", sn.markets.filter((m) => ok(m) && m.uni !== "main")), book("crypto", (sn.mainMarkets || sn.markets.filter((m) => m.uni === "main")).filter(ok))].filter(Boolean);
+      if (lines.length) { parts.push(""); parts.push("<b>24h</b> \u00b7 " + lines.join("\n")); }
     }
     return parts.join("\n");
   }
@@ -14762,6 +14791,9 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     pushEnqueueNow: (chat, text, force) => pushEnqueue(chat, text, !!force, 0),
     // The inbound half of the same wire: server.js installs the handler that turns /r into a message.
     setDmBridge: (fn) => { dmBridge = typeof fn === "function" ? fn : null; },
+    // harness: seed the caches the desk digest reads, without a poll
+    setSignalsCacheNow: (c) => { signalsCache = c; },
+    dailyCacheSetNow: (d) => { dailyCache = d; return dailyCache; },
     // Conversation-bound rules: the server installs the poster (build 2026.09.21-83), and unbinds
     // a rule whose author has left the conversation it was written in (thread 0 = personal).
     setRuleSink: (fn) => { ruleSink = typeof fn === "function" ? fn : null; },
@@ -14835,6 +14867,10 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       const dc = dailyCache; if (!dc || !dc.daily) return null;
       const arr = dc.daily[coin]; if (!arr || !arr.length) return null;
       const now = Date.now();
+      // The wire's daily series is a WINDOW (crypto ~92 bars, equities 370d): an instant before
+      // its first bar is not "the first bar", it is unknown. Answering with the oldest bar made
+      // an old call's "frozen" close roll forward every day as the window slid.
+      if (atTs < arr[0][0]) return null;
       for (const b of arr) {
         const closeAt = b[0] + DAY;
         if (closeAt >= atTs) { if (closeAt > now) return null; const c = +b[1]; return Number.isFinite(c) && c > 0 ? c : null; }
