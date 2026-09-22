@@ -45,12 +45,26 @@ function dmSignedIn(){ return !!(window.__ME && window.__ME.uid); }
 function dmUnreadTotal(){ return dmState.threads.reduce((a,t)=>a+((t.muted||t.hidden)?0:(t.unread||0)),0); }
 // Re-pull the open conversation's page — used by the 45s tick's cousin cases: a tweet card
 // landing, a jumped-to message needing fresh context.
+// A stamp's drift (`px`, the live mark) is derived on the server at READ time, never stored, so
+// the rows the client holds go stale the moment they land: the page has to be re-pulled for the
+// stamps to move. It is, every tick — but the fresh rows are patched IN PLACE, only where a stamp
+// or a card lives, rather than rebuilding the panel to move a percentage.
+async function dmRefreshStamps(){
+  const id=dmState.sel; if(!id||dmState.results||dmState.mode!=='chat'){ if(id&&state.view==='dm') dmRender(); return; }
+  const before=new Map(dmMsgs(id).map(m=>[m.id,JSON.stringify(m)]));
+  const d=await fetchJSON('/api/dm/'+encodeURIComponent(id));
+  if(!d||!d.ok||dmState.sel!==id) return;
+  const chg=dmMerge(d.messages);
+  if(d.info){ d.info.more=!!d.more; dmState.info.set(id,d.info); }
+  if(chg.added&&!dmAppend(chg.fresh)){ dmRender(); return; }
+  // Only the rows that actually changed are repainted: a stamp's drift, an edit, a reaction, a
+  // call closing — whatever it was, one bubble, in place.
+  const arr=dmMsgs(id);
+  for(const mid of chg.updated){ const m=arr.find(x=>x.id===mid); if(m&&before.get(mid)!==JSON.stringify(m)) dmPatchMsg(mid); }
+}
 async function dmRefreshOpen(){
   if(!dmState.sel) return;
-  try{
-    const d=await fetchJSON('/api/dm/'+encodeURIComponent(dmState.sel));
-    if(d&&d.ok){ dmMerge(d.messages); if(d.info){ d.info.more=!!d.more; dmState.info.set(dmState.sel,d.info); } if(state.view==='dm') dmRender(); }
-  }catch(_){ }
+  try{ await dmRefreshStamps(); }catch(_){ }
 }
 // Older history, one page at a time. The server has paged history (`before`/`limit`/`more`) but
 // the client never called it: anything past the newest 50 messages was unreachable in the UI
@@ -832,6 +846,13 @@ async function dmStartWith(uid){
   const ta=el('dm-input'); if(ta) ta.focus();
 }
 
+// Close early or extend: the reply is the updated message, patched in place.
+async function dmCallOp(body){
+  const res=await dmPost(body);
+  if(!res.ok) return dmLocal('\u2717 '+esc((res.d&&res.d.error)||'could not change that call'),'err');
+  if(res.d.message){ dmMerge([res.d.message]); dmPatchMsg(res.d.message.id); }
+  if(dmState.mode==='calls') dmFetchCalls().then(()=>dmRender());
+}
 async function dmRecapture(id){
   const t=dmThread(dmState.sel); if(!t) return;
   const m=dmMsgs(t.id).find(x=>x.id===id); if(!m||!m.card) return;
@@ -1121,12 +1142,19 @@ function dmStamp(m){
     :'<span class="dm-tk-d '+cls+'" title="price move since sent \u2014 colored by whether the '+side+' is right">'+(chg>0?'+':'')+(chg*100).toFixed(1)+'%</span>';
   const dirChip=has?' <span class="dm-dir '+(side==='short'?'neg':'pos')+'" title="read from the words around the ticker \u2014 short/sell/fade before it (or short/puts after) makes it a short; everything else is a long. One word in the message fixes a miscall.">'+(side==='short'?'\u25bc short':'\u25b2 long')+'</span>':'';
   const bell=has?' <button type="button" class="dm-tool dm-tkbell" data-dmalert="'+esc(m.ref)+'" data-px="'+at+'" title="arm a price alert at the stamp ('+fmtPx(at)+') \u2014 fires when the market crosses back through the level this call was made at">\u2691 alert</button>':'';
-  const sub=has?('sent at '+fmtPx(at)+(live?' \u00b7 now '+fmtPx(now):' \u00b7 no longer listed')):'no mark at send';
+  // The lifecycle (build 2026.09.22-88): open calls say when they close; closed ones show the
+  // final result, frozen, in place of the live move.
+  const cl=m.call||null;
+  const finalTxt=(cl&&cl.closed&&cl.final!=null)?'<span class="dm-tk-d '+(cl.final>0?'pos':(cl.final<0?'neg':'sec'))+'" title="final: direction-adjusted result at the close'+(cl.early?' (closed early by the author)':' (the '+cl.h+'-day horizon)')+'">'+(cl.final>0?'+':'')+(cl.final*100).toFixed(1)+'% <i class="dm-tk-cl">closed</i></span>':null;
+  const lifeTxt=!cl?'':cl.closed?(' \u00b7 closed '+dmDayShort(cl.closeTs)+(cl.closePx?' at '+fmtPx(cl.closePx):'')+(cl.early?' (early)':''))
+    :(' \u00b7 closes '+dmDayShort(cl.closeTs)+' ('+cl.h+'d)');
+  const sub=has?('sent at '+fmtPx(at)+(cl&&cl.closed?'':(live?' \u00b7 now '+fmtPx(now):' \u00b7 no longer listed'))+lifeTxt):'no mark at send';
   // The card is a door, not just a label: clicking it opens the market drawer for the name \u2014
   // same in-place drawer the earnings rows and news badges use, so no tab switch.
   return '<div role="button" tabindex="0" class="dm-tk" data-coin="'+esc(m.ref)+'" title="open the '+esc(dmTkName(m.ref))+' drawer"><div><div class="dm-tk-s">'+esc(dmTkName(m.ref))+dirChip+'</div>'
-    +'<div class="dm-tk-m">'+esc(sub)+bell+'</div></div>'+right+'</div>';
+    +'<div class="dm-tk-m">'+esc(sub)+bell+'</div></div>'+(finalTxt||right)+'</div>';
 }
+function dmDayShort(ts){ try{ return new Date(ts).toLocaleDateString('en-US',{month:'short',day:'numeric'}); }catch(_){ return ''; } }
 // One tap on a stamp arms a "back to the level" alert: crossing DOWN through the stamp when the
 // market sits above it, UP when below \u2014 the retest/reclaim of the price the call was made at.
 async function dmArmCallAlert(coin, refPx){
@@ -1227,6 +1255,9 @@ function dmMessageHtml(m,t,p){
     +'<button type="button" class="dm-tool" data-dmpin="'+m.id+'" data-on="'+(m.pinned?'0':'1')+'" title="'+(m.pinned?'Unpin':'Pin this to the top of the conversation')+'">'+(m.pinned?'unpin':'pin')+'</button>'
     +((m.ref&&m.refPx!=null&&dmState.admin)?'<button type="button" class="dm-tool" data-dmnote="'+m.id+'" title="Write this into the notes book, keeping the price and time it was called at">\u2192 note</button>':'')
     +(m.card?'<button type="button" class="dm-tool" data-dmrecap="'+m.id+'" title="Post a fresh card of the same cell, row or screen \u2014 live values, new capture time">re-capture</button>':'')
+    // The author's own open call: close it now at the live mark, or give it another week.
+    +((own&&m.call&&!m.call.closed)?'<button type="button" class="dm-tool" data-dmcallclose="'+m.id+'" title="Close this call now, at the current mark \u2014 the result freezes and enters the record">close call</button>'
+      +'<button type="button" class="dm-tool" data-dmcallext="'+m.id+'" data-days="'+(m.call.h+7)+'" title="Extend the horizon by a week (now '+m.call.h+'d) \u2014 the call keeps running">+7d</button>':'')
     +(own?((m.cmd||m.card)?'':'<button type="button" class="dm-tool" data-dmedit="'+m.id+'" title="Edit \u2014 the price stamp stays at what it was sent at">edit</button>')
       +'<button type="button" class="dm-tool" data-dmdel="'+m.id+'" title="Delete \u2014 this removes the attachment too">delete</button>':'')
     +'</span>';
@@ -1482,15 +1513,19 @@ function dmCallsHtml(){
   // column); the fixed 1d/7d yardsticks follow, muted, over the calls whose close has printed.
   const pct=(v)=>(v>=0?'+':'')+(v*100).toFixed(1)+'%';
   const hzRec=(r,lbl)=>r?' <span class="dm-callhzrec" title="the same record at the fixed '+lbl+' horizon (first daily close ≥ '+lbl+' after each call), over the '+r.n+' call'+(r.n===1?'':'s')+' whose close has printed — a settled yardstick for comparing people, not the live read">'+lbl+' <span class="'+(r.upPct>=0.5?'pos':'neg')+'">'+Math.round(r.upPct*100)+'%</span> <span class="'+(r.avg>=0?'pos':'neg')+'">'+pct(r.avg)+'</span></span>':'';
+  // The record is the CLOSED calls (build 2026.09.22-88): a call counts once it has closed, at its
+  // final result; open calls are counted, not scored — a number still moving is not a record.
   const sum=d.summary.map(x=>'<div class="dm-callsum'+(dmState.callsBy===x.uid?' sel':'')+'" data-dmcallsby="'+esc(x.uid)+'" title="'+(dmState.callsBy===x.uid?'show everyone':'show only '+esc(x.who)+'’s calls')+'"><span class="grow">'+esc(x.who)+'</span>'
-    +'<span class="acc-mu">'+x.n+' call'+(x.n===1?'':'s')+'</span>'
-    +(x.upPct!=null?'<span class="'+(x.upPct>=0.5?'pos':'neg')+'" title="fraction of calls that are right on the live move: sent price against the current mark, direction-adjusted (a short that fell counts as right)">'+Math.round(x.upPct*100)+'% right</span>'
-    +'<span class="'+(x.avg>=0?'pos':'neg')+'" title="average direction-adjusted move since sent, live">avg '+pct(x.avg)+'</span>':'<span class="sec">no mark yet</span>')
+    +'<span class="acc-mu">'+x.n+' closed'+(x.open?' \u00b7 '+x.open+' open':'')+'</span>'
+    +(x.upPct!=null?'<span class="'+(x.upPct>=0.5?'pos':'neg')+'" title="fraction of closed calls that ended right: sent price against the close price, direction-adjusted (a short that fell counts as right)">'+Math.round(x.upPct*100)+'% right</span>'
+    +'<span class="'+(x.avg>=0?'pos':'neg')+'" title="average direction-adjusted result at the close">avg '+pct(x.avg)+'</span>'
+    +(x.best?'<span class="sec" title="best closed call">best $'+esc(dmTkName(x.best.ref))+' '+pct(x.best.adj)+'</span>':''):'<span class="sec">nothing closed yet</span>')
     +hzRec(x.h1,'1d')+hzRec(x.h7,'7d')+'</div>').join('');
   const hz=(v)=>v==null?'<span class="sec">—</span>':'<span class="'+(v>0?'pos':(v<0?'neg':'sec'))+'">'+((v>0?'+':'')+(v*100).toFixed(1)+'%')+'</span>';
   const head='<div class="dm-callrow dm-callhead"><span>call</span><span>message</span><span>who \u00b7 when</span>'
-    +'<span class="dm-callpx">sent</span><span class="dm-callpx">now</span>'
-    +'<span title="raw price move since sent — colored by whether the call is right">move</span>'
+    +'<span class="dm-callst" title="open: still running until its horizon (7d by default, or the days written after the ticker); closed: frozen at the close">status</span>'
+    +'<span class="dm-callpx">sent</span><span class="dm-callpx" title="the current mark while open; the close price once closed">now / close</span>'
+    +'<span title="price move since sent (to the close, once closed) — colored by whether the call is right">move</span>'
     +'<span class="dm-callhz" title="direction-adjusted move at the fixed 1-day horizon (the first daily close ≥ 24h after the call) — positive means the call was right">1d</span>'
     +'<span class="dm-callhz" title="the same at the 7-day horizon">7d</span></div>';
   const rows=d.calls.map(c=>{
@@ -1501,6 +1536,7 @@ function dmCallsHtml(){
         +(c.side==='short'?'<span class="neg" title="short call">\u25bc</span>':'<span class="pos" title="long call">\u25b2</span>')+' '+esc(dmTkName(c.ref))+'</span>'
       +'<span class="dm-callb">'+(c.deleted?'<span class="dm-calldelmk">message deleted \u2014 the stamp stands</span>':esc(String(c.body||'').slice(0,120)))+'</span>'
       +'<span class="acc-mu">'+esc(c.sender)+' \u00b7 '+esc(c.kind==='dm'&&c.threadName===c.sender?'DM':c.threadName)+' \u00b7 '+dmWhen(c.ts)+'</span>'
+      +'<span class="dm-callst '+(c.closed?'sec':'pos')+'" title="'+(c.closed?('closed '+(c.early?'early ':'')+dmDayShort(c.closeTs)):('closes '+dmDayShort(c.closeTs)+' \u00b7 '+c.horizonD+'d horizon'))+'">'+(c.closed?(c.early?'closed \u2298':'closed'):'open \u00b7 '+Math.max(0,Math.ceil((c.closeTs-Date.now())/86400e3))+'d')+'</span>'
       +'<span class="dm-callpx" title="the mark when it was sent">'+(c.refPx!=null?fmtPx(c.refPx):'\u2014')+'</span>'
       +'<span class="dm-callpx dm-callnow" title="the current mark">'+(c.px!=null?fmtPx(c.px):'\u2014')+'</span>'
       +'<span class="dm-callmv '+cls+'" title="price move since sent \u2014 colored by whether the '+(c.side||'long')+' is right">'+mv+'</span>'
@@ -1841,6 +1877,10 @@ function dmWire(){
     if(co){ const m=dmMsgs(dmState.sel).find(x=>x.id===+co.dataset.cardopen); if(m&&m.card) cardOpen(m.card); return; }
     const rc=e.target.closest('[data-dmrecap]');
     if(rc){ dmRecapture(+rc.dataset.dmrecap); return; }
+    const cc0=e.target.closest('[data-dmcallclose]');
+    if(cc0){ dmCallOp({callClose:+cc0.dataset.dmcallclose}); return; }
+    const ce=e.target.closest('[data-dmcallext]');
+    if(ce){ dmCallOp({callExtend:+ce.dataset.dmcallext,days:+ce.dataset.days}); return; }
     const cc=e.target.closest('[data-cardcoin]');
     if(cc){ if(state.rows.get(cc.dataset.cardcoin)) openDetail(cc.dataset.cardcoin); return; }
     const noteBtn=e.target.closest('[data-dmnote]');
@@ -1987,20 +2027,6 @@ function dmPresenceSig(){
     // Receipts are patched in place by the sync, so they do not earn a rebuild here.
     dmState.threads.map(t=>[t.id,t.lastAt,t.unread,t.muted,t.tgSync,t.hidden,t.boardNotify]),
     dmState.members.map(m=>[m.uid,m.tg,m.display]), dmState.boards.map(b=>[b.id,b.joined,b.unread,b.lastAt])]);
-}
-// A stamp's drift (`px`, the live mark) is derived on the server at READ time, never stored, so
-// the rows the client holds go stale the moment they land: the page has to be re-pulled for the
-// stamps to move. It is, every tick — but the fresh rows are patched IN PLACE, only where a stamp
-// or a card lives, rather than rebuilding the panel to move a percentage.
-async function dmRefreshStamps(){
-  const id=dmState.sel; if(!id||dmState.results||dmState.mode!=='chat') return;
-  const d=await fetchJSON('/api/dm/'+encodeURIComponent(id));
-  if(!d||!d.ok||dmState.sel!==id) return;
-  const chg=dmMerge(d.messages);
-  if(d.info){ d.info.more=!!d.more; dmState.info.set(id,d.info); }
-  if(chg.added&&!dmAppend(chg.fresh)){ dmRender(); return; }
-  const arr=dmMsgs(id);
-  for(const mid of chg.updated){ const m=arr.find(x=>x.id===mid); if(m&&(m.ref||m.card)) dmPatchMsg(mid); }
 }
 setInterval(async ()=>{
   if(document.hidden||!dmSignedIn()||state.view!=='dm') return;   // nobody is reading a hidden tab; the visibilitychange sync catches up

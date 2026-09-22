@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.21-87";
+const VERSION = "2026.09.22-88";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -739,7 +739,8 @@ async function buildServer() {
   // The calls scoreboard's fixed horizons read the poller's daily spine; the desk digest reads
   // the member's own calls record. Both injected here — neither module reaches into the other.
   ACCOUNTS.setPxHistory((coin, atTs) => (poller.dailyCloseAt ? poller.dailyCloseAt(coin, atTs) : null));
-  if (poller.setDeskSource) poller.setDeskSource((uid) => ACCOUNTS.calls(uid, { limit: 100 }));
+  // The digest's record is the last 30 days of CLOSED calls; the board reads the lifetime.
+  if (poller.setDeskSource) poller.setDeskSource((uid) => ACCOUNTS.calls(uid, { limit: 100, windowMs: 30 * 86400e3 }));
 
   // ---- tweet preview cards ---------------------------------------------------------------------
   // A message carrying an x.com/twitter.com status link gets a preview card: author, handle, text,
@@ -1652,6 +1653,11 @@ async function buildServer() {
         r.note = note.ok ? note.message : null;
       }
     }
+    // The call lifecycle (build 2026.09.22-88): the author closes a call early at the live mark,
+    // or extends its horizon while it is open. Both change an existing row, so the room is told
+    // to re-pull it (the `refresh` hint an edit already uses) rather than to expect a new id.
+    else if (b.callClose != null) { r = ACCOUNTS.callClose(me.uid, b.callClose); if (r.ok) dmPoke(r.thread, { refresh: Number(r.thread) }); }
+    else if (b.callExtend != null) { r = ACCOUNTS.callExtend(me.uid, b.callExtend, b.days); if (r.ok) dmPoke(r.thread, { refresh: Number(r.thread) }); }
     else if (b.drop && b.id != null) r = ACCOUNTS.drop(me.uid, b.id);
     else if (b.id != null) r = ACCOUNTS.edit(me.uid, b.id, b.body);
     else {

@@ -260,6 +260,23 @@ instant, and the per-IP rate limit stops being a per-user problem.
   the same address), never a reply, and its note travels as an ordinary message right behind it.
   Not in this cut: charts, drawer sections and the other boards (the mock in `docs/` shows where
   the same glyph goes next), and a screen card does not re-run its filters live.
+- **The call lifecycle** (build 2026.09.22-88) — a call is **open** from the moment it is stamped
+  until its **horizon**: seven days by default, or the days written after the ticker (`$HOOD 30d`
+  — right after the ticker only, so "$HOOD ran 3d in a row" stays prose; 1 to 365). At the
+  horizon, the first daily close at or past it becomes the call's **final** result and the call
+  stops moving with the mark. The author can **close early** at the live mark (the hover bar on
+  their own stamp, or the calls board) and **extend** an open call by a week at a time, never to a
+  horizon whose close has already printed. Before this, a call was scored live forever and the
+  record read as a lifetime of moving numbers. **The record is the closed calls**: a call counts
+  once, at its final; open calls are counted, not scored ("running" is the honest word for a number
+  still moving); the fixed 1d/7d yardsticks stay beside it. The stamp says "closes Sep 24 (7d)" or
+  "closed Sep 24 at 118.50 · +4.1%"; the board gained a status column and reads the close price in
+  place of the live mark once closed; the wire carries `call: {h, closed, early, closeTs, closePx,
+  final}` on every stamped message, delete-proof like the stamp. **The desk digest** was rewritten
+  around it: open calls with age, levels and close date; the calls closed in the last week with
+  their final (⊘ marks an early close); the record over the last 30 days of closed calls per
+  person with their best; the newest signals with side; earnings today; the day's movers split
+  stocks / crypto. A section with nothing to say is absent.
 - **The calls record** (`/api/dm/calls`) — every price-stamped message in one place, with the move
   since it was sent and a per-person summary. This is what the stamp was FOR: without somewhere to
   read them together, each call died in the conversation it was made in. Calls carry a

@@ -1215,14 +1215,19 @@ test("messages -66: the desk digest is per-recipient, deterministic, and off unt
   assert.ok(desk, "the desk kind is registered");
   assert.ok(!Number.isFinite(schedResolve(null, desk).hour), "no default hour: opt-in by construction");
   // content assembles from the injected per-member calls source; sections it has no data for are absent
-  p.setDeskSource((uid) => ({ ok: true,
-    calls: [{ id: 1, ref: "xyz:HOOD", side: "short", sender: "gus", adj: 0.02, adj1: 0.03, adj7: null, deleted: false }],
-    summary: [{ uid, who: "gus", n: 1, upPct: 1, avg: 0.02 }] }));
-  const text = p.deskTextNow("u1", Date.now());
+  const now = Date.now(), DAY = 86400e3;
+  p.setDeskSource((uid) => ({ ok: true, windowMs: 30 * DAY,
+    calls: [{ id: 1, ref: "xyz:HOOD", side: "short", sender: "gus", adj: 0.02, adj1: 0.03, adj7: null, deleted: false, closed: false, refPx: 100, px: 98, ts: now - 2 * DAY, ageMs: 2 * DAY, closeTs: now + 5 * DAY, horizonD: 7 },
+      { id: 2, ref: "xyz:NVDA", side: "long", sender: "gus", adj: 0.041, deleted: false, closed: true, early: false, refPx: 170, px: 177, ts: now - 9 * DAY, closeTs: now - 2 * DAY, horizonD: 7 },
+      { id: 3, ref: "xyz:TSLA", side: "long", sender: "lena", adj: -0.038, deleted: false, closed: true, early: true, refPx: 300, px: 288.6, ts: now - 3 * DAY, closeTs: now - DAY, horizonD: 7 }],
+    summary: [{ uid, who: "gus", open: 1, n: 1, upPct: 1, avg: 0.041, best: { ref: "xyz:NVDA", adj: 0.041 } }, { uid: "u2", who: "lena", open: 0, n: 1, upPct: 0, avg: -0.038, best: { ref: "xyz:TSLA", adj: -0.038 } }] }));
+  const text = p.deskTextNow("u1", now);
   assert.ok(text.includes("Desk digest"), "titled");
-  assert.ok(text.includes("$HOOD") && text.includes("▼"), "the member's calls ride in, direction marked");
-  assert.ok(text.includes("100% right"), "the person summary scores");
+  assert.ok(/Open calls[\s\S]*▼ \$HOOD gus · \+2\.0% · 2d · 100 → 98 · closes/.test(text), "an open call rides in with its direction, age, levels and close date: " + text);
+  assert.ok(/Closed this week[\s\S]*▲ \$NVDA gus \+4\.1% ✓ · ▲ \$TSLA lena -3\.8% ✗ ⊘/.test(text), "closed calls show their final, marked early where the author closed them: " + text);
+  assert.ok(/<b>Record<\/b> · calls closed in the last 30d\ngus 1 · 100% right · avg \+4\.1% · best \$NVDA \+4\.1% · 1 open/.test(text), "the record is the closed calls, windowed, with the best and the open count: " + text);
   assert.ok(!text.includes("Earnings today"), "no earnings cache, no earnings section — absent, never fabricated");
+  assert.ok(!text.includes("Signals"), "no signals cache, no signals line");
 });
 
 test("ai report: Anthropic body — effort on models that take it, cached system block, max_tokens stop is a named failure", async () => {

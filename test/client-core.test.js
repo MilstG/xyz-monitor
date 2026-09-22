@@ -2586,8 +2586,8 @@ test("chat perf -87: arrivals append, a send merges its own reply, the tick pain
   assert.ok(/dmUpdatePip\(\); if\(state\.view==='dm'\) dmPatchRail\(\);/.test(mr) && !/dmRender\(\)/.test(mr), "mark-read patches the rail, never rebuilds");
   // Stamps: their drift is derived at read on the server, so the tick still re-pulls the page —
   // and patches only the stamped and card rows, in place.
-  const rs = app.slice(app.indexOf("async function dmRefreshStamps(){"), app.indexOf("setInterval(async ()=>{"));
-  assert.ok(/fetchJSON\('\/api\/dm\/'\+encodeURIComponent\(id\)\)/.test(rs) && /if\(m&&\(m\.ref\|\|m\.card\)\) dmPatchMsg\(mid\);/.test(rs), "the stamp refresh re-pulls and patches in place");
+  const rs = app.slice(app.indexOf("async function dmRefreshStamps(){"), app.indexOf("async function dmRefreshOpen(){"));
+  assert.ok(/fetchJSON\('\/api\/dm\/'\+encodeURIComponent\(id\)\)/.test(rs) && /if\(m&&before\.get\(mid\)!==JSON\.stringify\(m\)\) dmPatchMsg\(mid\);/.test(rs), "the re-pull patches only the rows that changed, in place");
   // An edit hands back an older message and must not move the rail row.
   assert.ok(/if\(arr\.length&&m\.id<arr\[arr\.length-1\]\.id\) return;/.test(app.slice(app.indexOf("function dmTouchThread(m){"))), "an edit does not touch the rail");
   // The append path refuses anything that is not a plain append.
@@ -2662,4 +2662,20 @@ test("chat perf -87: dmAppend executes — appends new bubbles before the receip
   assert.equal(run([Object.assign({}, arr[2], { pinned: true })], arr, [1, 2], true).ok, false, "a pinned arrival changes the strip: full render");
   // Nothing for the open thread: true, so the caller patches the rail alone.
   assert.equal(run([{ id: 9, thread: 8, ts: 12 * D }], arr, [1, 2, 3], true).ok, true);
+});
+
+test("calls -88: the stamp shows the lifecycle, the author can close or extend, the board scores closed calls", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "js", "messages.js"), "utf8");
+  const stamp = app.slice(app.indexOf("function dmStamp(m){"), app.indexOf("function dmDayShort(ts){"));
+  assert.ok(/const cl=m\.call\|\|null;/.test(stamp) && /closes '\+dmDayShort\(cl\.closeTs\)\+' \('\+cl\.h\+'d\)/.test(stamp), "an open call says when it closes");
+  assert.ok(/<i class="dm-tk-cl">closed<\/i>/.test(stamp) && /\+\(finalTxt\|\|right\)\+/.test(stamp), "a closed call shows its final in place of the live move");
+  assert.ok(/data-dmcallclose="'\+m\.id\+'"/.test(app) && /data-dmcallext="'\+m\.id\+'" data-days="'\+\(m\.call\.h\+7\)\+'"/.test(app), "close and +7d ride the hover bar");
+  assert.ok(/\(\(own&&m\.call&&!m\.call\.closed\)\?/.test(app), "…for the author's own OPEN calls only");
+  assert.ok(/dmCallOp\(\{callClose:\+cc0\.dataset\.dmcallclose\}\)/.test(app) && /dmCallOp\(\{callExtend:\+ce\.dataset\.dmcallext,days:\+ce\.dataset\.days\}\)/.test(app), "the dispatcher posts the two verbs");
+  const board = app.slice(app.indexOf("function dmCallsHtml(){"), app.indexOf("async function dmFetchCalls(){"));
+  assert.ok(/x\.n\+' closed'\+\(x\.open\?' \\u00b7 '\+x\.open\+' open':''\)/.test(board), "the summary counts closed and open separately");
+  assert.ok(/<span class="dm-callst/.test(board) && /now \/ close/.test(board), "the board has a status column and names the close price");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(/\.dm-callrow\{[^}]*grid-template-columns:64px 1fr auto 74px 68px 68px 58px 52px 52px/.test(css), "the grid gained the status column");
 });

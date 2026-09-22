@@ -923,9 +923,9 @@ test("messages -66: call direction — parsed at send, immutable, and the scoreb
   // ride beside it — a call up 20% since sent must never read as "wrong" because its first daily
   // close dipped
   const me = rec2.summary.find((x) => x.uid === g.uid);
-  assert.equal(me.n, 4, "all four calls counted");
-  assert.equal(me.upPct, 0.5, "live: the two shorts are right on a 2% fall, the two longs are wrong");
-  assert.ok(Math.abs(me.avg - 0) < 1e-12, "live avg nets to zero across mirrored calls");
+  assert.equal(me.n, 4, "all four calls counted — closed, since the injected reader answers every horizon");
+  assert.equal(me.upPct, 0.5, "closed at 97: the two shorts are right, the two longs are wrong");
+  assert.ok(Math.abs(me.avg - 0) < 1e-12, "the closed avg nets to zero across mirrored calls");
   assert.equal(me.h1.n, 4, "the 1d record covers the calls whose close printed");
   assert.equal(me.h1.upPct, 0.5, "1d: scored off the printed close, direction-adjusted");
   assert.ok(Math.abs(me.h1.avg - 0) < 1e-12);
@@ -937,8 +937,13 @@ test("messages -66: call direction — parsed at send, immutable, and the scoreb
   const rec3 = A.calls(g.uid, {});
   const me3 = rec3.summary.find((x) => x.uid === g.uid);
   assert.equal(me3.n, 5);
-  assert.equal(me3.upPct, 0.6, "live: three longs right at +20%, two shorts wrong");
-  assert.ok(Math.abs(me3.avg - ((0.2 + 0.2 + (120 / 98 - 1)) - 0.2 - 0.2) / 5) < 1e-9, "live avg over the five (the fifth was stamped at the 98 mark)");
+  // The record is the CLOSED calls (build 2026.09.22-88): every call here closed at its 7d
+  // horizon on the injected 97 close, so the mark running to 120 afterwards moves nothing —
+  // a closed call is frozen. Two shorts right at 97, three longs wrong (the fifth from 98).
+  assert.equal(me3.upPct, 0.4, "closed at the horizon close: the tape after it does not re-score a closed call");
+  assert.ok(Math.abs(me3.avg - ((0.03 + 0.03 - 0.03 - 0.03 + (97 / 98 - 1)) / 5)) < 1e-9, "the closed record equals the 7d yardstick when every call closed there");
+  assert.equal(me3.open, 0, "nothing is still running");
+  assert.ok(rec3.calls.every((c) => c.closed && !c.early && c.px === 97), "every row reads its close price, not the live mark");
   assert.equal(me3.h1.upPct, 0.4, "1d: only the two shorts are right on the 97 close");
   assert.ok(Math.abs(me3.h1.avg - ((0.03 + 0.03 - 0.03 - 0.03 + (97 / 98 - 1)) / 5)) < 1e-9, "the 1d record is settled on the 97 close and did not follow the mark to 120");
 });
@@ -1048,9 +1053,18 @@ test("the calls record scores what the price stamp was for", async () => {
   assert.ok(pl.threadName, "each call says which conversation it was made in");
 
   const mine = rec.summary.find((x) => x.who === "gustavo");
-  assert.equal(mine.n, 1);
-  assert.equal(mine.upPct, 1, "a per-person record is the only question a call log answers");
-  assert.ok(rec.summary.find((x) => x.who === "lena"), "everyone in the thread is scored");
+  assert.equal(mine.open, 1, "a call is OPEN until its horizon: counted, not scored");
+  assert.equal(mine.n, 0, "nothing closed yet, so no record yet");
+  assert.ok(!pl.closed && pl.horizonD === 7 && pl.closeTs === pl.ts + 7 * 86400e3, "seven days by default, closing at the first daily close past it");
+  assert.ok(rec.summary.find((x) => x.who === "lena"), "everyone in the thread is listed");
+  // Closing early freezes the result at the live mark and enters the record.
+  const closed = A.callClose(g.uid, pl.id);
+  assert.ok(closed.ok && closed.message.call.closed && closed.message.call.early && closed.message.call.closePx === 110, JSON.stringify(closed.message.call));
+  const rec2 = A.calls(g.uid, {});
+  const mine2 = rec2.summary.find((x) => x.who === "gustavo");
+  assert.equal(mine2.n, 1); assert.equal(mine2.upPct, 1, "a per-person record is the only question a call log answers");
+  marks.PLTR = 90;
+  assert.ok(Math.abs(A.calls(g.uid, {}).calls.find((c) => c.id === pl.id).chg - 0.1) < 1e-9, "a closed call does not move with the mark any more");
   assert.ok(A.calls(g.uid, { by: l.uid }).calls.every((c) => c.senderUid === l.uid), "filterable by author");
 
   const m = (await A.redeem(A.mintInvite(g.uid, null, 7, "join").invite.code, "marco", "another-long-password")).user;
@@ -1252,7 +1266,7 @@ test("chat terminal -69: a command result is a message with cmd, no stamp, no ed
   // A fresh open of the same volume migrates nothing away: the columns are in ADDED_COLUMNS.
   const src = fs.readFileSync(path.join(__dirname, "..", "src", "accounts.js"), "utf8");
   assert.ok(/\["cmd", "TEXT"\], \["cmdAi", "INTEGER"\]/.test(src), "both columns are in the table-driven migration list — a volume from before -69 must open");
-  assert.ok(/S\.msgIns\.run\(\+threadId, actor \|\| "", now, String\(detail \|\| ""\), null, null, null, kind, null, null, null, null, null, null\)/.test(src), "the system-row insert binds the two new columns too — a positional insert one short binds NULL into the wrong slot next time a column is added");
+  assert.ok(/S\.msgIns\.run\(\+threadId, actor \|\| "", now, String\(detail \|\| ""\), null, null, null, kind, null, null, null, null, null, null, null\)/.test(src), "the system-row insert binds the two new columns too — a positional insert one short binds NULL into the wrong slot next time a column is added");
   assert.ok(/const sym = cmd \? null : \(cardJson \? \(o\.stampSym \? String\(o\.stampSym\) : null\) : firstTickerRef\(text\)\);/.test(src), "the no-stamp rule is at the ref site, not a post-hoc null (a card stamps its own ticker, on request only)");
 
   // Server: the gate lives in the handlers because the keys own no route.
@@ -1572,4 +1586,55 @@ test("share to chat: a card is stored as JSON beside its text body, stamps only 
   A.drop(g.uid, plain.id);
   assert.equal(A.history(l.uid, plain.thread).messages.find((m) => m.id === plain.id).card, null, "a deleted card carries nothing");
   assert.equal(A._db.prepare("SELECT card FROM dm_msg WHERE id = ?").get(plain.id).card, null, "\u2026and the JSON is gone from the row, not just hidden");
+});
+
+// ===== build 2026.09.22-88: the call lifecycle ===================================================
+test("calls: seven days by default, a horizon written after the ticker, extend while open, close early, and a windowed record", async () => {
+  const marks = { HOOD: 100 };
+  const A = freshAccounts(marks);
+  const { g, l } = await seedTwo(A);
+  const T = A.threadFor(g.uid, l.uid, true).id;
+  const resolve = (x) => (marks[x] ? x : null);
+  const DAY = 86400e3;
+  const closes = new Map();
+  A.setPxHistory((coin, at) => (closes.has(coin + "@" + at) ? closes.get(coin + "@" + at) : null));
+  const a = A.send(g.uid, null, "long $HOOD 30d — the thesis", resolve, { thread: T });
+  assert.equal(a.message.call.h, 30, "the days after the ticker set the horizon");
+  const b = A.send(g.uid, null, "short $HOOD ran 3d in a row, fading it", resolve, { thread: T });
+  assert.equal(b.message.call.h, 7, "'3d' three words later is prose, not a horizon");
+  assert.equal(A.send(g.uid, null, "$HOOD 999d", resolve, { thread: T }).message.call.h, 7, "past a year is a thesis, not a call: default");
+  assert.equal(A.send(g.uid, null, "just chatting", resolve, { thread: T }).message.call, null, "no stamp, no lifecycle");
+  // Extend: the author only, while open, never to a horizon that has already printed.
+  assert.ok(!A.callExtend(l.uid, a.id, 60).ok, "not yours");
+  assert.ok(!A.callExtend(g.uid, a.id, 0).ok && !A.callExtend(g.uid, a.id, 400).ok, "1 to 365 days");
+  const ts = A.history(g.uid, T).messages.find((m) => m.id === a.id).ts;
+  closes.set("HOOD@" + (ts + 10 * DAY), 105);
+  assert.ok(!A.callExtend(g.uid, a.id, 10).ok, "a 10-day horizon whose close already printed cannot be chosen");
+  assert.equal(A.callExtend(g.uid, a.id, 60).message.call.h, 60, "extended to 60 days");
+  // Close early: the author only, at the live mark, once.
+  marks.HOOD = 92;
+  assert.ok(!A.callClose(l.uid, b.id).ok, "not yours");
+  const cb = A.callClose(g.uid, b.id);
+  assert.ok(cb.ok && cb.message.call.early && cb.message.call.closePx === 92 && Math.abs(cb.message.call.final - 0.08) < 1e-9, "the short closed early at 92 reads +8%");
+  assert.ok(!A.callClose(g.uid, b.id).ok, "closed is closed");
+  assert.ok(!A.callExtend(g.uid, b.id, 14).ok, "…and cannot be extended");
+  // At the horizon: the first close at or past it is the final; the call is not 'early'.
+  closes.set("HOOD@" + (ts + 60 * DAY), 130);
+  const rec = A.calls(g.uid, {});
+  const ra = rec.calls.find((c) => c.id === a.id), rb = rec.calls.find((c) => c.id === b.id);
+  assert.ok(ra.closed && !ra.early && ra.px === 130 && Math.abs(ra.adj - 0.3) < 1e-9 && ra.horizonD === 60, JSON.stringify(ra));
+  assert.ok(rb.closed && rb.early && rb.px === 92, JSON.stringify(rb));
+  const me = rec.summary.find((x) => x.uid === g.uid);
+  assert.equal(me.n, 2); assert.equal(me.upPct, 1); assert.equal(me.best.adj, ra.adj, "best names the biggest closed win");
+  // The window: a close older than the window leaves the record; the row itself stays. The
+  // long is backdated 100 days so its 60-day horizon closed 40 days ago.
+  A._db.prepare("UPDATE dm_msg SET ts = ? WHERE id = ?").run(ts - 100 * DAY, a.id);
+  closes.set("HOOD@" + (ts - 100 * DAY + 60 * DAY), 130);
+  const rw = A.calls(g.uid, { windowMs: 30 * DAY });
+  assert.equal(rw.summary.find((x) => x.uid === g.uid).n, 1, "the 60-day close 40 days ago is outside a 30-day window; the early close (now) is inside");
+  assert.equal(rw.calls.length, rec.calls.length, "the window scopes the record, never the rows");
+  // The wire carries the lifecycle, and a deleted call keeps it.
+  A.drop(g.uid, b.id);
+  const wb = A.history(g.uid, T).messages.find((m) => m.id === b.id);
+  assert.ok(wb.deleted && wb.call && wb.call.closed, "the stamp stands after a delete, lifecycle included");
 });
