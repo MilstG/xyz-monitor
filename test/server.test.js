@@ -690,7 +690,8 @@ test("dm: /api/dm/call-read is gated like an ask from a chat, needs a real marke
   const cara = jar(); cara.absorb(await post("/login", { handle: "cara", password: "yet-another-long-pw" }));
   // dm.ask is admin-only by default: a member is refused before anything is spent.
   const member = await post("/api/dm/call-read", { text: "$NVDA looks heavy", sym: "NVDA" }, cara);
-  assert.equal(member.statusCode, 403); assert.deepEqual(JSON.parse(member.body), { ok: false, error: "feature-gated", feature: "dm.ask" });
+  assert.equal(member.statusCode, 403); const mb = JSON.parse(member.body);
+  assert.ok(mb.error === "feature-gated" && /^(ai|dm)\.ask$/.test(mb.feature), "refused by whichever ask switch is closed first: " + member.body);
   // The operator passes the gate; with no market on this board the symbol is refused honestly.
   const noMkt = await post("/api/dm/call-read", { text: "$NVDA looks heavy", sym: "NVDA" }, gus);
   assert.equal(noMkt.statusCode, 400); assert.match(JSON.parse(noMkt.body).error, /no market called NVDA/);
@@ -703,6 +704,13 @@ test("dm: /api/dm/call-read is gated like an ask from a chat, needs a real marke
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   assert.ok(/callSide: co && \(co\.side === "long" \|\| co\.side === "short"\) \? co\.side : null, callDays: co && co\.days != null \? \+co\.days : null/.test(srv), "the override is passed through, bounded in accounts.js");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "js", "messages.js"), "utf8");
-  assert.ok(/const ov=\(!dmState\.editing&&dmState\.callOverride&&dmState\.callOverride\.text===text\)/.test(app), "the client sends an override only for the exact text it was applied to");
+  assert.ok(/const ov=\(!dmState\.editing&&dmState\.callOverride&&dmState\.callOverride\.text===ta\.value\.trim\(\)\)/.test(app), "the client sends an override only for the exact (trimmed) text it was applied to");
   assert.ok(/id="dm-callask"/.test(app) && /id="dm-callapply"/.test(app) && /vague&&dmAskAllowed\(\)/.test(app), "the ask is offered only when the words decided nothing, and only where dm.ask allows");
+  assert.ok(/const vague=!ov&&!read\.sideWord&&words>=4;/.test(app), "vague means no direction word");
+  assert.ok(/dmState\.callOverride\.text===ta\.value\.trim\(\)/.test(app), "the override is keyed on the trimmed text on both sides");
+  // ai.ask off is the operator's model-spend switch: the reader honours it before dm.ask.
+  assert.equal(JSON.parse((await post("/api/features", { key: "ai.ask", state: "off" }, gus)).body).ok, true);
+  const killed = await post("/api/dm/call-read", { text: "$NVDA looks heavy", sym: "NVDA" }, gus);
+  assert.equal(killed.statusCode, 403); assert.equal(JSON.parse(killed.body).feature, "ai.ask");
+  assert.equal(JSON.parse((await post("/api/features", { key: "ai.ask", state: "public" }, gus)).body).ok, true);
 });

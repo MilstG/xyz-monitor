@@ -2852,6 +2852,10 @@ async function buildServer() {
   fastify.post("/api/dm/call-read", { bodyLimit: 8 * 1024 }, async (req, reply) => {
     reply.header("cache-control", "no-store");
     const me = dmMe(req, reply); if (!me) return;
+    // ai.ask first (the operator's model-spend switch: off means nobody, admin included), then
+    // dm.ask on top, exactly as an ask from a chat composer is gated.
+    if (!featureVisible(poller.getFlags(), "ai.ask", isAdmin(req)))
+      return reply.code(403).send({ ok: false, error: "feature-gated", feature: "ai.ask" });
     if (!featureVisible(poller.getFlags(), "dm.ask", isAdmin(req)))
       return reply.code(403).send({ ok: false, error: "feature-gated", feature: "dm.ask" });
     const b = req.body || {};

@@ -5769,15 +5769,16 @@ module.exports.validateCard = validateCard;
 // the message is sent. The client carries a byte-identical copy (public/js/messages.js dmCallRead)
 // for the live preview; a test keeps the two in step.
 //   short words BEFORE the ticker (within 40 chars):  short shorting sell selling fade fading
-//                                                     bearish bear dump dumping puts lower downside
+//                                                     bearish bear dump dumping puts downside
+//   ("lower" only AFTER the ticker: "lower risk $HOOD" is not a short)
 //   short words AFTER it (within 24 chars):           short puts lower down bearish dump
 //   "sell $X puts" / "write $X puts" → long (selling puts is a long); "$X calls" → long unless
 //   sold; "buy $X puts" → short.
 //   horizons AFTER the ticker (within 40 chars): 30d · 3 days · 2w · 2 weeks · 1mo · 2 months ·
 //   a week · next week · a month · next month · eow · end of week · by friday · eom · end of
 //   month · eoy · year end · by Oct 15 · by 10/15. Default 7d, cap 365d.
-const CALL_SHORT_BEFORE = /(^|\W)(short|shorting|sell|selling|fade|fading|bearish|bear|dump|dumping|puts|lower|downside)(\W|$)/i;
-const CALL_SHORT_AFTER = /^\s*(short|puts|lower|down|bearish|dump)\b/i;
+const CALL_SHORT_BEFORE = /(^|\W)(short|shorting|sell|selling|fade|fading|bearish|bear|dump|dumping|puts|downside)(\W|$)/i;
+const CALL_SHORT_AFTER = /^[\s,:;\u2014-]*(short|puts|lower|down|bearish|dump)\b/i;
 const CALL_SELL_BEFORE = /(^|\W)(sell|selling|sold|write|writing)(\W|$)/i;
 const CALL_MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, sept: 8, oct: 9, nov: 10, dec: 11 };
 function callRead(text, sym, nowMs) {
@@ -5787,7 +5788,7 @@ function callRead(text, sym, nowMs) {
   const before = t.slice(Math.max(0, i - 40), i), after = t.slice(i + S.length + 1, i + S.length + 41);
   // direction
   let side = "long", sideWord = null;
-  const optAfter = /^\s*(puts|calls)\b/i.exec(after);
+  const optAfter = /^[\s,:;\u2014-]*(?:\$?\d+(?:\.\d+)?\s*)?(puts|calls)\b/i.exec(after);
   if (optAfter) {
     const sold = CALL_SELL_BEFORE.exec(before);
     const opt = optAfter[1].toLowerCase();
@@ -5803,13 +5804,13 @@ function callRead(text, sym, nowMs) {
   const days = (d) => (d >= 1 && d <= 365 ? d * DAY : null);
   const endOfUtcDay = (y, m, d) => Date.UTC(y, m, d + 1) - 1;
   let m;
-  if ((m = /^\s*(\d{1,3})\s*(d|days?)\b/i.exec(after))) { horizonMs = days(+m[1]); horizonWord = m[0].trim(); }
-  else if ((m = /^\s*(\d{1,2})\s*(w|wks?|weeks?)\b/i.exec(after))) { horizonMs = days(+m[1] * 7); horizonWord = m[0].trim(); }
-  else if ((m = /^\s*(\d{1,2})\s*(mo|months?)\b/i.exec(after))) { horizonMs = days(+m[1] * 30); horizonWord = m[0].trim(); }
+  if ((m = /^\s*(\d{1,3})\s*(d|days?)\b/i.exec(after))) { horizonMs = days(+m[1]); horizonWord = horizonMs ? m[0].trim() : null; }
+  else if ((m = /^\s*(\d{1,2})\s*(w|wks?|weeks?)\b/i.exec(after))) { horizonMs = days(+m[1] * 7); horizonWord = horizonMs ? m[0].trim() : null; }
+  else if ((m = /^\s*(\d{1,2})\s*(mo|months?)\b/i.exec(after))) { horizonMs = days(+m[1] * 30); horizonWord = horizonMs ? m[0].trim() : null; }
   else if ((m = /(?:^|\W)(a week|next week|this week)(?:\W|$)/i.exec(after))) { horizonMs = days(7); horizonWord = m[1]; }
   else if ((m = /(?:^|\W)(a month|next month|this month)(?:\W|$)/i.exec(after))) { horizonMs = days(30); horizonWord = m[1]; }
   else if ((m = /(?:^|\W)(eow|end of (?:the )?week|by friday)(?:\W|$)/i.exec(after))) {
-    const d = new Date(now); const dow = d.getUTCDay(); const ahead = ((5 - dow) + 7) % 7 || 7;
+    const d = new Date(now); const dow = d.getUTCDay(); const ahead = ((5 - dow) + 7) % 7;   // Friday: the week ends today
     horizonMs = days(Math.max(1, Math.ceil((endOfUtcDay(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + ahead) - now) / DAY))); horizonWord = m[1];
   }
   else if ((m = /(?:^|\W)(eom|end of (?:the )?month)(?:\W|$)/i.exec(after))) {
@@ -5818,10 +5819,10 @@ function callRead(text, sym, nowMs) {
   else if ((m = /(?:^|\W)(eoy|end of (?:the )?year|year end|year-end)(?:\W|$)/i.exec(after))) {
     const d = new Date(now); horizonMs = days(Math.min(365, Math.max(1, Math.ceil((endOfUtcDay(d.getUTCFullYear(), 11, 31) - now) / DAY)))); horizonWord = m[1];
   }
-  else if ((m = /(?:^|\W)by\s+(?:([A-Za-z]{3,4})\.?\s+(\d{1,2})|(\d{1,2})\/(\d{1,2}))(?:\W|$)/i.exec(after))) {
+  else if ((m = /(?:^|\W)by\s+(?:([A-Za-z]{3,9})\.?\s+(\d{1,2})|(\d{1,2})\/(\d{1,2}))(?:\W|$)/i.exec(after))) {
     const d = new Date(now);
-    const mon = m[1] ? CALL_MONTHS[m[1].toLowerCase()] : +m[3] - 1, day = m[1] ? +m[2] : +m[4];
-    if (mon != null && day >= 1 && day <= 31) {
+    const mon = m[1] ? CALL_MONTHS[m[1].slice(0, 3).toLowerCase()] : +m[3] - 1, day = m[1] ? +m[2] : +m[4];
+    if (mon != null && mon >= 0 && mon <= 11 && day >= 1 && new Date(Date.UTC(2001, mon, day)).getUTCMonth() === mon) {
       let end = endOfUtcDay(d.getUTCFullYear(), mon, day);
       if (end < now) end = endOfUtcDay(d.getUTCFullYear() + 1, mon, day);
       horizonMs = days(Math.min(365, Math.max(1, Math.ceil((end - now) / DAY)))); horizonWord = m[0].trim();

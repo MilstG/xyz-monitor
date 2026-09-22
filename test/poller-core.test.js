@@ -2873,6 +2873,15 @@ test("callRead: direction and horizon from a fixed vocabulary, naming the word e
     ["I'd fade $HOOD into the print", "short", "fade", null],
     ["bearish $HOOD", "short", "bearish", null],
     ["$HOOD lower from here", "short", "lower", null],
+    ["lower risk $HOOD here", "long", null, null],              // 'lower' only reads AFTER the ticker
+    ["$HOOD: bearish", "short", "bearish", null],               // punctuation after the ticker
+    ["$HOOD, down", "short", "down", null],
+    ["$HOOD 100 puts", "short", "puts", null],                  // a strike before the option word
+    ["sell $HOOD 100 puts", "long", "sell … puts", null],
+    ["$HOOD by July 4", "long", null, 286 * DAY],               // four-letter months read by their first three
+    ["$HOOD by Sept 30", "long", null, 9 * DAY],
+    ["$HOOD by 13/5", "long", null, null],                      // no thirteenth month
+    ["$HOOD by 2/30", "long", null, null],                      // no February 30th
     ["dumping $HOOD", "short", "dumping", null],
     ["not a fan of $HOOD", "long", null, null],                 // 'fan' is not a word we read: long by default, said so
     ["buy $HOOD puts", "short", "puts", null],
@@ -2895,7 +2904,8 @@ test("callRead: direction and horizon from a fixed vocabulary, naming the word e
     ["$HOOD by 10/15", "long", null, 24 * DAY],
     ["$HOOD by Jan 5", "long", null, 106 * DAY],                // rolls into next year
     ["$HOOD ran 3d in a row", "long", null, null],              // three words later is prose
-    ["$HOOD 999d", "long", null, null],                         // past a year: no horizon (default applies)
+    ["$HOOD 999d", "long", null, null],                         // past a year: no horizon (default applies), and no word either
+    ["$HOOD 53w", "long", null, null],
     ["$HOOD 0d", "long", null, null],
   ];
   for (const [text, side, word, h] of cases) {
@@ -2907,6 +2917,11 @@ test("callRead: direction and horizon from a fixed vocabulary, naming the word e
   assert.equal(r("$NVDA short").side, "long", "the words read are the ones around THIS ticker");
   assert.equal(r("$NVDA short", "NVDA").side, "short");
   assert.ok(r("$HOOD 2w").horizonWord === "2w" && r("$HOOD by Oct 15").horizonWord === "by Oct 15", "the horizon names its word");
+  assert.equal(r("$HOOD 999d").horizonWord, null, "an out-of-range number is not a horizon word");
+  // On a Friday the week ends today; on Saturday it is next Friday.
+  const fri = Date.UTC(2026, 8, 25, 15, 0, 0), sat = Date.UTC(2026, 8, 26, 15, 0, 0);
+  assert.equal(callRead("$HOOD by eow", "HOOD", fri).horizonMs, 1 * DAY);
+  assert.equal(callRead("$HOOD by eow", "HOOD", sat).horizonMs, 7 * DAY, "Saturday 15:00Z to the end of next Friday is 6.4 days: 7");
 });
 
 test("callRead: the client's copy reads every case exactly as the server does", () => {
@@ -2918,6 +2933,7 @@ test("callRead: the client's copy reads every case exactly as the server does", 
   const now = Date.UTC(2026, 8, 22, 15, 0, 0);
   const texts = ["long $HOOD here", "I'd fade $HOOD into the print", "sell $HOOD puts", "selling $HOOD calls", "buy $HOOD puts", "$HOOD lower",
     "short $HOOD 30d", "$HOOD 2 weeks", "$HOOD 1mo", "$HOOD next week", "$HOOD for a month", "$HOOD by eow", "$HOOD eom", "$HOOD by year end",
-    "$HOOD by Oct 15", "$HOOD by 10/15", "$HOOD by Jan 5", "$HOOD ran 3d in a row", "$HOOD 999d", "nothing here", "$NVDA short"];
+    "$HOOD by Oct 15", "$HOOD by 10/15", "$HOOD by Jan 5", "$HOOD ran 3d in a row", "$HOOD 999d", "nothing here", "$NVDA short",
+    "lower risk $HOOD here", "$HOOD: bearish", "$HOOD 100 puts", "sell $HOOD 100 puts", "$HOOD by July 4", "$HOOD by 13/5", "$HOOD by 2/30", "$HOOD 53w"];
   for (const t of texts) assert.deepEqual(clientRead(t, "HOOD", now), callRead(t, "HOOD", now), "parity: " + t);
 });
