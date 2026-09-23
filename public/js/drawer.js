@@ -48,12 +48,12 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
         `<span data-tip="total 30d price return">total <b class="${split.total>=0?'pos':'neg'}">${split.total>=0?'+':''}${split.total.toFixed(1)}%</b></span>`+
         `<span data-tip="compounded across ${split.n} close\u2192open holds (overnight + weekend)">off-hours <b class="${split.off>=0?'pos':'neg'}">${split.off>=0?'+':''}${split.off.toFixed(1)}%</b></span>`+
         `<span data-tip="the residual: what accrued during ${esc(sessLbl)}">session <b class="${split.sess>=0?'pos':'neg'}">${split.sess>=0?'+':''}${split.sess.toFixed(1)}%</b></span>`+
-        (Math.abs(split.off)>Math.abs(split.total)*0.7&&Math.abs(split.total)>2?`<span class="sec" style="font-size:10.5px" data-tip="\u226570% of the 30d move accrued while the cash market was closed">\u26a1 overnight-driven</span>`:'')+
+        (Math.abs(split.off)>Math.abs(split.total)*0.7&&Math.abs(split.total)>2?`<span class="sec" style="font-size:var(--fs-xs)" data-tip="\u226570% of the 30d move accrued while the cash market was closed">\u26a1 overnight-driven</span>`:'')+
       `</div>`
     : '';
   el('drawer').innerHTML=`
     <div class="dhead">${esc(r.ticker)}
-      <span class="star${starred?' on':''}" id="dstar" role="button" tabindex="0" style="font-size:16px;cursor:pointer" title="${starred?'remove from watchlist':'add to watchlist'}">${starred?'★':'☆'}</span>
+      <span class="star${starred?' on':''}" id="dstar" role="button" tabindex="0" style="font-size:var(--fs-lg);cursor:pointer" title="${starred?'remove from watchlist':'add to watchlist'}">${starred?'★':'☆'}</span>
       <button class="dclose" id="dclose" title="close">✕</button></div>
     ${r.nm?`<div class="dname" data-tip="the instrument behind the ticker — static server-side map; a name that isn\u2019t seeded shows no line rather than a guess">${esc(r.nm)}</div>`:''}
     <div class="dsub">${esc(r.coin)} · ${fmtPrice(r.px)}${r.coin===state.benchCoin?' · S&amp;P benchmark':''}${r.coin===state.benchMain?' · BTC — crypto benchmark':''}${r.uni==='main'?' · 24/7 · 90d dailies':''} · <span id="dai" style="color:var(--blue);cursor:pointer;text-decoration:underline;text-underline-offset:2px" data-tip="jump to the Report tab — everything this server holds on this name, synthesized into a plain-language read with scenarios and R/R">AI report →</span></div>
@@ -86,9 +86,9 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
     ${r.uni==='xyz'?'<div id="dfund"></div>':''}
     <div id="dledger"></div>
     <div id="dnews"></div>
-    ${r.regime?`<div class="sec" style="font-size:11.5px;margin:2px 0 12px;line-height:1.55">${regimeReadout(r)}</div>`:''}
-    <div class="dsec">Top co-movers (90d)</div>${pos.length?pos.map(x=>li(x[0],x[1])).join(''):'<div class="sec" style="font-size:12px">daily history still loading…</div>'}
-    <div class="dsec">Top hedges — inverse (90d)</div>${neg.length?neg.map(x=>li(x[0],x[1])).join(''):'<div class="sec" style="font-size:12px">no negative correlations</div>'}`;
+    ${r.regime?`<div class="sec" style="font-size:var(--fs-xs);margin:2px 0 12px;line-height:1.55">${regimeReadout(r)}</div>`:''}
+    <div class="dsec">Top co-movers (90d)</div>${pos.length?pos.map(x=>li(x[0],x[1])).join(''):'<div class="sec" style="font-size:var(--fs-sm)">daily history still loading…</div>'}
+    <div class="dsec">Top hedges — inverse (90d)</div>${neg.length?neg.map(x=>li(x[0],x[1])).join(''):'<div class="sec" style="font-size:var(--fs-sm)">no negative correlations</div>'}`;
   el('drawer').classList.add('show'); el('drawerbg').classList.add('show'); el('drawer').setAttribute('aria-hidden','false');
   overlayPush('drawer', closeDetail);
   el('dclose').onclick=closeDetail;
@@ -190,7 +190,7 @@ async function loadDrawerSeries(coin){
       html+=`<div class="dsec">Open interest ${span(s.oi)}</div>${sparkline(v,{color:up?'var(--up)':'var(--down)'})}`; }
     if(s.funding && s.funding.length>2){ const v=s.funding.map(p=>p[1]*24*365*100), last=v[v.length-1];
       html+=`<div class="dsec">Funding APR ${span(s.funding)} · now ${(last>=0?'+':'')+last.toFixed(1)}%</div>${sparkline(v,{zero:true,color:'var(--blue)'})}`; }
-    box.innerHTML = html || '<div class="dsec">OI / funding history</div><div class="sec" style="font-size:12px">collecting — the trend appears here as history accrues server-side</div>';
+    box.innerHTML = html || '<div class="dsec">OI / funding history</div><div class="sec" style="font-size:var(--fs-sm)">collecting — the trend appears here as history accrues server-side</div>';
   }catch(_){}
 }
 // ===== drawer: fundamentals panel (xyz equity universe · Finnhub basic financials) =====
@@ -274,7 +274,7 @@ function loadDrawerDerivs(coin){ const box=el('dderivs'); if(!box) return; const
 function renderDerivs(box,coin,d){
   if(!d||d.enabled===false){ box.innerHTML=''; return; }   // no key on the server — the panel simply doesn't exist
   const head=`<div class="dsec" data-tip="aggregated CEX liquidations + open interest for this coin \u2014 market context for the HL name, NOT Hyperliquid-native \u00b7 source: Coinalyze${d.venue?' \u00b7 venue: '+esc(d.venue)+' perp':''} \u00b7 USD values source-converted \u00b7 15-min buckets, chart aggregated hourly">Derivs context <span class="dzsrc">${esc(d.venue||'CEX')} \u00b7 coinalyze \u2014 not HL</span></div>`;
-  if(d.error&&!(d.hours&&d.hours.length)){ box.innerHTML=head+`<div class="sec" style="font-size:11.5px;margin-bottom:10px">${esc(d.error)}</div>`; return; }
+  if(d.error&&!(d.hours&&d.hours.length)){ box.innerHTML=head+`<div class="sec" style="font-size:var(--fs-xs);margin-bottom:10px">${esc(d.error)}</div>`; return; }
   const H=d.hours||[], roll=d.roll, now=Date.now();
   const stale=d.staleMs!=null&&d.staleMs>2*15*60*1000;
   const asOf=d.asOf?fmtAge(now-d.asOf)+' ago':'never';
@@ -314,7 +314,7 @@ function renderDerivs(box,coin,d){
       oiSvg=`<div class="dzlbl">agg OI (USD) \u00b7 same window</div><div class="dzwrap"><svg class="dzoi" viewBox="0 0 ${W} ${HB}" preserveAspectRatio="none"><polyline points="${pts.trim()}" fill="none" stroke="var(--blue)" stroke-width="1.6" stroke-linejoin="round"/><line class="dzchB" x1="0" y1="0" x2="0" y2="${HB}" stroke="var(--accent)" stroke-width="1" opacity="0"/><circle class="dzdotB" r="3" fill="var(--blue)" opacity="0"/></svg></div>`; }
     charts=`<div class="dzlbl">liquidations \u00b7 hourly \u00b7 ${Math.min(48,H.length)}h <span class="pos">shorts \u25b4</span> <span class="neg">longs \u25be</span> <span style="color:var(--accent)">\u25c6 cascade</span></div><div class="dzwrap"><svg class="dzliq" viewBox="0 0 ${W} ${HA}" preserveAspectRatio="none">${g}</svg></div>${oiSvg}<div class="dztip" style="display:none"></div>`;
   } else {
-    charts=`<div class="sec" style="font-size:11.5px;margin-bottom:8px">accumulating \u2014 the chart appears once a few hourly buckets exist${d.error?' \u00b7 '+esc(d.error):''}</div>`;
+    charts=`<div class="sec" style="font-size:var(--fs-xs);margin-bottom:8px">accumulating \u2014 the chart appears once a few hourly buckets exist${d.error?' \u00b7 '+esc(d.error):''}</div>`;
   }
   box.innerHTML=head+sub+chips+charts+`<div class="dzfoot">context only \u00b7 a different venue population than the HL book \u00b7 baselines grow server-side from day one</div>`;
   box.classList.toggle('dzstale',stale);
@@ -380,7 +380,7 @@ async function loadDrawerLedger(coin){
       +`<div class="dsplit" style="flex-wrap:wrap">`
       +`<span>${head}</span>`
       +(open?`<span data-tip="claims on the books, awaiting their horizon">open <b>${open}</b></span>`:'')
-      +(canJump?`<span id="dledger-full" class="sec" style="cursor:pointer;font-size:11px;text-decoration:underline;text-underline-offset:2px" data-tip="jump to the Signals tab with this ticker\u2019s full claim-by-claim history loaded">full history \u2192</span>`:'')
+      +(canJump?`<span id="dledger-full" class="sec" style="cursor:pointer;font-size:var(--fs-xs);text-decoration:underline;text-underline-offset:2px" data-tip="jump to the Signals tab with this ticker\u2019s full claim-by-claim history loaded">full history \u2192</span>`:'')
       +`</div>`
       +(chips?`<div class="dsplit" style="flex-wrap:wrap;gap:6px">${chips}</div>`:'');
     const fb=el('dledger-full');
@@ -434,7 +434,7 @@ async function loadSigHistory(f){
     const capNote=d.closed.length>=150?' <span class="sec" data-tip="the ledger keeps the last 4,000 resolved claims; this view shows the most recent 150 matching">\u00b7 most recent 150 shown</span>':'';
     p.innerHTML=`<div class="cp-head">${title} <span class="sec" style="font-weight:400">\u2014 signal history${rec}${d.open.length?` \u00b7 ${d.open.length} open`:''}${capNote}</span> <button class="btn xtiny" id="sighist-close" title="close" style="float:right">\u2715</button></div>`
       +(rows?`<table class="sigrec-t"><thead><tr>${withTicker?'<th>ticker</th>':''}<th>event</th><th>side</th><th data-tip="when THIS claim opened its own entry in the ledger (your local time) \u2014 every event instance stamps its own time. \u27f2 marks claims opened on the first build after a restart/deploy, where the condition may predate the stamp">fired</th><th data-tip="the mark THIS instance was triggered at \u2014 outcomes are measured from this price">mark</th><th data-tip="live price against this claim, computed here from the same streaming mark the board uses \u2014 never shipped in the cached ledger payload. \u0394 is signed WITH the claim: a short whose price is falling reads GREEN, because this column answers \u201cis this claim currently winning\u201d, not \u201cis the chart up\u201d. Touch-mode claims add a bracket bar: travel toward the frozen target (green, right) vs the frozen void (red, left). Settled claims show a dash \u2014 their outcome column already owns the answer">now</th><th data-tip="when it reached its horizon and was scored \u00b7 open claims show time remaining">resolved</th><th data-tip="signal score at fire time">score</th><th data-tip="at-horizon outcome, signed with the claim (positive = followed through), in the unit the study claims">outcome</th><th data-tip="stop-aware outcome: capped at the frozen void level when it was touched before horizon \u00b7 \u2014 when it coincides with at-horizon">\u26d4</th></tr></thead><tbody>${rows}</tbody></table>`
-      :`<div class="sec" style="font-size:11.5px;padding:6px 2px">No claims match${f.ev?` \u2014 no ${esc(evLbl)} claim has ever fired${f.coin?` on ${esc(d.ticker||f.coin)}`:''}`:''}. The history starts with the first fire.</div>`);
+      :`<div class="sec" style="font-size:var(--fs-xs);padding:6px 2px">No claims match${f.ev?` \u2014 no ${esc(evLbl)} claim has ever fired${f.coin?` on ${esc(d.ticker||f.coin)}`:''}`:''}. The history starts with the first fire.</div>`);
     const cb=el('sighist-close'); if(cb) cb.onclick=()=>{ p.hidden=true; const q=el('sighist-q'); if(q) q.value=''; const ee=el('sighist-ev'); if(ee) ee.value=''; };
     p.querySelectorAll('[data-shtk]').forEach(c=>c.addEventListener('click',()=>{ const qi=el('sighist-q'); if(qi) qi.value=c.dataset.shtk; runSigHist(); }));
   }catch(_){ if(seq===_shSeq) p.innerHTML='<div class="msg">Could not load the history \u2014 try again.</div>'; }
@@ -453,7 +453,7 @@ function runSigHist(){
   p.hidden=false;
   p.innerHTML=cand.length
     ? `<div class="cp-head">matches <span class="sec" style="font-weight:400">\u2014 pick a ticker</span></div><div class="dsplit" style="flex-wrap:wrap;gap:6px">${cand.slice(0,12).map(r=>`<span class="sigrec-chip" style="cursor:pointer" data-shc="${esc(r.ticker)}">${esc(r.ticker)}</span>`).join('')}</div>`
-    : `<div class="sec" style="font-size:11.5px;padding:6px 2px">No ticker matching \u201c${esc(q)}\u201d in this scope.</div>`;
+    : `<div class="sec" style="font-size:var(--fs-xs);padding:6px 2px">No ticker matching \u201c${esc(q)}\u201d in this scope.</div>`;
   p.querySelectorAll('[data-shc]').forEach(c=>c.addEventListener('click',()=>{ const q2=el('sighist-q'); if(q2) q2.value=c.dataset.shc; runSigHist(); }));
 }
 function openSigHistory(ticker){

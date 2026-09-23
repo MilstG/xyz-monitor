@@ -508,7 +508,7 @@ test("UI batch -99: density toggle, keyboard nav and focused-ticker chip are ful
   // rules must survive as unconditional CSS — deleting the attribute without keeping the selector
   // weight would silently drop compact back to the base padding, which is the exact failure this
   // pins. Both halves are asserted: the rule still exists, and nothing can turn it off again.
-  assert.ok(css.includes(":root .wrap tbody td{font-size:12px"), "compact table CSS missing");
+  assert.ok(css.includes(":root .wrap tbody td{font-size:var(--fs-sm)"), "compact table CSS missing");
   assert.ok(!css.includes("[data-density"), "the density attribute selector must be gone — compact is the only density");
   assert.ok(!app.includes("xyzmon.density") && !app.includes("densBtn"), "density toggle wiring must be gone");
   assert.ok(!html.includes('id="densBtn"'), "density button must be gone from the markup");

@@ -210,12 +210,14 @@
 
 <section id="view-trend" hidden>
   <div class="controls">
+    <div class="zone">
     <div class="seg" id="trendside" role="group" aria-label="Side">
       <span class="seglbl">side</span>
       <button type="button" data-side="long" class="active">Longs</button>
       <button type="button" data-side="short">Shorts</button>
     </div>
-    <span class="sec" id="trend-asof" style="align-self:center;font-size:12px"></span>
+    </div>
+    <span class="sec" id="trend-asof" style="align-self:center;font-size:var(--fs-sm)"></span>
   </div>
   <div id="trend-body"><div class="msg">Loading…</div></div>
 </section>
@@ -229,6 +231,7 @@
 
 <section id="view-sectors" hidden>
   <div class="controls">
+    <div class="zone">
     <div class="seg" id="sectf" role="group" aria-label="Window">
       <span class="seglbl">window</span>
       <button type="button" data-tf="1h">1h</button>
@@ -242,6 +245,8 @@
       <button type="button" data-wt="vol">by volume</button>
       <button type="button" data-wt="eq">equal</button>
     </div>
+    </div>
+    <div class="zone cut">
     <div class="seg" id="sectgrp" role="group" aria-label="Grouping">
       <span class="seglbl">grouping</span>
       <button type="button" data-grp="sector">sector</button>
@@ -252,7 +257,10 @@
       <button type="button" data-mode="flow">flow map</button>
       <button type="button" data-mode="leaders">leaders</button>
     </div>
-    <button class="btn" id="sectExport" title="Download the sector board as CSV" style="margin-left:auto">↓ CSV</button>
+    </div>
+    <div class="zone act">
+    <button class="btn" id="sectExport" title="Download the sector board as CSV">↓ CSV</button>
+    </div>
   </div>
   <div class="sect-legend" id="sect-legend">
     <b>Rotation map</b> — horizontal = capital direction (price + OI conviction), vertical = activity heat (volume + volatility).
@@ -275,11 +283,13 @@
 
 <section id="view-housing" hidden>
   <div class="controls">
+    <div class="zone">
     <div class="seg" id="hsgwin" role="group" aria-label="Chart window" title="Chart window — the full history is already on the client; switching never costs a request">
       <span class="seglbl">window</span>
       <button type="button" data-w="1y">1y</button>
       <button type="button" data-w="5y" class="active">5y</button>
       <button type="button" data-w="max">max</button>
+    </div>
     </div>
     <span class="benchnote">Direct = same series as the institutional monitor · <b>Proxy</b> = closest public stand-in (hover the chip) · Pending = file-fed source not wired yet</span>
   </div>
@@ -288,11 +298,13 @@
 
 <section id="view-liquidity" hidden>
   <div class="controls">
+    <div class="zone">
     <div class="seg" id="liqwin" role="group" aria-label="Chart window" title="Chart window — full history is on the client; switching never costs a request">
       <span class="seglbl">window</span>
       <button type="button" data-w="1y">1y</button>
       <button type="button" data-w="5y" class="active">5y</button>
       <button type="button" data-w="max">max</button>
+    </div>
     </div>
     <span class="benchnote">Net liquidity = <b>total assets − TGA − ON RRP</b> · H.4.1 Wednesdays · billions · <b>Ours</b> chip = not on the usual net-liquidity pages</span>
   </div>
@@ -301,6 +313,7 @@
 
 <section id="view-corr" hidden>
   <div class="controls">
+    <div class="zone">
     <div class="search">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
       <input id="corrsearch" aria-label="Search correlation names" type="text" placeholder="Focus tickers… e.g. AAPL, NVDA, SPX" autocomplete="off" spellcheck="false"/>
@@ -312,6 +325,8 @@
       <button type="button" data-d="180">180d</button>
       <button type="button" data-d="365">1y</button>
     </div>
+    </div>
+    <div class="zone cut">
     <div class="seg" id="corrn" role="group" aria-label="Universe size">
       <span class="seglbl">top by vol</span>
       <button type="button" data-n="20">20</button>
@@ -319,8 +334,11 @@
       <button type="button" data-n="60">60</button>
     </div>
     <div class="seg" id="corrbk" role="group" aria-label="Basket rows" hidden></div>
+    </div>
+    <div class="zone act">
     <span class="sync" id="corrsync"><span class="sdot"></span><span id="corrsync-t">—</span></span>
     <button class="btn" id="corrExport" title="Download the matrix as CSV">↓ CSV</button>
+    </div>
   </div>
   <div class="corr-legend">
     <span>inverse</span><span class="grad"></span><span>co-moving</span>
@@ -331,11 +349,13 @@
   <div id="pairpanel" class="corrpanel" hidden></div>
   <div id="corrpanel" class="corrpanel" hidden></div>
   <div class="controls" style="margin-top:18px">
-    <div class="cp-sub" style="margin:0">Strongest pairs across the set</div>
+    <div class="zone"><div class="cp-sub" style="margin:0">Strongest pairs across the set</div></div>
+    <div class="zone cut">
     <div class="seg" id="corrtop" role="group" aria-label="Pair count">
       <span class="seglbl">show</span>
       <button type="button" data-k="10">10</button>
       <button type="button" data-k="20">20</button>
+    </div>
     </div>
   </div>
   <div id="corrpairs" class="corrpairs"></div>
@@ -353,14 +373,16 @@
 </section>
 
 <section id="view-signals" hidden>
-  <div class="controls" style="margin-bottom:10px;flex-wrap:wrap">
+  <div class="controls" style="flex-wrap:wrap">
+    <div class="zone">
     <div class="search" data-tip="the audit trail behind the aggregate record: every visible claim the engine ever fired — filter by ticker, by signal type, or both. Outcomes shown in the unit each claim resolved in">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
       <input id="sighist-q" aria-label="Search signal history" type="text" placeholder="Ticker history… e.g. MSTR" autocomplete="off" spellcheck="false"/>
     </div>
     <select id="sighist-ev" class="btn" title="Browse the claim history by signal type — every claim of that kind ever fired, across all tickers (or combined with the ticker search)"><option value="">any signal type…</option></select>
-    <span id="sig-introtxt" class="sec" style="font-size:11.5px;line-height:1.5"></span>
-    <span id="sig-segslot" style="margin-left:auto"></span>
+    </div>
+    <span id="sig-introtxt" class="sec" style="font-size:var(--fs-xs);line-height:1.5"></span>
+    <span id="sig-segslot" class="zone act"></span>
   </div>
   <div id="sighist-panel" class="corrpanel" hidden></div>
   <div id="signals-body"><div class="msg">Loading…</div></div>
@@ -383,17 +405,23 @@
 </section>
 <section id="view-actionable" hidden>
   <div class="controls">
+    <div class="zone">
     <div class="seg" id="actside" role="group" aria-label="Side">
       <span class="seglbl">side</span>
       <button type="button" data-aside="all" class="active">All</button>
       <button type="button" data-aside="long">Longs</button>
       <button type="button" data-aside="short">Shorts</button>
     </div>
+    </div>
+    <div class="zone cut">
     <label class="copt" title="Setups whose frozen R:R at fire clears 2:1 — level-triggered trades (breakouts, trend retests) with the stop at a real chart level. Win big, less often."><input type="checkbox" id="act-cls-rr" checked> 2:1+ setups</label>
     <label class="copt" title="Setups below 2:1 at fire whose expectancy is still positive — the statistical family (big moves, funding divergences) built on median outcomes against a 1σ void. Win small, more often. Every row here still clears the same record and EV gates."><input type="checkbox" id="act-cls-ev" checked> positive-EV grinders</label>
     <label class="copt" title="Hide rows with a scheduled earnings print inside the setup's horizon."><input type="checkbox" id="act-noearn"> no earnings in horizon</label>
+    </div>
+    <div class="zone act">
     <button type="button" class="btn" id="act-sortreset" title="Back to the default sort: most recently triggered first.">↺ newest first</button>
-    <span class="sec" id="act-asof" style="align-self:center;font-size:12px"></span>
+    <span class="sec" id="act-asof" style="align-self:center;font-size:var(--fs-sm)"></span>
+    </div>
   </div>
   <div id="act-body"><div class="msg">Loading…</div></div>
 </section>
@@ -408,12 +436,14 @@
 
 <section id="view-report" hidden>
   <div class="controls" style="flex-wrap:wrap">
+    <div class="zone">
     <div class="search" style="position:relative" data-tip="type a ticker from either universe — only names in the live universe match; free text never reaches the API">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
       <input id="ai-q" aria-label="Ask the analyst" type="text" placeholder="Ticker… any universe" autocomplete="off" spellcheck="false"/>
       <div class="ai-sug" id="ai-sug" hidden></div>
     </div>
-    <span class="sec" id="ai-note" style="align-self:center;font-size:11.5px;line-height:1.5"></span>
+    </div>
+    <span class="sec" id="ai-note" style="align-self:center;font-size:var(--fs-xs);line-height:1.5"></span>
   </div>
   <div id="ai-report" class="corrpanel" hidden></div>
   <div id="ai-recent"></div>

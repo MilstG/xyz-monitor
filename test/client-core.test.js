@@ -2018,7 +2018,7 @@ test("chip stories manifest: tag rendered on name and group chips, story leads e
   const cs = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   for (const pin of [".achip .tag{", ".achip .tag.t-turn", ".achip .tag.t-dist",
     ".achip .rt{min-width:56px;flex:none;white-space:nowrap}",   // -06: fixed cells never shrink below content — the "+29.60%M +67" glue
-    ".achip .why{color:var(--muted);font-size:10.5px;flex:1;min-width:140px}"])
+    ".achip .why{color:var(--muted);font-size:var(--fs-xs);flex:1;min-width:140px}"])
     assert.ok(cs.includes(pin), "styles pin missing: " + pin);
 });
 

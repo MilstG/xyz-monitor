@@ -428,7 +428,7 @@ function btCurveSvg(res, splitIdx){
   s+=`<path d="${path(bench)}" fill="none" stroke="var(--muted)" stroke-width="1.2"/>`;
   s+=`<path d="${path(gross)}" fill="none" stroke="var(--blue)" stroke-width="1.2" opacity="0.85"/>`;
   s+=`<path d="${path(net)}" fill="none" stroke="var(--accent)" stroke-width="2"/>`;
-  const endLab=(arr,col)=>`<text x="${(W-pr+4)}" y="${(Y(arr[m-1])+3).toFixed(1)}" style="font-size:9px;fill:${col}">${(arr[m-1]>0?'+':'')+arr[m-1].toFixed(1)}%</text>`;
+  const endLab=(arr,col)=>`<text x="${(W-pr+4)}" y="${(Y(arr[m-1])+3).toFixed(1)}" style="font-size:var(--fs-2xs);fill:${col}">${(arr[m-1]>0?'+':'')+arr[m-1].toFixed(1)}%</text>`;
   s+=endLab(net,'var(--accent)');
   if(res.single){                                                   // position ribbon: WHEN the rule was on, and on which side
     s+=endLab(ew,'var(--text)');
@@ -501,7 +501,7 @@ function btPositionPanel(res){
       `${res.curZ!=null&&isFinite(res.curZ)?` · ${(res.curZ>0?'+':'')+res.curZ.toFixed(2)}σ`:''} · entry ${state.backtest.entry>0?'±'+state.backtest.entry+'σ':'sign only'}`+
       ` · ${res.trades.length} round trip${res.trades.length===1?'':'s'}${res.trades.length?`, ${Math.round(wins/res.trades.length*100)}% green`:''}</span></div>`+
     `<div class="bt-ttbl"><div class="bt-trow bt-thd"><span>side</span><span>in</span><span>out</span><span class="r">size</span><span class="r">return</span></div>${rows}</div>`+
-    (res.trades.length>MAX?`<div class="sec" style="font-size:10.5px;padding:6px 2px 0">+${res.trades.length-MAX} earlier</div>`:''));
+    (res.trades.length>MAX?`<div class="sec" style="font-size:var(--fs-xs);padding:6px 2px 0">+${res.trades.length-MAX} earlier</div>`:''));
 }
 // ===== target picker — typeahead over the live scope, never a dropdown =========================
 // The roster is a few hundred names across two universes; a <select> is unusable at that size. Same
@@ -729,7 +729,7 @@ function duelSvg(ic){
   const rows=ic.map((r2,i)=>`<b style="color:var(--text)">${sessDate(r2[0]*DAY)}</b> <span class="sec">· ${r2[3]} names</span><br>`+
     `<span style="color:var(--muted)">MOM ${ra[i].toFixed(3)}</span> · <span style="color:var(--accent)">MOM+ ${rb[i].toFixed(3)}</span>`+
     ` · Δ <span class="${rb[i]-ra[i]>=0?'pos':'neg'}">${(rb[i]-ra[i]>=0?'+':'')+(rb[i]-ra[i]).toFixed(3)}</span>`+
-    `<br><span class="sec" style="font-size:10px">raw day: MOM ${r2[1].toFixed(3)} · MOM+ ${r2[2].toFixed(3)}</span>`);
+    `<br><span class="sec" style="font-size:var(--fs-2xs)">raw day: MOM ${r2[1].toFixed(3)} · MOM+ ${r2[2].toFixed(3)}</span>`);
   return hoverChart(s2,{w:W,h:H,pt,pb,xs,rows});
 }
 function duelDivergence(){

@@ -178,12 +178,12 @@ async function shareOpen(card) {
 function renderTargets() {
   const box = el("sh-list"); if (!box) return;
   const q = (el("sh-q") && el("sh-q").value || "").trim().toLowerCase();
-  if (targets == null) { box.innerHTML = "<div class=\"sec\" style=\"font-size:12px;padding:6px 4px\">loading conversations…</div>"; return; }
+  if (targets == null) { box.innerHTML = "<div class=\"sec\" style=\"font-size:var(--fs-sm);padding:6px 4px\">loading conversations…</div>"; return; }
   const list = targets.filter((t) => !q || t.name.toLowerCase().includes(q));
   box.innerHTML = list.length ? list.slice(0, 40).map((t) => "<div class=\"torow" + (t.id === picked ? " on" : "") + "\" data-shto=\"" + esc(t.id) + "\">"
     + "<span class=\"nm" + (t.kind === "group" || t.kind === "board" ? " grp" : "") + "\">" + (t.kind === "group" || t.kind === "board" ? "# " : "") + esc(t.name) + "</span>"
     + "<span class=\"last\">" + (t.kind === "new" ? "new conversation" : t.kind) + "</span></div>").join("")
-    : "<div class=\"sec\" style=\"font-size:12px;padding:6px 4px\">" + (targets.length ? "no match" : "sign in to Messages first") + "</div>";
+    : "<div class=\"sec\" style=\"font-size:var(--fs-sm);padding:6px 4px\">" + (targets.length ? "no match" : "sign in to Messages first") + "</div>";
 }
 function renderSheet() {
   const s = sheetEl(); if (!cur) return;

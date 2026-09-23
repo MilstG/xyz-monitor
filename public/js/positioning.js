@@ -41,7 +41,7 @@ function renderRegime(reg, sel){
   const classes=[['all','Both'],['crypto','Crypto'],['stocks','Stocks']];
   if(!classes.some(c=>c[0]===sel)) sel='all';
   const label = sel==='all'?'the whole book':(sel==='crypto'?'crypto':'stocks');
-  const selHtml=`<select id="regimesel" style="background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:3px 7px;font-family:var(--mono);font-size:11px">`+
+  const selHtml=`<select id="regimesel" style="background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:3px 7px;font-family:var(--mono);font-size:var(--fs-xs)">`+
     classes.map(c=>`<option value="${c[0]}"${c[0]===sel?' selected':''}>${c[1]}</option>`).join('')+`</select>`;
   const headRow=`<div class="cp-sub" style="margin:2px 0 12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span class="t" style="color:var(--text)">◆ Positioning regime</span> <span class="d sec">— how crowded &amp; leveraged ${label} is, tape-wide</span><span style="margin-left:auto">${selHtml}</span></div>`;
   const d=reg[sel];
@@ -70,7 +70,7 @@ function renderRegime(reg, sel){
     sCard(sCap('Total OI \u00b7 '+(sel==='all'?'both':sel))+oiChart)+
     sCard(sCap('Net funding skew (APR) \u00b7 '+(sel==='all'?'both':sel))+skewChart)+
     `</div>`;
-  return headRow+crowdTiles+levTiles+grid+`<div class="sec" style="margin:10px 0 20px;font-size:11px;max-width:720px;line-height:1.5">Crowding is OI-weighted funding + how many names sit at a funding extreme; leverage is aggregate OI and how stretched it is vs its own norm. Crowded <em>and</em> stretched is the cascade precondition — context, not a trade.</div>`;
+  return headRow+crowdTiles+levTiles+grid+`<div class="sec" style="margin:10px 0 20px;font-size:var(--fs-xs);max-width:720px;line-height:1.5">Crowding is OI-weighted funding + how many names sit at a funding extreme; leverage is aggregate OI and how stretched it is vs its own norm. Crowded <em>and</em> stretched is the cascade precondition — context, not a trade.</div>`;
 }
 // ---- structural-level validation (sections.levels) ----
 // The -09 detector's report card. Two charts + one table, all control-matched: excess = real rate
@@ -546,7 +546,7 @@ function drawSessions(){
   const allLive = anySections && !gate.some(Boolean);
   const nStudies = 1/*regime*/+4/*decomp, anatomy, candles, pivots*/
     +(onG('clocks')?3:0)+(onG('week')?1:0)+(onG('structure')?2:0);
-  const foot = allLive ? `<div class="sec" style="margin-top:4px;font-size:11px;opacity:.8">All ${nStudies} studies live. \u25c6</div>` : '';
+  const foot = allLive ? `<div class="sec" style="margin-top:4px;font-size:var(--fs-xs);opacity:.8">All ${nStudies} studies live. \u25c6</div>` : '';
   // Render only the groups this universe publishes (-19) — crypto ships positioning + holds.
   const GROUP_BODY={
     positioning:()=>sgSection('positioning','Positioning',vPositioning(),[{html:regimeBlock}]),

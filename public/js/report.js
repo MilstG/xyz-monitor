@@ -161,7 +161,7 @@ function grpIndexSvg(idx){
       <rect x="${PL}" y="${PT}" width="${W-PL-PR}" height="${H-PT-PB}" fill="transparent" id="grp-hit"/>
     </svg>
     <div class="cg-read" id="grp-read"></div>
-    <div class="sec" style="font-size:10px;margin-top:2px">equal-weight index of member daily closes, rebased to 100 — a synthetic composite, drawn for context only; no levels are annotated on it by design (structure on a synthetic index would be false precision)</div>
+    <div class="sec" style="font-size:var(--fs-2xs);margin-top:2px">equal-weight index of member daily closes, rebased to 100 — a synthetic composite, drawn for context only; no levels are annotated on it by design (structure on a synthetic index would be false precision)</div>
   </div>`;
 }
 function grpWireIndexHover(idx){
@@ -182,10 +182,10 @@ function grpWireIndexHover(idx){
 }
 function renderAiGroupReport(d,coin,box){
   const label=grpLabelOf(coin,d);
-  const budget=(d&&d.dayLeft!=null?`<div class="sec" style="font-size:11px;margin-top:6px">${d.admin?'admin — unlimited':(d.userDayLeft!=null?'yours: '+d.userDayLeft+'/'+d.userPerDay+' today · '+d.userMonthLeft+'/'+d.userPerMonth+' this month · ':'')+'shared pool '+d.dayLeft+'/'+d.perDay+' today'}</div>`:'');
+  const budget=(d&&d.dayLeft!=null?`<div class="sec" style="font-size:var(--fs-xs);margin-top:6px">${d.admin?'admin — unlimited':(d.userDayLeft!=null?'yours: '+d.userDayLeft+'/'+d.userPerDay+' today · '+d.userMonthLeft+'/'+d.userPerMonth+' this month · ':'')+'shared pool '+d.dayLeft+'/'+d.perDay+' today'}</div>`:'');
   if(!d||d.status==='none'||!d.ai){
     box.innerHTML=`<div class="ai-head"><span class="tk">${esc(label)}</span><span class="sec">group report</span></div>`
-      +`<div class="msg" style="padding:22px 10px">No report for this ${String(coin).startsWith('grp:sec:')?'sector':'basket'} yet.${d&&d.error?'<br><span class="neg" style="font-size:12px">'+esc(d.error)+'</span>':''}<br><span class="sec" style="font-size:12px">Group reads are prose-tier: breadth, leadership and rotation over an equal-weight basket — no entry/stop/target, nothing enters the track record.</span></div>`
+      +`<div class="msg" style="padding:22px 10px">No report for this ${String(coin).startsWith('grp:sec:')?'sector':'basket'} yet.${d&&d.error?'<br><span class="neg" style="font-size:var(--fs-sm)">'+esc(d.error)+'</span>':''}<br><span class="sec" style="font-size:var(--fs-sm)">Group reads are prose-tier: breadth, leadership and rotation over an equal-weight basket — no entry/stop/target, nothing enters the track record.</span></div>`
       +(d&&d.enabled!==false&&!d.error?`<div style="text-align:center;padding-bottom:12px"><button class="btn" id="ai-regen" ${d&&d.dayLeft===0&&!d.admin?'disabled data-cap="1" title="shared daily pool exhausted — resets at midnight UTC"':''}>generate group report</button>${budget}</div>`:'');
     const b=el('ai-regen'); if(b) b.onclick=()=>aiRegenerate(coin);
     return;
@@ -200,7 +200,7 @@ function renderAiGroupReport(d,coin,box){
   const brRow=(k,v,tip)=>v==null?'':`<span class="sec" style="margin-right:12px" data-tip="${esc(tip)}"><b>${esc(k)}</b> ${esc(String(v))}</span>`;
   box.innerHTML=`<div class="ai-head"><span class="tk">${esc(label)}</span><span class="sec">group report · ${d.memberCount||''} members</span></div>
     <div style="margin:6px 0 8px"><span class="ai-badge ${d.ai.bias==='short'?'short':d.ai.bias==='neutral'?'neutral':''}">${esc(d.ai.headline)}</span></div>
-    <div class="sec" style="font-size:11px;margin-bottom:6px">${stateLine} · <span id="ai-age" data-ts="${d.ts}">${aiFmtAgo(Date.now()-d.ts)}</span> old · ${esc(d.model||'')}</div>
+    <div class="sec" style="font-size:var(--fs-xs);margin-bottom:6px">${stateLine} · <span id="ai-age" data-ts="${d.ts}">${aiFmtAgo(Date.now()-d.ts)}</span> old · ${esc(d.model||'')}</div>
     ${grpIndexSvg(c.ewIndex)}
     <div style="margin:8px 0 4px">${brRow('up today',br.pctUpD1!=null?br.pctUpD1+'%':null,'share of members positive on the day')}${brRow('above 200dma',br.pctAboveMa200!=null?br.pctAboveMa200+'%':null,'share of members above their 200-day SMA (of those with enough history)')}${brRow('avg pair corr',c.avgPairCorr,'average pairwise 30d correlation of member daily returns — high means one trade wearing many names')}${brRow('7d dispersion',c.dispersionD7!=null?c.dispersionD7+'pp':null,'cross-sectional stdev of member 7d returns — how differently the members are trading')}</div>
     <div style="margin:4px 0 10px">${chips}</div>
@@ -209,7 +209,7 @@ function renderAiGroupReport(d,coin,box){
     <div class="hlp-h">Laggards</div><p style="margin:4px 0">${esc(d.ai.laggards||'')}</p>
     ${(d.ai.risks&&d.ai.risks.length)?`<div class="hlp-h">Risks</div><p style="margin:4px 0">${d.ai.risks.map(esc).join(' · ')}</p>`:''}
     ${(d.ai.watch&&d.ai.watch.length)?`<div class="hlp-h">What would change the read</div><p style="margin:4px 0">${d.ai.watch.map(esc).join(' · ')}</p>`:''}
-    <div class="sec" style="font-size:10px;margin-top:8px">Group reads are prose-tier by design: no frozen side/void/target, no ledger claim, no track record — a breadth-and-rotation synthesis over an equal-weight composite, cached for the whole group like any report.</div>
+    <div class="sec" style="font-size:var(--fs-2xs);margin-top:8px">Group reads are prose-tier by design: no frozen side/void/target, no ledger claim, no track record — a breadth-and-rotation synthesis over an equal-weight composite, cached for the whole group like any report.</div>
     <div style="text-align:center;padding:10px 0"><button class="btn" id="ai-regen" ${(!d.canRegen)?'disabled title="on cooldown"':''} ${d.dayLeft===0&&!d.admin?'disabled data-cap="1" title="shared daily pool exhausted"':''}>regenerate</button>${budget}</div>`;
   grpWireIndexHover(c.ewIndex);
   const b=el('ai-regen'); if(b&&!b.disabled) b.onclick=()=>aiRegenerate(coin);
@@ -228,8 +228,8 @@ function renderAiReport(d,coin){
   const uni=(d&&d.uni)||(r&&r.uni==='main'?'crypto':'stocks');
   if(!d||d.status==='none'){
     box.innerHTML=`<div class="ai-head"><span class="tk">${esc(tk)}</span><span class="sec">${uni} universe</span>${r&&r.px!=null?`<span class="px">${fmtPrice(r.px)}</span>`:''}</div>`+
-      `<div class="msg" style="padding:26px 10px">No report for this name yet.${d&&d.enabled===false?'<br><span class="sec" style="font-size:12px">ANTHROPIC_API_KEY is not set on the server — generation is disabled.</span>':' The first generation is cached for the whole group.'}</div>`+
-      (d&&d.enabled!==false?`<div style="text-align:center;padding-bottom:12px"><button class="btn" id="ai-regen" ${d&&d.dayLeft===0?'disabled data-cap="1" title="daily budget exhausted — resets at midnight UTC, or admin reset-reports in the terminal"':''}>generate report</button>${d&&d.dayLeft!=null?`<div class="sec" style="font-size:11px;margin-top:6px" data-tip="daily generation budget, shared by the whole group — resets at midnight UTC; an admin can reset it early from the ask terminal">${d.dayLeft}/${d.perDay} generations left today</div>`:''}</div>`:'');
+      `<div class="msg" style="padding:26px 10px">No report for this name yet.${d&&d.enabled===false?'<br><span class="sec" style="font-size:var(--fs-sm)">ANTHROPIC_API_KEY is not set on the server — generation is disabled.</span>':' The first generation is cached for the whole group.'}</div>`+
+      (d&&d.enabled!==false?`<div style="text-align:center;padding-bottom:12px"><button class="btn" id="ai-regen" ${d&&d.dayLeft===0?'disabled data-cap="1" title="daily budget exhausted — resets at midnight UTC, or admin reset-reports in the terminal"':''}>generate report</button>${d&&d.dayLeft!=null?`<div class="sec" style="font-size:var(--fs-xs);margin-top:6px" data-tip="daily generation budget, shared by the whole group — resets at midnight UTC; an admin can reset it early from the ask terminal">${d.dayLeft}/${d.perDay} generations left today</div>`:''}</div>`:'');
     const b=el('ai-regen'); if(b) b.onclick=()=>aiRegenerate(coin);
     return;
   }
@@ -272,9 +272,9 @@ function renderAiReport(d,coin){
       <span class="px">${fmtPrice(livePx)}</span>${chg}
       ${aiBiasBadge(d)}</div>
     ${(()=>{const ar=d.analystRecord;if(!ar)return'';const o=ar.overall||{},m=ar.thisName||{};
-      const f=(x)=>x&&x.n?`<b class="${x.hit>=0.5?'pos':'neg'}">${Math.round(x.hit*100)}%</b> hit \u00b7 <span class="${x.avgR>=0?'pos':'neg'}">${x.avgR>=0?'+':''}${x.avgR}R</span> <i style="font-style:normal;color:var(--faint);font-size:10px">(n=${x.n})</i>`:null;
+      const f=(x)=>x&&x.n?`<b class="${x.hit>=0.5?'pos':'neg'}">${Math.round(x.hit*100)}%</b> hit \u00b7 <span class="${x.avgR>=0?'pos':'neg'}">${x.avgR>=0?'+':''}${x.avgR}R</span> <i style="font-style:normal;color:var(--faint);font-size:var(--fs-2xs)">(n=${x.n})</i>`:null;
       const ov=f(o), mn=f(m);
-      return `<div class="sec" style="font-size:11px;margin:2px 0 8px" data-tip="the analyst's OWN out-of-sample record: every directional report read is frozen as a claim at generation — the report's void as the stop, its target, mark at generation — and resolved at a 5d horizon, stop-aware, in a bucket fully separate from the signal engine's record. Same discipline the signals answer to; a report that sounds authoritative earns it here or it doesn't.${ar.openOnName?' \u00b7 a read on this name is currently open and resolving':''}">analyst reads: ${ov||'first reads still open \u2014 resolutions land at 5d horizons'}${mn?` \u00b7 this name ${mn}`:''}${ar.open?` \u00b7 ${ar.open} open`:''}</div>`;})()}
+      return `<div class="sec" style="font-size:var(--fs-xs);margin:2px 0 8px" data-tip="the analyst's OWN out-of-sample record: every directional report read is frozen as a claim at generation — the report's void as the stop, its target, mark at generation — and resolved at a 5d horizon, stop-aware, in a bucket fully separate from the signal engine's record. Same discipline the signals answer to; a report that sounds authoritative earns it here or it doesn't.${ar.openOnName?' \u00b7 a read on this name is currently open and resolving':''}">analyst reads: ${ov||'first reads still open \u2014 resolutions land at 5d horizons'}${mn?` \u00b7 this name ${mn}`:''}${ar.open?` \u00b7 ${ar.open} open`:''}</div>`;})()}
     <div class="dsec">The picture in one paragraph</div>
     <div class="ai-syn">${esc(d.ai.synthesis)}</div>
     ${aiChartTfSeg(coin,c)}
@@ -283,7 +283,7 @@ function renderAiReport(d,coin){
     <table class="ai-ev">${ev}</table>
     ${d.ai.eventRisk?`<div class="dsec">Event risk</div><div class="ai-event">${esc(d.ai.eventRisk)}</div>`:''}
     <div class="dsec">Track record on this name</div>
-    <div id="ai-claims" class="sec" style="font-size:12px">loading claim history…</div>
+    <div id="ai-claims" class="sec" style="font-size:var(--fs-sm)">loading claim history…</div>
     ${(flags||covHtml)?`<div class="dsec">Flags</div>${flags}${covHtml}`:''}
     ${aiActionHtml(c)}
     <div class="dsec">Scenarios${c.riskPct!=null?` · risk unit = distance to ${fmtPrice(c.voidLevel)} (\u2212${c.riskPct.toFixed(1)}%)`:''}</div>
@@ -322,12 +322,12 @@ function aiActionHtml(c){
       <span class="cell"><span class="k">target</span><b class="pos">${fmtPrice(a.target)}</b></span>
       <span class="cell"><span class="k">r/r</span><b>${a.rr!=null?a.rr.toFixed(1)+' : 1':'—'}</b></span>
       <span class="cell"><span class="k">ev</span><b class="${a.evR>0?'pos':'neg'}">${a.evR>0?'+':''}${a.evR!=null?a.evR.toFixed(2):'—'}R</b></span>
-    </div>${a.note?`<div class="sec" style="font-size:12px;line-height:1.6;margin-top:4px">${esc(a.note)}</div>`:''}`;
+    </div>${a.note?`<div class="sec" style="font-size:var(--fs-sm);line-height:1.6;margin-top:4px">${esc(a.note)}</div>`:''}`;
   }
   const lbl=a.stance==='take_profit'?'Take profit':a.stance==='no_trade'?'No trade':'Wait';
   return `<div class="dsec">If you act on this · mechanical plan, not advice</div>
     <div class="ai-act muted"><span class="cell"><span class="k">stance</span><b style="color:var(--accent)">${lbl.toUpperCase()}</b></span>
-    <span style="font-size:12px;line-height:1.6;align-self:center">${esc(a.note||'the odds and geometry don\u2019t support an entry here')}${a.downgraded?' <i class="sec" data-tip="the model proposed an entry, but the expected value at that entry was not positive — the server downgraded it rather than shipping a losing plan">(server-downgraded)</i>':''}</span></div>`;
+    <span style="font-size:var(--fs-sm);line-height:1.6;align-self:center">${esc(a.note||'the odds and geometry don\u2019t support an entry here')}${a.downgraded?' <i class="sec" data-tip="the model proposed an entry, but the expected value at that entry was not positive — the server downgraded it rather than shipping a losing plan">(server-downgraded)</i>':''}</span></div>`;
 }
 async function aiLoadClaims(coin){
   const box=el('ai-claims'); if(!box) return;
@@ -341,7 +341,7 @@ async function aiLoadClaims(coin){
       const out=e.realized==null?'\u2014':`<span class="${e.realized>0?'pos':'neg'}">${e.realized>0?'+':''}${e.realized.toFixed(1)}${e.unit==='R'?'R':e.unit}</span>`;
       const dur=e.tR?((e.tR-e.t0)/86400000).toFixed(1)+'d':'';
       return `<tr><td class="d">${shDate(e.t0)}</td><td>${esc(e.label)} — ${out}${e.stopped?' <span class="sec" data-tip="resolved on the stop-aware track: the frozen void was touched before the horizon">(stopped)</span>':''}${dur?` in ${dur}`:''}</td></tr>`; }).join('');
-    box.className=''; box.innerHTML=`<div style="font-size:12px;margin-bottom:4px">${head} · <span class="sec" style="cursor:pointer;text-decoration:underline;text-underline-offset:2px" id="ai-fullhist">full history \u2192</span></div><table class="ai-claims">${rows}</table>`;
+    box.className=''; box.innerHTML=`<div style="font-size:var(--fs-sm);margin-bottom:4px">${head} · <span class="sec" style="cursor:pointer;text-decoration:underline;text-underline-offset:2px" id="ai-fullhist">full history \u2192</span></div><table class="ai-claims">${rows}</table>`;
     const fh=el('ai-fullhist'); if(fh) fh.onclick=()=>openSigHistory(d.ticker||coin);
   }catch(_){ box.innerHTML='<span class="sec">claim history unavailable</span>'; }
 }
@@ -481,7 +481,7 @@ async function aiReportChart(coin,c){
         s+=`<rect x="${(x-4.5).toFixed(1)}" y="${y.toFixed(1)}" width="9" height="9" fill="var(--panel)" stroke="${col}" transform="rotate(45 ${x.toFixed(1)} ${(y+4.5).toFixed(1)})"/>`+
            `<text x="${(x+8).toFixed(1)}" y="${(y+9).toFixed(1)}" class="lc-tick" style="fill:${col}">${tag}</text>`; }
       else if(g.kind==='flag'||g.kind==='ctx'){ const y=Math.max(pt+12,Y(hiV)-7);
-        s+=`<text x="${(x-4).toFixed(1)}" y="${y.toFixed(1)}" style="fill:${col};font-size:11px">\u25c6</text>`+
+        s+=`<text x="${(x-4).toFixed(1)}" y="${y.toFixed(1)}" style="fill:${col};font-size:var(--fs-xs)">\u25c6</text>`+
            `<text x="${(x+7).toFixed(1)}" y="${y.toFixed(1)}" class="lc-tick" style="fill:${col}">${tag}</text>`; }
       else { const y=Math.min(H-pb-12,Y(lowV)+9);
         s+=`<path d="M${x.toFixed(1)} ${y.toFixed(1)} l-4.4 8 l8.8 0 z" fill="${col}"/>`+
@@ -514,14 +514,14 @@ async function aiReportChart(coin,c){
         `<span><i style="color:var(--blue)">\u25c7</i> earnings print</span>`+
         `<span class="sec">\u00d7N = distinct signal types at onset \u00b7 first fires only \u00b7 proven-edge signals only</span></div>`+
         `<table>${rows}</table>`+
-        (c&&c.marksSuppressed?`<div class="sec" style="font-size:10.5px;margin-top:5px">${c.marksSuppressed} fire(s) from unproven or negative-edge signal types not marked \u2014 the ledger records them all (full history \u2192 Signals tab)</div>`:'')+
+        (c&&c.marksSuppressed?`<div class="sec" style="font-size:var(--fs-xs);margin-top:5px">${c.marksSuppressed} fire(s) from unproven or negative-edge signal types not marked \u2014 the ledger records them all (full history \u2192 Signals tab)</div>`:'')+
         `</div>`;
     } else if(c&&c.marksSuppressed){
-      below+=`<div class="sec" style="font-size:10.5px;margin-top:6px">${c.marksSuppressed} signal fire(s) in the window, none from a proven-edge type \u2014 nothing marked; the ledger records them all</div>`;
+      below+=`<div class="sec" style="font-size:var(--fs-xs);margin-top:6px">${c.marksSuppressed} signal fire(s) in the window, none from a proven-edge type \u2014 nothing marked; the ledger records them all</div>`;
     }
-    if(offView.length) below+=`<div class="sec" style="font-size:11px;margin-top:4px">off-chart: ${offView.map(l=>`${fmtPrice(l.value)} — ${esc(l.label)} (${l.value<lo?'below':'above'} view)`).join(' · ')}</div>`;
-    if(struct.length) below+=`<div class="sec" style="font-size:11px;margin-top:4px">${struct.length} detected structural level(s) drawn faint \u2014 confirmed daily pivot clusters (<span style="color:var(--up)">support</span> \u00b7 <span style="color:var(--down)">resistance</span> \u00b7 <span style="color:var(--accent)">flip</span>); hover any for its touch count and age. Without a frozen claim, the void above had to sit on one of them.</div>`;
-    if(lineMode) below+=`<div class="sec" style="font-size:11px;margin-top:4px">close-line mode — full candles return automatically as the daily backfill refreshes (warm-cache dailies carry closes only)</div>`;
+    if(offView.length) below+=`<div class="sec" style="font-size:var(--fs-xs);margin-top:4px">off-chart: ${offView.map(l=>`${fmtPrice(l.value)} — ${esc(l.label)} (${l.value<lo?'below':'above'} view)`).join(' · ')}</div>`;
+    if(struct.length) below+=`<div class="sec" style="font-size:var(--fs-xs);margin-top:4px">${struct.length} detected structural level(s) drawn faint \u2014 confirmed daily pivot clusters (<span style="color:var(--up)">support</span> \u00b7 <span style="color:var(--down)">resistance</span> \u00b7 <span style="color:var(--accent)">flip</span>); hover any for its touch count and age. Without a frozen claim, the void above had to sit on one of them.</div>`;
+    if(lineMode) below+=`<div class="sec" style="font-size:var(--fs-xs);margin-top:4px">close-line mode — full candles return automatically as the daily backfill refreshes (warm-cache dailies carry closes only)</div>`;
     box.innerHTML=hoverChart(s,{w:W,h:H,pt,pb,xs,rows})+below;
     attachLineHover();
   }catch(e){ box.innerHTML=`<div class="msg" style="padding:14px 0">chart unavailable — ${esc(e.message)}</div>`; }
@@ -532,7 +532,7 @@ async function loadAiRecent(){
     if(!box.isConnected) return;
     state.report.list=d;
     if(!d.reports||!d.reports.length){
-      box.innerHTML=`<div class="dsec">Recent reports · cached for everyone</div><div class="sec" style="font-size:12px">none yet — search a ticker above and generate the first one${d.enabled===false?' (no AI API key set on the server)':''}</div>`;
+      box.innerHTML=`<div class="dsec">Recent reports · cached for everyone</div><div class="sec" style="font-size:var(--fs-sm)">none yet — search a ticker above and generate the first one${d.enabled===false?' (no AI API key set on the server)':''}</div>`;
       return; }
     const rows=d.reports.map(rep=>{
       const st=rep.status==='fresh'?`fresh · ${aiFmtLeft(rep.regenInMs)} left`:rep.status==='invalidated'?`invalidated — ${esc(rep.invalidReason||'')}`:'stale';

@@ -111,7 +111,7 @@ function rvdSvg(rows, anchorTs){
   const maxY=Math.max(5, ...ys)*1.08, minY=Math.min(0, ...ys)*1.08;
   const xM=v=>px1-Math.min(-v,maxX)/maxX*(px1-px0);          // v is the drawdown (≤ 0): zero at the right edge, deeper to the left
   const yM=v=>py0-(Math.min(Math.max(v,minY),maxY)-minY)/(maxY-minY)*(py0-py1);
-  const ql='font-family:var(--mono);font-size:10px;fill:var(--faint)';
+  const ql='font-family:var(--mono);font-size:var(--fs-2xs);fill:var(--faint)';
   const since=dOnly(anchorTs), yl=RVD.y==='best'?'best return':'return';
   let s=`<svg class="smapsvg rvdsvg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block" role="img" aria-label="${yl} since ${since} against max drawdown, one dot per market">`;
   s+=`<rect x="${px0}" y="${py1}" width="${px1-px0}" height="${py0-py1}" fill="var(--panel2)" opacity="0.3"/>`;
@@ -122,7 +122,7 @@ function rvdSvg(rows, anchorTs){
     for(const b of rows.filter(x=>x.bench>=0).sort((a,c)=>yOf(c)-yOf(a))){ const y=yM(yOf(b)), col=RVD_COL[b.bench+1]||RVD_COL[1];
       s+=`<line x1="${px0}" y1="${y.toFixed(1)}" x2="${px1}" y2="${y.toFixed(1)}" stroke="${col}" stroke-dasharray="5 4" opacity="0.7"/>`;
       const ty=(y-lastY<14)?y+12:y-4; lastY=y;
-      s+=`<text x="${px0+6}" y="${ty.toFixed(1)}" style="font-family:var(--mono);font-size:10.5px;fill:${col};font-weight:600;paint-order:stroke;stroke:var(--bg);stroke-width:3px">${esc(b.ticker)} ${pct(yOf(b))}</text>`; } }
+      s+=`<text x="${px0+6}" y="${ty.toFixed(1)}" style="font-family:var(--mono);font-size:var(--fs-xs);fill:${col};font-weight:600;paint-order:stroke;stroke:var(--bg);stroke-width:3px">${esc(b.ticker)} ${pct(yOf(b))}</text>`; } }
   s+=`<text x="${(px0+px1)/2}" y="${H-6}" text-anchor="middle" style="${ql}">max drawdown since ${since}, close to close  ·  shallower →</text>`;
   s+=`<text x="14" y="${(py0+py1)/2}" text-anchor="middle" transform="rotate(-90 14 ${(py0+py1)/2})" style="${ql}">${yl} since the ${since} close ↑</text>`;
   const lbl=rvdLabelSet(rows);

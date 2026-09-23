@@ -73,7 +73,7 @@ function actSettled(d,wantU){
   const st=d&&d.settled, u=st&&st.perUni&&st.perUni[wantU];
   let h=`<div class="act-set"><div class="act-set-h dsec" data-settgl style="cursor:pointer" data-tip="the board's own out-of-sample record: every suggestion it ever surfaced, stamped at first appearance and scored when the underlying claim resolved \u2014 on or off the board. Once shown, always scored. Click to ${_actSetOpen?'collapse':'expand'}">${_actSetOpen?'\u25be':'\u25b8'} Settled \u2014 every suggestion this board ever showed, scored${st&&st.since?` <span class="sec" style="text-transform:none;letter-spacing:0">\u00b7 out of sample since ${new Date(st.since).toISOString().slice(0,10)}</span>`:''}</div>`;
   if(!u||(!u.all.n&&!u.open)){
-    h+=_actSetOpen?`<div class="sec" style="font-size:11.5px;padding:4px 2px">No episodes in this scope yet \u2014 the record opens with the first suggestion the board surfaces and scores when its claim resolves. Starting from zero is the point: nothing here is backfilled.</div>`:'';
+    h+=_actSetOpen?`<div class="sec" style="font-size:var(--fs-xs);padding:4px 2px">No episodes in this scope yet \u2014 the record opens with the first suggestion the board surfaces and scores when its claim resolves. Starting from zero is the point: nothing here is backfilled.</div>`:'';
     return h+`</div>`;
   }
   const a=u.all;
@@ -149,7 +149,7 @@ function actSettled(d,wantU){
     }
     h+=`</tbody></table>`;
   }
-  h+=`<div class="sec" style="font-size:10.5px;margin-top:6px">All stamps and scores are frozen server-side at first appearance and at resolution \u2014 this section renders them and never re-derives. The record started at zero when this feature shipped; nothing before it is claimed.</div></div>`;
+  h+=`<div class="sec" style="font-size:var(--fs-xs);margin-top:6px">All stamps and scores are frozen server-side at first appearance and at resolution \u2014 this section renders them and never re-derives. The record started at zero when this feature shipped; nothing before it is claimed.</div></div>`;
   return h;
 }
 function actEpDetail(e){
@@ -278,7 +278,7 @@ function renderActionable(){
   const rows=(d.rows||[]).filter(r=>r.uni===wantU&&(_actSide==='all'||r.side===_actSide)&&!(noEarn&&r.earn)&&((r.cls==='ev')?showEV:showRR)).slice().sort(actCmp);
   let h='';
   { const mn=macroNextC();
-    if(mn&&mn.diff<=2) h+=`<div class="sec" style="font-size:11.5px;margin-bottom:8px;color:var(--blue)" data-tip="universe-wide scheduled binary \u2014 rows whose remaining horizon contains the event carry a \u25c6; flagged, never filtered. Applies to crypto exactly as to equities.">\u25c6 ${esc(mn.e.label)} ${mn.diff===0?'today':mn.diff===1?'tomorrow':macroDayLbl(mn.e.d)} (${macroDayLbl(mn.e.d)}, ${macroTimeLbl(mn.e)}) \u2014 inside every open horizon \u2265${Math.max(1,mn.diff)}d; flagged per row, never filtered</div>`; }
+    if(mn&&mn.diff<=2) h+=`<div class="sec" style="font-size:var(--fs-xs);margin-bottom:8px;color:var(--blue)" data-tip="universe-wide scheduled binary \u2014 rows whose remaining horizon contains the event carry a \u25c6; flagged, never filtered. Applies to crypto exactly as to equities.">\u25c6 ${esc(mn.e.label)} ${mn.diff===0?'today':mn.diff===1?'tomorrow':macroDayLbl(mn.e.d)} (${macroDayLbl(mn.e.d)}, ${macroTimeLbl(mn.e)}) \u2014 inside every open horizon \u2265${Math.max(1,mn.diff)}d; flagged per row, never filtered</div>`; }
   if(!rows.length){
     h+=`<div class="msg">Nothing confirmed at a swing trigger right now.`
       +`${c.openClaims!=null?` ${c.openClaims} open claim(s) scanned across both universes`:''}`

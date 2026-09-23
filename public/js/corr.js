@@ -251,7 +251,7 @@ function alignedIntraday(A,B){ if(!CORR._bars) return null;
   for(let k=0;k<n;k++){ if(a[k]!=null&&b[k]!=null){ pa.push(a[k]); pb.push(b[k]); } }
   return pa.length>=2?{days:pa.map((_,k)=>k), pa, pb}:null; }
 function sparkline(vals, opts){ opts=opts||{}; const w=260, h=46, pad=4;
-  const fin=vals.filter(v=>v!=null&&isFinite(v)); if(fin.length<2) return '<div class="sec" style="font-size:11px">not enough data</div>';
+  const fin=vals.filter(v=>v!=null&&isFinite(v)); if(fin.length<2) return '<div class="sec" style="font-size:var(--fs-xs)">not enough data</div>';
   let mn=Math.min(...fin), mx=Math.max(...fin);
   if(opts.lo!=null)mn=Math.min(mn,opts.lo); if(opts.hi!=null)mx=Math.max(mx,opts.hi); if(mn===mx){mn-=1;mx+=1;}
   const X=i=>pad+(i/(vals.length-1))*(w-2*pad), Y=v=>h-pad-((v-mn)/(mx-mn))*(h-2*pad);
@@ -599,13 +599,13 @@ function renderBasketPanel(){
       <td style="white-space:nowrap"><span class="bkg">\u2b12</span> <b>${esc(b.name)}</b>${b.builtin?' <span class="bk-builtin">BUILT-IN</span>':(b.guest?' <span class="bk-guest" data-tip="stored in THIS browser only \u2014 not saved on the server, invisible to the admin and to other visitors, and gone if you clear site data">THIS BROWSER</span>':'')}</td>
       <td class="sec">${esc(b.members.join(' '))} <span class="sec">\u00b7 ${b.members.length}</span></td>
       <td class="sec" style="white-space:nowrap" data-tip="equal weight, daily-rebalanced \u2014 the only honest default without market-cap data \u00b7 coverage = members contributing on the latest valid day \u00b7 a day under ${Math.round((BASKETS.floor||0.6)*100)}% membership renders as a gap, never a renormalized guess">EW \u00b7 ${b.cov?b.cov.n+'/'+b.cov.N:'\u2014'}</td>
-      <td>${b.builtin?'<span class="sec" style="font-size:10px">derived \u2014 follows the roster</span>':`<button class="btn xtiny" data-bkdrop="${esc(b.name)}">drop</button>`}</td>
+      <td>${b.builtin?'<span class="sec" style="font-size:var(--fs-2xs)">derived \u2014 follows the roster</span>':`<button class="btn xtiny" data-bkdrop="${esc(b.name)}">drop</button>`}</td>
     </tr>`).join('');
   const customN=BASKETS.list.filter(b=>!b.builtin).length;
   // Ownership banner: the admin's customs persist server-side; a guest's live only in this browser.
   const scopeBanner=IS_ADMIN
-    ? `<div class="sec" style="font-size:10.5px;margin-top:2px">Your custom baskets are saved on the server and available on every admin browser. Visitors don't see them \u2014 they only get the built-ins.</div>`
-    : `<div class="sec bk-guestbanner" style="font-size:10.5px;margin-top:2px" data-tip="no accounts yet \u2014 without an admin session your baskets can only live in this browser">Your custom baskets are stored in <b>this browser only</b> \u2014 not saved on the server, and gone if you clear site data. The built-ins (MAG7, sectors) are shared and always here.</div>`;
+    ? `<div class="sec" style="font-size:var(--fs-xs);margin-top:2px">Your custom baskets are saved on the server and available on every admin browser. Visitors don't see them \u2014 they only get the built-ins.</div>`
+    : `<div class="sec bk-guestbanner" style="font-size:var(--fs-xs);margin-top:2px" data-tip="no accounts yet \u2014 without an admin session your baskets can only live in this browser">Your custom baskets are stored in <b>this browser only</b> \u2014 not saved on the server, and gone if you clear site data. The built-ins (MAG7, sectors) are shared and always here.</div>`;
   p.hidden=false;
   p.innerHTML=`<div class="cp-head">Baskets <span class="sec" style="font-weight:400">\u2014 synthetic EW instruments \u00b7 visual layer only, never signal math</span></div>
     ${scopeBanner}
@@ -615,7 +615,7 @@ function renderBasketPanel(){
       <input id="bk-members" placeholder="members \u2014 e.g. AAPL MSFT GOOGL AMZN NVDA META TSLA" autocomplete="off"/>
       <button class="btn xtiny" id="bk-create">create</button>
       <span id="bk-err" class="tp-err"></span></div>
-    <div class="sec" style="font-size:10.5px;margin-top:5px">2\u2013${BASKETS.maxMembers} members \u00b7 one universe (baskets never cross the stocks/crypto separation) \u00b7 ${customN}/${BASKETS.maxCustom} custom \u00b7 name must not collide with a listed ticker or a benchmark alias</div>`;
+    <div class="sec" style="font-size:var(--fs-xs);margin-top:5px">2\u2013${BASKETS.maxMembers} members \u00b7 one universe (baskets never cross the stocks/crypto separation) \u00b7 ${customN}/${BASKETS.maxCustom} custom \u00b7 name must not collide with a listed ticker or a benchmark alias</div>`;
   p.querySelectorAll('[data-bkdrop]').forEach(x=>x.onclick=async()=>{
     const d=await basketMutate({name:x.dataset.bkdrop, drop:true});
     if(d&&d.ok) loadBaskets(true); else { const e=el('bk-err'); if(e) e.textContent=(d&&d.error)||'drop failed'; } });
@@ -963,7 +963,7 @@ function compgWirePicker(p){
     const m=[...uni.filter(t=>t.startsWith(q)),...uni.filter(t=>!t.startsWith(q)&&t.includes(q))].slice(0,6-Math.min(2,bks.length));
     if(!m.length&&!bks.length){ sg.innerHTML='<div class="cg-sg-none">no match in the live universe</div>'; sg.hidden=false; return; }
     sg.innerHTML=bks.map(t=>{ const b=basketByName(t); const tag=b&&b.shadow?(b.kind==='industry'?'industry':'sector'):(b&&b.builtin?'built-in':'basket');
-        const nm=b&&b.label?`${esc(b.label)} <span class="sec" style="font-size:9px">${esc(t)}</span>`:esc(t);
+        const nm=b&&b.label?`${esc(b.label)} <span class="sec" style="font-size:var(--fs-2xs)">${esc(t)}</span>`:esc(t);
         return `<div class="cg-sg bk" data-t="${esc(t)}"><span class="bkg">\u2b12</span> ${nm} <span class="cg-sg-r">${tag}</span></div>`; }).join('')
       + m.map(t=>`<div class="cg-sg" data-t="${esc(t)}">${esc(t)}</div>`).join(''); sg.hidden=false;
     sg.querySelectorAll('.cg-sg').forEach(x=>x.onclick=()=>{ if(compgAddName(x.dataset.t)){ const ni=el('cg-add'); if(ni){ ni.focus(); } } }); };
