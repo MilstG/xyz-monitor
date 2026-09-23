@@ -81,7 +81,6 @@ h1{font-size:27px;font-weight:700;letter-spacing:-.4px;margin:0 0 10px;text-wrap
 .rvd-legend{display:inline-flex;flex-wrap:wrap;align-items:center;gap:4px 10px;margin-left:auto;color:var(--muted)}
 .rvd-legend i{display:inline-block;width:9px;height:9px;border-radius:50%;vertical-align:-1px;margin-right:4px;border:1.6px solid var(--blue);background:rgba(111,147,201,.72)}
 .rvd-legend i.late{border-style:dashed;background:rgba(111,147,201,.12)}
-.rvd-legend i.diag{width:16px;height:0;border-radius:0;border:none;border-top:2px dashed var(--accent-dim);vertical-align:2px;background:none}
 .rvd-late{color:var(--accent);font-family:var(--mono);font-size:10.5px}
 .rvd-chart{padding:6px}
 .rvd-chart .rvd-read{top:10px;right:8px;min-width:230px;z-index:2}
@@ -102,6 +101,9 @@ h1{font-size:27px;font-weight:700;letter-spacing:-.4px;margin:0 0 10px;text-wrap
 .rvd-tbl tbody tr{cursor:pointer}
 .rvd-tbl tbody tr:hover td{background:var(--panel2)}
 .rvd-tbl td b{color:var(--text);font-weight:600}
+.rvd-pager{display:flex;align-items:center;justify-content:flex-end;gap:10px;padding:8px 12px;border-top:1px solid var(--border);font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+.rvd-pager .btn[disabled]{opacity:.35;cursor:default}
+.btn.xtiny{padding:2px 8px;font-size:12px;line-height:1.4}
 @media (max-width:640px){ .rvd-legend{margin-left:0} .rvd-chart{overflow-x:auto} .rvd-chart svg.rvdsvg{min-width:680px} .rvd-chart .rvd-read{min-width:0;max-width:60%} }
 /* the rejected version */
 .badsvg text{font-family:var(--mono);font-size:10px;fill:var(--faint)}
@@ -116,21 +118,23 @@ h1{font-size:27px;font-weight:700;letter-spacing:-.4px;margin:0 0 10px;text-wrap
 </div>
 
 <div class="s-sec"><span class="t">1 · The chart</span> &nbsp;<span class="d">what ships — the same study, driven by a synthetic roster of 34 names</span></div>
-<p class="hint">Click <kbd>30d</kbd> / <kbd>90d</kbd> / <kbd>YTD</kbd> or type a date and watch the dots re-run · switch the return axis between <kbd>now</kbd> and <kbd>best</kbd> · hover a dot for the dates of the high, the peak and the trough · <em>HOLD</em> is a listing that came after the anchor and wears a dashed ring · <em>SP500</em> and <em>XYZ100</em> are the references · sort the table on any column.</p>
+<p class="hint">Click <kbd>30d</kbd> / <kbd>90d</kbd> / <kbd>YTD</kbd> or type a date and watch the dots re-run · switch the return axis between <kbd>now</kbd> and <kbd>best</kbd> · cut the chart to the <kbd>top 10</kbd> / <kbd>20</kbd> / <kbd>30</kbd> · page the table · hover a dot for the dates of the high, the peak and the trough · <em>HOLD</em> is a listing that came after the anchor and wears a dashed ring · <em>SP500</em> and <em>XYZ100</em> are the references · sort the table on any column.</p>
 
 <div class="frame">
   <div class="controls" id="rvd-ctrls"></div>
   <div id="rvd-wrap"></div>
 </div>
 
-<div class="s-sec"><span class="t">2 · The references, and the diagonal</span> &nbsp;<span class="d">two kinds of line that turn a scatter into a verdict</span></div>
+<div class="s-sec"><span class="t">2 · The references, and the cut</span> &nbsp;<span class="d">what turns a scatter into a verdict, and what keeps it readable</span></div>
 <div class="two">
   <div class="notecard">
     <h3>The benchmarks are horizontal lines</h3>
     <p>BTC and ETH in crypto scope, the S&amp;P and the XYZ100 index in stocks scope: each is a dashed line at its own return, named at the left edge, and its dot wears the colour. Everything above a line beat that reference; everything above it <em>and to its right</em> beat it with a shallower hole — the two questions a relative-return chart answers one at a time, read together.</p>
-    <p>The faint diagonal is the other line: return equals drawdown. Above it a name made more than it ever gave back inside the window. The <code>Best / DD</code> column is that read as a number, so the sort can rank on it.</p>
+    <p><code>Best / DD</code> in the table is the other read: above 1 the name made more than it ever gave back inside the window. It was a diagonal on the chart in an earlier draft; on a full board the line crossed everything and said nothing the column does not, so it went.</p>
   </div>
   <div class="notecard">
+    <h3>Top N is a cut on the chart, never on the study</h3>
+    <p><em>Show top</em> draws the top 10, 20, 30 or 50 names by the return axis — the references always stay, however badly they rank — because a hundred labelled dots is a texture, not a chart. The table underneath is never cut: the whole universe, 25 rows a page, sortable on every column, so nothing the cut hides is out of reach.</p>
     <h3>Why the drawdown is measured from the running peak</h3>
     <p>A name that went +40% and then fell to +10% has a −21% drawdown, not −30 points of "given back" — the two are different questions. <em>Gave back</em> (best minus now) is in the table because it is what a holder feels; the drawdown on the axis is the path-dependent one, because the path is what a stop would have hit.</p>
     <p>Both are stated in the readout with their dates, so a dot is never a number without a story.</p>
@@ -190,7 +194,8 @@ h1{font-size:27px;font-weight:700;letter-spacing:-.4px;margin:0 0 10px;text-wrap
 // ── the study, verbatim from public/js/drawdown.js ─────────────────────────────────────────
 const DAY=86400000, TODAY=Date.UTC(2026,8,23), NOW=TODAY+15*3600e3;
 const RVD_LATE_GAP=4*DAY, RVD_LABEL_ALL_MAX=45;
-const RVD={ preset:'90', date:null, y:'now', labels:'auto', sort:'now', dir:'desc' };
+const RVD={ preset:'90', date:null, y:'now', top:'30', labels:'auto', sort:'now', dir:'desc', page:1 };
+const RVD_TOPS=[['10','10'],['20','20'],['30','30'],['50','50'],['all','all']], RVD_PAGE=25;
 const RVD_PRESETS=[['30','30d'],['60','60d'],['90','90d'],['180','180d'],['ytd','YTD'],['365','1y']];
 function rvdToday(){ return TODAY; }
 function rvdAnchorTs(){
@@ -253,6 +258,11 @@ function rvdRows(anchorTs){
   return out;
 }
 const RVD_COL=['var(--blue)','var(--accent)','#a48cf0'];   // names, the benchmark, the second reference
+// The chart's cut: the top N names by the return axis, plus every reference whatever its rank. The
+// table underneath always carries the whole universe — the cut is what the eye can read, not the study.
+function rvdChartRows(rows){ const n=+RVD.top; if(!isFinite(n)||n<=0) return rows;
+  const names=rows.filter(x=>x.bench<0).sort((a,b)=>yOf(b)-yOf(a)).slice(0,n);
+  return rows.filter(x=>x.bench>=0).concat(names); }
 const pct=(x,d=1)=>(x==null||!isFinite(x))?'—':(x>0?'+':'')+x.toFixed(d)+'%';
 const dOnly=t=>isoUtc(t,0,10);
 const yOf=x=>RVD.y==='best'?x.best:x.now;
@@ -298,9 +308,6 @@ function rvdSvg(rows, anchorTs, opt={}){
   s+=`<rect x="${px0}" y="${py1}" width="${px1-px0}" height="${py0-py1}" fill="var(--panel2)" opacity="0.3"/>`;
   for(const t of rvdTicks(-maxX,0,7)){ const x=xM(t); s+=`<line x1="${x.toFixed(1)}" y1="${py1}" x2="${x.toFixed(1)}" y2="${py0}" stroke="var(--grid)"/><text x="${x.toFixed(1)}" y="${py0+15}" text-anchor="middle" style="${ql}">${t?'−':''}${Math.abs(+t.toFixed(2))}%</text>`; }
   for(const t of rvdTicks(minY,maxY,6)){ const y=yM(t); s+=`<line x1="${px0}" y1="${y.toFixed(1)}" x2="${px1}" y2="${y.toFixed(1)}" stroke="${t?'var(--grid)':'var(--faint)'}"/><text x="${px0-6}" y="${(y+3.5).toFixed(1)}" text-anchor="end" style="${ql}">${t>0?'+':''}${+t.toFixed(2)}%</text>`; }
-  // the diagonal: return == max drawdown. Above it a name made more than it ever gave back.
-  { const lim=Math.min(maxX,maxY); if(lim>0){ s+=`<line x1="${xM(0)}" y1="${yM(0).toFixed(1)}" x2="${xM(-lim).toFixed(1)}" y2="${yM(lim).toFixed(1)}" stroke="var(--accent-dim)" stroke-dasharray="3 5" opacity="0.55"/>`;
-    s+=`<text x="${(xM(-lim*0.7)-6).toFixed(1)}" y="${(yM(lim*0.7)-6).toFixed(1)}" text-anchor="end" style="font-family:var(--mono);font-size:10px;fill:var(--accent-dim)">${yl} = drawdown</text>`; } }
   // the references: a dashed line at each benchmark's return, named at the left edge
   { let lastY=-1e9;   // two references within a label's height of each other: the lower one names itself under its line
     for(const b of rows.filter(x=>x.bench>=0).sort((a,c)=>yOf(c)-yOf(a))){ const y=yM(yOf(b)), col=RVD_COL[b.bench+1]||RVD_COL[1];
@@ -317,7 +324,7 @@ function rvdSvg(rows, anchorTs, opt={}){
     s+=`<g class="rvd-dot" data-coin="${esc(x.coin)}" style="cursor:pointer"><title>${esc(rvdTitle(x))}</title>${lp.leader}`;
     // a hit target wider than the mark; the visible dot stays 10px (12px for a reference)
     s+=`<circle cx="${n.cx.toFixed(1)}" cy="${n.cy.toFixed(1)}" r="11" fill="transparent"/>`;
-    s+=`<circle cx="${n.cx.toFixed(1)}" cy="${n.cy.toFixed(1)}" r="${n.r}" fill="${col}" fill-opacity="${x.s.late?'0.12':(x.bench>=0?'0.95':'0.72')}" stroke="${col}" stroke-width="1.6"${x.s.late?' stroke-dasharray="2.5 2"':''}/>`;
+    s+=`<circle cx="${n.cx.toFixed(1)}" cy="${n.cy.toFixed(1)}" r="${n.r}" fill="${col}" fill-opacity="${x.s.late?'0.1':(x.bench>=0?'0.95':'0.6')}" stroke="${col}" stroke-width="1.4"${x.s.late?' stroke-dasharray="2.5 2"':''}/>`;
     s+=lp.txt+'</g>'; }
   s+='</svg>';
   return s;
@@ -348,15 +355,18 @@ function rvdSortVal(x,k){ if(k==='ticker') return x.ticker; if(k==='bestT') retu
 function rvdTableHtml(rows){
   const sorted=[...rows].sort((a,b)=>{ const va=rvdSortVal(a,RVD.sort), vb=rvdSortVal(b,RVD.sort);
     const c=(typeof va==='string')?va.localeCompare(vb):((va===vb)?0:(va>vb?1:-1)); return (RVD.dir==='desc'?-c:c)||a.ticker.localeCompare(b.ticker); });
+  const pages=Math.max(1,Math.ceil(sorted.length/RVD_PAGE)); RVD.page=Math.min(Math.max(1,RVD.page|0||1),pages);
+  const from=(RVD.page-1)*RVD_PAGE, page=sorted.slice(from,from+RVD_PAGE);
+  const pager=sorted.length>RVD_PAGE?`<div class="rvd-pager"><button type="button" class="btn xtiny" data-rvdpg="${RVD.page-1}"${RVD.page<=1?' disabled':''} aria-label="previous page">‹</button><span>${from+1}–${from+page.length} of ${sorted.length}</span><button type="button" class="btn xtiny" data-rvdpg="${RVD.page+1}"${RVD.page>=pages?' disabled':''} aria-label="next page">›</button></div>`:'';
   let h='<table class="rvd-tbl"><thead><tr>'+RVD_COLS.map(c=>`<th class="${c.num?'num':''}${RVD.sort===c.k?' on':''}" data-k="${c.k}"${c.tip?` data-tip="${esc(c.tip)}"`:''}>${esc(c.l)}${RVD.sort===c.k?(RVD.dir==='desc'?' ▾':' ▴'):''}</th>`).join('')+'</tr></thead><tbody>';
-  for(const x of sorted){ const s=x.s, cl=v=>v>0?'pos':(v<0?'neg':'sec');
+  for(const x of page){ const s=x.s, cl=v=>v>0?'pos':(v<0?'neg':'sec');
     h+=`<tr data-coin="${esc(x.coin)}"><td><b${x.bench>=0?` style="color:${RVD_COL[x.bench+1]}"`:''}>${esc(x.ticker)}</b>${s.late?` <span class="rvd-late" data-tip="listed after the anchor — starts at its own first close, ${dOnly(s.baseT)}">late</span>`:''}</td>`
       +`<td class="num ${cl(x.now)}">${pct(x.now)}</td>`
       +`<td class="num ${cl(x.best)}">${pct(x.best)}</td><td class="num sec">${dOnly(s.best.t)}</td>`
       +`<td class="num ${cl(x.dd)}">${pct(x.dd)}</td><td class="num sec">${dOnly(s.dd.peakT)} → ${dOnly(s.dd.troughT)}</td>`
       +`<td class="num ${x.gave>0?'neg':'sec'}">${x.gave>0?'−':''}${Math.abs(x.gave).toFixed(1)}pp</td>`
       +`<td class="num">${isFinite(x.ratio)?x.ratio.toFixed(2)+'×':'∞'}</td></tr>`; }
-  return h+'</tbody></table>';
+  return h+'</tbody></table>'+pager;
 }
 function rvdControlsHtml(anchorTs){
   const today=rvdToday();
@@ -365,29 +375,32 @@ function rvdControlsHtml(anchorTs){
   const seg=(id,lbl,attr,opts,cur)=>`<div class="seg" id="${id}" role="group" aria-label="${lbl}"><span class="seglbl">${lbl}</span>${opts.map(([k,l])=>`<button type="button"${cur===k?' class="active"':''} data-${attr}="${k}">${l}</button>`).join('')}</div>`;
   return `<div class="cg-anchorctl"><span class="cg-lbl">since</span>${pills}<input type="date" id="rvd-date" value="${isoUtc(anchorTs,0,10)}" min="${minISO}" max="${maxISO}" aria-label="anchor date"/></div>`
     +seg('rvd-y','return','rvdy',[['now','now'],['best','best']],RVD.y)
+    +seg('rvd-top','show top','rvdt',RVD_TOPS,RVD.top)
     +seg('rvd-labels','labels','rvdl',[['auto','auto'],['all','all'],['none','none']],RVD.labels)
     +`<button class="btn" id="rvd-csv" title="Download the table as CSV" style="margin-left:auto">↓ CSV</button>`;
 }
 function renderDrawdown(){
   const wrap=el('rvd-wrap'), anchorTs=rvdAnchorTs(); el('rvd-ctrls').innerHTML=rvdControlsHtml(anchorTs);
-  const rows=rvdRows(anchorTs), days=Math.round((TODAY-anchorTs)/DAY), late=rows.filter(x=>x.s.late).length;
+  const rows=rvdRows(anchorTs), shown=rvdChartRows(rows), days=Math.round((TODAY-anchorTs)/DAY), late=rows.filter(x=>x.s.late).length;
   const refs=rows.filter(x=>x.bench>=0).sort((a,b)=>a.bench-b.bench), since=dOnly(anchorTs), yl=RVD.y==='best'?'Best return':'Return';
   const head=`<div class="rvd-title">${yl} since the ${since} close vs max drawdown</div>`
     +`<div class="rvd-sub">Up and to the right is better: more return for less pain.${refs.length?` Dashed lines mark ${refs.map(x=>`<b style="color:${RVD_COL[x.bench+1]}">${esc(x.ticker)}</b>'s`).join(' and ')} return.`:''} Hover any point; click it, or a row, for the drawer.</div>`
-    +`<div class="rvd-head"><b>${rows.length}</b> names · ${days}d${late?` · <span class="rvd-late">${late} listed after the anchor</span>`:''}<span class="rvd-legend"><i></i> names${refs.map(x=>` <i style="border-color:${RVD_COL[x.bench+1]};background:${RVD_COL[x.bench+1]}"></i> ${esc(x.ticker)}`).join('')} <i class="late"></i> listed after the anchor <i class="diag"></i> ${yl.toLowerCase()} = drawdown</span></div>`;
-  wrap.innerHTML=head+`<div class="cg-chartwrap rvd-chart">${rvdSvg(rows,anchorTs)}<div class="cg-read rvd-read" id="rvd-read"></div></div>`
-    +`<p class="rvd-cap">${RVD.y==='best'?'Best return = the highest daily close since the anchor over the anchor close (the live mark counts as today\'s point).':'Return = the live mark over the first daily close on or after the anchor.'} Max drawdown = the deepest close-to-close fall from any running peak inside the window — intraday lows are not in the daily feed, so a wick below the close is not counted. The faint diagonal is where ${yl.toLowerCase()} equals drawdown; above it a name made more than it ever gave back.</p>`
+    +`<div class="rvd-head"><b>${rows.length}</b> names · ${days}d${shown.length<rows.length?` · chart: top <b>${shown.length-refs.length}</b> by ${yl.toLowerCase()}`:''}${late?` · <span class="rvd-late">${late} listed after the anchor</span>`:''}<span class="rvd-legend"><i></i> names${refs.map(x=>` <i style="border-color:${RVD_COL[x.bench+1]};background:${RVD_COL[x.bench+1]}"></i> ${esc(x.ticker)}`).join('')} <i class="late"></i> listed after the anchor</span></div>`;
+  wrap.innerHTML=head+`<div class="cg-chartwrap rvd-chart">${rvdSvg(shown,anchorTs)}<div class="cg-read rvd-read" id="rvd-read"></div></div>`
+    +`<p class="rvd-cap">${RVD.y==='best'?'Best return = the highest daily close since the anchor over the anchor close (the live mark counts as today\'s point).':'Return = the live mark over the first daily close on or after the anchor.'} Max drawdown = the deepest close-to-close fall from any running peak inside the window — intraday lows are not in the daily feed, so a wick below the close is not counted. ${shown.length<rows.length?'The chart shows the top '+(shown.length-refs.length)+' by '+yl.toLowerCase()+' plus the references; the table underneath has everyone.':'The table underneath carries the same names.'} Best / DD above 1 means the name made more than it ever gave back.</p>`
     +`<div class="corrpanel rvd-tblwrap">${rvdTableHtml(rows)}</div>`;
   const byCoin=new Map(rows.map(x=>[x.coin,x])), svg=wrap.querySelector('svg.rvdsvg'), read=el('rvd-read');
   svg.querySelectorAll('.rvd-dot').forEach(g=>{
     g.addEventListener('mouseenter',()=>{ svg.classList.add('hv'); g.classList.add('hot'); const x=byCoin.get(g.dataset.coin); read.innerHTML=rvdReadHtml(x); read.style.display='block';
       const c=g.querySelector('circle'), left=(+c.getAttribute('cx'))<440; read.style.left=left?'auto':'8px'; read.style.right=left?'8px':'auto'; });
     g.addEventListener('mouseleave',()=>{ svg.classList.remove('hv'); g.classList.remove('hot'); read.style.display='none'; }); });
-  wrap.querySelectorAll('.rvd-tbl th[data-k]').forEach(th=>th.onclick=()=>{ const k=th.dataset.k; if(RVD.sort===k) RVD.dir=RVD.dir==='desc'?'asc':'desc'; else { RVD.sort=k; RVD.dir=(k==='ticker'||k==='dd')?'asc':'desc'; } renderDrawdown(); });
-  document.querySelectorAll('[data-rvdp]').forEach(b=>b.onclick=()=>{ RVD.preset=b.dataset.rvdp; RVD.date=null; renderDrawdown(); });
+  wrap.querySelectorAll('.rvd-tbl th[data-k]').forEach(th=>th.onclick=()=>{ const k=th.dataset.k; if(RVD.sort===k) RVD.dir=RVD.dir==='desc'?'asc':'desc'; else { RVD.sort=k; RVD.dir=(k==='ticker'||k==='dd')?'asc':'desc'; } RVD.page=1; renderDrawdown(); });
+  wrap.querySelectorAll('[data-rvdpg]').forEach(b=>b.onclick=()=>{ RVD.page=+b.dataset.rvdpg; renderDrawdown(); });
+  document.querySelectorAll('[data-rvdp]').forEach(b=>b.onclick=()=>{ RVD.preset=b.dataset.rvdp; RVD.date=null; RVD.page=1; renderDrawdown(); });
   document.querySelectorAll('[data-rvdy]').forEach(b=>b.onclick=()=>{ RVD.y=b.dataset.rvdy; renderDrawdown(); });
+  document.querySelectorAll('[data-rvdt]').forEach(b=>b.onclick=()=>{ RVD.top=b.dataset.rvdt; renderDrawdown(); });
   document.querySelectorAll('[data-rvdl]').forEach(b=>b.onclick=()=>{ RVD.labels=b.dataset.rvdl; renderDrawdown(); });
-  el('rvd-date').onchange=e=>{ const t=new Date(e.target.value+'T00:00:00Z').getTime(); if(isFinite(t)&&t<TODAY){ RVD.date=e.target.value; renderDrawdown(); } };
+  el('rvd-date').onchange=e=>{ const t=new Date(e.target.value+'T00:00:00Z').getTime(); if(isFinite(t)&&t<TODAY){ RVD.date=e.target.value; RVD.page=1; renderDrawdown(); } };
 }
 renderDrawdown();
 // ── the two rejected versions, same data, 90d anchor ─────────────────────────────────────
