@@ -248,7 +248,10 @@ CREATE TABLE IF NOT EXISTS dm_msg (
   pinnedBy TEXT,
   replyTo INTEGER,                 -- quoted message id, same thread — threading without threads
   cmd TEXT,                        -- the terminal command this body is the output of ("top funding 5"), else NULL
-  cmdAi INTEGER                    -- 1 when that output came back from the AI fallback rather than the local grammar; NULL/0 otherwise
+  cmdAi INTEGER,                   -- 1 when that output came back from the AI fallback rather than the local grammar; NULL/0 otherwise
+  editedBy TEXT,                   -- moderation (build 2026.09.23-94): the operator who rewrote somebody else's message, else NULL
+  deletedBy TEXT,                  -- the operator who removed somebody else's message, else NULL
+  callDroppedBy TEXT               -- the operator who struck this row's call from the record, else NULL (the words stay)
 ) STRICT;
 
 -- Tickers a member wants to hear about even when they are not looking. A message carrying one of
@@ -359,7 +362,8 @@ CREATE TABLE IF NOT EXISTS dm_webpush (
   const ADDED_COLUMNS = {
     dm_thread: [["kind", "TEXT NOT NULL DEFAULT 'dm'"], ["pairKey", "TEXT"], ["title", "TEXT"], ["createdBy", "TEXT"]],
     dm_msg: [["sys", "TEXT"], ["fileId", "TEXT"], ["via", "TEXT"], ["pinnedAt", "INTEGER"], ["pinnedBy", "TEXT"], ["replyTo", "INTEGER"], ["side", "TEXT"],
-      ["cmd", "TEXT"], ["cmdAi", "INTEGER"], ["card", "TEXT"], ["callH", "INTEGER"], ["closedAt", "INTEGER"], ["closePx", "REAL"]],
+      ["cmd", "TEXT"], ["cmdAi", "INTEGER"], ["card", "TEXT"], ["callH", "INTEGER"], ["closedAt", "INTEGER"], ["closePx", "REAL"],
+      ["editedBy", "TEXT"], ["deletedBy", "TEXT"], ["callDroppedBy", "TEXT"]],
     dm_read: [["hiddenUpTo", "INTEGER NOT NULL DEFAULT 0"], ["clearedUpTo", "INTEGER NOT NULL DEFAULT 0"],
       ["boardNotify", "INTEGER NOT NULL DEFAULT 0"], ["tgSync", "INTEGER NOT NULL DEFAULT 0"]],
   };
@@ -448,6 +452,13 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     msgById: db.prepare("SELECT * FROM dm_msg WHERE id = ?"),
     msgEdit: db.prepare("UPDATE dm_msg SET body = ?, ref = ?, editedAt = ? WHERE id = ? AND sender = ? AND deletedAt IS NULL"),
     msgDrop: db.prepare("UPDATE dm_msg SET deletedAt = ?, body = '', fileId = NULL, card = NULL WHERE id = ? AND sender = ?"),
+    // Moderation (build 2026.09.23-94): the operator's variants bind no sender — the route gates
+    // them, and the row remembers who acted so the room is told. Striking a call clears every
+    // column the record reads (the stamp, its side, its horizon, an early close) and nothing else:
+    // the words stand, and retainSweep now ages the row like any other prose.
+    msgEditAdm: db.prepare("UPDATE dm_msg SET body = ?, editedAt = ?, editedBy = ? WHERE id = ? AND deletedAt IS NULL"),
+    msgDropAdm: db.prepare("UPDATE dm_msg SET deletedAt = ?, deletedBy = ?, body = '', fileId = NULL, card = NULL WHERE id = ?"),
+    callDrop: db.prepare("UPDATE dm_msg SET ref = NULL, refPx = NULL, side = NULL, callH = NULL, closedAt = NULL, closePx = NULL, callDroppedBy = ? WHERE id = ?"),
     msgPage: db.prepare("SELECT * FROM dm_msg WHERE thread = ? AND id < ? AND id > ? ORDER BY id DESC LIMIT ?"),
     msgSince: db.prepare("SELECT * FROM dm_msg WHERE thread = ? AND id > ? ORDER BY id LIMIT ?"),
     msgLast: db.prepare("SELECT * FROM dm_msg WHERE thread = ? ORDER BY id DESC LIMIT 1"),
@@ -1399,6 +1410,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     S.callSetH.run(d * CALL_DAY, +id, uid);
     return { ok: true, thread: m.thread, message: wire(S.msgById.get(+id), uid) };
   }
+  const modName = (uid) => (uid ? ((users.get(uid) || {}).display || uid) : null);
   function wire(m, uid) {
     return { id: m.id, thread: m.thread, mine: m.sender === uid,
       replyTo: m.replyTo || null, reply: m.replyTo ? replyPreview(m.replyTo, uid) : null,
@@ -1410,6 +1422,10 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       side: m.side || null,
       px: m.ref ? markFor(m.ref) : null,          // live mark, derived at read — never stored
       edited: !!m.editedAt, deleted: !!m.deletedAt,
+      // Moderation leaves a name on the row: "edited by gus" / "removed by gus" / "call removed
+      // by gus" — the operator who did it, never a bare "the operator". A person whose message
+      // was changed by somebody else is owed the who as much as the fact.
+      editedBy: modName(m.editedBy), deletedBy: modName(m.deletedBy), callDropped: modName(m.callDroppedBy),
       sys: m.sys || null, via: m.via || null, pinned: !!m.pinnedAt,
       // A command result names the command it answers and which engine answered it. The client
       // renders the pair as a monospace block under a "▸ cmd" header with a computed/AI badge —
@@ -1495,9 +1511,15 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     return { ok: true, id, thread: t.id, message: wire(S.msgById.get(id), fromUid) };
   }
 
-  function edit(uid, id, body) {
+  // Moderation (build 2026.09.23-94): `asAdmin` lets the operator edit or delete ANYBODY's
+  // message, in any conversation — the same reach the read-through already grants, and gated at
+  // the route the same way. The row keeps the operator's name (the room sees "edited by gus"),
+  // the act lands in the audit log with what the words were, and the author's own path is
+  // untouched: an operator acting on their own message is just an author.
+  function edit(uid, id, body, asAdmin) {
     const m = S.msgById.get(+id);
-    if (!m || m.sender !== uid || m.sys) return { ok: false, error: "that isn't your message" };
+    const mod = !!asAdmin && !!m && m.sender !== uid;
+    if (!m || (m.sender !== uid && !mod) || m.sys) return { ok: false, error: "that isn't your message" };
     if (m.deletedAt) return { ok: false, error: "that message was deleted" };
     // A command result is the board's output under your name, not your prose: rewording it would
     // put a "computed" badge on words nobody computed. Delete it and run the command again.
@@ -1509,18 +1531,43 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     // timestamp and price stamp stand"). The old code re-derived ref from the rewritten body:
     // editing the ticker out silently removed the call from the record (and stranded refPx on a
     // ref-less row), while editing an unresolved $WORD in stamped a raw symbol as a dead ref.
-    S.msgEdit.run(text, m.ref || null, Date.now(), +id, uid);
-    return { ok: true, thread: m.thread, message: wire(S.msgById.get(+id), uid) };
+    if (mod) {
+      S.msgEditAdm.run(text, Date.now(), uid, +id);
+      adminAudit(uid, "edit-message", m.thread, modName(m.sender) + ": “" + m.body.slice(0, 64) + "” → “" + text.slice(0, 64) + "”");
+    } else S.msgEdit.run(text, m.ref || null, Date.now(), +id, uid);
+    return { ok: true, thread: m.thread, moderated: mod || undefined, message: wire(S.msgById.get(+id), uid) };
   }
-  function drop(uid, id) {
+  function drop(uid, id, asAdmin) {
     const m = S.msgById.get(+id);
-    if (!m || m.sender !== uid || m.sys) return { ok: false, error: "that isn't your message" };
+    const mod = !!asAdmin && !!m && m.sender !== uid;
+    if (!m || (m.sender !== uid && !mod) || m.sys) return { ok: false, error: "that isn't your message" };
+    if (m.deletedAt) return { ok: false, error: "that message was already deleted" };
     // Tombstone the ROW, never delete it: the id is a cursor position on the other side, and
     // removing it would make their next sync silently skip a beat. The ATTACHMENT is a different
     // matter — it must actually go, row and bytes, or "delete" is a rendering change and anyone who
     // still holds the id can keep downloading it.
-    S.msgDrop.run(Date.now(), +id, uid);
+    if (mod) {
+      S.msgDropAdm.run(Date.now(), uid, +id);
+      adminAudit(uid, "delete-message", m.thread, modName(m.sender) + ": “" + (m.cmd ? "▸ " + m.cmd : m.body).slice(0, 64) + "”");
+    } else S.msgDrop.run(Date.now(), +id, uid);
     removeFile(m.fileId);
+    return { ok: true, thread: m.thread, moderated: mod || undefined, message: wire(S.msgById.get(+id), uid) };
+  }
+  // Strike a call from the record altogether (build 2026.09.23-94). The record is delete-proof
+  // against its AUTHOR by design — deleting the message keeps the stamp — so this is the one
+  // door, and it is the operator's: a mis-stamped $WORD, a joke that resolved to a real ticker,
+  // a row somebody asked to have taken down. The words stay (deleted or not); the stamp, its
+  // side, its horizon and any early close go, so the row leaves the board, the summary and the
+  // digest at once. Irreversible, and audited with what was struck.
+  function callDrop(uid, id, asAdmin) {
+    if (!asAdmin) return { ok: false, error: "operator only" };
+    const m = S.msgById.get(+id);
+    if (!m || m.sys) return { ok: false, error: "no such message" };
+    if (!m.ref || !(m.refPx > 0)) return { ok: false, error: "that message carries no call" };
+    const st = callState(m);
+    S.callDrop.run(uid, +id);
+    adminAudit(uid, "delete-call", m.thread, "$" + m.ref + " " + (m.side === "short" ? "short" : "long") + " @ " + m.refPx
+      + (st && st.closed ? " (closed)" : " (open)") + " by " + modName(m.sender) + (m.deletedAt ? " (message deleted)" : ""));
     return { ok: true, thread: m.thread, message: wire(S.msgById.get(+id), uid) };
   }
 
@@ -2148,7 +2195,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     createGroup, addMembers, removeMember, leaveGroup, renameGroup, deleteGroup,
     createBoard, joinBoard, listBoards, setTweetSource,
     react, REACTIONS, putFile, readFile, removeFile, sweepFiles, sweepRetention, bridgeReply,
-    watchList, setWatch, pin, pinsOf, calls, callClose, callExtend, exportThread,
+    watchList, setWatch, pin, pinsOf, calls, callClose, callExtend, callDrop, exportThread,
     prefsGet, prefsPut,
     walletGet, walletSet, walletDrop, walletsAll,
     adminThreads, adminHistory, adminSearch, adminAuditLog,

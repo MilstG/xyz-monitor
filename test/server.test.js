@@ -725,3 +725,43 @@ test("dm: /api/dm/call-read is gated like an ask from a chat, needs a real marke
   assert.equal(killed.statusCode, 403); assert.equal(JSON.parse(killed.body).feature, "ai.ask");
   assert.equal(JSON.parse((await post("/api/features", { key: "ai.ask", state: "public" }, gus)).body).ok, true);
 });
+
+
+// ===== build 2026.09.23-94: moderation over the wire ===============================================
+test("dm -94: the operator edits and deletes a member's message and strikes a call; a member is refused on every one", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const cara = jar(); cara.absorb(await post("/login", { handle: "cara", password: "yet-another-long-pw" }));
+  const members = JSON.parse((await get("/api/access", gus)).body).members;
+  const gusUid = members.find((m) => m.handle === "gus").uid;
+  const mine = JSON.parse((await post("/api/dm", { to: gusUid, body: "cara's words" }, cara)).body);
+  assert.ok(mine.ok, JSON.stringify(mine));
+  const theirs = JSON.parse((await post("/api/dm", { thread: mine.thread, body: "gus's words" }, gus)).body);
+  // A member on the operator's message: refused, exactly as before.
+  const no1 = await post("/api/dm", { id: theirs.message.id, body: "hijacked" }, cara);
+  assert.equal(no1.statusCode, 400); assert.match(JSON.parse(no1.body).error, /isn.t your message/);
+  assert.equal((await post("/api/dm", { id: theirs.message.id, drop: true }, cara)).statusCode, 400);
+  // The operator on a member's message: the words change, the row names the operator.
+  const ed = JSON.parse((await post("/api/dm", { id: mine.message.id, body: "cara's words, moderated" }, gus)).body);
+  assert.ok(ed.ok && ed.moderated && ed.message.editedBy === "gus", JSON.stringify(ed));
+  const seen = JSON.parse((await get("/api/dm/" + mine.thread, cara)).body).messages.find((m) => m.id === mine.message.id);
+  assert.equal(seen.body, "cara's words, moderated"); assert.equal(seen.editedBy, "gus"); assert.ok(seen.mine);
+  const dr = JSON.parse((await post("/api/dm", { id: mine.message.id, drop: true }, gus)).body);
+  assert.ok(dr.ok && dr.moderated && dr.message.deleted && dr.message.deletedBy === "gus");
+  // Striking a call is admin-gated at the route (403, not 400), before the store is asked anything.
+  const noCall = await post("/api/dm", { callDrop: theirs.message.id }, cara);
+  assert.equal(noCall.statusCode, 403); assert.deepEqual(JSON.parse(noCall.body), { ok: false, error: "forbidden" });
+  assert.equal((await post("/api/dm", { callDrop: theirs.message.id })).statusCode, 401);
+  // No markets in this suite, so nothing stamps: the operator's strike is refused on the merits, not the gate.
+  const noStamp = await post("/api/dm", { callDrop: theirs.message.id }, gus);
+  assert.equal(noStamp.statusCode, 400); assert.match(JSON.parse(noStamp.body).error, /carries no call/);
+  // The read log carries both acts; the read-through surface still serves the moderated rows.
+  const audit = JSON.parse((await get("/api/access/dm/audit?limit=10", gus)).body).entries;
+  assert.ok(audit.some((e) => e.action === "edit-message" && e.who === "gus" && /cara/.test(e.detail)), JSON.stringify(audit));
+  assert.ok(audit.some((e) => e.action === "delete-message" && e.who === "gus"));
+  assert.equal((await get("/api/access/dm/audit", cara)).statusCode, 403);
+  const rt = JSON.parse((await get("/api/access/dm/" + mine.thread, gus)).body);
+  assert.ok(rt.messages.find((m) => m.id === mine.message.id).deletedBy === "gus", "the read-through names the operator too");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(/r = ACCOUNTS\.drop\(me\.uid, b\.id, isAdmin\(req\)\)/.test(srv) && /r = ACCOUNTS\.edit\(me\.uid, b\.id, b\.body, isAdmin\(req\)\)/.test(srv), "authz is decided at the route");
+  assert.ok(/if \(r\.ok && r\.moderated\) \{ log\(.*dmPoke\(r\.thread, \{ refresh: Number\(r\.thread\) \}\); \}/.test(srv), "a moderated row tells the room to re-pull it");
+});

@@ -1103,9 +1103,26 @@ async function dmClearHistory(){
   if(res.ok){ dmState.msgs.delete(t.id); dmState.sel=null; await dmLoad(); dmRender(); }
 }
 async function dmDrop(id){
-  if(!confirm('Delete this message? The other side sees that it was deleted.')) return;
+  const m=(dmState.sel?dmMsgs(dmState.sel):[]).find(x=>x.id===id);
+  const own=!m||m.mine;
+  if(!confirm(own?'Delete this message? The other side sees that it was deleted.'
+    :'Delete '+(m.sender||'this member')+'\u2019s message as the operator? Everyone in the conversation sees that you removed it, and the act is written to the audit log.')) return;
   const res=await dmPost({id:id,drop:true});
   if(res.ok&&res.d.message){ dmMerge([res.d.message]); dmRender(); }
+  else if(!res.ok) dmLocal('\u2717 '+esc((res.d&&res.d.error)||'could not delete that'),'err');
+}
+// The operator strikes a call from the record (build 2026.09.23-94). Reachable from a bubble and
+// from a row on the calls board; either way the reply is the updated message, and the board is
+// re-pulled so the row and the summary drop it together.
+async function dmCallDrop(id){
+  const m=(dmState.sel?dmMsgs(dmState.sel):[]).find(x=>x.id===id)||(dmState.calls&&dmState.calls.calls||[]).find(x=>x.id===id);
+  const mine=!!m&&(m.mine||(!!m.senderUid&&!!dmState.me&&m.senderUid===dmState.me.uid));
+  const what=m&&m.ref?'the $'+dmTkName(m.ref)+' call'+(m.sender&&!mine?' by '+m.sender:''):'this call';
+  if(!confirm('Remove '+what+' from the record altogether? The words stay; the stamp, its score and its place in the summary are gone for everyone. This cannot be undone, and it is written to the audit log.')) return;
+  const res=await dmPost({callDrop:id});
+  if(!res.ok) return dmLocal('\u2717 '+esc((res.d&&res.d.error)||'could not remove that call'),'err');
+  if(res.d.message&&dmState.msgs.has(res.d.message.thread)){ dmMerge([res.d.message]); if(dmState.mode==='chat') dmPatchMsg(res.d.message.id); }
+  if(dmState.mode==='calls') dmFetchCalls().then(()=>dmRender());
 }
 function dmEdit(id){
   const m=dmMsgs(dmState.sel).find(x=>x.id===id); if(!m) return;
@@ -1335,10 +1352,12 @@ function dmMessageHtml(m,t,p){
   const meta=head?'<div class="dm-meta">'+(own?'':(t&&t.kind!=='dm'
     ?'<b class="dm-who" style="color:'+dmNameColor(m.senderUid||m.sender)+'">'+esc(who)+'</b> \u00b7 '
     :esc(who)+' \u00b7 '))+dmTime(m.ts)+'</div>':'';
-  // Pinning is any member's; editing and deleting are the author's; promoting a call to a note is
-  // the operator's, because the notes book itself is operator-only. All of it — the reaction
-  // picker included — lives in a hover action bar over the bubble, so a message at rest is
-  // just its bubble.
+  // Pinning is any member's; editing and deleting are the author's — and the operator's, on
+  // anybody's message (build 2026.09.23-94: moderation, named on the row and audited); promoting
+  // a call to a note is the operator's, because the notes book itself is operator-only. All of
+  // it — the reaction picker included — lives in a hover action bar over the bubble, so a
+  // message at rest is just its bubble.
+  const canMod=own||dmState.admin;
   const act=m.deleted?'':'<span class="dm-act">'
     +'<span class="dm-rxadd"><button type="button" class="dm-tool" data-dmrxopen="'+m.id+'" title="React">+</button>'
       +'<span class="dm-rxmenu">'+dmState.reactions.map(e=>
@@ -1350,20 +1369,24 @@ function dmMessageHtml(m,t,p){
     // The author's own open call: close it now at the live mark, or give it another week.
     +((own&&m.call&&!m.call.closed)?'<button type="button" class="dm-tool" data-dmcallclose="'+m.id+'" title="Close this call now, at the current mark \u2014 the result freezes and enters the record">close call</button>'
       +'<button type="button" class="dm-tool" data-dmcallext="'+m.id+'" data-days="'+(m.call.h+7)+'" title="Extend the horizon by a week (now '+m.call.h+'d) \u2014 the call keeps running">+7d</button>':'')
-    +(own?((m.cmd||m.card)?'':'<button type="button" class="dm-tool" data-dmedit="'+m.id+'" title="Edit \u2014 the price stamp stays at what it was sent at">edit</button>')
-      +'<button type="button" class="dm-tool" data-dmdel="'+m.id+'" title="Delete \u2014 this removes the attachment too">delete</button>':'')
+    // The operator's strike: the call leaves the record altogether — the one door the record's
+    // delete-proofing does not close, because it is not the author's.
+    +((m.ref&&m.refPx!=null&&dmState.admin)?'<button type="button" class="dm-tool dm-mod" data-dmcalldrop="'+m.id+'" title="Remove this call from the record altogether \u2014 the words stay, the stamp and score go. Operator only, audited.">drop call</button>':'')
+    +(canMod?((m.cmd||m.card)?'':'<button type="button" class="dm-tool'+(own?'':' dm-mod')+'" data-dmedit="'+m.id+'" title="'+(own?'Edit \u2014 the price stamp stays at what it was sent at':'Edit '+esc(who)+'\u2019s message as the operator \u2014 the room sees it was edited by you')+'">edit</button>')
+      +'<button type="button" class="dm-tool'+(own?'':' dm-mod')+'" data-dmdel="'+m.id+'" title="'+(own?'Delete \u2014 this removes the attachment too':'Delete '+esc(who)+'\u2019s message as the operator \u2014 the room sees it was removed by you')+'">delete</button>':'')
     +'</span>';
   // Edited / via-telegram ride inside the bubble as a faint suffix: the header line is gone on
   // grouped messages, so anything that lived only there would vanish with it.
   const marks=m.deleted?'':((m.via==='telegram'?'<span class="dm-mk" title="sent from Telegram">tg</span>':'')
-    +(m.edited?'<span class="dm-mk">edited</span>':''));
+    +(m.edited?'<span class="dm-mk"'+(m.editedBy?' title="rewritten by the operator, not the author"':'')+'>edited'+(m.editedBy?' by '+esc(m.editedBy):'')+'</span>':'')
+    +(m.callDropped?'<span class="dm-mk" title="the operator struck this message\u2019s price call from the record \u2014 the words stand, the stamp and score are gone">call removed by '+esc(m.callDropped)+'</span>':''));
   // The quote a reply carries: one line of what it answers, clickable back to the original.
   const quote=(!m.deleted&&m.reply)
     ? '<div class="dm-quote" data-dmq="'+m.replyTo+'" title="jump to the quoted message"><b style="color:'+dmNameColor(m.reply.senderUid||m.reply.sender)+'">'+esc(m.reply.sender||'\u2014')+'</b> '
       +esc(m.reply.deleted?'message deleted':((m.reply.ref?'$'+dmTkName(m.reply.ref)+' \u00b7 ':'')+(m.reply.body||'attachment'))).replace(/\n/g,' ')+'</div>'
     : '';
   const body=m.deleted
-    ? '<div class="dm-b dm-del">message deleted</div>'
+    ? '<div class="dm-b dm-del">'+(m.deletedBy?'message removed by '+esc(m.deletedBy):'message deleted')+'</div>'
     // A shared screener card (build 2026.09.21-84): its own container, rendered from the JSON
     // through the table's formatting rules, with the live drift in its footer.
     : m.card
@@ -1633,7 +1656,7 @@ function dmCallsHtml(){
       +'<span class="dm-callpx dm-callnow" title="the current mark">'+(c.px!=null?fmtPx(c.px):'\u2014')+'</span>'
       +'<span class="dm-callmv '+cls+'" title="price move since sent \u2014 colored by whether the '+(c.side||'long')+' is right">'+mv+'</span>'
       +'<span class="dm-callhz">'+hz(c.adj1)+'</span>'
-      +'<span class="dm-callhz">'+hz(c.adj7)+'</span></div>';
+      +'<span class="dm-callhz">'+hz(c.adj7)+(dmState.admin?' <button type="button" class="dm-tool dm-mod" data-dmcalldrop="'+c.id+'" title="Remove this call from the record altogether \u2014 the words stay, the stamp and score go. Operator only, audited.">drop</button>':'')+'</span></div>';
   }).join('');
   return '<div class="dm-log" id="dm-log"><div class="dm-callsums">'+sum+'</div>'+head+rows+'</div>';
 }
@@ -1973,6 +1996,8 @@ function dmWire(){
     if(cc0){ dmCallOp({callClose:+cc0.dataset.dmcallclose}); return; }
     const ce=e.target.closest('[data-dmcallext]');
     if(ce){ dmCallOp({callExtend:+ce.dataset.dmcallext,days:+ce.dataset.days}); return; }
+    const cd=e.target.closest('[data-dmcalldrop]');
+    if(cd){ dmCallDrop(+cd.dataset.dmcalldrop); return; }
     const cc=e.target.closest('[data-cardcoin]');
     if(cc){ if(state.rows.get(cc.dataset.cardcoin)) openDetail(cc.dataset.cardcoin); return; }
     const noteBtn=e.target.closest('[data-dmnote]');
@@ -2194,4 +2219,4 @@ function dmDockInit(){
   });
   document.addEventListener('click',(e)=>{ if(!p.hidden&&(!e.target.closest||!e.target.closest('#dm-dock,#dm-dockpanel'))) p.hidden=true; });
 }
-export { dmKeys, dmLoad, dmRefreshOpen, dmRender, dmState, dmSync, dmSysLine, dmTypingFrame, openDM };
+export { dmKeys, dmLoad, dmPost, dmRefreshOpen, dmRender, dmState, dmSync, dmSysLine, dmTypingFrame, openDM };

@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.23-93";
+const VERSION = "2026.09.23-94";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1578,7 +1578,7 @@ async function buildServer() {
     const me = dmMe(req, reply); if (!me) return;
     const b = req.body || {};
     // The scalar fields, once, before the verb dispatch: every branch below binds one of these.
-    for (const k of ["id", "thread", "fileId", "replyTo", "to", "watch", "pin", "close", "reopen", "clearHistory", "deleteGroup", "joinBoard", "read", "uid"])
+    for (const k of ["id", "thread", "fileId", "replyTo", "to", "watch", "pin", "close", "reopen", "clearHistory", "deleteGroup", "joinBoard", "read", "uid", "callClose", "callExtend", "callDrop"])
       if (Array.isArray(b[k])) b[k] = b[k][0];
     let r;
     if (b.typing) {
@@ -1658,8 +1658,24 @@ async function buildServer() {
     // to re-pull it (the `refresh` hint an edit already uses) rather than to expect a new id.
     else if (b.callClose != null) { r = ACCOUNTS.callClose(me.uid, b.callClose); if (r.ok) dmPoke(r.thread, { refresh: Number(r.thread) }); }
     else if (b.callExtend != null) { r = ACCOUNTS.callExtend(me.uid, b.callExtend, b.days); if (r.ok) dmPoke(r.thread, { refresh: Number(r.thread) }); }
-    else if (b.drop && b.id != null) r = ACCOUNTS.drop(me.uid, b.id);
-    else if (b.id != null) r = ACCOUNTS.edit(me.uid, b.id, b.body);
+    // Moderation (build 2026.09.23-94): the operator may strike a call from the record, and edit
+    // or delete anybody's message. The authz is the admin flag, decided HERE and passed down —
+    // accounts.js never reads a cookie — and a moderated row is announced with the `refresh`
+    // hint so every open copy of the conversation repaints the bubble now, not at the next
+    // sync (an id-cursor sync never re-delivers an old row). The act is audited in the store.
+    else if (b.callDrop != null) {
+      if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "forbidden" });
+      r = ACCOUNTS.callDrop(me.uid, b.callDrop, true);
+      if (r.ok) { log("operator " + me.handle + " struck a call from the record (message " + r.message.id + ")"); dmPoke(r.thread, { refresh: Number(r.thread) }); }
+    }
+    else if (b.drop && b.id != null) {
+      r = ACCOUNTS.drop(me.uid, b.id, isAdmin(req));
+      if (r.ok && r.moderated) { log("operator " + me.handle + " deleted message " + r.message.id + " by " + r.message.sender); dmPoke(r.thread, { refresh: Number(r.thread) }); }
+    }
+    else if (b.id != null) {
+      r = ACCOUNTS.edit(me.uid, b.id, b.body, isAdmin(req));
+      if (r.ok && r.moderated) { log("operator " + me.handle + " edited message " + r.message.id + " by " + r.message.sender); dmPoke(r.thread, { refresh: Number(r.thread) }); }
+    }
     else {
       // A terminal command's output posted into the thread (build 2026.09.11-69). The manifest
       // keys own no route — this verb shares /api/dm with every other send — so the gate is

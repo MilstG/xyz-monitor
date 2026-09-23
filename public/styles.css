@@ -2349,6 +2349,9 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
   cursor:pointer;padding:0;text-decoration:underline;
   white-space:nowrap}   /* "→ note" is one label — never let a squeezed bar fold it in half */
 .dm-tool:hover{color:var(--accent)}
+/* Moderation (build 2026.09.23-94): an operator's control over somebody ELSE's message or call wears the
+   down color, so "delete" on your own bubble and "delete" on theirs never read as the same button. */
+.dm-tool.dm-mod{color:var(--down)} .dm-tool.dm-mod:hover{color:var(--accent)}
 .dm-act .dm-tool{text-decoration:none}
 .dm-b{background:var(--panel2);border:1px solid var(--border);border-radius:13px;padding:5px 10px;
   font-size:var(--fs-md);line-height:1.45;word-wrap:break-word;overflow-wrap:anywhere}
@@ -2667,7 +2670,7 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 a.dm-mutebtn{text-decoration:none;display:inline-flex;align-items:center}
 .adm-dmlog{max-height:340px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--r-2);
   padding:10px 12px;background:var(--bg);display:flex;flex-direction:column;gap:7px}
-.adm-dmrow{display:grid;grid-template-columns:84px 1fr auto;gap:10px;align-items:baseline;font-size:var(--fs-sm)}
+.adm-dmrow{display:grid;grid-template-columns:84px 1fr auto auto;gap:10px;align-items:baseline;font-size:var(--fs-sm)}
 .adm-dmwho{font-family:var(--mono);font-size:var(--fs-xs);color:var(--accent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .adm-dmbody{color:var(--text);word-wrap:break-word;overflow-wrap:anywhere}
 

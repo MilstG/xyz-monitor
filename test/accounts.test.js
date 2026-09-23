@@ -1296,7 +1296,7 @@ test("chat terminal -69: a command result is a message with cmd, no stamp, no ed
   assert.ok(/if\(_termSink&&_termSink\.check\)\{ const why=_termSink\.check\(d\.query\); if\(why\) return termErr/.test(app), "an AI-planned query obeys the chat allowlist — it must not navigate the sender away");
   assert.ok(/const shown=line\.replace\(\/\^\(admin\\s\+\(\?:unlock\|reset-reports\)\)/.test(app), "an admin password typed into chat is redacted in the private echo");
   assert.ok(/cmd:line,cmdAi:!cmd\|\|r\.ai/.test(app), "a planner answer (AI planned, board computed) still posts as AI — the badge follows the spend");
-  assert.ok(/\(\(m\.cmd\|\|m\.card\)\?'':'<button type="button" class="dm-tool" data-dmedit=/.test(app), "no edit button on a command result (nor on a shared card)");
+  assert.ok(/\(canMod\?\(\(m\.cmd\|\|m\.card\)\?'':'<button type="button" class="dm-tool'\+\(own\?'':' dm-mod'\)\+'" data-dmedit=/.test(app), "no edit button on a command result (nor on a shared card)");
   assert.ok(/<\/div>'\+dmRatioBlock\(m\)\+'<pre class="dm-cmdout">'\+esc\(m\.body\)\+'<\/pre>/.test(app) && /if\(!ra\) return dmFile\(m\);/.test(app), "the output renders escaped, in a monospace block, with the attachment ABOVE it — the first cut never rendered a command result's attachment, so the chart posted and never drew");
   assert.ok(/\/help for commands\)/.test(app), "the composer placeholder points at /help");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
@@ -1657,4 +1657,89 @@ test("calls -89: an applied reading rides the send as an explicit, bounded overr
   assert.equal(b.message.call.h, 30, "a horizon past a year is ignored: the words decide");
   const c = A.send(g.uid, null, "no ticker, no call", resolve, { thread: T, callSide: "short", callDays: 14 });
   assert.equal(c.message.call, null, "an override without a stamp stamps nothing");
+});
+
+
+// ===== build 2026.09.23-94: moderation — the operator edits or deletes anybody's message, and strikes a call =====
+test("moderation -94: the operator may edit or delete somebody else's message; the row names them and the audit log says what changed", async () => {
+  const marks = { "xyz:HOOD": 100 };
+  const { A, g, l, m } = await seedDesk(marks);
+  const resolve = (s) => (marks["xyz:" + s] ? "xyz:" + s : null);
+  const T = A.threadFor(l.uid, m.uid, true).id;          // a conversation the operator is NOT in
+  const msg = A.send(l.uid, null, "long $HOOD, and something rude", resolve, { thread: T });
+  // Without the flag nothing changes: the author's guard stands for everyone, the operator included.
+  assert.ok(!A.edit(g.uid, msg.id, "polite").ok && !A.drop(g.uid, msg.id).ok, "no flag, no reach");
+  // Edit as the operator: the words change, the stamp stands, the row says who rewrote it.
+  const ed = A.edit(g.uid, msg.id, "long $HOOD, and something polite", true);
+  assert.ok(ed.ok && ed.moderated, JSON.stringify(ed));
+  const seen = A.history(l.uid, T).messages.find((x) => x.id === msg.id);
+  assert.equal(seen.body, "long $HOOD, and something polite");
+  assert.ok(seen.edited && seen.editedBy === "gus", "the author's copy says 'edited by gus'");
+  assert.equal(seen.ref, "xyz:HOOD"); assert.equal(seen.refPx, 100); assert.ok(seen.call, "the stamp and the lifecycle survive a moderated edit");
+  // The operator's OWN message takes the ordinary path: no moderation mark, no audit row.
+  const own = A.send(g.uid, null, "mine", null, { thread: A.threadFor(g.uid, l.uid, true).id });
+  const ownEd = A.edit(g.uid, own.id, "mine, reworded", true);
+  assert.ok(ownEd.ok && !ownEd.moderated && !ownEd.message.editedBy, "an operator editing their own message is just an author");
+  // Command results and cards stay un-editable for the operator too — the same reasons apply.
+  const cmd = A.send(l.uid, null, "TOP\n1 NVDA", null, { thread: T, cmd: "top funding 5" });
+  assert.match(A.edit(g.uid, cmd.id, "x", true).error, /can't be edited/);
+  // Delete as the operator: tombstone, attachment gone, name on the row; a second delete is refused.
+  const dr = A.drop(g.uid, msg.id, true);
+  assert.ok(dr.ok && dr.moderated && dr.message.deleted && dr.message.deletedBy === "gus", JSON.stringify(dr));
+  assert.ok(!A.drop(g.uid, msg.id, true).ok, "already deleted");
+  assert.ok(!A.drop(l.uid, msg.id).ok, "…for the author as well");
+  const gone = A.history(m.uid, T).messages.find((x) => x.id === msg.id);
+  assert.ok(gone.deleted && gone.body === "" && gone.deletedBy === "gus" && gone.call, "the peer sees 'removed by gus'; the stamp still stands (delete-proof record)");
+  // Both acts are in the audit log, with the words that were changed or removed.
+  const log = A.adminAuditLog(10);
+  assert.ok(log.some((e) => e.action === "edit-message" && e.thread === T && /rude.*polite/.test(e.detail)), JSON.stringify(log));
+  assert.ok(log.some((e) => e.action === "delete-message" && e.thread === T && /polite/.test(e.detail)));
+  assert.ok(!log.some((e) => e.detail && /reworded/.test(e.detail)), "the operator's own edit is nobody's business");
+  // A system line is never anybody's to edit or delete, flag or no flag.
+  const grp = A.createGroup(l.uid, "desk", [m.uid]).thread;
+  const sys = A.history(l.uid, grp).messages.find((x) => x.sys);
+  assert.ok(sys && !A.edit(g.uid, sys.id, "x", true).ok && !A.drop(g.uid, sys.id, true).ok);
+});
+
+test("moderation -94: striking a call removes it from the record altogether — words stay, stamp and score go, retention resumes", async () => {
+  const marks = { "xyz:HOOD": 100, "xyz:PLTR": 50 };
+  const { A, g, l, m } = await seedDesk(marks);
+  const resolve = (s) => (marks["xyz:" + s] ? "xyz:" + s : null);
+  const T = A.threadFor(l.uid, m.uid, true).id;
+  const call = A.send(l.uid, null, "short $HOOD 30d", resolve, { thread: T }).message;
+  const other = A.send(l.uid, null, "long $PLTR", resolve, { thread: T }).message;
+  const plain = A.send(l.uid, null, "no ticker here", null, { thread: T }).message;
+  assert.ok(call.call && call.call.h === 30 && call.side === "short");
+  // Operator only, and only on a stamped row.
+  assert.ok(!A.callDrop(l.uid, call.id).ok && !A.callDrop(l.uid, call.id, false).ok, "the author cannot scrub their own record");
+  assert.match(A.callDrop(g.uid, plain.id, true).error, /carries no call/);
+  assert.ok(!A.callDrop(g.uid, 999999, true).ok);
+  // Strike it: the row leaves the record and the summary; the message keeps its words.
+  const r = A.callDrop(g.uid, call.id, true);
+  assert.ok(r.ok && r.thread === T, JSON.stringify(r));
+  assert.equal(r.message.body, "short $HOOD 30d");
+  assert.equal(r.message.ref, null); assert.equal(r.message.refPx, null); assert.equal(r.message.side, null); assert.equal(r.message.call, null);
+  assert.equal(r.message.callDropped, "gus", "the row says who struck it");
+  assert.ok(!r.message.deleted && !r.message.edited, "not a delete, not an edit");
+  const rec = A.calls(l.uid, {});
+  assert.ok(!rec.calls.some((c) => c.id === call.id), "off the record");
+  assert.ok(rec.calls.some((c) => c.id === other.id), "the other call is untouched");
+  assert.equal(rec.summary.find((s) => s.uid === l.uid).open, 1, "the summary counts one open call now, not two");
+  assert.ok(!A.calls(g.uid, { all: true }).calls.some((c) => c.id === call.id), "…and off the operator's all-view too");
+  assert.ok(!A.callClose(l.uid, call.id).ok && !A.callExtend(l.uid, call.id, 60).ok, "no lifecycle verbs on a struck row");
+  assert.ok(!A.callDrop(g.uid, call.id, true).ok, "struck is struck");
+  const audit = A.adminAuditLog(5).find((e) => e.action === "delete-call");
+  assert.ok(audit && audit.thread === T && /\$xyz:HOOD short @ 100 \(open\) by lena/.test(audit.detail), JSON.stringify(audit));
+  // A deleted message's call can be struck as well: that is the one way a bad tombstoned call leaves the board.
+  A.drop(l.uid, other.id);
+  assert.ok(A.calls(l.uid, {}).calls.some((c) => c.id === other.id && c.deleted), "delete-proof, as before");
+  const r2 = A.callDrop(g.uid, other.id, true);
+  assert.ok(r2.ok && r2.message.deleted && r2.message.call === null);
+  assert.ok(!A.calls(l.uid, {}).calls.some((c) => c.id === other.id), "gone from the record");
+  assert.match(A.adminAuditLog(5).find((e) => e.action === "delete-call").detail, /message deleted/);
+  // Struck rows are ordinary prose to retention: the stamp was the exemption.
+  A.sweepRetention(Date.now() + 40 * 86400e3);
+  assert.ok(A.history(l.uid, T).messages.every((x) => x.id !== call.id && x.id !== other.id), "both age out with the window");
+  // The moderation columns survive a re-open of the same file.
+  assert.ok(A._db.prepare("PRAGMA table_info(dm_msg)").all().map((c) => c.name).includes("callDroppedBy"));
 });
