@@ -436,7 +436,8 @@ app footer, the `?` card.
 
 `docs/` also holds the longer reference pages — the feature map, system map, mechanics and signal
 reference — plus the design mocks that preceded the funding heatmap, notes, insiders,
-backtest-target and return/drawdown work, the share-to-chat mock (`xyz-monitor-share-to-chat-mock.html`, now built — see **Share to chat** above) and the call-targets mock (`xyz-monitor-call-targets-mock.html`: "$INTC to 32 by Oct 15" as a tracked target that resolves on hit, miss or an invalidation level — a proposal, not yet built). The six reference pages are served at `/docs/ref/explainer`, `/docs/ref/howto`,
+backtest-target and return/drawdown work, the site-shell redesign mock
+(`xyz-monitor-shell-redesign-mock.html`: one shell, one type scale, three controls — a proposal, not yet built), the share-to-chat mock (`xyz-monitor-share-to-chat-mock.html`, now built — see **Share to chat** above) and the call-targets mock (`xyz-monitor-call-targets-mock.html`: "$INTC to 32 by Oct 15" as a tracked target that resolves on hit, miss or an invalidation level — a proposal, not yet built). The six reference pages are served at `/docs/ref/explainer`, `/docs/ref/howto`,
 `/docs/ref/features`, `/docs/ref/map`,
 `/docs/ref/mechanics` and `/docs/ref/signals` (nonce-stamped, same gate); the mocks are not served.
 
