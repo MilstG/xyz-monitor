@@ -432,4 +432,4 @@ function exportSectors(){ const list=SECT._rows; if(!list) return;
     g.ret!=null?g.ret.toFixed(2):'', g.doi!=null?g.doi.toFixed(2):'', g.green!=null?Math.round(g.green*100):'',
     g.totVol!=null?Math.round(g.totVol):'', g.totOI!=null?Math.round(g.totOI):'', g.cohesion!=null?g.cohesion.toFixed(3):'']);
   downloadCSV(`xyz-${byInd?'industries':'sectors'}-${state.tf}.csv`,[head,...body]); }
-export { computeSectors, exportSectors, renderSectors, sectorShort };
+export { computeSectors, exportSectors, layoutMapLabels, mapLabelSvg, renderSectors, sectorShort };

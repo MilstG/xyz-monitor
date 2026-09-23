@@ -13,6 +13,7 @@ import { computeSqueeze, render, renderRegimeStrip, rowSessState, scheduleRender
 import { _hsgLast, _liqLast, loadHousing, loadLiquidity } from "./notes.js";
 import { aiFmtAgo } from "./report.js";
 import { renderSectors } from "./sectors.js";
+import { renderDrawdown } from "./drawdown.js";
 import { loadTriggers } from "./triggers.js";
 
 
@@ -179,6 +180,7 @@ function applyDaily(d){ if(!d||!d.daily) return;
     // panel had no path back from empty and stayed broken-looking for the life of the page.
     if(COMPG._empty && el('compg') && !el('compg').hidden) renderCompg(); }
   if(!el('view-sectors').hidden) renderSectors();   // leaders map + sector corr fill in live as daily coverage grows
+  { const dv=el('view-drawdown'); if(dv&&!dv.hidden) renderDrawdown(); }   // the study is a pure function of these closes
 }
 function updateAggregates(){ const rows=activeRows(); let v=0,o=0;
   for(const r of rows){ if(r.vol)v+=r.vol; if(r.oi)o+=r.oi; }
