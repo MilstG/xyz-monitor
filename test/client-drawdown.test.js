@@ -111,7 +111,7 @@ test("drawdown tab: wired end to end — manifest, markup, routing, scope, dispa
   const docs = fs.readFileSync(path.join(__dirname, "..", "public", "docs.html"), "utf8");
   assert.ok(docs.includes('<section id="tab-drawdown" data-feature="drawdown" data-def="admin">'), "the manual has a gated, admin-marked section");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
-  for (const pin of [".rvd-head", ".rvd-tbl", ".rvdsvg.hv .rvd-dot:not(.hot)", ".rvd-legend i.hollow", ".rvd-late"])
+  for (const pin of [".rvd-title", ".rvd-sub", ".rvd-head", ".rvd-tbl", ".rvdsvg.hv .rvd-dot:not(.hot)", ".rvd-legend i.late", ".rvd-late"])
     assert.ok(css.includes(pin), "css pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   assert.ok(sv.includes('const VERSION = "2026.09.23-92"'), "build stamp");
@@ -119,5 +119,10 @@ test("drawdown tab: wired end to end — manifest, markup, routing, scope, dispa
   const src = fs.readFileSync(path.join(__dirname, "..", "public", "js", "drawdown.js"), "utf8");
   assert.ok(src.includes("intraday lows are not in the daily feed"), "the caption discloses close-to-close");
   assert.ok(src.includes("'best_date','max_dd_pct','dd_peak','dd_trough'"), "CSV columns carry the dates");
+  assert.ok(src.includes("const xM=v=>px1-Math.min(-v,maxX)/maxX*(px1-px0);"), "zero drawdown sits at the RIGHT edge — up-and-right is better");
+  assert.ok(src.includes("shallower →") && src.includes("Up and to the right is better"), "the axis and the subtitle say which way is good");
+  assert.ok(src.includes("seg('rvd-y','return','rvdy',[['now','now'],['best','best']],RVD.y)"), "the return axis switches between now and best");
+  assert.ok(/function rvdBenchCoins\(\)\{[\s\S]*?scopeBench\(\)[\s\S]*?'ETH'[\s\S]*?r\.sector==='Index'/.test(src), "references: the scope benchmark, plus ETH in crypto and the index rows in stocks");
+  assert.ok(src.includes("stroke-dasharray=\"5 4\"") && src.includes("${esc(b.ticker)} ${pct(yOf(b))}"), "each reference is a dashed line named with its return");
   assert.ok(src.includes("layoutMapLabels(nodes.filter(n=>n.label),{px0,px1,py1,py0:py0-22})"), "labels route around each other with the sector map's layout, kept out of the tick row");
 });

@@ -66,14 +66,16 @@ instant, and the per-IP rate limit stops being a per-user problem.
   volume — no new fetch and no new persistence. Ships in the market-data menu (the `tape` group);
   an admin can rename that menu or move the tab out of it without a deploy.
 - **Sectors tab** — sector classification, a rotation flow map, a Relative Rotation Graph (RS-Ratio / RS-Momentum vs the S&P), per-sector detail, and a sector×sector correlation matrix.
-- **Drawdown tab** — best return since an anchor date against the max drawdown taken in the same
-  window, one dot per market (top-left paid a lot and cost little; the dashed diagonal is where a
-  name gave back as much as it ever made), with the same study as a sortable table and a CSV.
-  Best = highest daily close over the anchor close with the live mark as today's point; drawdown =
-  deepest close-to-close fall from any running peak (the daily feed carries no low, so wicks are not
-  counted). Presets or any date in the last year; a name listed after the anchor is drawn hollow and
-  marked *late*. A client-side study over `/api/daily`, no route of its own. Ships admin-only. The
-  design mock is `docs/xyz-monitor-return-drawdown-mock.html`.
+- **Drawdown tab** — return since an anchor date against the max drawdown taken in the same
+  window, one dot per market, zero drawdown at the right edge so up-and-right is better (more
+  return for less pain). The return axis reads *now* (the live mark over the first daily close on
+  or after the anchor) or *best* (the highest close since it); drawdown is the deepest
+  close-to-close fall from any running peak (the daily feed carries no low, so wicks are not
+  counted). The benchmarks are dashed horizontal lines at their own return — BTC and ETH in crypto
+  scope, the S&P and the XYZ100 index in stocks scope. Presets or any date in the last year; a
+  name listed after the anchor is drawn with a dashed ring and marked *late*. The same study as a
+  sortable table with CSV. A client-side study over `/api/daily`, no route of its own. Ships
+  admin-only. The design mock is `docs/xyz-monitor-return-drawdown-mock.html`.
 - **Persistence** — OI *and* funding history are written to the `/data` volume and survive restarts; the computed feature cache is persisted too, so redeploys serve a warm table instantly.
 - **Staleness** — the snapshot carries the last successful poll time; the status dot turns amber if the server's data goes stale (poller stalled).
 - **Deep links** — the URL reflects the current tab and open ticker (`#sectors`, `#t=<coin>`), so links are shareable.
