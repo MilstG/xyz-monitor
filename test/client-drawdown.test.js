@@ -86,6 +86,23 @@ test("drawdown anchor: presets count back from today's UTC midnight, YTD is Jan 
   assert.equal(rvdAnchorTs(), today - 30 * DAY, "a future date falls back to the preset");
 });
 
+test("drawdown chart cut: top N by the return axis, references always kept, the table untouched", () => {
+  const app = require("./_client").clientSource();
+  const a = app.indexOf("const RVD_LATE_GAP="), b = app.indexOf("function rvdNiceStep(");
+  const api = new Function("store", "DAY", "isoUtc", "scopeBench", "activeRows", "state", app.slice(a, b) + "; return { rvdChartRows, RVD };")({ get: () => null, set() {} }, DAY, () => "", () => null, () => [], { scope: "stocks" });
+  const rows = [
+    { coin: "a", bench: -1, now: 50, best: 60 }, { coin: "b", bench: -1, now: 10, best: 90 }, { coin: "c", bench: -1, now: -20, best: 5 },
+    { coin: "spx", bench: 0, now: -40, best: 1 }, { coin: "d", bench: -1, now: 30, best: 35 }];
+  api.RVD.y = "now"; api.RVD.top = "2";
+  assert.deepEqual(api.rvdChartRows(rows).map((x) => x.coin), ["spx", "a", "d"], "top 2 by now, plus the reference however badly it ranks");
+  api.RVD.y = "best";
+  assert.deepEqual(api.rvdChartRows(rows).map((x) => x.coin), ["spx", "b", "a"], "the cut follows the return axis in use");
+  api.RVD.top = "all";
+  assert.equal(api.rvdChartRows(rows).length, 5, "'all' is everyone");
+  api.RVD.top = "garbage";
+  assert.equal(api.rvdChartRows(rows).length, 5, "an unknown cut is everyone, never an empty chart");
+});
+
 test("drawdown tab: wired end to end — manifest, markup, routing, scope, dispatch, data hook, help, manual, styles, build stamp", () => {
   const C = require("../src/compute");
   const f = C.FEATURES.find((x) => x.key === "drawdown");
@@ -124,5 +141,8 @@ test("drawdown tab: wired end to end — manifest, markup, routing, scope, dispa
   assert.ok(src.includes("seg('rvd-y','return','rvdy',[['now','now'],['best','best']],RVD.y)"), "the return axis switches between now and best");
   assert.ok(/function rvdBenchCoins\(\)\{[\s\S]*?scopeBench\(\)[\s\S]*?'ETH'[\s\S]*?r\.sector==='Index'/.test(src), "references: the scope benchmark, plus ETH in crypto and the index rows in stocks");
   assert.ok(src.includes("stroke-dasharray=\"5 4\"") && src.includes("${esc(b.ticker)} ${pct(yOf(b))}"), "each reference is a dashed line named with its return");
+  assert.ok(src.includes("seg('rvd-top','show top','rvdt',RVD_TOPS,RVD.top)") && src.includes("rvdSvg(shown,anchorTs)") && src.includes("rvdTableHtml(rows)"), "the top-N cut applies to the chart, never to the table");
+  assert.ok(src.includes("const RVD_PAGE=25;") && src.includes("data-rvdpg=") && css.includes(".rvd-pager"), "the table pages, 25 rows at a time");
+  assert.ok(!src.includes("= drawdown</text>"), "no diagonal on the chart");
   assert.ok(src.includes("layoutMapLabels(nodes.filter(n=>n.label),{px0,px1,py1,py0:py0-22})"), "labels route around each other with the sector map's layout, kept out of the tick row");
 });

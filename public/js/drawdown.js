@@ -6,7 +6,8 @@
 // one of — the table's %-change is "now", the drawer sparkline is the path — but never side by
 // side, and side by side is the question: what did this name pay in pain for what it paid out?
 // The benchmarks (BTC and ETH in crypto scope, the index rows in stocks scope) are dashed
-// horizontal lines, so "beat the market" and "beat it without the hole" read at once.
+// horizontal lines, so "beat the market" and "beat it without the hole" read at once. The chart
+// shows the top N by the return axis (the references always stay); the table has everyone, paged.
 //
 // Runs entirely in-browser off state.rows[*].daily (shipped via /api/daily under the pinned
 // markets key) plus the live mark as the final point, so a name that is making its high right now
@@ -25,8 +26,10 @@ const RVD_KEY='xyzmon.rvd.v1';
 const RVD_PRESETS=[['30','30d'],['60','60d'],['90','90d'],['180','180d'],['ytd','YTD'],['365','1y']];
 const RVD_LATE_GAP=4*DAY;   // a first bar this far past the anchor is a listing that came after it, not a weekend
 const RVD_LABEL_ALL_MAX=45; // at most this many dots before 'auto' labels only the standouts
-const RVD=Object.assign({ preset:'90', date:null, y:'now', labels:'auto', sort:'now', dir:'desc' }, (()=>{ try{ return JSON.parse(store.get(RVD_KEY)||'{}')||{}; }catch(_){ return {}; } })());
-function rvdSave(){ try{ store.set(RVD_KEY, JSON.stringify({ preset:RVD.preset, date:RVD.date, y:RVD.y, labels:RVD.labels, sort:RVD.sort, dir:RVD.dir })); }catch(_){} }
+const RVD_TOPS=[['10','10'],['20','20'],['30','30'],['50','50'],['all','all']];   // the chart's cut, by the return axis; the references always stay
+const RVD_PAGE=25;          // table rows per page
+const RVD=Object.assign({ preset:'90', date:null, y:'now', top:'30', labels:'auto', sort:'now', dir:'desc' }, (()=>{ try{ return JSON.parse(store.get(RVD_KEY)||'{}')||{}; }catch(_){ return {}; } })(), { page:1 });
+function rvdSave(){ try{ store.set(RVD_KEY, JSON.stringify({ preset:RVD.preset, date:RVD.date, y:RVD.y, top:RVD.top, labels:RVD.labels, sort:RVD.sort, dir:RVD.dir })); }catch(_){} }
 function rvdToday(){ return Math.floor(Date.now()/DAY)*DAY; }
 // The anchor is a UTC midnight: bars are keyed by UTC day, so "since March 3" means the first bar
 // on or after 2026-03-03T00:00Z.
@@ -80,6 +83,11 @@ function rvdRows(anchorTs){
   return out;
 }
 const RVD_COL=['var(--blue)','var(--accent)','#a48cf0'];   // names, the benchmark, the second reference
+// The chart's cut: the top N names by the return axis, plus every reference whatever its rank. The
+// table underneath always carries the whole universe — the cut is what the eye can read, not the study.
+function rvdChartRows(rows){ const n=+RVD.top; if(!isFinite(n)||n<=0) return rows;
+  const names=rows.filter(x=>x.bench<0).sort((a,b)=>yOf(b)-yOf(a)).slice(0,n);
+  return rows.filter(x=>x.bench>=0).concat(names); }
 const pct=(x,d=1)=>(x==null||!isFinite(x))?'—':(x>0?'+':'')+x.toFixed(d)+'%';
 const dOnly=t=>isoUtc(t,0,10);
 const yOf=x=>RVD.y==='best'?x.best:x.now;
@@ -109,9 +117,6 @@ function rvdSvg(rows, anchorTs){
   s+=`<rect x="${px0}" y="${py1}" width="${px1-px0}" height="${py0-py1}" fill="var(--panel2)" opacity="0.3"/>`;
   for(const t of rvdTicks(-maxX,0,7)){ const x=xM(t); s+=`<line x1="${x.toFixed(1)}" y1="${py1}" x2="${x.toFixed(1)}" y2="${py0}" stroke="var(--grid)"/><text x="${x.toFixed(1)}" y="${py0+15}" text-anchor="middle" style="${ql}">${t?'−':''}${Math.abs(+t.toFixed(2))}%</text>`; }
   for(const t of rvdTicks(minY,maxY,6)){ const y=yM(t); s+=`<line x1="${px0}" y1="${y.toFixed(1)}" x2="${px1}" y2="${y.toFixed(1)}" stroke="${t?'var(--grid)':'var(--faint)'}"/><text x="${px0-6}" y="${(y+3.5).toFixed(1)}" text-anchor="end" style="${ql}">${t>0?'+':''}${+t.toFixed(2)}%</text>`; }
-  // the diagonal: return == max drawdown. Above it a name made more than it ever gave back.
-  { const lim=Math.min(maxX,maxY); if(lim>0){ s+=`<line x1="${xM(0)}" y1="${yM(0).toFixed(1)}" x2="${xM(-lim).toFixed(1)}" y2="${yM(lim).toFixed(1)}" stroke="var(--accent-dim)" stroke-dasharray="3 5" opacity="0.55"/>`;
-    s+=`<text x="${(xM(-lim*0.7)-6).toFixed(1)}" y="${(yM(lim*0.7)-6).toFixed(1)}" text-anchor="end" style="font-family:var(--mono);font-size:10px;fill:var(--accent-dim)">${yl} = drawdown</text>`; } }
   // the references: a dashed line at each benchmark's return, named at the left edge
   { let lastY=-1e9;   // two references within a label's height of each other: the lower one names itself under its line
     for(const b of rows.filter(x=>x.bench>=0).sort((a,c)=>yOf(c)-yOf(a))){ const y=yM(yOf(b)), col=RVD_COL[b.bench+1]||RVD_COL[1];
@@ -128,7 +133,7 @@ function rvdSvg(rows, anchorTs){
     s+=`<g class="rvd-dot" data-coin="${esc(x.coin)}" style="cursor:pointer"><title>${esc(rvdTitle(x))}</title>${lp.leader}`;
     // a hit target wider than the mark; the visible dot stays 10px (12px for a reference)
     s+=`<circle cx="${n.cx.toFixed(1)}" cy="${n.cy.toFixed(1)}" r="11" fill="transparent"/>`;
-    s+=`<circle cx="${n.cx.toFixed(1)}" cy="${n.cy.toFixed(1)}" r="${n.r}" fill="${col}" fill-opacity="${x.s.late?'0.12':(x.bench>=0?'0.95':'0.72')}" stroke="${col}" stroke-width="1.6"${x.s.late?' stroke-dasharray="2.5 2"':''}/>`;
+    s+=`<circle cx="${n.cx.toFixed(1)}" cy="${n.cy.toFixed(1)}" r="${n.r}" fill="${col}" fill-opacity="${x.s.late?'0.1':(x.bench>=0?'0.95':'0.6')}" stroke="${col}" stroke-width="1.4"${x.s.late?' stroke-dasharray="2.5 2"':''}/>`;
     s+=lp.txt+'</g>'; }
   s+='</svg>';
   return s;
@@ -159,15 +164,18 @@ function rvdSortVal(x,k){ if(k==='ticker') return x.ticker; if(k==='bestT') retu
 function rvdTableHtml(rows){
   const sorted=[...rows].sort((a,b)=>{ const va=rvdSortVal(a,RVD.sort), vb=rvdSortVal(b,RVD.sort);
     const c=(typeof va==='string')?va.localeCompare(vb):((va===vb)?0:(va>vb?1:-1)); return (RVD.dir==='desc'?-c:c)||a.ticker.localeCompare(b.ticker); });
+  const pages=Math.max(1,Math.ceil(sorted.length/RVD_PAGE)); RVD.page=Math.min(Math.max(1,RVD.page|0||1),pages);
+  const from=(RVD.page-1)*RVD_PAGE, page=sorted.slice(from,from+RVD_PAGE);
+  const pager=sorted.length>RVD_PAGE?`<div class="rvd-pager"><button type="button" class="btn xtiny" data-rvdpg="${RVD.page-1}"${RVD.page<=1?' disabled':''} aria-label="previous page">‹</button><span>${from+1}–${from+page.length} of ${sorted.length}</span><button type="button" class="btn xtiny" data-rvdpg="${RVD.page+1}"${RVD.page>=pages?' disabled':''} aria-label="next page">›</button></div>`:'';
   let h='<table class="rvd-tbl"><thead><tr>'+RVD_COLS.map(c=>`<th class="${c.num?'num':''}${RVD.sort===c.k?' on':''}" data-k="${c.k}"${c.tip?` data-tip="${esc(c.tip)}"`:''}>${esc(c.l)}${RVD.sort===c.k?(RVD.dir==='desc'?' ▾':' ▴'):''}</th>`).join('')+'</tr></thead><tbody>';
-  for(const x of sorted){ const s=x.s, cl=v=>v>0?'pos':(v<0?'neg':'sec');
+  for(const x of page){ const s=x.s, cl=v=>v>0?'pos':(v<0?'neg':'sec');
     h+=`<tr data-coin="${esc(x.coin)}"><td><b${x.bench>=0?` style="color:${RVD_COL[x.bench+1]}"`:''}>${esc(x.ticker)}</b>${s.late?` <span class="rvd-late" data-tip="listed after the anchor — starts at its own first close, ${dOnly(s.baseT)}">late</span>`:''}</td>`
       +`<td class="num ${cl(x.now)}">${pct(x.now)}</td>`
       +`<td class="num ${cl(x.best)}">${pct(x.best)}</td><td class="num sec">${dOnly(s.best.t)}</td>`
       +`<td class="num ${cl(x.dd)}">${pct(x.dd)}</td><td class="num sec">${dOnly(s.dd.peakT)} → ${dOnly(s.dd.troughT)}</td>`
       +`<td class="num ${x.gave>0?'neg':'sec'}">${x.gave>0?'−':''}${Math.abs(x.gave).toFixed(1)}pp</td>`
       +`<td class="num">${isFinite(x.ratio)?x.ratio.toFixed(2)+'×':'∞'}</td></tr>`; }
-  return h+'</tbody></table>';
+  return h+'</tbody></table>'+pager;
 }
 function rvdControlsHtml(anchorTs){
   const today=rvdToday();
@@ -176,6 +184,7 @@ function rvdControlsHtml(anchorTs){
   const seg=(id,lbl,attr,opts,cur)=>`<div class="seg" id="${id}" role="group" aria-label="${lbl}"><span class="seglbl">${lbl}</span>${opts.map(([k,l])=>`<button type="button"${cur===k?' class="active"':''} data-${attr}="${k}">${l}</button>`).join('')}</div>`;
   return `<div class="cg-anchorctl"><span class="cg-lbl">since</span>${pills}<input type="date" id="rvd-date" value="${isoUtc(anchorTs,0,10)}" min="${minISO}" max="${maxISO}" aria-label="anchor date"/></div>`
     +seg('rvd-y','return','rvdy',[['now','now'],['best','best']],RVD.y)
+    +seg('rvd-top','show top','rvdt',RVD_TOPS,RVD.top)
     +seg('rvd-labels','labels','rvdl',[['auto','auto'],['all','all'],['none','none']],RVD.labels)
     +`<button class="btn" id="rvd-csv" title="Download the table as CSV" style="margin-left:auto">↓ CSV</button>`;
 }
@@ -189,20 +198,21 @@ function renderDrawdown(){
   if(!withDaily.length){ wrap.innerHTML='<div class="msg">Loading daily history — the chart draws itself the moment it lands.</div>'; wireControls();
     if(!_rvdLoading){ _rvdLoading=true; loadDaily().finally(()=>{ _rvdLoading=false; if(state.view==='drawdown') renderDrawdown(); }); }
     return; }
-  const rows=rvdRows(anchorTs);
+  const rows=rvdRows(anchorTs), shown=rvdChartRows(rows);
   const days=Math.round((rvdToday()-anchorTs)/DAY), late=rows.filter(x=>x.s.late).length, cr=state.scope==='crypto';
   const refs=rows.filter(x=>x.bench>=0).sort((a,b)=>a.bench-b.bench);
   const since=dOnly(anchorTs), yl=RVD.y==='best'?'Best return':'Return';
   const head=`<div class="rvd-title">${yl} since the ${since} close vs max drawdown</div>`
     +`<div class="rvd-sub">Up and to the right is better: more return for less pain.${refs.length?` Dashed lines mark ${refs.map(x=>`<b style="color:${RVD_COL[x.bench+1]}">${esc(x.ticker)}</b>'s`).join(' and ')} return.`:''} Hover any point; click it, or a row, for the drawer.</div>`
     +`<div class="rvd-head"><b>${rows.length}</b> ${cr?'coins':'names'} · ${days}d`
+    +(shown.length<rows.length?` · chart: top <b>${shown.length-refs.length}</b> by ${yl.toLowerCase()}`:'')
     +(withDaily.length-rows.length>0?` · <span class="sec">${withDaily.length-rows.length} without two closes in the window</span>`:'')
     +(late?` · <span class="rvd-late">${late} listed after the anchor</span>`:'')
-    +`<span class="rvd-legend"><i></i> ${cr?'coins':'names'}${refs.map(x=>` <i style="border-color:${RVD_COL[x.bench+1]};background:${RVD_COL[x.bench+1]}"></i> ${esc(x.ticker)}`).join('')} <i class="late"></i> listed after the anchor <i class="diag"></i> ${yl.toLowerCase()} = drawdown</span></div>`;
+    +`<span class="rvd-legend"><i></i> ${cr?'coins':'names'}${refs.map(x=>` <i style="border-color:${RVD_COL[x.bench+1]};background:${RVD_COL[x.bench+1]}"></i> ${esc(x.ticker)}`).join('')} <i class="late"></i> listed after the anchor</span></div>`;
   if(!rows.length){ wrap.innerHTML=head+'<div class="msg">No name has two closes on or after this anchor'+(cr?' — the crypto feed carries about 90 days; pick a nearer date.':'.')+'</div>'; wireControls(); return; }
   wrap.innerHTML=head
-    +`<div class="cg-chartwrap rvd-chart">${rvdSvg(rows,anchorTs)}<div class="cg-read rvd-read" id="rvd-read"></div></div>`
-    +`<p class="rvd-cap">${RVD.y==='best'?'Best return = the highest daily close since the anchor over the anchor close (the live mark counts as today\'s point).':'Return = the live mark over the first daily close on or after the anchor.'} Max drawdown = the deepest close-to-close fall from any running peak inside the window — intraday lows are not in the daily feed, so a wick below the close is not counted. The faint diagonal is where ${yl.toLowerCase()} equals drawdown; above it a name made more than it ever gave back.${cr?' Crypto history on the wire is ~90 days: an older anchor starts every coin at its first close.':''}</p>`
+    +`<div class="cg-chartwrap rvd-chart">${rvdSvg(shown,anchorTs)}<div class="cg-read rvd-read" id="rvd-read"></div></div>`
+    +`<p class="rvd-cap">${RVD.y==='best'?'Best return = the highest daily close since the anchor over the anchor close (the live mark counts as today\'s point).':'Return = the live mark over the first daily close on or after the anchor.'} Max drawdown = the deepest close-to-close fall from any running peak inside the window — intraday lows are not in the daily feed, so a wick below the close is not counted. ${shown.length<rows.length?'The chart shows the top '+(shown.length-refs.length)+' by '+yl.toLowerCase()+' plus the references; the table underneath has everyone.':'The table underneath carries the same names.'} Best / DD above 1 means the name made more than it ever gave back.${cr?' Crypto history on the wire is ~90 days: an older anchor starts every coin at its first close.':''}</p>`
     +`<div class="corrpanel rvd-tblwrap">${rvdTableHtml(rows)}</div>`;
   wireControls();
   const byCoin=new Map(rows.map(x=>[x.coin,x]));
@@ -217,20 +227,22 @@ function renderDrawdown(){
     });
   }
   wrap.querySelectorAll('.rvd-tbl th[data-k]').forEach(th=>th.addEventListener('click',()=>{ const k=th.dataset.k;
-    if(RVD.sort===k) RVD.dir=RVD.dir==='desc'?'asc':'desc'; else { RVD.sort=k; RVD.dir=(k==='ticker'||k==='dd')?'asc':'desc'; } rvdSave(); renderDrawdown(); }));
+    if(RVD.sort===k) RVD.dir=RVD.dir==='desc'?'asc':'desc'; else { RVD.sort=k; RVD.dir=(k==='ticker'||k==='dd')?'asc':'desc'; } RVD.page=1; rvdSave(); renderDrawdown(); }));
   wrap.querySelectorAll('.rvd-tbl tbody tr').forEach(tr=>tr.addEventListener('click',()=>openDetail(tr.dataset.coin)));
+  wrap.querySelectorAll('[data-rvdpg]').forEach(b=>b.addEventListener('click',()=>{ RVD.page=+b.dataset.rvdpg; renderDrawdown(); el('rvd-wrap').querySelector('.rvd-tblwrap').scrollIntoView({block:'nearest'}); }));
   const csv=el('rvd-csv'); if(csv) csv.onclick=()=>{
     const m=[['ticker','sector','reference','anchor','anchor_close','now_pct','best_pct','best_date','max_dd_pct','dd_peak','dd_trough','gave_back_pp','best_over_dd','listed_after_anchor']];
     for(const x of rows) m.push([x.ticker,x.sector||'',x.bench>=0?1:0,dOnly(x.s.baseT),x.s.base,x.now.toFixed(3),x.best.toFixed(3),dOnly(x.s.best.t),x.dd.toFixed(3),dOnly(x.s.dd.peakT),dOnly(x.s.dd.troughT),x.gave.toFixed(3),isFinite(x.ratio)?x.ratio.toFixed(3):'',x.s.late?1:0]);
     downloadCSV(`return-drawdown-${state.scope}-${since}.csv`, m); };
   function wireControls(){
     const c=el('rvd-ctrls'); if(!c) return;
-    c.querySelectorAll('[data-rvdp]').forEach(b=>b.onclick=()=>{ RVD.preset=b.dataset.rvdp; RVD.date=null; rvdSave(); renderDrawdown(); });
+    c.querySelectorAll('[data-rvdp]').forEach(b=>b.onclick=()=>{ RVD.preset=b.dataset.rvdp; RVD.date=null; RVD.page=1; rvdSave(); renderDrawdown(); });
     c.querySelectorAll('[data-rvdy]').forEach(b=>b.onclick=()=>{ RVD.y=b.dataset.rvdy; rvdSave(); renderDrawdown(); });
+    c.querySelectorAll('[data-rvdt]').forEach(b=>b.onclick=()=>{ RVD.top=b.dataset.rvdt; rvdSave(); renderDrawdown(); });
     c.querySelectorAll('[data-rvdl]').forEach(b=>b.onclick=()=>{ RVD.labels=b.dataset.rvdl; rvdSave(); renderDrawdown(); });
-    const dt=el('rvd-date'); if(dt) dt.onchange=()=>{ const t=new Date(dt.value+'T00:00:00Z').getTime(); if(isFinite(t)&&t<rvdToday()){ RVD.date=dt.value; rvdSave(); renderDrawdown(); } };
+    const dt=el('rvd-date'); if(dt) dt.onchange=()=>{ const t=new Date(dt.value+'T00:00:00Z').getTime(); if(isFinite(t)&&t<rvdToday()){ RVD.date=dt.value; RVD.page=1; rvdSave(); renderDrawdown(); } };
   }
 }
 function openDrawdown(){ renderDrawdown(); }
 
-export { RVD, RVD_PRESETS, openDrawdown, renderDrawdown, rvdAnchorTs, rvdBenchCoins, rvdStudy, rvdRows };
+export { RVD, RVD_PRESETS, RVD_TOPS, openDrawdown, renderDrawdown, rvdAnchorTs, rvdBenchCoins, rvdChartRows, rvdStudy, rvdRows };

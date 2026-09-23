@@ -72,9 +72,10 @@ instant, and the per-IP rate limit stops being a per-user problem.
   or after the anchor) or *best* (the highest close since it); drawdown is the deepest
   close-to-close fall from any running peak (the daily feed carries no low, so wicks are not
   counted). The benchmarks are dashed horizontal lines at their own return — BTC and ETH in crypto
-  scope, the S&P and the XYZ100 index in stocks scope. Presets or any date in the last year; a
-  name listed after the anchor is drawn with a dashed ring and marked *late*. The same study as a
-  sortable table with CSV. A client-side study over `/api/daily`, no route of its own. Ships
+  scope, the S&P and the XYZ100 index in stocks scope. The chart draws the top 10/20/30/50 by the
+  return axis or everyone (references always stay); the table underneath has the whole universe,
+  25 rows a page. Presets or any date in the last year; a name listed after the anchor is drawn
+  with a dashed ring and marked *late*. The same study as a sortable table with CSV. A client-side study over `/api/daily`, no route of its own. Ships
   admin-only. The design mock is `docs/xyz-monitor-return-drawdown-mock.html`.
 - **Persistence** — OI *and* funding history are written to the `/data` volume and survive restarts; the computed feature cache is persisted too, so redeploys serve a warm table instantly.
 - **Staleness** — the snapshot carries the last successful poll time; the status dot turns amber if the server's data goes stale (poller stalled).
