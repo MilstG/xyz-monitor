@@ -151,7 +151,7 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
   const srvRules=(ruleState&&ruleState.rules)||[];
   const srvHtml=srvRules.length? srvRules.map(rl=>
       `<div class="arule"><span>${esc(rl.text||rl.metric)}${rl.mine?'':' <span class="sec" data-tip="written from another browser \u2014 visible because you are admin">(not yours)</span>'}${rl.note?' <span class="sec">'+esc(rl.note)+'</span>':''}${rl.thread?' <span class="sec" data-tip="set with /alert in a conversation \u2014 it fires there, as a message, instead of to your phone">\u2192 '+esc(rl.threadName||'a conversation')+'</span>':''}</span><span class="ax" data-sdel="${rl.id}" title="delete">\u2715</span></div>`).join('')
-    : '<div class="sec" style="font-size:12px;padding:4px">You have no rules yet.</div>';
+    : '<div class="sec" style="font-size:var(--fs-sm);padding:4px">You have no rules yet.</div>';
   const otherRules=(ruleState&&ruleState.othersRules)||0;
   const rulesHtml=A.rules.length? A.rules.map(rl=>{ const m=AM_BY[rl.metric];
     return `<div class="arule"><span>${rl.coin?esc(tickerOf(rl.coin)):'<span class="sec">any</span>'} \u00b7 ${esc(m?m.label:rl.metric)} ${rl.op} ${rl.value}</span><span class="ax" data-del="${rl.id}" title="delete">\u2715</span></div>`; }).join('')
@@ -182,11 +182,11 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
     const unread=e.seq>0&&e.seq>(A.seenSeq||0);
     return `<div class="alog${unread?' aunread':''}"><span class="at">${e.t?new Date(e.t).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}):'\u2014'}</span>`
       +`<span class="atag ${lbl[1]}">${lbl[0]}</span> ${esc(e.text)}${e.n>1?` <span class="sec" data-tip="repeated ${e.n} times \u2014 collapsed">\u00d7${e.n}</span>`:''}</div>`; }).join('')
-    : `<div class="sec" style="font-size:12px;padding:4px">${(A.clearedSeq||0)>0?'Cleared. New events will appear here.':'Nothing has fired yet.'}</div>`;
+    : `<div class="sec" style="font-size:var(--fs-sm);padding:4px">${(A.clearedSeq||0)>0?'Cleared. New events will appear here.':'Nothing has fired yet.'}</div>`;
   const navail=(typeof Notification!=='undefined');
   const T=A.trig;
   const mutedHtml=T.muted.length? T.muted.map(c=>`<span class="arule" style="display:inline-flex;margin:0 4px 4px 0"><span>${esc(tickerOf(c))}</span><span class="ax" data-unmute="${esc(c)}" title="unmute">✕</span></span>`).join('')
-    : '<div class="sec" style="font-size:12px;padding:4px">Nothing muted.</div>';
+    : '<div class="sec" style="font-size:var(--fs-sm);padding:4px">Nothing muted.</div>';
   // Collapsible sections. Four stacked blocks plus a log had turned the panel into a wall; the
   // header is now a toggle and the open/closed state persists per browser.
   const O=A.open||{};
@@ -208,7 +208,7 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
              :'Setups below 2:1 at fire whose expectancy is still positive \u2014 the statistical family (big moves, funding divergences) built on median outcomes against a 1\u03c3 void. Win small, more often. Every one still clears the same record and EV gates.')}">${c==='rr'?'2:1+ setups':'positive-EV grinders'}</button>`;
          }).join('')}
        </div>
-       <div class="sec" style="font-size:10.5px;margin-top:4px">these thresholds apply to the in-tab toasts and to your telegram delivery</div>
+       <div class="sec" style="font-size:var(--fs-xs);margin-top:4px">these thresholds apply to the in-tab toasts and to your telegram delivery</div>
        <div class="cphead" style="margin-top:8px">Muted (${T.muted.length})</div>${mutedHtml}`)
     + sec('rules',`Rules (${srvRules.length})`,'private to you \u00b7 evaluated server-side, fire with no tab open',
       `<div class="arule-form">
@@ -217,7 +217,7 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
         <select id="ar-op">${opOpts}</select>
         <input id="ar-val" class="full" placeholder="Threshold (e.g. 5 for 5%, 50 for 50M)" autocomplete="off" spellcheck="false"/>
         <button class="btn full" id="ar-add" style="justify-content:center">Add alert</button>
-       </div>${srvHtml}${otherRules>0?`<div class="sec" style="font-size:11px;padding:2px 4px">${otherRules} rule(s) written by other people \u2014 not shown</div>`:''}
+       </div>${srvHtml}${otherRules>0?`<div class="sec" style="font-size:var(--fs-xs);padding:2px 4px">${otherRules} rule(s) written by other people \u2014 not shown</div>`:''}
        ${A.rules.length?`<div class="cphead" style="margin-top:8px">This browser only (${A.rules.length}) <span class="sec" style="text-transform:none;letter-spacing:0" data-tip="squeeze, momentum and beta are derived in your browser against the analysis window you have selected, so there is no single server-side value to alert on. These fire only while this tab is open and never reach telegram.">\u00b7 why?</span></div>${rulesHtml}`:''}`)
     + sec('deliv','Delivery','your own telegram \u00b7 DMs sent with no tab open', alertMatrixHtml()+buildPushSection())
     + sec('recent','Recent','server-held \u2014 survives a closed tab', logHtml,

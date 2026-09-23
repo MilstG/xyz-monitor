@@ -334,11 +334,11 @@ function renderLiquidity(){
   const cut=pts=>(pts||[]).filter(p=>p[0]>=from);
   const tile=(k,label,extra)=>{ const x=L[k]; if(!x) return '';
     const v = x.unit==='%' ? x.v.toFixed(2)+'%' : liqB(x.v);
-    return `<div class="stat"><span class="k">${label}</span><span class="v">${v}</span><span style="font-size:11px">${x.chg!=null?liqSigned(x.chg,x.unit==='%'?'bp':'$'):''} <span class="sec">w/w · ${esc(x.sid)}</span>${extra||''}</span></div>`; };
-  const qt = D&&D.qtEnd ? `<div class="sec" style="font-size:10.5px">QT end (derived): ${hsgDate(D.qtEnd)}</div>` : '';
-  const netTile = D ? `<div class="stat" style="border-left:1px solid var(--border);padding-left:18px"><span class="k">Net liquidity</span><span class="v" style="color:var(--accent)">${liqB(D.last.v)}</span><span style="font-size:11px">${D.prev?liqSigned(+(D.last.v-D.prev.v).toFixed(1)):''} <span class="sec">w/w · ${D.last.pctGdp!=null?D.last.pctGdp.toFixed(1)+'% of GDP':''}</span></span></div>` : '';
+    return `<div class="stat"><span class="k">${label}</span><span class="v">${v}</span><span style="font-size:var(--fs-xs)">${x.chg!=null?liqSigned(x.chg,x.unit==='%'?'bp':'$'):''} <span class="sec">w/w · ${esc(x.sid)}</span>${extra||''}</span></div>`; };
+  const qt = D&&D.qtEnd ? `<div class="sec" style="font-size:var(--fs-xs)">QT end (derived): ${hsgDate(D.qtEnd)}</div>` : '';
+  const netTile = D ? `<div class="stat" style="border-left:1px solid var(--border);padding-left:18px"><span class="k">Net liquidity</span><span class="v" style="color:var(--accent)">${liqB(D.last.v)}</span><span style="font-size:var(--fs-xs)">${D.prev?liqSigned(+(D.last.v-D.prev.v).toFixed(1)):''} <span class="sec">w/w · ${D.last.pctGdp!=null?D.last.pctGdp.toFixed(1)+'% of GDP':''}</span></span></div>` : '';
   const tiles=`<div class="hsg-tiles">`+tile('assets','Total assets')+tile('ust','Treasuries',qt)+tile('agency','Agency debt')+tile('mbs','MBS')+tile('tga','TGA')+tile('rrp','ON RRP')+netTile+
-    `<div class="stat" style="margin-left:auto"><span class="k">As of</span><span class="v" style="font-size:13px">${d.asOf?new Date(d.asOf).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):'—'}</span><span class="sec" style="font-size:11px">H.4.1 · ${D?hsgDate(D.last.d):''}</span></div></div>`;
+    `<div class="stat" style="margin-left:auto"><span class="k">As of</span><span class="v" style="font-size:var(--fs-md)">${d.asOf?new Date(d.asOf).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):'—'}</span><span class="sec" style="font-size:var(--fs-xs)">H.4.1 · ${D?hsgDate(D.last.d):''}</span></div></div>`;
   const cards=[];
   if(D){
     const netPts=cut(D.net.map(p=>[p[0],p[1]]));
@@ -495,9 +495,9 @@ function renderHousing(){
   const win=state.housingWin, g=k=>S[k], sl=k=>g(k)?hsgSlice(g(k),win):[];
   // headline tiles — only for series that came back
   const tile=(k,label,fmt)=>{ const x=g(k); if(!x) return '';
-    return `<div class="stat"><span class="k">${label}</span><span class="v">${fmt?fmt(x):hsgFmt(x.last.v,x)}</span><span style="font-size:11px">${hsgDelta(x)}</span></div>`; };
+    return `<div class="stat"><span class="k">${label}</span><span class="v">${fmt?fmt(x):hsgFmt(x.last.v,x)}</span><span style="font-size:var(--fs-xs)">${hsgDelta(x)}</span></div>`; };
   const tiles=`<div class="hsg-tiles">`+tile('rate30','30y mortgage')+tile('spread','BBB OAS (proxy)')+tile('sf','SF starts')+tile('supply',"Months' supply")+tile('sales','New home sales')+tile('price','Median price')+
-    `<div class="stat" style="margin-left:auto"><span class="k">As of</span><span class="v" style="font-size:13px">${d.asOf?new Date(d.asOf).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):'—'}</span><span class="sec" style="font-size:11px">FRED · 6h refresh</span></div></div>`;
+    `<div class="stat" style="margin-left:auto"><span class="k">As of</span><span class="v" style="font-size:var(--fs-md)">${d.asOf?new Date(d.asOf).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):'—'}</span><span class="sec" style="font-size:var(--fs-xs)">FRED · 6h refresh</span></div></div>`;
   const cards=[];
   if(g('rate30')) cards.push(hsgCard(g('rate30'),hsgLineSvg(g('rate30'),sl('rate30'),{color:'var(--blue)'})));
   if(g('spread')) cards.push(hsgCard(g('spread'),hsgLineSvg(g('spread'),sl('spread'),{color:'var(--accent)'})));
@@ -507,7 +507,7 @@ function renderHousing(){
   let starts='';
   if(g('sf')&&g('mf')){ const sf=g('sf'), mf=g('mf');
     starts=`<div class="s-card hsg-card hsg-wide"><div class="hsg-head"><span class="hsg-title">Housing starts — single-family vs multifamily</span>${hsgChip(sf)}<span class="src-chip direct" title="${esc(mf.src)}"><i></i>Direct · ${esc(mf.sid)}</span></div>`+
-      `<div class="hsg-kpis"><span class="hsg-v">${hsgNum(sf.last.v,2)}M</span><span class="sec hsg-d">single-family · ${hsgDate(sf.last.d)}</span>${hsgDelta(sf)}<span class="sec" style="margin:0 6px">|</span><span class="hsg-v" style="font-size:15px">${hsgNum(mf.last.v,2)}M</span><span class="sec hsg-d">multifamily</span>${hsgDelta(mf)}</div>`+
+      `<div class="hsg-kpis"><span class="hsg-v">${hsgNum(sf.last.v,2)}M</span><span class="sec hsg-d">single-family · ${hsgDate(sf.last.d)}</span>${hsgDelta(sf)}<span class="sec" style="margin:0 6px">|</span><span class="hsg-v" style="font-size:var(--fs-lg)">${hsgNum(mf.last.v,2)}M</span><span class="sec hsg-d">multifamily</span>${hsgDelta(mf)}</div>`+
       sLeg([{color:'var(--blue)',label:'Single-family'},{color:'var(--muted)',label:'Multifamily (5+ units)'}])+
       hsgStackSvg(sf,mf,sl('sf'),sl('mf'))+`</div>`; }
   const missing=(d.missing&&d.missing.length)?`<div class="s-cap" style="margin-top:10px">Absent this pass (not shown stale): ${d.missing.map(esc).join(', ')}</div>`:'';
@@ -659,14 +659,14 @@ function renderEarnings(){
   const asOf=d.asOf?new Date(d.asOf):null;
   const ageMin=d.asOf?Math.round((Date.now()-d.asOf)/60000):null;
   const stale=ageMin!=null&&ageMin>8*60;   // > 8h without a good fetch = the 6h cadence is failing
-  const src=`<span class="sec" style="font-size:11px">${d.error
+  const src=`<span class="sec" style="font-size:var(--fs-xs)">${d.error
     ?`<span style="color:var(--down)">feed error: ${esc(d.error)}</span>${asOf?` \u00b7 showing last good fetch (${ageMin>=60?Math.round(ageMin/60)+'h':ageMin+'m'} old)`:''}`
     :(asOf?`as of ${asOf.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}${stale?` <span style="color:var(--accent)">\u00b7 ${Math.round(ageMin/60)}h stale</span>`:''} \u00b7 source: ${esc(d.source||'finnhub')}`:'never fetched')}</span>`;
   const head=`<div class="controls" style="margin-bottom:10px"><span style="font-weight:600">Calendar <span class="sec" style="font-weight:400">\u00b7 earnings + macro \u00b7 last 2 + next ${d.windowDays||14} days, ET</span></span><span style="margin-left:auto"></span>${src}</div>`;
   const covered=new Set((d.entries||[]).map(e=>e.t)).size;
-  const cov=`<div class="sec" style="font-size:11.5px;line-height:1.55;margin-bottom:12px" data-tip="eligibility = live xyz EQUITIES; indices, ETFs, FX, commodities, thematics and pre-IPO synthetics never report. Foreign listings without a US symbol are eligible but absent from the feed \u2014 shown as uncovered, never guessed. A name missing here means the feed has no report scheduled in the window OR does not cover it.">${d.entries&&d.entries.length?`<b>${d.entries.length}</b> report${d.entries.length===1?'':'s'} across <b>${covered}</b> ticker${covered===1?'':'s'}`:'No reports in the window'} \u00b7 ${d.eligible||0} eligible equities in the universe \u00b7 names the feed doesn\u2019t cover simply don\u2019t appear${(()=>{const ml=macroList();const up=ml.filter(e=>macroStateC(e)==='upcoming').length;return ` \u00b7 <span data-tip="universe-wide macro binaries: FOMC decisions (static Fed schedule) + CPI / NFP / PPI / retail / GDP / PCE (FRED schedule). Prior shown as reference \u2014 no street consensus exists in this feed, so rows read prior \u2192 actual + the tape\u2019s reaction, never beat/miss vs estimates.">${up} macro event${up===1?'':'s'} in the window</span>${d.macroErr?` <span style="color:var(--down)" data-tip="the FOMC table still serves \u2014 only the FRED-fed print rows and their numbers are degraded">(FRED: ${esc(d.macroErr)})</span>`:''}`})()}</div>`;
+  const cov=`<div class="sec" style="font-size:var(--fs-xs);line-height:1.55;margin-bottom:12px" data-tip="eligibility = live xyz EQUITIES; indices, ETFs, FX, commodities, thematics and pre-IPO synthetics never report. Foreign listings without a US symbol are eligible but absent from the feed \u2014 shown as uncovered, never guessed. A name missing here means the feed has no report scheduled in the window OR does not cover it.">${d.entries&&d.entries.length?`<b>${d.entries.length}</b> report${d.entries.length===1?'':'s'} across <b>${covered}</b> ticker${covered===1?'':'s'}`:'No reports in the window'} \u00b7 ${d.eligible||0} eligible equities in the universe \u00b7 names the feed doesn\u2019t cover simply don\u2019t appear${(()=>{const ml=macroList();const up=ml.filter(e=>macroStateC(e)==='upcoming').length;return ` \u00b7 <span data-tip="universe-wide macro binaries: FOMC decisions (static Fed schedule) + CPI / NFP / PPI / retail / GDP / PCE (FRED schedule). Prior shown as reference \u2014 no street consensus exists in this feed, so rows read prior \u2192 actual + the tape\u2019s reaction, never beat/miss vs estimates.">${up} macro event${up===1?'':'s'} in the window</span>${d.macroErr?` <span style="color:var(--down)" data-tip="the FOMC table still serves \u2014 only the FRED-fed print rows and their numbers are degraded">(FRED: ${esc(d.macroErr)})</span>`:''}`})()}</div>`;
   if(d.error&&!(d.entries&&d.entries.length)){
-    box.innerHTML=head+cov+`<div class="msg">No earnings data.<br><span class="sec" style="font-size:11px">${d.error==='FINNHUB_TOKEN not set'?'Set <b>FINNHUB_TOKEN</b> in the Railway service variables (free key from finnhub.io) and redeploy.':'The feed is unreachable \u2014 the server retries every 30 minutes.'}</span></div>`;
+    box.innerHTML=head+cov+`<div class="msg">No earnings data.<br><span class="sec" style="font-size:var(--fs-xs)">${d.error==='FINNHUB_TOKEN not set'?'Set <b>FINNHUB_TOKEN</b> in the Railway service variables (free key from finnhub.io) and redeploy.':'The feed is unreachable \u2014 the server retries every 30 minutes.'}</span></div>`;
     return;
   }
   // Reported — last 48h: two prior ET days, most recent first, so the scoreboard survives the
@@ -677,7 +677,7 @@ function renderEarnings(){
   if(rep.length){
     const rg=new Map();
     for(const e of rep){ let g=rg.get(e.d); if(!g){g={d:e.d,diff:earnDiffC(e.d),rows:[]};rg.set(e.d,g);} g.rows.push(e); }
-    repHtml+=`<div class="sec" style="font-size:11.5px;margin:2px 0 6px" data-tip="prints from the two prior ET calendar days, kept on the tab with their beat/miss and reaction move; today\u2019s reports show under TODAY below. Rows come from the persisted print history \u2014 an actual that lands on a later feed pass upgrades the row in place."><b>${rep.length}</b> report${rep.length===1?'':'s'} in the past 2 days</div>`;
+    repHtml+=`<div class="sec" style="font-size:var(--fs-xs);margin:2px 0 6px" data-tip="prints from the two prior ET calendar days, kept on the tab with their beat/miss and reaction move; today\u2019s reports show under TODAY below. Rows come from the persisted print history \u2014 an actual that lands on a later feed pass upgrades the row in place."><b>${rep.length}</b> report${rep.length===1?'':'s'} in the past 2 days</div>`;
     for(const g of rg.values()){
       const dt=new Date(g.d+'T12:00:00Z');
       const lbl=dt.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',timeZone:'UTC'}).toUpperCase();
@@ -692,7 +692,7 @@ function renderEarnings(){
           +earnFilingHtml(e)
           +earnReactHtml(e)
           +earnStudyHtml(e.t)
-          +`<button class="earn-void" data-vt="${esc(e.t)}" data-vd="${esc(e.d)}" style="background:none;border:0;color:var(--faint);cursor:pointer;font-size:14px;line-height:1;padding:0 2px" data-tip="void this print \u2014 operator override for feed garbage: removes it from history and the reaction study and tombstones it so the feed cannot re-add it. Permanent.">\u00d7</button>`
+          +`<button class="earn-void" data-vt="${esc(e.t)}" data-vd="${esc(e.d)}" style="background:none;border:0;color:var(--faint);cursor:pointer;font-size:var(--fs-md);line-height:1;padding:0 2px" data-tip="void this print \u2014 operator override for feed garbage: removes it from history and the reaction study and tombstones it so the feed cannot re-add it. Permanent.">\u00d7</button>`
           +`</div>`;
       }
     }
@@ -754,7 +754,7 @@ function renderEarnings(){
         +`</div>`;
     }
   }
-  html+=`<div class="sec" style="font-size:11px;margin-top:14px;line-height:1.5">Dates and sessions are the feed\u2019s scheduled values and can move \u2014 companies reschedule. Session-spanning signals (breakout, gap, overnight drift) on names reporting \u2264 1 day out carry an <i>earnings</i> flag on the Signals tab and have their evidence contribution capped: the base rates weren\u2019t sampled around a known binary catalyst. Macro rows work the same way universe-wide \u2014 an FOMC/CPI/NFP print \u2264 1 day out flags session-spanning signals on <b>both</b> universes with the same cap, and events inside an open setup\u2019s horizon are flagged on the Actionable board (\u25c6) and in AI reports. Macro dates come from the Fed\u2019s published schedule and FRED; prior values are the previous print (labeled by month), never consensus \u2014 no street-estimate feed exists here, so there is no beat/miss verdict, only prior \u2192 actual and the tape.</div>`;
+  html+=`<div class="sec" style="font-size:var(--fs-xs);margin-top:14px;line-height:1.5">Dates and sessions are the feed\u2019s scheduled values and can move \u2014 companies reschedule. Session-spanning signals (breakout, gap, overnight drift) on names reporting \u2264 1 day out carry an <i>earnings</i> flag on the Signals tab and have their evidence contribution capped: the base rates weren\u2019t sampled around a known binary catalyst. Macro rows work the same way universe-wide \u2014 an FOMC/CPI/NFP print \u2264 1 day out flags session-spanning signals on <b>both</b> universes with the same cap, and events inside an open setup\u2019s horizon are flagged on the Actionable board (\u25c6) and in AI reports. Macro dates come from the Fed\u2019s published schedule and FRED; prior values are the previous print (labeled by month), never consensus \u2014 no street-estimate feed exists here, so there is no beat/miss verdict, only prior \u2192 actual and the tape.</div>`;
   box.innerHTML=html;
   box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',(ev)=>{ if(ev.target.closest('a,button')) return; const c=rw.dataset.coin; if(state.rows.has(c)) openDetail(c); }));   // in-place drawer — no tab switch
   wireEarnVoid(box);

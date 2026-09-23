@@ -301,7 +301,7 @@ function renderTrendChart(res){
   // closes-only by construction and must not tag a healthy series
   const closesOnly=_tc.tf==='1d'&&cd.length>1&&cd.slice(0,-1).every(b=>b[1]==null);
   m.innerHTML=
-    `<div class="tcm-head"><span class="ttick" style="font-size:16px">${esc(e.t||_tc.coin)}</span>`+
+    `<div class="tcm-head"><span class="ttick" style="font-size:var(--fs-lg)">${esc(e.t||_tc.coin)}</span>`+
     (res&&res.px!=null?`<span class="tcm-px">${fmtPrice(res.px)}</span>`:'')+
     (st?`<span class="tcm-badge ${st.cls}" data-tip="${tfDef.lad} \u00b7 ${st.lbl} \u2014 the board's own classification for this rung, restated">${tfDef.lad} ${tfc.st}</span>`:'')+
     `<span class="tcm-badge sc" data-tip="timeframes aligned with the ${_tc.side} side, from the board">${e.score!=null?e.score+'/'+(e.avail||4):''}</span>`+
@@ -314,7 +314,7 @@ function renderTrendChart(res){
     (d21?`<span class="tcm-d21" data-tip="live distance from this rung's EMA${S} at the last board build \u2014 small = at the entry zone, large = extended">${d21}</span>`:'')+`</div>`+
     `<div class="tcm-note">${tcDepthNote(cd,tfDef.lad,closesOnly)}</div>`+
     `<div class="tcm-read">${st?`<span class="tdot ${st.cls}" style="margin-right:7px"></span>`:''}${esc(e.read||'')}${rrv?`<span class="sec">${rrv}</span>`:''}`+
-    `<div class="sec" style="margin-top:5px;font-size:11.5px;line-height:1.55">Badges, zone levels and the read are the Trend board's own values (\u22643 min old); candles are the exact series that board's ladder consumed for this rung, so the plotted ribbon reproduces its EMAs. Nothing here is re-derived client-side.</div></div>`;
+    `<div class="sec" style="margin-top:5px;font-size:var(--fs-xs);line-height:1.55">Badges, zone levels and the read are the Trend board's own values (\u22643 min old); candles are the exact series that board's ladder consumed for this rung, so the plotted ribbon reproduces its EMAs. Nothing here is re-derived client-side.</div></div>`;
   m.querySelectorAll('.cdtf').forEach(b=>b.addEventListener('click',()=>{ if(b.dataset.tf!==_tc.tf){ _tc.tf=b.dataset.tf; loadTrendChart(); } }));
   const x=el('tchartx'); if(x) x.onclick=closeTrendChart;
   attachLineHover();
@@ -455,7 +455,7 @@ function renderNews(){
   if(d&&d.items) for(const a of d.items){ if(a.sec&&!a.fl&&inLane(a)) secCounts.set(a.sec,(secCounts.get(a.sec)||0)+1); }
   const secOpts=[...secCounts.entries()].sort((x,y)=>y[1]-x[1]);
   const head=`<div class="nhead">`
-    +`<span class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px" data-tip="per-name headlines (Finnhub company news) for the equity universe + the general macro tape \u00b7 72h rolling window, evicted on publish time \u00b7 this is a digest, not a live wire — the freshness stamp on the right is the coverage clock \u00b7 sectors: solid badge = static GICS map, ~ = AI-classified (write-once, fallback model)">news \u2014 xyz universe</span>`
+    +`<span class="sec" style="font-size:var(--fs-xs);text-transform:uppercase;letter-spacing:.6px" data-tip="per-name headlines (Finnhub company news) for the equity universe + the general macro tape \u00b7 72h rolling window, evicted on publish time \u00b7 this is a digest, not a live wire — the freshness stamp on the right is the coverage clock \u00b7 sectors: solid badge = static GICS map, ~ = AI-classified (write-once, fallback model)">news \u2014 xyz universe</span>`
     +`<span style="flex:1"></span>`
     +`<input id="nfilter" placeholder="filter: ticker or text" value="${esc(newsFilter)}" style="width:150px">`
     +`<select id="nsec" data-tip="filter by sector — counts are live over the current 72h window">`
@@ -465,7 +465,7 @@ function renderNews(){
     +['latest','sector'].map(m=>`<button type="button" class="cdtf${newsView===m?' on':''}" data-nv="${m}" data-tip="${m==='latest'?'one reverse-chronological stream':'grouped by sector, sections ordered by newest headline'}">${m==='latest'?'latest':'by sector'}</button>`).join('')
     +['universe','tape','telegram','filings'].map(m=>`<button type="button" class="cdtf${newsMode===m?' on':''}" data-nm="${m}" data-tip="${m==='universe'?'ONLY headlines verified to concern a universe name \u2014 the relevance gate (name match, AI verdict, or a single-name telegram match) has confirmed the attribution; nothing leaks in':m==='tape'?'the consolidated unfiltered feed: Finnhub wire, macro tape, telegram posts, unverified/pending items, off-topic (dimmed) \u2014 all sources interleaved by publish time':m==='telegram'?'telegram posts only \u2014 the channels configured in \u2699, attributed and unattributed alike':'SEC EDGAR filings for the equity universe \u2014 a completely separate lane: regulatory events, not headlines. 7-day window, per-company Atom feeds from sec.gov'}">${m}</button>`).join('')
     +`<span class="cdtf" id="ntg-gear" data-tip="manage telegram channels \u2014 shared for the whole group, saved server-side">\u2699</span>`
-    +(d&&d.fetchedAt?`<span class="sec" style="font-size:10.5px" data-tip="when the news worker last landed a fetch — per-name refresh rotates every few minutes">fetched ${fmtAge(now-d.fetchedAt)} ago</span>`:'')
+    +(d&&d.fetchedAt?`<span class="sec" style="font-size:var(--fs-xs)" data-tip="when the news worker last landed a fetch — per-name refresh rotates every few minutes">fetched ${fmtAge(now-d.fetchedAt)} ago</span>`:'')
     +`</div>`;
   if(!d||!d.items||!d.items.length){
     box.innerHTML=head+`<div class="msg">${d&&d.error?'News feed error: '+esc(d.error)+' \u2014 the server retries on its own cadence.':'No headlines yet \u2014 the rotation is warming up.'}</div>`;
@@ -488,13 +488,13 @@ function renderNews(){
   if(newsTgOpen){
     const chans=tgChans&&tgChans.channels?tgChans.channels:null;
     tgPanel=`<div class="ntg-panel">`
-      +`<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin-bottom:7px">telegram channels \u2014 shared, saved server-side</div>`
-      +(chans===null?`<div class="sec" style="font-size:11px">loading\u2026</div>`
+      +`<div class="sec" style="font-size:var(--fs-xs);text-transform:uppercase;letter-spacing:.6px;margin-bottom:7px">telegram channels \u2014 shared, saved server-side</div>`
+      +(chans===null?`<div class="sec" style="font-size:var(--fs-xs)">loading\u2026</div>`
         :(chans.length?`<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${chans.map(ch=>
           `<span class="ntg-chip">${esc(ch.c)} <b class="${ch.error?'neg':'pos'}" data-tip="${esc(ch.error?ch.error+' \u2014 kept in the list, retried every 10 min':(ch.lastOk?'last fetch '+fmtAge(Date.now()-ch.lastOk)+' ago \u00b7 '+ch.posts+' post(s) parsed':'not fetched yet'))}">\u25cf</b> <i data-rmch="${esc(ch.c)}" style="font-style:normal;cursor:pointer;color:var(--muted)" data-tip="remove this channel for the whole group">\u2715</i></span>`).join('')}</div>`
-        :`<div class="sec" style="font-size:11px;margin-bottom:8px">no channels yet \u2014 add a public channel below (its t.me/s/&lt;name&gt; page must load)</div>`))
+        :`<div class="sec" style="font-size:var(--fs-xs);margin-bottom:8px">no channels yet \u2014 add a public channel below (its t.me/s/&lt;name&gt; page must load)</div>`))
       +`<div style="display:flex;gap:6px"><input id="ntg-add" placeholder="channel username (t.me/\u2026)" style="flex:1"><button type="button" class="cdtf" id="ntg-addbtn">add</button></div>`
-      +`<div class="sec" style="font-size:10.5px;margin-top:6px">public channels only (reads the t.me preview \u2014 no bot, no credentials) \u00b7 max ${tgChans&&tgChans.max||12} \u00b7 changes apply for the whole group within seconds</div>`
+      +`<div class="sec" style="font-size:var(--fs-xs);margin-top:6px">public channels only (reads the t.me preview \u2014 no bot, no credentials) \u00b7 max ${tgChans&&tgChans.max||12} \u00b7 changes apply for the whole group within seconds</div>`
       +`</div>`;
   }
   let body;
@@ -518,13 +518,13 @@ function renderNews(){
     for(const a of items){ const k=a.sec||'unclassified'; if(!groups.has(k)) groups.set(k,[]); groups.get(k).push(a); }
     const ordered=[...groups.entries()].sort((x,y)=>y[1][0].pub-x[1][0].pub);
     body=ordered.map(([s,list])=>
-      `<div class="sec nsec-head" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;padding:8px 0 3px" data-tip="${esc(s==='unclassified'?'no sector yet — classification is write-once and catches up on its own cadence':'sections ordered by newest headline; newest first within')}">${esc(secShort(s))} \u00b7 ${list.length} headline${list.length===1?'':'s'} \u00b7 newest ${fmtAge(now-list[0].pub)}</div>`
+      `<div class="sec nsec-head" style="font-size:var(--fs-xs);text-transform:uppercase;letter-spacing:.6px;padding:8px 0 3px" data-tip="${esc(s==='unclassified'?'no sector yet — classification is write-once and catches up on its own cadence':'sections ordered by newest headline; newest first within')}">${esc(secShort(s))} \u00b7 ${list.length} headline${list.length===1?'':'s'} \u00b7 newest ${fmtAge(now-list[0].pub)}</div>`
       +`<div class="nlist">${list.map(a=>newsRow(a,now,false)).join('')}</div>`).join('');
   } else body=`<div class="nlist">${items.map(a=>newsRow(a,now,false)).join('')}</div>`;
   box.innerHTML=head+tgPanel+flChips+body
     +(newsMode==='filings'
-      ?`<div class="sec" style="font-size:10.5px;margin-top:8px">filings live only in this lane \u2014 never mixed into universe/tape/telegram \u00b7 amber form = material \u00b7 ticker click \u2192 drawer \u00b7 form click \u2192 filter \u00b7 source: sec.gov EDGAR \u00b7 7d window${(()=>{const st=d&&d.flStat;if(!st)return'';return st.lastOk?` \u00b7 last EDGAR fetch ${fmtAge(Date.now()-st.lastOk)} ago \u00b7 ${st.names}${st.roster?'/'+st.roster:''} names covered`:(st.lastErr?` \u00b7 <b class=\"neg\">EDGAR: ${esc(st.lastErr)}</b>`:'');})()}</div>`
-      :`<div class="sec" style="font-size:10.5px;margin-top:8px">universe = verified attribution only \u00b7 amber = earnings within 7d \u00b7 red = live signal firing \u00b7 sector: solid = static map, ~ = AI-classified \u00b7 off-topic dimmed in tape \u00b7 72h window</div>`);
+      ?`<div class="sec" style="font-size:var(--fs-xs);margin-top:8px">filings live only in this lane \u2014 never mixed into universe/tape/telegram \u00b7 amber form = material \u00b7 ticker click \u2192 drawer \u00b7 form click \u2192 filter \u00b7 source: sec.gov EDGAR \u00b7 7d window${(()=>{const st=d&&d.flStat;if(!st)return'';return st.lastOk?` \u00b7 last EDGAR fetch ${fmtAge(Date.now()-st.lastOk)} ago \u00b7 ${st.names}${st.roster?'/'+st.roster:''} names covered`:(st.lastErr?` \u00b7 <b class=\"neg\">EDGAR: ${esc(st.lastErr)}</b>`:'');})()}</div>`
+      :`<div class="sec" style="font-size:var(--fs-xs);margin-top:8px">universe = verified attribution only \u00b7 amber = earnings within 7d \u00b7 red = live signal firing \u00b7 sector: solid = static map, ~ = AI-classified \u00b7 off-topic dimmed in tape \u00b7 72h window</div>`);
   bindNews(box);
 }
 function bindNews(box){
@@ -576,16 +576,16 @@ function fillDrawerNews(){
         :'this is a macro instrument with no company feed \u2014 the general tape, gated to headlines that actually name '+scope+'; anything else is not this name\u2019s news and is not shown')
       :'no verified headlines for this name in the last 72h \u2014 coverage refreshes every few minutes');
   let s=`<div class="dsec" data-tip="${esc(tip)}">${head}</div>`;
-  if(!d||!d.items){ s+=`<div class="sec" style="font-size:11px">news feed loading\u2026</div>`; box.innerHTML=s; return; }
-  if(!list.length){ s+=`<div class="nrow" style="border-style:dashed;border-width:1px 0"><span class="sec" style="font-size:11px">no ${useTape?'matching ':''}headlines in the last 72h</span></div>`; }
+  if(!d||!d.items){ s+=`<div class="sec" style="font-size:var(--fs-xs)">news feed loading\u2026</div>`; box.innerHTML=s; return; }
+  if(!list.length){ s+=`<div class="nrow" style="border-style:dashed;border-width:1px 0"><span class="sec" style="font-size:var(--fs-xs)">no ${useTape?'matching ':''}headlines in the last 72h</span></div>`; }
   else s+=`<div class="nlist">${list.map(a=>newsRow(a,now,true)).join('')}</div>`;
   // Provenance line for the gated lane: how much of the tape survived the gate, and on what. A
   // reader who sees two rows where a neighbouring drawer shows five is entitled to know why.
   if(useTape&&!lane.broad){
     const tot=d.items.filter(a=>!a.tk&&!a.pend).length;
-    s+=`<div class="sec" style="font-size:10px;margin-top:4px" data-tip="${esc('word-boundary matched against: '+(lane.topics||[]).join(', '))}">${pool.length} of ${tot} tape item${tot===1?'':'s'} matched \u00b7 gated on ${esc((lane.topics||[]).slice(0,5).join(', '))}${(lane.topics||[]).length>5?'\u2026':''}</div>`;
+    s+=`<div class="sec" style="font-size:var(--fs-2xs);margin-top:4px" data-tip="${esc('word-boundary matched against: '+(lane.topics||[]).join(', '))}">${pool.length} of ${tot} tape item${tot===1?'':'s'} matched \u00b7 gated on ${esc((lane.topics||[]).slice(0,5).join(', '))}${(lane.topics||[]).length>5?'\u2026':''}</div>`;
   }
-  s+=`<div style="display:flex;gap:10px;align-items:center;margin-top:5px"><span id="dnews-all" class="sec" style="cursor:pointer;font-size:11px;text-decoration:underline;text-underline-offset:2px" data-tip="jump to the News tab filtered to this name">all ${esc(r.ticker)} news \u2192</span><span style="flex:1"></span>${d.fetchedAt?`<span class="sec" style="font-size:10.5px">fetched ${fmtAge(now-d.fetchedAt)} ago</span>`:''}</div>`;
+  s+=`<div style="display:flex;gap:10px;align-items:center;margin-top:5px"><span id="dnews-all" class="sec" style="cursor:pointer;font-size:var(--fs-xs);text-decoration:underline;text-underline-offset:2px" data-tip="jump to the News tab filtered to this name">all ${esc(r.ticker)} news \u2192</span><span style="flex:1"></span>${d.fetchedAt?`<span class="sec" style="font-size:var(--fs-xs)">fetched ${fmtAge(now-d.fetchedAt)} ago</span>`:''}</div>`;
   box.innerHTML=s;
   const fb=el('dnews-all'); if(fb) fb.onclick=()=>{ newsFilter=String(r.ticker); newsMode='all'; showView('news'); };
 }
@@ -772,7 +772,7 @@ function sigRecordHtml(d){
     // render even on a zero record — "never fired" is a fact the panel states, not a blank
     // screen. This exact blank shipped the day the crypto universe joined the engine with an
     // honestly-empty record and the whole audit vanished below this line.
-    s+=`<div class="sec" style="font-size:11.5px;padding:4px 2px">No claims resolved yet \u2014 the record accrues from the signals this universe fires. First resolutions land at their horizons (12h\u20135d).</div>`;
+    s+=`<div class="sec" style="font-size:var(--fs-xs);padding:4px 2px">No claims resolved yet \u2014 the record accrues from the signals this universe fires. First resolutions land at their horizons (12h\u20135d).</div>`;
   }
   const hitAll=resolved?Math.round(100*wins/resolved):null;
   if(fired) s+=`<div class="sigrec-top">`
@@ -793,10 +793,10 @@ function sigRecordHtml(d){
         +`<td>${r.med!=null?`<span class="${r.med>=0?'pos':'neg'}">${r.med>=0?'+':''}${r.med}${r.unit}</span>`:'\u2014'}</td>`
         +`<td>${r.pf!=null?`<span class="${r.pf>=1?'pos':'neg'}" data-tip="${esc(`avg win ${r.avgWin!=null?'+'+r.avgWin+r.unit:'\u2014'} vs avg loss ${r.avgLoss!=null?r.avgLoss+r.unit:'\u2014'}`)}">${r.pf}</span>`:'\u2014'}</td>`
         +`<td>${r.claimMed!=null?`${r.claimMed>=0?'+':''}${r.claimMed}${r.unit}`:'\u2014'}</td>`
-        +`<td class="ss">${r.nS?`<span class="${r.hitS>=0.5?'pos':'neg'}" data-tip="${esc(`${EV_LABELS[ev]||ev} \u2014 stop-aware hit (n=${r.nS}) \u00b7 share of stop-disciplined outcomes that resolved positive \u00b7 stopped en route: ${r.stopped||0} of ${r.nS} (${Math.round(100*(r.stopped||0)/r.nS)}%) \u2014 separate fact: a claim can lose at horizon without ever touching its void \u00b7 n trails the live column when claims predate stop-tracking (no frozen void on older claims)`)}">${Math.round(r.hitS*100)}% <i style="font-style:normal;color:var(--faint);font-size:10px">(n=${r.nS})</i></span>`:'\u2014'}</td>`
+        +`<td class="ss">${r.nS?`<span class="${r.hitS>=0.5?'pos':'neg'}" data-tip="${esc(`${EV_LABELS[ev]||ev} \u2014 stop-aware hit (n=${r.nS}) \u00b7 share of stop-disciplined outcomes that resolved positive \u00b7 stopped en route: ${r.stopped||0} of ${r.nS} (${Math.round(100*(r.stopped||0)/r.nS)}%) \u2014 separate fact: a claim can lose at horizon without ever touching its void \u00b7 n trails the live column when claims predate stop-tracking (no frozen void on older claims)`)}">${Math.round(r.hitS*100)}% <i style="font-style:normal;color:var(--faint);font-size:var(--fs-2xs)">(n=${r.nS})</i></span>`:'\u2014'}</td>`
         +`<td class="ss">${r.medS!=null?`<span class="${r.medS>=0?'pos':'neg'}">${r.medS>=0?'+':''}${r.medS}${r.unit}</span>`:'\u2014'}</td>`
         +`<td class="ss">${r.pfS!=null?`<span class="${r.pfS>=1?'pos':'neg'}">${r.pfS}</span>`:'\u2014'}</td>`
-        +`<td class="ss">${r.nB?`<span class="${r.hitB>=0.5?'pos':'neg'}" data-tip="${esc(`${EV_LABELS[ev]||ev} \u2014 bracket hit (n=${r.nB}) \u00b7 first-touch resolution across BOTH frozen levels \u00b7 target touched first: ${r.tchT||0} \u00b7 void touched first: ${r.tchS||0} \u00b7 neither (at-horizon): ${r.tchM||0}`)}">${Math.round(r.hitB*100)}% <i style="font-style:normal;color:var(--faint);font-size:10px">(n=${r.nB})</i></span>`:'\u2014'}</td>`
+        +`<td class="ss">${r.nB?`<span class="${r.hitB>=0.5?'pos':'neg'}" data-tip="${esc(`${EV_LABELS[ev]||ev} \u2014 bracket hit (n=${r.nB}) \u00b7 first-touch resolution across BOTH frozen levels \u00b7 target touched first: ${r.tchT||0} \u00b7 void touched first: ${r.tchS||0} \u00b7 neither (at-horizon): ${r.tchM||0}`)}">${Math.round(r.hitB*100)}% <i style="font-style:normal;color:var(--faint);font-size:var(--fs-2xs)">(n=${r.nB})</i></span>`:'\u2014'}</td>`
         +`<td class="ss">${r.medB!=null?`<span class="${r.medB>=0?'pos':'neg'}">${r.medB>=0?'+':''}${r.medB}${r.unit}</span>`:'\u2014'}</td>`
         +`<td class="ss">${r.pfB!=null?`<span class="${r.pfB>=1?'pos':'neg'}">${r.pfB}</span>`:'\u2014'}</td>`
         +`<td>${bad?'<i class="sig-unp" style="color:var(--down);border-color:var(--down)">no live edge</i>':(good?'<i class="sig-unp" style="color:var(--up);border-color:var(--up)">confirmed</i>':'')}</td></tr>`;
@@ -851,7 +851,7 @@ function sigRecordHtml(d){
         tun+=`<span class="sigrec-chip${x.inc?' inc':''}" data-tip="${esc(`${v.param}${x.v} \u2014 ${x.inc?'INCUMBENT: the threshold live signals use':'shadow challenger: ledgered silently, never shown as a signal'}. ${x.n} resolved shadow claim${x.n===1?'':'s'}${x.n<30?' (promotion needs 30 on both sides)':''}.`)}">${x.inc?'\u2605 ':''}${esc(v.param)}${x.v}${x.hit!=null?` <b class="${x.hit>=0.5?'pos':'neg'}">${Math.round(x.hit*100)}%</b>`:''}${x.avg!=null?` <span class="${x.avg>=0?'pos':'neg'}">${x.avg>=0?'+':''}${x.avg}${v.unit}</span>`:''} <i>(n=${x.n})</i></span>`;
       }
       if(v.hist&&v.hist.length){ const h=v.hist[v.hist.length-1];
-        tun+=`<span class="sec" style="font-size:10px" data-tip="${esc(`most recent promotion: incumbent ${h.incAvg}${v.unit} on n=${h.incN} vs challenger ${h.chAvg}${v.unit} on n=${h.chN} \u2014 out-of-sample shadow claims only`)}">promoted ${h.from}\u2192${h.to} on n=${h.chN} out-of-sample</span>`; }
+        tun+=`<span class="sec" style="font-size:var(--fs-2xs)" data-tip="${esc(`most recent promotion: incumbent ${h.incAvg}${v.unit} on n=${h.incN} vs challenger ${h.chAvg}${v.unit} on n=${h.chN} \u2014 out-of-sample shadow claims only`)}">promoted ${h.from}\u2192${h.to} on n=${h.chN} out-of-sample</span>`; }
       tun+='</div>';
     }
     s+=sigSec('tuning','sigrec-sub','self-tuning (shadow variants)',`Bounded self-improvement: each gated event runs 2\u20133 candidate thresholds. Only the incumbent emits visible signals \u2014 but ALL variants (incumbent included) silently ledger shadow claims on identical bookkeeping, so the comparison is out-of-sample and apples-to-apples. A challenger is promoted only with \u226530 resolutions on BOTH sides, expectancy beating the incumbent by \u22650.08 native units and positive, and no hit-rate collapse. Promotions are logged, persisted, and reversible by the same rule. This searches a small fixed hypothesis space under out-of-sample discipline \u2014 it cannot re-fit freely.`,tun);
@@ -873,7 +873,7 @@ function sigRecordHtml(d){
       }
       shd+='</div>';
     }
-    shd+=`<div class="sec" style="font-size:10.5px;margin-top:4px">shadow claims only \u2014 never shown as live signals \u00b7 promotion requires an earned record</div>`;
+    shd+=`<div class="sec" style="font-size:var(--fs-xs);margin-top:4px">shadow claims only \u2014 never shown as live signals \u00b7 promotion requires an earned record</div>`;
     s+=sigSec('shadows','sigrec-sub','strategy shadows (earning their record)',`Strategy shadows: whole candidate STRATEGIES (not threshold tweaks) earning an out-of-sample record before any promotion. Every claim carries frozen side/void/target at fire, resolves stop-aware, and is episode-deduped like everything else \u2014 and NONE of it touches the live board. This panel is the entire record; nothing is curated away. A strategy that never earns anything simply never surfaces.`,shd);
   }
   if(rs.recent&&rs.recent.length){
@@ -946,7 +946,7 @@ function renderSignals(){
   }
   const _wantUni = state.scope === 'crypto' ? 'main' : 'xyz';
   if(!d||!d.signals||!d.signals.filter(g=>g.uni===_wantUni).length){
-    box.innerHTML=intro+`<div class="msg">No unusual ${state.scope==='crypto'?'crypto':'stocks/macro'} conditions firing right now \u2014 this tape is quiet.${warmCount()}<br><span class="sec" style="font-size:11px">Premium baselines, event studies and the live track record all accrue server-side; early after a cold start this list is naturally sparse.</span></div>`+sigRecordHtml(d)+rec;
+    box.innerHTML=intro+`<div class="msg">No unusual ${state.scope==='crypto'?'crypto':'stocks/macro'} conditions firing right now \u2014 this tape is quiet.${warmCount()}<br><span class="sec" style="font-size:var(--fs-xs)">Premium baselines, event studies and the live track record all accrue server-side; early after a cold start this list is naturally sparse.</span></div>`+sigRecordHtml(d)+rec;
     bindSigControls(box); return;
   }
   let hiddenN=0;
@@ -980,7 +980,7 @@ function renderSignals(){
     if(state._sigLow) for(const gr of low){ rank++; s+=rowOf(gr,rank); }
   }
   s+='</div>';
-  if(hiddenN>0) s+=`<div class="sec" style="font-size:10.5px;padding:6px 2px" data-tip="signals whose playbook target is closer than the active threshold, or which have no computable target">${hiddenN} signal${hiddenN===1?'':'s'} hidden by the active filter${prOn?' (prime-only)':''}</div>`;
+  if(hiddenN>0) s+=`<div class="sec" style="font-size:var(--fs-xs);padding:6px 2px" data-tip="signals whose playbook target is closer than the active threshold, or which have no computable target">${hiddenN} signal${hiddenN===1?'':'s'} hidden by the active filter${prOn?' (prime-only)':''}</div>`;
   s+=sigRecordHtml(d)+rec;
   box.innerHTML=s;
   bindSigControls(box);

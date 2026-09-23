@@ -224,7 +224,7 @@ function renderLeaders(data){
   const xM=v=>px0+(clamp(v,-mx,mx)+mx)/(2*mx)*(px1-px0);
   const yM=v=>py0-(clamp(v,-my,my)+my)/(2*my)*(py0-py1);
   const cx=xM(0), cy=yM(0), maxVol=Math.max(1,...data.map(s=>s.vol||0));
-  const ql='font-family:var(--mono);font-size:10px;fill:var(--faint)';
+  const ql='font-family:var(--mono);font-size:var(--fs-2xs);fill:var(--faint)';
   let s=`<svg class="smapsvg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`;
   s+=`<rect x="${px0}" y="${py1}" width="${px1-px0}" height="${py0-py1}" fill="var(--panel2)" opacity="0.3"/>`;
   s+=`<rect x="${cx}" y="${py1}" width="${px1-cx}" height="${cy-py1}" fill="rgb(70,185,126)" opacity="0.07"/>`;
@@ -233,10 +233,10 @@ function renderLeaders(data){
   s+=`<rect x="${px0}" y="${cy}" width="${cx-px0}" height="${py0-cy}" fill="rgb(229,96,77)" opacity="0.07"/>`;
   s+=`<line x1="${cx}" y1="${py1}" x2="${cx}" y2="${py0}" stroke="var(--border)"/>`;
   s+=`<line x1="${px0}" y1="${cy}" x2="${px1}" y2="${cy}" stroke="var(--border)"/>`;
-  s+=`<text x="${px1-8}" y="${py1+14}" text-anchor="end" style="font-family:var(--mono);font-size:10.5px;fill:var(--up);font-weight:600">LEADERS · ahead &amp; gaining</text>`;
-  s+=`<text x="${px0+8}" y="${py1+14}" style="font-family:var(--mono);font-size:10.5px;fill:var(--blue);font-weight:600">CATCHING UP · behind, gaining</text>`;
-  s+=`<text x="${px1-8}" y="${py0-8}" text-anchor="end" style="font-family:var(--mono);font-size:10.5px;fill:var(--accent);font-weight:600">COOLING · ahead, slowing</text>`;
-  s+=`<text x="${px0+8}" y="${py0-8}" style="font-family:var(--mono);font-size:10.5px;fill:var(--down);font-weight:600">LAGGARDS · behind &amp; falling</text>`;
+  s+=`<text x="${px1-8}" y="${py1+14}" text-anchor="end" style="font-family:var(--mono);font-size:var(--fs-xs);fill:var(--up);font-weight:600">LEADERS · ahead &amp; gaining</text>`;
+  s+=`<text x="${px0+8}" y="${py1+14}" style="font-family:var(--mono);font-size:var(--fs-xs);fill:var(--blue);font-weight:600">CATCHING UP · behind, gaining</text>`;
+  s+=`<text x="${px1-8}" y="${py0-8}" text-anchor="end" style="font-family:var(--mono);font-size:var(--fs-xs);fill:var(--accent);font-weight:600">COOLING · ahead, slowing</text>`;
+  s+=`<text x="${px0+8}" y="${py0-8}" style="font-family:var(--mono);font-size:var(--fs-xs);fill:var(--down);font-weight:600">LAGGARDS · behind &amp; falling</text>`;
   [-mx, -mx/2, mx/2, mx].forEach(t=>{ const x=xM(t); s+=`<line x1="${x}" y1="${py0}" x2="${x}" y2="${py0+4}" stroke="var(--faint)"/><text x="${x.toFixed(1)}" y="${py0+16}" text-anchor="middle" style="${ql}">${t>0?'+':''}${t.toFixed(1)}%</text>`; });
   s+=`<text x="${cx.toFixed(1)}" y="${py0+16}" text-anchor="middle" style="${ql}">S&amp;P</text>`;
   s+=`<text x="${(px0+px1)/2}" y="${H-6}" text-anchor="middle" style="${ql}">← behind the S&amp;P    ·    % vs S&amp;P over ${wl}    ·    ahead →</text>`;
@@ -308,7 +308,7 @@ function renderSectorMap(list){
   s+=`<rect x="${px0}" y="${py1}" width="${px1-px0}" height="${py0-py1}" fill="var(--panel2)" opacity="0.35"/>`;
   s+=`<line x1="${cx0}" y1="${py1}" x2="${cx0}" y2="${py0}" stroke="var(--border)" stroke-dasharray="4 4"/>`;
   s+=`<line x1="${px0}" y1="${cy50}" x2="${px1}" y2="${cy50}" stroke="var(--border)" stroke-dasharray="4 4"/>`;
-  const ql='font-family:var(--mono);font-size:10px;fill:var(--faint)';
+  const ql='font-family:var(--mono);font-size:var(--fs-2xs);fill:var(--faint)';
   s+=`<text x="${px1-6}" y="${py1+14}" text-anchor="end" style="${ql}">accumulation ▲in</text>`;
   s+=`<text x="${px0+6}" y="${py1+14}" style="${ql}">distribution ▲out</text>`;
   s+=`<text x="${px1-6}" y="${py0-6}" text-anchor="end" style="${ql}">stealth inflow</text>`;

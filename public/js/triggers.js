@@ -208,14 +208,14 @@ function buildPushSection(){
   // per-recipient state below needs its own reference to the same store, or every call that gets
   // as far as a linked recipient throws before the panel's innerHTML is ever assigned.
   const P=pushState, A=state.alerts;
-  if(!P) return '<div class="sec" style="font-size:12px;padding:4px">Delivery state unavailable \u2014 the server did not answer.</div>';
-  if(!P.enabled) return '<div class="sec" style="font-size:12px;padding:4px">Telegram push is off \u2014 set <b>TG_BOT_TOKEN</b> on the server to enable it. Nothing else changes while it is unset.</div>';
+  if(!P) return '<div class="sec" style="font-size:var(--fs-sm);padding:4px">Delivery state unavailable \u2014 the server did not answer.</div>';
+  if(!P.enabled) return '<div class="sec" style="font-size:var(--fs-sm);padding:4px">Telegram push is off \u2014 set <b>TG_BOT_TOKEN</b> on the server to enable it. Nothing else changes while it is unset.</div>';
   // The bell panel shows YOUR recipients and nobody else's — with three linked accounts and nine
   // class chips each it had become a wall of controls for people you cannot help. Admin's view of
   // everyone lives in the admin panel now, collapsed, where managing other people belongs.
   const mineOnly=(P.recipients||[]).filter(r=>r.mine);
   const others=(P.othersLinked||0)+((P.recipients||[]).length-mineOnly.length);
-  const othersNote=others>0?`<div class="sec" style="font-size:11px;padding:2px 4px">${others} recipient(s) linked by other people${P.admin?' \u2014 manage them in the Admin tab':''}</div>`:'';
+  const othersNote=others>0?`<div class="sec" style="font-size:var(--fs-xs);padding:2px 4px">${others} recipient(s) linked by other people${P.admin?' \u2014 manage them in the Admin tab':''}</div>`:'';
   const recips=mineOnly.length? mineOnly.map(r=>{
     const dot=r.muted?'neg':(r.lastErr?'warn':'pos');
     const tip=r.muted?(r.lastErr||'muted'):(r.lastOk?('last delivery '+fmtAge(Date.now()-r.lastOk)+' ago'):'linked, nothing delivered yet');
@@ -264,19 +264,19 @@ function buildPushSection(){
           return `<button type="button" class="cdtf${h!=null?' on':''}" data-psched="${esc(k.k)}" data-pchat2="${esc(r.chat)}" data-tip="${esc(k.label+(k.tip?' \u2014 '+k.tip:'')+' \u00b7 on by default; click to set the hour and which days you want it')}">${esc(k.label.toLowerCase())} ${esc(lbl)}</button>`;
         }).join(''))
       +`</span>`:'')+`</div>`;
-  }).join('') : '<div class="sec" style="font-size:12px;padding:4px">You haven\u2019t linked a telegram account yet.</div>';
+  }).join('') : '<div class="sec" style="font-size:var(--fs-sm);padding:4px">You haven\u2019t linked a telegram account yet.</div>';
   void othersNote;
   const code=P.code&&pushCodeLeft(P.code)!=='expired'
-    ? `<div class="pushcode"><div class="sec" style="font-size:11px">DM the bot <b>/start ${esc(P.code.code)}</b></div><div class="pcode">${esc(P.code.code)}</div><div class="sec" style="font-size:11px">expires in ${esc(pushCodeLeft(P.code))}</div></div>`
+    ? `<div class="pushcode"><div class="sec" style="font-size:var(--fs-xs)">DM the bot <b>/start ${esc(P.code.code)}</b></div><div class="pcode">${esc(P.code.code)}</div><div class="sec" style="font-size:var(--fs-xs)">expires in ${esc(pushCodeLeft(P.code))}</div></div>`
     : '';
-  const errs=P.lastErr?`<div class="sec neg" style="font-size:11px;padding:2px 4px" data-tip="verbatim from the Telegram API \u2014 this is what a bad token or chat looks like">${esc(P.lastErr)}</div>`:'';
+  const errs=P.lastErr?`<div class="sec neg" style="font-size:var(--fs-xs);padding:2px 4px" data-tip="verbatim from the Telegram API \u2014 this is what a bad token or chat looks like">${esc(P.lastErr)}</div>`:'';
   const logHtml=P.log&&P.log.length? P.log.slice(0,6).map(e=>`<div class="alog"><span class="at">${new Date(e.t).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})}</span> ${esc(e.chat)} ${e.ok?'<span class="pos">sent</span>':'<span class="neg">'+esc(e.err||'failed')+'</span>'}</div>`).join('') : '';
   return `${recips}${others>0?othersNote:''}${code}${errs}
     <div style="display:flex;gap:6px;margin-top:6px">
       <button class="btn" id="p-link" style="flex:1;justify-content:center">Link telegram</button>
       <button class="btn" id="p-test" style="flex:1;justify-content:center" ${P.recipients&&P.recipients.length?'':'disabled'}>Test fire</button>
     </div>
-    <div class="sec" style="font-size:11px;margin-top:5px">queue ${P.queue}${P.dropped?' \u00b7 <span class="neg">'+P.dropped+' dropped</span>':''} \u00b7 cap ${P.capHour}/h per person</div>${logHtml}`;
+    <div class="sec" style="font-size:var(--fs-xs);margin-top:5px">queue ${P.queue}${P.dropped?' \u00b7 <span class="neg">'+P.dropped+' dropped</span>':''} \u00b7 cap ${P.capHour}/h per person</div>${logHtml}`;
 }
 async function pushAct(url, body){
   if(pushBusy) return null;

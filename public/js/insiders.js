@@ -290,7 +290,7 @@ function insRender() {
       + INS_RANGES.map(r => `<button type="button" class="cng-chip${INS.preset === r.k ? ' on' : ''}" data-insrange="${r.k}" data-tip="${esc(r.tip)}">${esc(r.label)}</button>`).join('')
       + `<span class="ins-sep"></span>`
       + `<input type="date" id="ins-from" class="cng-in ins-date" value="${esc(INS.from)}" max="9999-12-31" data-tip="start of the range, inclusive. Leave empty for no lower bound.">`
-      + `<span class="sec" style="font-size:11px">→</span>`
+      + `<span class="sec" style="font-size:var(--fs-xs)">→</span>`
       + `<input type="date" id="ins-to" class="cng-in ins-date" value="${esc(INS.to)}" max="9999-12-31" data-tip="end of the range, inclusive — a row filed at 21:00 on the end date is in it.">`
       + ((INS.from || INS.to) ? `<button type="button" class="cng-chip on" id="ins-dclear" data-tip="clear the range">${esc(insRangeLabel())} ✕</button>` : '')
     + `</div>`

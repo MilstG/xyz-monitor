@@ -66,7 +66,7 @@ function renderAudit(){
   const acked=appliedAll.filter(a=>a.ack), applied=_audShowAck?appliedAll:appliedAll.filter(a=>!a.ack);
   if(!appliedAll.length&&!flagged.length) h+='<div class="msg">Nothing applied or flagged \u2014 every roster name resolves against the curated tables.</div>';
   if(applied.length){ h+='<div class="aud-grp">Applied \u00b7 overlay active'
-      +(acked.length?' <a href="#" id="audAckTog" style="float:right;font-size:11px" title="Cleared rows are hidden acknowledgements \u2014 their overlay entries are still active on the board">'+(_audShowAck?'hide cleared':'show cleared ('+acked.length+')')+'</a>':'')+'</div>';
+      +(acked.length?' <a href="#" id="audAckTog" style="float:right;font-size:var(--fs-xs)" title="Cleared rows are hidden acknowledgements \u2014 their overlay entries are still active on the board">'+(_audShowAck?'hide cleared':'show cleared ('+acked.length+')')+'</a>':'')+'</div>';
     for(const a of applied){ const grad=a.action==='graduate';
       h+='<div class="aud-row'+(a.ack?' reverted':'')+'"><div class="aud-top"><div><b>'+esc(a.ticker)+'</b>'
         +'<span class="aud-badge '+(grad?'grad':'cls')+'">'+(grad?'GRADUATED':'CLASSIFIED')+'</span>'
@@ -292,7 +292,7 @@ function renderAdmRecips(){
       +(r.owned?'':`<button type="button" class="cdtf" data-admclaim="${esc(r.chat)}" style="margin-left:auto" data-tip="this recipient was linked before per-browser ownership existed, so no browser manages it. Claiming moves it to THIS browser and it appears in your alerts panel with its class chips and quiet hours.">claim</button>`)
       +`<span class="ax" data-admunlink="${esc(r.chat)}" title="revoke this recipient">\u2715</span>`
       +(openR?`<span style="display:flex;gap:4px;width:100%;margin-top:5px;flex-wrap:wrap">${chips}${opChip}${schedChips}</span>`:'')+`</div>`; }).join('')
-    : '<div class="sec" style="font-size:12px;padding:4px">Nobody has linked a telegram account.</div>');
+    : '<div class="sec" style="font-size:var(--fs-sm);padding:4px">Nobody has linked a telegram account.</div>');
   b.querySelectorAll('[data-admexp]').forEach(x=>x.addEventListener('click',()=>{
     admRecOpen[x.dataset.admexp]=!admRecOpen[x.dataset.admexp]; renderAdmRecips(); }));
   b.querySelectorAll('[data-apcls]').forEach(x=>x.addEventListener('click',()=>{
@@ -349,10 +349,10 @@ function renderAdmBrief(){
     // the admin boxes serve — an operator administering from a second machine still sees and edits
     // their own schedule here instead of a dead "link a telegram" line.
     const me=rows.find(r=>r.mine)||rows.find(r=>r.admin);
-    if(!me) return `<div class="sec" style="font-size:11.5px;margin-top:4px">your schedule: <span class="warn">link a telegram or mark an operator below</span></div>`;
+    if(!me) return `<div class="sec" style="font-size:var(--fs-xs);margin-top:4px">your schedule: <span class="warn">link a telegram or mark an operator below</span></div>`;
     const sc=(me.sched&&me.sched[k])||null, h=sc?sc.hour:null;
     const lbl=h!=null?`${String(h).padStart(2,'0')}:00${sc&&sc.utc?' UTC':''} \u00b7 ${esc(sc&&sc.daysLabel||'daily')}`:'off';
-    return `<div class="sec" style="font-size:11.5px;margin-top:4px">your schedule: <button type="button" class="cdtf${h!=null?' on':''}" data-mysched="${esc(k)}" data-tip="when YOUR copy of ${esc(kind.label||k)} arrives \u2014 hour and days. Everyone else\u2019s is on their roster row.">${esc(lbl)}</button></div>`;
+    return `<div class="sec" style="font-size:var(--fs-xs);margin-top:4px">your schedule: <button type="button" class="cdtf${h!=null?' on':''}" data-mysched="${esc(k)}" data-tip="when YOUR copy of ${esc(kind.label||k)} arrives \u2014 hour and days. Everyone else\u2019s is on their roster row.">${esc(lbl)}</button></div>`;
   };
 
   const utcN=rows.filter(r=>r.briefHour!=null&&r.briefUtc).length;
@@ -361,13 +361,13 @@ function renderAdmBrief(){
   const state=st?(st.enabled?`<span class="pos">on</span> \u00b7 default ${String(st.defaultHour).padStart(2,'0')}:00 UTC \u00b7 ${st.dayLeft}/${st.perDay} generations left today`
     :'<span class="neg">disabled</span> (BRIEF_ENABLED=0)'):'\u2026';
   box.innerHTML=`<div class="abr-t" data-tip="One market brief a day per recipient, delivered as two telegram messages: indices, movers, sectors, regime, positioning, earnings, macro and the day\u2019s headlines, with two model-written sections. On by default for everyone who links telegram.">Morning brief</div>`
-    +`<div class="sec" style="font-size:11.5px">${state}${st&&st.model?` \u00b7 ${esc(st.model)}`:''}</div>`
-    +`<div class="sec" style="font-size:11.5px;margin-top:3px">${onN} of ${rows.length} linked recipient(s) receiving it${utcN?` \u00b7 <span class="warn">${utcN} on the UTC default</span>`:''}</div>`
-    +(st&&st.lastErr?`<div class="sec neg" style="font-size:11px;margin-top:3px" data-tip="the last time the prose layer failed \u2014 the mechanical brief still shipped">last prose failure: ${esc(st.lastErr)}</div>`:'')
+    +`<div class="sec" style="font-size:var(--fs-xs)">${state}${st&&st.model?` \u00b7 ${esc(st.model)}`:''}</div>`
+    +`<div class="sec" style="font-size:var(--fs-xs);margin-top:3px">${onN} of ${rows.length} linked recipient(s) receiving it${utcN?` \u00b7 <span class="warn">${utcN} on the UTC default</span>`:''}</div>`
+    +(st&&st.lastErr?`<div class="sec neg" style="font-size:var(--fs-xs);margin-top:3px" data-tip="the last time the prose layer failed \u2014 the mechanical brief still shipped">last prose failure: ${esc(st.lastErr)}</div>`:'')
     +`<div class="abr-row">`
       +`<button type="button" class="cdtf" id="adm-brief" data-tip="re-serves this hour\u2019s brief \u2014 no model call, no budget spent">send test (cached)</button>`
       +`<button type="button" class="cdtf" id="adm-brief-f" data-tip="regenerate from live state and spend one of today\u2019s brief budget">send test (fresh)</button>`
-      +`<span class="sec" style="font-size:11px" data-tip="test fires go ONLY to the recipient(s) marked operator on the roster below \u2014 never to anyone else. Toggle who is operator with the crown chip on their row.">\u2192 operator only</span>`
+      +`<span class="sec" style="font-size:var(--fs-xs)" data-tip="test fires go ONLY to the recipient(s) marked operator on the roster below \u2014 never to anyone else. Toggle who is operator with the crown chip on their row.">\u2192 operator only</span>`
     +`</div><div class="abr-r" id="adm-brief-r"></div>`
     +mySchedRow('brief');
   // Separate state line and test pair, not a shared row with the brief: separate schedules,
@@ -377,8 +377,8 @@ function renderAdmBrief(){
   const lState=L?(L.enabled?`<span class="pos">on</span> \u00b7 default ${String(L.defaultHour).padStart(2,'0')}:00 UTC \u00b7 ${esc(L.defaultDays||'daily')} \u00b7 ${L.dayLeft}/${L.perDay} generations left today \u00b7 ${L.windowH}h corpus`
     :'<span class="neg">disabled</span> (LANDSCAPE_ENABLED=0)'):'\u2026';
   box.innerHTML+=`<div class="abr-t" style="margin-top:10px" data-tip="One written commentary message per scheduled day, an hour after the brief. Built from the headline corpus and it must cite the headlines it rests on \u2014 those citations render as the sources footer. Interpretation, not measurement: unlike the brief, its claims are not checked against server-computed figures. Per-recipient hour and days are on each roster row below.">THE LANDSCAPE</div>`
-    +`<div class="sec" style="font-size:11.5px">${lState}${L&&L.model?` \u00b7 ${esc(L.model)}`:''}</div>`
-    +(L&&L.lastErr?`<div class="sec neg" style="font-size:11px;margin-top:3px" data-tip="the last time commentary generation failed \u2014 the message still ships, saying so">last failure: ${esc(L.lastErr)}</div>`:'')
+    +`<div class="sec" style="font-size:var(--fs-xs)">${lState}${L&&L.model?` \u00b7 ${esc(L.model)}`:''}</div>`
+    +(L&&L.lastErr?`<div class="sec neg" style="font-size:var(--fs-xs);margin-top:3px" data-tip="the last time commentary generation failed \u2014 the message still ships, saying so">last failure: ${esc(L.lastErr)}</div>`:'')
     +`<div class="abr-row">`
       +`<button type="button" class="cdtf" id="adm-land" data-tip="re-serves this hour\u2019s commentary \u2014 no model call, no budget spent">send test (cached)</button>`
       +`<button type="button" class="cdtf" id="adm-land-f" data-tip="regenerate from the live headline corpus and spend one of today\u2019s landscape budget">send test (fresh)</button>`
@@ -752,20 +752,20 @@ function renderSessionDecomp(sd){
     ? `UTC day · buy at 00:00, sell at 24:00 · ${sd.equityCount} perps`
     : `Overnight · buy at close, sell before open · ${sd.equityCount} equities`;
   const head = `<div style="background:var(--panel2);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:10px;padding:16px 18px;margin-bottom:16px">`+
-    `<div style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.6px;margin-bottom:10px">${headLabel}</div>`+
+    `<div style="color:var(--muted);font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.6px;margin-bottom:10px">${headLabel}</div>`+
     `<div style="display:flex;align-items:flex-end;gap:20px;flex-wrap:wrap">`+
-      `<div><div style="font-family:var(--mono);font-size:32px;line-height:1" class="${dcls(h.medianNet)}">${fp(h.medianNet)}</div><div class="sec" style="font-size:11px;margin-top:3px">median net / ${unit}</div></div>`+
-      `<div><div style="font-family:var(--mono);font-size:20px;line-height:1;color:var(--blue)">${fp(h.medianGross)}</div><div class="sec" style="font-size:11px;margin-top:3px">gross / ${unit}</div></div>`+
-      `<div><div style="font-family:var(--mono);font-size:20px;line-height:1;color:var(--muted)">−${dragBp.toFixed(1)}bp</div><div class="sec" style="font-size:11px;margin-top:3px">funding drag</div></div>`+
+      `<div><div style="font-family:var(--mono);font-size:var(--fs-xl);line-height:1" class="${dcls(h.medianNet)}">${fp(h.medianNet)}</div><div class="sec" style="font-size:var(--fs-xs);margin-top:3px">median net / ${unit}</div></div>`+
+      `<div><div style="font-family:var(--mono);font-size:var(--fs-xl);line-height:1;color:var(--blue)">${fp(h.medianGross)}</div><div class="sec" style="font-size:var(--fs-xs);margin-top:3px">gross / ${unit}</div></div>`+
+      `<div><div style="font-family:var(--mono);font-size:var(--fs-xl);line-height:1;color:var(--muted)">−${dragBp.toFixed(1)}bp</div><div class="sec" style="font-size:var(--fs-xs);margin-top:3px">funding drag</div></div>`+
       `<div style="width:1px;align-self:stretch;background:var(--border)"></div>`+
-      `<div><div style="font-family:var(--mono);font-size:20px;line-height:1" class="${dcls(h.totNet)}">${fp(h.totNet)}</div><div class="sec" style="font-size:11px;margin-top:3px">${period} net · gross ${fp(h.totGross)}</div></div>`+
-      `<div><div style="font-family:var(--mono);font-size:20px;line-height:1;color:var(--text)">${(h.winNet*100).toFixed(0)}%</div><div class="sec" style="font-size:11px;margin-top:3px">win · ${h.nights} ${units}</div></div>`+
+      `<div><div style="font-family:var(--mono);font-size:var(--fs-xl);line-height:1" class="${dcls(h.totNet)}">${fp(h.totNet)}</div><div class="sec" style="font-size:var(--fs-xs);margin-top:3px">${period} net · gross ${fp(h.totGross)}</div></div>`+
+      `<div><div style="font-family:var(--mono);font-size:var(--fs-xl);line-height:1;color:var(--text)">${(h.winNet*100).toFixed(0)}%</div><div class="sec" style="font-size:var(--fs-xs);margin-top:3px">win · ${h.nights} ${units}</div></div>`+
     `</div>`+
     `<div class="s-cap" style="margin-top:12px">${funded ? `Net-of-funding reliable from <b>${sessDate(h.fundingHorizonTs)}</b> onward (${endp}).` : `Net-of-funding approximate — funding history sparse (${endp}); the dashed net line tracks gross before coverage begins.`}</div></div>`;
   const chart=(key,label)=>{ const x=S[key]; if(!x||!x.n) return '';
     return `<div style="flex:1 1 320px;min-width:290px" class="s-card">`+
-      `<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px"><span style="color:var(--text);font-size:13px;font-weight:600">${label}</span>`+
-      `<span class="sec" style="font-size:11px">net <span class="${dcls(x.totNet)}">${fp(x.totNet)}</span> · ${x.n} bets · win ${(x.winNet*100).toFixed(0)}%</span></div>`+
+      `<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px"><span style="color:var(--text);font-size:var(--fs-md);font-weight:600">${label}</span>`+
+      `<span class="sec" style="font-size:var(--fs-xs)">net <span class="${dcls(x.totNet)}">${fp(x.totNet)}</span> · ${x.n} bets · win ${(x.winNet*100).toFixed(0)}%</span></div>`+
       sessCurveSvg(x.curve, x.fundingHorizonTs)+`</div>`; };
   const charts = cr
     ? `<div class="s-grid" style="margin-bottom:6px">`+chart('utcday','UTC day · 00:00→24:00')+chart('weekend','Weekend · Fri→Mon')+`</div>`
@@ -849,8 +849,8 @@ function activityClockSvg(vec, metric){
     const ro=rOf(val), col= val>=1?'var(--accent)':'var(--accent-dim)', op=0.35+0.55*Math.min(1,val/maxV);
     s+=`<path d="${clockWedge(cx,cy,ri,ro,clockDeg(h)+1.4,clockDeg(h+1)-1.4)}" fill="${col}" fill-opacity="${op.toFixed(2)}"><title>${h}:00 ${_szTz()} · ${val.toFixed(2)}× avg${vec.volAbsMean&&metric!=='volume'?' · '+(val*vec.volAbsMean*100).toFixed(2)+'% hourly range':''}</title></path>`; }
   s+=`<circle cx="${cx}" cy="${cy}" r="${ri}" fill="var(--panel)" stroke="var(--border)"/>`;
-  s+=`<text x="${cx}" y="${cy-1}" text-anchor="middle" style="font-size:10px;fill:var(--muted)">${metric==='volume'?'volume':'range'}</text>`;
-  s+=`<text x="${cx}" y="${cy+11}" text-anchor="middle" style="font-size:8px;fill:var(--faint)">× avg</text>`;
+  s+=`<text x="${cx}" y="${cy-1}" text-anchor="middle" style="font-size:var(--fs-2xs);fill:var(--muted)">${metric==='volume'?'volume':'range'}</text>`;
+  s+=`<text x="${cx}" y="${cy+11}" text-anchor="middle" style="font-size:var(--fs-2xs);fill:var(--faint)">× avg</text>`;
   return s+'</svg>';
 }
 function fundingClockSvg(fund){
@@ -867,9 +867,9 @@ function fundingClockSvg(fund){
   const net = arr.reduce((a,b)=>a+(Number.isFinite(b)?b:0),0);
   const netCls = net>0?'--down':(net<0?'--up':'--muted');
   s+=`<circle cx="${cx}" cy="${cy}" r="${ri}" fill="var(--panel)" stroke="var(--border)"/>`;
-  s+=`<text x="${cx}" y="${cy-11}" text-anchor="middle" style="font-size:9px;fill:var(--muted)">net / day</text>`;
-  s+=`<text x="${cx}" y="${cy+4}" text-anchor="middle" style="font-size:15px;fill:var(${netCls})">${(net>0?'+':'')+(net*100).toFixed(3)}%</text>`;
-  s+=`<text x="${cx}" y="${cy+17}" text-anchor="middle" style="font-size:8px;fill:var(--faint)">${(net*365*100>0?'+':'')+(net*365*100).toFixed(0)}%/yr · 1× long</text>`;
+  s+=`<text x="${cx}" y="${cy-11}" text-anchor="middle" style="font-size:var(--fs-2xs);fill:var(--muted)">net / day</text>`;
+  s+=`<text x="${cx}" y="${cy+4}" text-anchor="middle" style="font-size:var(--fs-lg);fill:var(${netCls})">${(net>0?'+':'')+(net*100).toFixed(3)}%</text>`;
+  s+=`<text x="${cx}" y="${cy+17}" text-anchor="middle" style="font-size:var(--fs-2xs);fill:var(--faint)">${(net*365*100>0?'+':'')+(net*365*100).toFixed(0)}%/yr · 1× long</text>`;
   return s+'</svg>';
 }
 function clockResolve(hc, sel){
@@ -894,8 +894,8 @@ function renderClocks(hc){
   const ph=peakHour(st.metric==='volume'?vec.qr:vec.vr);
   const fh=vec.fund?peakHour(vec.fund.map(Math.abs)):null;
   const twin=`<div class="s-grid">`+
-    `<div style="flex:1 1 240px;min-width:230px" class="s-card"><div style="color:var(--text);font-size:13px;font-weight:600;margin-bottom:6px">Activity — when it moves</div>${activityClockSvg(vec, st.metric)}</div>`+
-    `<div style="flex:1 1 240px;min-width:230px" class="s-card"><div style="color:var(--text);font-size:13px;font-weight:600;margin-bottom:6px">Funding — <span style="color:var(--up)">receive</span> / <span style="color:var(--down)">pay</span> by hour</div>${fundingClockSvg(vec.fund)}</div>`+
+    `<div style="flex:1 1 240px;min-width:230px" class="s-card"><div style="color:var(--text);font-size:var(--fs-md);font-weight:600;margin-bottom:6px">Activity — when it moves</div>${activityClockSvg(vec, st.metric)}</div>`+
+    `<div style="flex:1 1 240px;min-width:230px" class="s-card"><div style="color:var(--text);font-size:var(--fs-md);font-weight:600;margin-bottom:6px">Funding — <span style="color:var(--up)">receive</span> / <span style="color:var(--down)">pay</span> by hour</div>${fundingClockSvg(vec.fund)}</div>`+
     `</div>`;
   const _tz=_szTz();
   const cap=`Midnight ${_tz} at top, clockwise. Left clock: spoke length = that hour's range/volume vs the day's average — rings mark 1×, 2×…${_szCash()?' and the blue arc is the US cash session':''}${vec.hm?`; the amber arc is the ${sessEx(vec.hm)} home session — if this name's hump doesn't sit inside it, the home-session premise is wrong for the perp's own flow`:''}. Right clock: color = carry direction, brightness = size. `+
@@ -969,7 +969,7 @@ function dowHeatSvg(grid, metric){
   if(_szCash()){ const rx=lx+9.5*cw, rw=(16-9.5)*cw;
     s+=`<rect x="${rx.toFixed(1)}" y="${top}" width="${rw.toFixed(1)}" height="${(ch*5)}" fill="var(--blue)" opacity="0.06"/>`; }
   for(let row=0;row<7;row++){ const d=WD_ORDER[row]; const y=top+row*ch;
-    s+=`<text x="${lx-6}" y="${(y+ch/2+3).toFixed(1)}" text-anchor="end" style="font-size:10px;fill:${(d===0||d===6)?'var(--faint)':'var(--muted)'}">${WD_NAMES[d]}</text>`;
+    s+=`<text x="${lx-6}" y="${(y+ch/2+3).toFixed(1)}" text-anchor="end" style="font-size:var(--fs-2xs);fill:${(d===0||d===6)?'var(--faint)':'var(--muted)'}">${WD_NAMES[d]}</text>`;
     for(let h=0;h<24;h++){ const x=lx+h*cw; const v=cells[d][h];
       s+=`<rect x="${x}" y="${y}" width="${cw-1}" height="${ch-1}" fill="var(--panel2)"/>`;
       if(Number.isFinite(v)){ const op=Math.max(0.04,Math.min(1,v/cap)); s+=`<rect x="${x}" y="${y}" width="${cw-1}" height="${ch-1}" fill="var(--accent)" fill-opacity="${op.toFixed(3)}"><title>${WD_NAMES[d]} ${h}:00 ${_szTz()} · ${v.toFixed(2)}× avg${ns[d]?' · n='+(ns[d][h]||0):''}</title></rect>`; }
@@ -1270,7 +1270,7 @@ function renderFunding(){
   const host=el('funding-body'); if(!host) return;
   syncFundingSlot();
   const slot=state.funding.view||{}, fh=slot.data, err=slot.err;
-  const title=`<div class="cp-head">Funding heatmap <span class="sec" style="font-weight:400;font-size:12.5px">\u2014 every market\u2019s carry over calendar time, at 1h \u00b7 8h \u00b7 24h</span></div>`;
+  const title=`<div class="cp-head">Funding heatmap <span class="sec" style="font-weight:400;font-size:var(--fs-sm)">\u2014 every market\u2019s carry over calendar time, at 1h \u00b7 8h \u00b7 24h</span></div>`;
   if(err && !fh){ host.innerHTML=title+`<div class="msg">Couldn\u2019t load the funding board: ${esc(err)}. Retrying on the next refresh.</div>`; return; }
   if(!fh){ host.innerHTML=title+`<div class="msg">Loading\u2026</div>`; return; }
   // A build that throws every cycle and a cache that has not filled yet look identical from here.
@@ -1315,7 +1315,7 @@ function clusterScatterSvg(points, classes){
     const tip=`${p.ticker} · ${p.assetClass}${p.odd&&p.bestClass?` — trades like ${p.bestClass} (r ${p.bestCorr}) vs own ${p.ownCorr}`:(p.ownCorr!=null?` — fits its class (r ${p.ownCorr})`:'')}`;
     if(p.odd){ s+=`<circle cx="${cx}" cy="${cy}" r="6.5" fill="none" stroke="var(--down)" stroke-width="1.6"/>`;
       s+=`<circle cx="${cx}" cy="${cy}" r="3.6" fill="${col}"><title>${esc(tip)}</title></circle>`;
-      s+=`<text x="${(+cx+8).toFixed(1)}" y="${(+cy+3).toFixed(1)}" style="font-size:9px;fill:var(--down)">${esc(p.ticker)}</text>`; }
+      s+=`<text x="${(+cx+8).toFixed(1)}" y="${(+cy+3).toFixed(1)}" style="font-size:var(--fs-2xs);fill:var(--down)">${esc(p.ticker)}</text>`; }
     else s+=`<circle cx="${cx}" cy="${cy}" r="3.6" fill="${col}" fill-opacity="0.85"><title>${esc(tip)}</title></circle>`;
   }
   return s+'</svg>';
@@ -1391,8 +1391,8 @@ function renderSeasonality(se){
     ? `Mean intra-hour return by ET hour for <b style="color:var(--text)">${esc(v.label)}</b> alone, time-series t-test (${unit}). Single-name and noisy — autocorrelation isn't modeled, so treat |t| loosely: <b style="color:var(--text)">${v.sigCount} of 24</b> hours clear |t|≥2. Not a standalone signal.`
     : `Mean intra-hour return by ET hour, cross-sectional t-test (${unit}). Fragile: <b style="color:var(--text)">${v.sigCount} of 24</b> hours clear |t|≥2 and ~1 is expected by chance. Only the colored bars are flagged — never trade this alone.`;
   const banner=`<div style="background:var(--panel2);border:1px solid var(--border);border-left:3px solid var(--down);border-radius:10px;padding:11px 14px;margin-bottom:12px">`+
-    `<span style="color:var(--down);font-family:var(--mono);font-size:11px;letter-spacing:.5px;font-weight:600">⚠ EXPLORATORY</span> `+
-    `<span class="sec" style="font-size:12px">${bannerBody}</span></div>`;
+    `<span style="color:var(--down);font-family:var(--mono);font-size:var(--fs-xs);letter-spacing:.5px;font-weight:600">⚠ EXPLORATORY</span> `+
+    `<span class="sec" style="font-size:var(--fs-sm)">${bannerBody}</span></div>`;
   const cap = `Bar height = mean return in basis points; whiskers = ±1 standard error across ${isTS?"this name's trading days":'the cross-section'}. Grey bars are noise; green/red bars cleared |t|≥2. Blue band = US cash session. <b>Hover</b> a bar for its mean, t-stat and sample size.`;
   return sHead('Return seasonality by hour','quarantined — pick all, a sector or one name; grey is noise, colored cleared significance')+controls+banner+sCard(seasonBarSvg(v.hours))+sCap(cap);
 }

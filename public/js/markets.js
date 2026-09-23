@@ -419,7 +419,7 @@ function gAggTd(g,k,cap,lbl){ const a=g.agg[k];
 const GCOLS=[
   {key:'name', label:'Group', tip:'Sector (GICS + asset classes) or industry group \u2014 same curated classification the Sectors tab uses. Click a row to drill in: the table flips to the names view filtered to this group\u2019s members, with a chip to clear. Industry rows marked "= sector" have no curated split \u2014 the group is the sector itself, shown honestly rather than hidden.',
     val:g=>g.name,
-    td:g=>`<td style="color:var(--text);font-weight:600" title="click \u2192 ${state.scope==='crypto'?'coins':'stocks'} view filtered to its ${g.n} member${g.n===1?'':'s'}">${esc(sectorShort(g.name))}${g.fall?' <span class="sec" style="font-style:italic;font-size:10px" title="no curated industry split for these names \u2014 the group is the GICS sector itself">= sector</span>':''}</td>`},
+    td:g=>`<td style="color:var(--text);font-weight:600" title="click \u2192 ${state.scope==='crypto'?'coins':'stocks'} view filtered to its ${g.n} member${g.n===1?'':'s'}">${esc(sectorShort(g.name))}${g.fall?' <span class="sec" style="font-style:italic;font-size:var(--fs-2xs)" title="no curated industry split for these names \u2014 the group is the GICS sector itself">= sector</span>':''}</td>`},
   {key:'n', label:'#', tip:'Members in the group \u2014 after the Filters popover (vol/OI thresholds and \u2605-only apply to MEMBERS before aggregation, so this board always aggregates exactly what the names view would show).',
     val:g=>g.n, td:g=>`<td class="sec">${g.n}</td>`},
   {key:'dopen', label:'D open', tip:'Weighted average of members\u2019 % change since the current UTC day\u2019s open \u2014 the day-boundary read, vs the rolling 24h column. Hover any cell for weighting + coverage.',
@@ -878,7 +878,7 @@ function renderRegimeStrip(){
       segs+=`<span class="rs-mix-seg" data-tip="${esc(`${l} \u00b7 ${Math.round(sh*100)}% of open interest \u00b7 ${m.n} market${m.n===1?'':'s'}, ${fmtUsd(m.oi)} \u00b7 ${RG_STORY[l]||''}`)}" style="width:${(sh*100).toFixed(1)}%;background:${RG_COLOR[RG_CLS[l]]||'var(--faint)'}"></span>`; }
     mixHtml=`<span class="rs-m"><span class="rs-k" data-tip="positioning mix \u00b7 share of total OI in each price\u00d7OI regime over ${state.tf} \u00b7 is new money entering the complex (longs+/shorts+) or is positioning unwinding (squeeze/unwind)? \u00b7 hover each segment for detail">positioning</span>`+
       `<span class="rs-mix">${segs}</span>`+
-      (domL?`<b class="${RG_CLS[domL]}" style="font-size:11px" data-tip="largest non-flat regime by OI share">${Math.round(domV*100)}% ${esc(domL)}</b>`:'')+`</span>`; }
+      (domL?`<b class="${RG_CLS[domL]}" style="font-size:var(--fs-xs)" data-tip="largest non-flat regime by OI share">${Math.round(domV*100)}% ${esc(domL)}</b>`:'')+`</span>`; }
   box.innerHTML=
      `<span class="rs-lab ${lab.cls}" data-tip="${esc(lab.tip)}">${esc(lab.t)}</span>`
     +`<span class="rs-m" data-tip="share of markets up over ${state.tf} (${upN}/${g.n})"><span class="rs-k">breadth</span>`

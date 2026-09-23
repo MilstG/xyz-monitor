@@ -233,7 +233,7 @@ function renderDrawerPos(coin){ const box=el('dpos'); if(!box) return; const r=s
     +chip('liquidation', p.liq!=null?fmtPrice(p.liq)+(c.liqDist!=null?' <span class="sec">('+(c.liqDist>=0?'+':'')+c.liqDist.toFixed(1)+'%)</span>':''):'<span class="na">\u00b7</span>', 'estimated liquidation price and its distance from the live mark')
     +chip('margin', p.margin!=null?fmtUsd(p.margin):'<span class="na">\u00b7</span>', 'margin used by this position')
     +chip('funding', p.fundOpen==null?'<span class="na">\u00b7</span>':`<span class="${p.fundOpen>0?'neg':(p.fundOpen<0?'pos':'sec')}">${p.fundOpen>0?'paid ':'received '}${fmtUsd(Math.abs(p.fundOpen))}</span>`, 'cumulative funding since the position opened \u2014 the carry you have actually paid or received')
-    +`</div>`+(agree?`<div class="sec" style="font-size:11.5px;margin:-4px 0 10px">${agree}</div>`:''); }
+    +`</div>`+(agree?`<div class="sec" style="font-size:var(--fs-xs);margin:-4px 0 10px">${agree}</div>`:''); }
 let POSSEQ=0, _posColShown=false;
 async function loadPositions(quiet){ if(!prefsSignedIn()){ posStatText(); return; } const seq=++POSSEQ;
   let d; try{ d=await fetchJSON('/api/positions'); }catch(_){ return; }
