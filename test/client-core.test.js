@@ -2336,7 +2336,7 @@ test("ux -68: the phone gets its table back, controls reach the keyboard, quiet 
   const app = require("./_client").clientSource();
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   assert.ok(/viewport-fit=cover/.test(html) && /env\(safe-area-inset-bottom\)/.test(css), "safe areas for the installed PWA");
-  assert.ok(/\.controls\{flex-wrap:nowrap;overflow-x:auto/.test(css) && /\.sub\{display:none\}/.test(css), "the six-row control stack is one strip under 680px");
+  assert.ok(/\.controls\{flex-wrap:nowrap;overflow-x:auto/.test(css) && /header\{height:auto;flex-wrap:wrap/.test(css), "the six-row control stack is one strip under 680px, and the one-row shell wraps to two");   // -93: the tagline (.sub) left the shell; the header wraps instead
   assert.ok(/--dim:#7A8592/.test(css) && !/color:var\(--faint\)/.test(css), "--faint is no longer used for text");
   assert.ok(/input:focus-visible,textarea:focus-visible,select:focus-visible,\[role="button"\]:focus-visible,tr\[data-coin\]:focus-visible\{outline:2px solid var\(--accent\)!important/.test(css), "one ring on every control");
   assert.ok(/<tr data-coin="\$\{esc\(r\.coin\)\}"\$\{cls\} tabindex="0"/.test(app) && /t\.matches\('tr\[data-coin\]'\)&&e\.key==='Enter'/.test(app), "rows are focusable and Enter opens them");
