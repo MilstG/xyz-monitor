@@ -189,12 +189,14 @@ footer.docfoot{max-width:1320px;margin:0 auto;padding:18px 34px 40px;color:var(-
 
 <!-- ================================================================================ -->
 <section id="layout">
-<h2>3. The shell — header, status line, nav</h2>
+<h2>3. The shell — one row of chrome, one line of meta</h2>
 <h3>Header</h3>
-<p><b>Markets</b>, <b>24h Volume</b> and <b>Open Interest</b> are totals for the active universe. The dot beside the wordmark is the connection state: green = live, amber = the server's data has gone stale (its poller stalled — the snapshot carries the last successful poll time), red = the browser cannot reach the server.</p>
-<h3>Status line</h3>
+<p>One row: the mark, the navigation, the <b>Stocks | Crypto</b> scope pill and the session buttons (back, home, <b>?</b>, sign out). The dot beside the mark is the connection state: green = live, amber = the server's data has gone stale (its poller stalled — the snapshot carries the last successful poll time), red = the browser cannot reach the server.</p>
+<h3>Meta line</h3>
+<p>Under the header, one mono line holds every fact about the state of the machine, left to right:</p>
 <div class="tw"><table>
 <tr><th>Field</th><th>Meaning</th></tr>
+<tr><td>markets · vol · OI</td><td>Totals for the active universe: the number of markets, 24h volume and open interest.</td></tr>
 <tr><td>benchmark</td><td>The name every "vs" column is measured against in this scope: the S&amp;P 500 perp for stocks, BTC for crypto.</td></tr>
 <tr><td>next</td><td>Countdown to the next fallback pull. Reads <b>push live</b> while the stream is up.</td></tr>
 <tr><td>sync</td><td>Server-side backfill progress: <code>syncing X/Y</code> while candle history is being fetched for new listings, then <code>live</code>.</td></tr>
@@ -202,11 +204,11 @@ footer.docfoot{max-width:1320px;margin:0 auto;padding:18px 34px 40px;color:var(-
 <tr><td>build</td><td>The server build stamp (also in <code>/api/health</code>). If it does not match the latest delivery, the deploy is stale.</td></tr>
 <tr><td>freshness tray</td><td>One dot per external feed — <b>Data</b> (Hyperliquid poll), <b>Earn</b> (Finnhub calendar), <b>News</b>, <b>Filings</b> (SEC EDGAR) — colour-graded by age against each feed's own cadence; red also means the fetch is failing. The <b>Loop</b> dot is the server event-loop p99 (green &lt;20ms, amber &lt;50ms, red ≥50ms). Hover for the exact age.</td></tr>
 <tr><td>◎ focus chip</td><td>The <b>focused ticker</b> follows you across tabs: pick a name and every tab that has a per-ticker view opens on it. Click the chip to reopen the drawer, ✕ to clear.</td></tr>
-<tr><td>🔔 bell</td><td>Alerts — setups, ledger events, rules and ops notices, with an unread count. It lives in the status bar so it is reachable from every tab. See <a href="#alerts">Alerts</a>.</td></tr>
+<tr><td>🔔 bell</td><td>Alerts — setups, ledger events, rules and ops notices, with an unread count. It lives on the meta line so it is reachable from every tab. See <a href="#alerts">Alerts</a>.</td></tr>
 </table></div>
 <h3>Navigation ribbon</h3>
 <ul>
-  <li><b>Scope pills</b> — <b>Stocks | Crypto</b>. Remembered per browser. Tabs that have no meaning in a scope hide when you flip to it; Markets, Trend and Report follow the switch, Signals and Actionable have per-universe visibility the operator sets separately.</li>
+  <li><b>Scope pill</b> — <b>Stocks | Crypto</b>, at the right of the row. Remembered per browser. Tabs that have no meaning in a scope hide when you flip to it; Markets, Trend and Report follow the switch, Signals and Actionable have per-universe visibility the operator sets separately.</li>
   <li><b>Tabs and menus</b> — related tabs are grouped into drop-down menus (by default <i>Tape</i>, <i>Signals</i>, <i>Macro</i>, <i>Research</i>; the operator can rename a menu or move a tab in Admin › Feature visibility without a deploy). Drag a tab to reorder it; the order is saved in this browser. Some tabs show a live count badge.</li>
   <li><b>?</b> — the per-tab explainer: how to read the tab you are on, plus the keyboard table. Each explainer links to the matching section of this manual.</li>
   <li><b>⎋</b> — sign out.</li>
@@ -214,7 +216,7 @@ footer.docfoot{max-width:1320px;margin:0 auto;padding:18px 34px 40px;color:var(-
 <h3>Strips under the nav</h3>
 <ul>
   <li><b>Macro banner</b> — appears on every tab when the next universe-wide macro event (FOMC, CPI, payrolls, PPI, retail sales, GDP, PCE) is ≤2 ET days out, and flips to a blue result strip once the print is out.</li>
-  <li><b>Regime strip</b> — the crypto tape strip: crowd pays (OI-weighted funding APR), breadth, total OI with its weighted delta, BTC's day and the alt-season gauge. Crypto scope only.</li>
+  <li><b>Regime strip</b> — the first line of the <b>Markets</b> tab, not site chrome: the stocks board's regime read (breadth, dispersion, positioning, 30d correlation), or in crypto scope the tape strip: crowd pays (OI-weighted funding APR), breadth, total OI with its weighted delta, BTC's day and the alt-season gauge.</li>
 </ul>
 <h3>Always-on controls</h3>
 <ul>

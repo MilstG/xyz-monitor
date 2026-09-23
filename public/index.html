@@ -20,44 +20,12 @@
 <script>try{['xyzmon.theme','xyzmon.themeReset.v2','xyzmon.density'].forEach(function(k){localStorage.removeItem(k);});}catch(e){}</script>
 </head>
 <body>
+<!-- The shell (build 2026.09.23-93): one row — mark · nav · scope · session — then one meta line.
+     The nav lives inside the header; its DOM order is unchanged so #tabSpacer and every hook hold. -->
 <header>
-  <div class="brand">
+  <div class="brand" title="HIP-3 perp markets on Hyperliquid · dex xyz · served from a continuously updated cache">
     <div class="wordmark"><span>Milst</span><span class="bk">Screener</span><span class="dot" id="live" title="connecting"></span></div>
-    <div class="sub">HIP-3 perp markets on <b>Hyperliquid</b> · dex <code style="font-family:var(--mono)">xyz</code> · served from a continuously updated cache</div>
   </div>
-  <div class="stats">
-    <div class="stat"><span class="k">Markets</span><span class="v" id="s-mkts">—</span></div>
-    <div class="stat"><span class="k">24h Volume</span><span class="v" id="s-vol">—</span></div>
-    <div class="stat"><span class="k">Open Interest</span><span class="v" id="s-oi">—</span></div>
-  </div>
-</header>
-
-<div class="statusline">
-  <span class="st-item">benchmark <b id="benchnote">…</b></span>
-  <span class="st-sep">·</span>
-  <span class="st-item"><span id="cdlbl">next</span> <b id="cd">—:—</b></span>
-  <span class="st-sep">·</span>
-  <span class="sync" id="sync"><span class="sdot"></span><span id="sync-t">starting…</span></span>
-  <span class="st-sep">·</span>
-  <span class="st-item">updated <b id="s-upd">—</b></span>
-  <span class="st-sep">·</span>
-  <span class="st-item" title="server build — if this doesn't match the latest delivery, the deploy is stale">build <b id="ver">—</b></span>
-  <span class="st-right">
-    <span class="st-item freshtray" id="freshtray" title="data-source freshness — green fresh, amber aging, red stale or fetch-failing"></span>
-    <span id="focusChip" hidden><button class="fchip-t" id="focusChipT" title="focused ticker — follows you across tabs; click to reopen the drawer">◎ —</button><button class="fchip-x" id="focusChipX" title="clear the focused ticker">✕</button></span>
-    <!-- Alerts is a session control, not a markets control: it fires from the poller regardless of
-         which tab is open, so it lives in the global status bar rather than inside #view-markets,
-         where showView() used to hide it — and its unread badge — on every other tab. -->
-    <div class="bellwrap">
-      <button class="btn stbell" id="bellBtn" aria-haspopup="true" aria-expanded="false" title="Alerts — triggers, ledger events and ops notices for this browser">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
-        <span class="bell-badge" id="bellBadge">0</span>
-      </button>
-      <div class="alertpop" id="alertpop" hidden></div>
-    </div>
-  </span>
-</div>
-
 <nav class="tabs" title="Drag a tab to reorder — the order is saved in this browser">
   <span class="scopeseg" title="Scope: Stocks (xyz dex — equities, indices, commodities, FX, synthetics) vs Crypto (Hyperliquid main dex — top-60 perps by volume). Fully separated: no merged views, separate benchmarks (SP500 / BTC), and separate signal rosters, horizons and track records — the two universes never pool, and no record mixes them.">
     <button class="scope on" data-scope="stocks">Stocks</button><button class="scope" data-scope="crypto">Crypto</button>
@@ -94,17 +62,54 @@
   <button class="btn tabbtn" id="helpBtn" style="font-weight:600" title="How to read this tab — what every column, chart and score means and how to interpret it">?</button>
   <button class="btn tabbtn" id="logoutBtn" hidden title="Sign out — clears this browser's session; the shared password gets you back in">⎋</button>
 </nav>
+</header>
+
+<div class="statusline">
+  <span class="stats">
+    <span class="stat"><span class="k">markets</span><span class="v" id="s-mkts">—</span></span>
+    <span class="stat"><span class="k">vol</span><span class="v" id="s-vol">—</span></span>
+    <span class="stat"><span class="k">OI</span><span class="v" id="s-oi">—</span></span>
+  </span>
+  <span class="st-sep">·</span>
+  <span class="st-item">benchmark <b id="benchnote">…</b></span>
+  <span class="st-sep">·</span>
+  <span class="st-item"><span id="cdlbl">next</span> <b id="cd">—:—</b></span>
+  <span class="st-sep">·</span>
+  <span class="sync" id="sync"><span class="sdot"></span><span id="sync-t">starting…</span></span>
+  <span class="st-sep">·</span>
+  <span class="st-item">updated <b id="s-upd">—</b></span>
+  <span class="st-sep">·</span>
+  <span class="st-item" title="server build — if this doesn't match the latest delivery, the deploy is stale">build <b id="ver">—</b></span>
+  <span class="st-right">
+    <span class="st-item freshtray" id="freshtray" title="data-source freshness — green fresh, amber aging, red stale or fetch-failing"></span>
+    <span id="focusChip" hidden><button class="fchip-t" id="focusChipT" title="focused ticker — follows you across tabs; click to reopen the drawer">◎ —</button><button class="fchip-x" id="focusChipX" title="clear the focused ticker">✕</button></span>
+    <!-- Alerts is a session control, not a markets control: it fires from the poller regardless of
+         which tab is open, so it lives in the global status bar rather than inside #view-markets,
+         where showView() used to hide it — and its unread badge — on every other tab. -->
+    <div class="bellwrap">
+      <button class="btn stbell" id="bellBtn" aria-haspopup="true" aria-expanded="false" title="Alerts — triggers, ledger events and ops notices for this browser">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        <span class="bell-badge" id="bellBadge">0</span>
+      </button>
+      <div class="alertpop" id="alertpop" hidden></div>
+    </div>
+  </span>
+</div>
+
 
 <div class="macrostrip" id="macrostrip" hidden></div>
-<div class="regimestrip" id="regime" hidden></div>
 
 <div id="view-markets">
+<div class="regimestrip" id="regime" hidden></div>
 <div class="controls">
+  <div class="zone">
   <div class="search">
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
     <input id="filter" aria-label="Filter tickers" type="text" placeholder="Filter ticker…" autocomplete="off" spellcheck="false"/>
   </div>
   <span class="drillchip" id="drillchip" hidden></span>
+  </div>
+  <div class="zone cut">
   <div class="seg" id="grpseg" role="group" aria-label="Grouping" title="Group lens — the same board, one row per name, sector or industry. Sector/industry rows are the weighted average of exactly the names the table shows (hover any cell for weighting + coverage); click a group row to drill into its members.">
     <span class="seglbl">group</span>
     <button type="button" data-grp="names" class="active">stocks</button>
@@ -132,7 +137,9 @@
     <button type="button" data-ms="300000">5m</button>
     <button type="button" data-ms="900000">15m</button>
   </div>
-  <button class="btn" id="refresh" style="margin-left:auto" title="Refresh now"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>Refresh</button>
+  </div>
+  <div class="zone act">
+  <button class="btn" id="refresh" title="Refresh now"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>Refresh</button>
   <div class="filtermenu">
     <button class="btn" id="filtersBtn" aria-haspopup="true" aria-expanded="false" title="Volume / OI thresholds & watchlist">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/></svg>Filters<span class="filt-dot" id="filtDot" hidden></span>
@@ -169,6 +176,7 @@
     <div class="colpop" id="colpop" hidden></div>
   </div>
   <button class="btn" id="mktExport" title="Download the current table as CSV">↓ CSV</button>
+  </div>
 </div>
 
 <div class="movers" id="movers" hidden>

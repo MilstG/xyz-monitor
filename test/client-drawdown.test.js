@@ -131,7 +131,7 @@ test("drawdown tab: wired end to end — manifest, markup, routing, scope, dispa
   for (const pin of [".rvd-title", ".rvd-sub", ".rvd-head", ".rvd-tbl", ".rvdsvg.hv .rvd-dot:not(.hot)", ".rvd-legend i.late", ".rvd-late"])
     assert.ok(css.includes(pin), "css pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.23-92"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.23-93"'), "build stamp");
   // the renderer's contract with the DOM: closes only, the caption says so, and the CSV carries the dates
   const src = fs.readFileSync(path.join(__dirname, "..", "public", "js", "drawdown.js"), "utf8");
   assert.ok(src.includes("intraday lows are not in the daily feed"), "the caption discloses close-to-close");
@@ -141,7 +141,7 @@ test("drawdown tab: wired end to end — manifest, markup, routing, scope, dispa
   assert.ok(src.includes("seg('rvd-y','return','rvdy',[['now','now'],['best','best']],RVD.y)"), "the return axis switches between now and best");
   assert.ok(/function rvdBenchCoins\(\)\{[\s\S]*?scopeBench\(\)[\s\S]*?'ETH'[\s\S]*?r\.sector==='Index'/.test(src), "references: the scope benchmark, plus ETH in crypto and the index rows in stocks");
   assert.ok(src.includes("stroke-dasharray=\"5 4\"") && src.includes("${esc(b.ticker)} ${pct(yOf(b))}"), "each reference is a dashed line named with its return");
-  assert.ok(src.includes("seg('rvd-top','show top','rvdt',RVD_TOPS,RVD.top)") && src.includes("rvdSvg(shown,anchorTs)") && src.includes("rvdTableHtml(rows)"), "the top-N cut applies to the chart, never to the table");
+  assert.ok(src.includes("seg('rvd-top','top','rvdt',RVD_TOPS,RVD.top)") && src.includes("rvdSvg(shown,anchorTs)") && src.includes("rvdTableHtml(rows)"), "the top-N cut applies to the chart, never to the table");
   assert.ok(src.includes("const RVD_PAGE=25;") && src.includes("data-rvdpg=") && css.includes(".rvd-pager"), "the table pages, 25 rows at a time");
   assert.ok(!src.includes("= drawdown</text>"), "no diagonal on the chart");
   assert.ok(src.includes("layoutMapLabels(nodes.filter(n=>n.label),{px0,px1,py1,py0:py0-22})"), "labels route around each other with the sector map's layout, kept out of the tick row");

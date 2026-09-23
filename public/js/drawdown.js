@@ -179,14 +179,16 @@ function rvdTableHtml(rows){
 }
 function rvdControlsHtml(anchorTs){
   const today=rvdToday();
-  const pills=RVD_PRESETS.map(([k,l])=>`<button type="button" class="cg-pill${(!RVD.date&&RVD.preset===k)?' on':''}" data-rvdp="${k}">${l}</button>`).join('');
   const minISO=isoUtc(today-370*DAY,0,10), maxISO=isoUtc(today-DAY,0,10);
-  const seg=(id,lbl,attr,opts,cur)=>`<div class="seg" id="${id}" role="group" aria-label="${lbl}"><span class="seglbl">${lbl}</span>${opts.map(([k,l])=>`<button type="button"${cur===k?' class="active"':''} data-${attr}="${k}">${l}</button>`).join('')}</div>`;
-  return `<div class="cg-anchorctl"><span class="cg-lbl">since</span>${pills}<input type="date" id="rvd-date" value="${isoUtc(anchorTs,0,10)}" min="${minISO}" max="${maxISO}" aria-label="anchor date"/></div>`
+  const seg=(id,lbl,attr,opts,cur,tail='')=>`<div class="seg" id="${id}" role="group" aria-label="${lbl}"><span class="seglbl">${lbl}</span>${opts.map(([k,l])=>`<button type="button"${cur===k?' class="active"':''} data-${attr}="${k}">${l}</button>`).join('')}${tail}</div>`;
+  // what · cut · actions — the site's controls-row grammar
+  return `<div class="zone">`
+    +seg('rvd-since','since','rvdp',RVD_PRESETS,RVD.date?null:RVD.preset,`<input type="date" id="rvd-date" value="${isoUtc(anchorTs,0,10)}" min="${minISO}" max="${maxISO}" aria-label="anchor date"/>`)
     +seg('rvd-y','return','rvdy',[['now','now'],['best','best']],RVD.y)
-    +seg('rvd-top','show top','rvdt',RVD_TOPS,RVD.top)
+    +`</div><div class="zone cut">`
+    +seg('rvd-top','top','rvdt',RVD_TOPS,RVD.top)
     +seg('rvd-labels','labels','rvdl',[['auto','auto'],['all','all'],['none','none']],RVD.labels)
-    +`<button class="btn" id="rvd-csv" title="Download the table as CSV" style="margin-left:auto">↓ CSV</button>`;
+    +`</div><div class="zone act"><button class="btn" id="rvd-csv" title="Download the table as CSV">↓ CSV</button></div>`;
 }
 let _rvdLoading=false;
 function renderDrawdown(){
