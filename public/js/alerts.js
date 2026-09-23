@@ -363,5 +363,5 @@ window.addEventListener('hashchange',()=>{ if(!_hashSelf) applyHash(); });
    // a pasted #t=… into an open tab now works
 let _hashSelf=false;
 function setHash(h){ _hashSelf=true; try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} setTimeout(()=>{ _hashSelf=false; },0); }
-const HASH_VIEWS=new Set(['markets','focus','funds','trend','charts','sectors','corr','funding','sessions','signals','earnings','news','backtest','report','actionable','admin','housing','liquidity','notes','congress','insiders','dm']);
+const HASH_VIEWS=new Set(['markets','focus','funds','trend','charts','sectors','drawdown','corr','funding','sessions','signals','earnings','news','backtest','report','actionable','admin','housing','liquidity','notes','congress','insiders','dm']);
 export { HASH_VIEWS, alertMarkRead, alertText, buildAlertsPanel, evaluateAlerts, loadAlerts, notifyNewBuild, pushToast, saveAlerts, schedDaysClient, setHash, tickerOf, updateBell };

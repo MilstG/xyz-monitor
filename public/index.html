@@ -68,6 +68,7 @@
   <button class="tab" data-view="trend" title="EMA 13/21 ribbon evaluated on D1 · H12 · H4 · H1 — ranked long &amp; short trend leaderboards for both universes, with continuation-entry retest flags">Trend</button>
   <button class="tab" data-view="charts" title="Multi-pane chart grid — up to 8 names side by side, or one name across timeframes (MTF wall). Intraday panes (5m–4h) read the local 5-minute archive; 12H/1D panes read the deep archive seeded back to each listing's birth. Per-pane coverage is disclosed; linked panes share crosshair and zoom.">Charts</button>
   <button class="tab" data-view="sectors">Sectors</button>
+  <button class="tab" data-view="drawdown" id="tab-drawdown" title="Return vs drawdown — one dot per market: the best return it printed since an anchor date (highest daily close over the anchor close) against the deepest close-to-close drawdown in the same window. Top-left paid a lot and cost little; the dashed diagonal is where a name gave back as much as it ever made. Pick the anchor with the presets or any date; the table underneath carries the dates and sorts on every column.">Drawdown</button>
   <button class="tab" data-view="corr">Correlation</button>
   <button class="tab" data-view="funding" id="tab-funding" title="Funding heatmap — every market's carry laid out over calendar time: a row per market, a column per time bucket, readable at 1h, 8h or 24h. Read annualized (hourly ×24×365, the same unit as the table's funding column — one market reads one number at every resolution) or per bucket (what a 1× long paid over it, so the timeframe changes the quantity). Red = longs pay (crowded long), green = longs receive; a bucket the funding spine cannot cover is hatched, never drawn as zero.">Funding</button>
   <button class="tab" data-view="sessions">Sessions</button>
@@ -254,6 +255,14 @@
   <div id="sect-detail" class="corrpanel" hidden></div>
   <div class="cp-sub" style="margin:18px 2px 8px">Sector × sector correlation <span class="sec" style="text-transform:none;letter-spacing:0">· average pairwise daily-return correlation between members (90d)</span></div>
   <div id="sect-corr" class="corrwrap"></div>
+</section>
+
+<section id="view-drawdown" hidden>
+  <!-- DRAWDOWN tab (build 2026.09.23-92): controls, chart and table are built by drawdown.js
+       (renderDrawdown) so the anchor, the label mode and the sort stay one renderer with one state
+       object — nothing here to drift against the client. -->
+  <div class="controls" id="rvd-ctrls"></div>
+  <div id="rvd-wrap"><div class="msg">Loading…</div></div>
 </section>
 
 <section id="view-housing" hidden>

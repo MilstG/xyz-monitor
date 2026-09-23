@@ -20,6 +20,7 @@ import { __boot_calendar_7810 } from "./js/calendar.js";
 import { __boot_notes_8010 } from "./js/notes.js";
 import { __boot_trend_8880 } from "./js/trend.js";
 import "./js/sectors.js";
+import "./js/drawdown.js";
 import { __boot_nav_10165, __boot_nav_10228, __boot_nav_10422, __boot_nav_10545, __boot_nav_10554, __boot_nav_10590, __boot_nav_10612, __boot_nav_10624, __boot_nav_10845 } from "./js/nav.js";
 import { __boot_terminal_10926, __boot_terminal_11651 } from "./js/terminal.js";
 import { __boot_report_12113 } from "./js/report.js";

@@ -412,6 +412,18 @@ footer.docfoot{max-width:1320px;margin:0 auto;padding:18px 34px 40px;color:var(-
 <p class="sec">Window, weighting and CSV export follow the same conventions as Markets. A weekly <b>classification audit</b> (AI-assisted, operator-reviewed) proposes overlay changes to the curated tables; applied overlays are revertable from Admin.</p>
 </section>
 
+<section id="tab-drawdown" data-feature="drawdown" data-def="admin">
+<h3>Drawdown — best return since a date against the drawdown it cost</h3>
+<ul>
+  <li><b>The chart</b> — one dot per market. Vertical = the best return since the anchor (highest daily close over the anchor close, the live mark counting as today's point). Horizontal = the max drawdown in the same window (deepest close-to-close fall from any running peak, deeper to the right). Top-left paid a lot and cost little. The dashed diagonal is where best return equals drawdown: above it a name made more than it ever gave back.</li>
+  <li><b>Anchor</b> — presets count back from today's UTC midnight (YTD is January 1); the date box takes any day in the last year. A name whose first close is well after the anchor is drawn hollow and marked <i>late</i>: it starts at its own first close.</li>
+  <li><b>Colour</b> — only the sign of the return <i>now</i>: green above the anchor close, red below. Hover a dot for the dates of the high, the peak and the trough; click it, or a table row, for the drawer.</li>
+  <li><b>Table</b> — the same study as numbers: best and its date, max drawdown with its peak → trough dates, now, <i>gave back</i> (best minus now, in points) and <i>Best / DD</i>. Every column sorts; CSV exports the lot.</li>
+  <li><b>Labels</b> — <i>auto</i> names everyone up to 45 dots, then only the standouts on either axis and the best ratios; <i>all</i> and <i>none</i> override.</li>
+</ul>
+<p class="sec">Closes only — the daily feed carries no intraday low, so a wick below the close is not counted. Follows the Stocks|Crypto switcher; crypto history on the wire is about 90 days, so an older anchor starts every coin late and the header says how many.</p>
+</section>
+
 <section id="tab-corr" data-feature="corr">
 <h3>Correlation — matrix, pairs, COMP/G, ratios, baskets</h3>
 <ul>

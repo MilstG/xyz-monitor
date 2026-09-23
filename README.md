@@ -66,6 +66,14 @@ instant, and the per-IP rate limit stops being a per-user problem.
   volume — no new fetch and no new persistence. Ships in the market-data menu (the `tape` group);
   an admin can rename that menu or move the tab out of it without a deploy.
 - **Sectors tab** — sector classification, a rotation flow map, a Relative Rotation Graph (RS-Ratio / RS-Momentum vs the S&P), per-sector detail, and a sector×sector correlation matrix.
+- **Drawdown tab** — best return since an anchor date against the max drawdown taken in the same
+  window, one dot per market (top-left paid a lot and cost little; the dashed diagonal is where a
+  name gave back as much as it ever made), with the same study as a sortable table and a CSV.
+  Best = highest daily close over the anchor close with the live mark as today's point; drawdown =
+  deepest close-to-close fall from any running peak (the daily feed carries no low, so wicks are not
+  counted). Presets or any date in the last year; a name listed after the anchor is drawn hollow and
+  marked *late*. A client-side study over `/api/daily`, no route of its own. Ships admin-only. The
+  design mock is `docs/xyz-monitor-return-drawdown-mock.html`.
 - **Persistence** — OI *and* funding history are written to the `/data` volume and survive restarts; the computed feature cache is persisted too, so redeploys serve a warm table instantly.
 - **Staleness** — the snapshot carries the last successful poll time; the status dot turns amber if the server's data goes stale (poller stalled).
 - **Deep links** — the URL reflects the current tab and open ticker (`#sectors`, `#t=<coin>`), so links are shareable.
@@ -424,8 +432,8 @@ member's. Same wiring as the explainer: DOC_REFS, the manual's opening and furth
 app footer, the `?` card.
 
 `docs/` also holds the longer reference pages — the feature map, system map, mechanics and signal
-reference — plus the design mocks that preceded the funding heatmap, notes, insiders and
-backtest-target work, the share-to-chat mock (`xyz-monitor-share-to-chat-mock.html`, now built — see **Share to chat** above) and the call-targets mock (`xyz-monitor-call-targets-mock.html`: "$INTC to 32 by Oct 15" as a tracked target that resolves on hit, miss or an invalidation level — a proposal, not yet built). The six reference pages are served at `/docs/ref/explainer`, `/docs/ref/howto`,
+reference — plus the design mocks that preceded the funding heatmap, notes, insiders,
+backtest-target and return/drawdown work, the share-to-chat mock (`xyz-monitor-share-to-chat-mock.html`, now built — see **Share to chat** above) and the call-targets mock (`xyz-monitor-call-targets-mock.html`: "$INTC to 32 by Oct 15" as a tracked target that resolves on hit, miss or an invalidation level — a proposal, not yet built). The six reference pages are served at `/docs/ref/explainer`, `/docs/ref/howto`,
 `/docs/ref/features`, `/docs/ref/map`,
 `/docs/ref/mechanics` and `/docs/ref/signals` (nonce-stamped, same gate); the mocks are not served.
 

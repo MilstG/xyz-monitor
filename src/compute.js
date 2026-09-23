@@ -5965,7 +5965,7 @@ const FEATURE_NEVER_GATE = new Set(["/api/health", "/login", "/logout",
 // Config shape: { labels: {groupKey: name}, views: {viewKey: groupKey} }. Only DIFFERENCES from the
 // defaults are stored — renaming a menu back, or moving a tab home, leaves no residue behind.
 const NAV_GROUPS = [
-  { key: "tape",     label: "Tape",     views: ["trend", "charts", "treemap", "sectors", "corr", "funding", "sessions"] },
+  { key: "tape",     label: "Tape",     views: ["trend", "charts", "treemap", "sectors", "drawdown", "corr", "funding", "sessions"] },
   { key: "signals",  label: "Signals",  views: ["signals", "actionable", "focus", "backtest"] },
   { key: "macro",    label: "Macro",    views: ["earnings", "news", "housing", "liquidity"] },
   { key: "research", label: "Research", views: ["report", "funds", "congress", "insiders", "notes"] },
@@ -6043,6 +6043,11 @@ const FEATURES = [
   // its own means gating it could never strand a candle request, and it exposes nothing the
   // Markets drawer chart doesn't already show.
   { key: "charts",     kind: "tab", label: "Charts",      def: "public", routes: [] },
+  // DRAWDOWN (build 2026.09.23-92): best return since an anchor date against max drawdown in the
+  // same window, one dot per market. A client-side study over /api/daily, which is pinned public
+  // under markets — no route of its own, so gating it can never strand a request. Admin-only
+  // while it soaks, the same doctrine every new board has shipped under.
+  { key: "drawdown",   kind: "tab", label: "Drawdown",    def: "admin",  routes: [] },
   { key: "corr",       kind: "tab", label: "Correlation", def: "public", routes: ["/api/corr-crypto"] },
   // FUNDING (build 2026.08.26-34): the funding heatmap, promoted out of the Sessions tab into a
   // board of its own. It joins the `tape` group above — the market-data menu, which this

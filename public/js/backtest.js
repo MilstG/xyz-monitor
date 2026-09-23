@@ -20,6 +20,7 @@ import { openHousing, openLiquidity, openNotes } from "./notes.js";
 import { drawSessions } from "./positioning.js";
 import { openReportView } from "./report.js";
 import { renderSectors } from "./sectors.js";
+import { openDrawdown, renderDrawdown } from "./drawdown.js";
 import { openTrend, renderSignals, renderTrend } from "./trend.js";
 
 // ===== Strategy backtest — client-side, cross-sectional long/short on the daily returns already loaded =====
@@ -833,6 +834,7 @@ function applyScope(){
   syncGrpSeg();   // markets group lens: hide the industries button on crypto (coerced to sectors), relabel names 'stocks'/'coins'
   if(state.view==='corr' && !el('view-corr').hidden){ state.corr.pair=null; state.corr.selected=null; renderCorr(); setTimeout(compgAuto,60); }   // repaint the matrix for the new universe/data source, then auto-open COMP/G for it
   if(state.view==='trend') renderTrend();   // scope flip repaints the board for the new universe
+  if(state.view==='drawdown') renderDrawdown();   // same study, the other universe's closes
   state.backtest.picks=[];   // a backtest target belongs to one universe: xyz names don't exist in the crypto scope and vice versa
   if(state.view==='backtest') drawBacktest();   // scope flip re-runs the test on the new universe + benchmark
   if(state.view==='sessions'){ syncAnalyticsSlot(); drawSessions(); loadAnalytics(); }   // -17: repaint sessions for the new universe (its own analytics payload)
@@ -899,6 +901,7 @@ function showView(v){
   setHidden('view-trend', v!=='trend');
   setHidden('view-charts', v!=='charts');
   setHidden('view-sectors', v!=='sectors');
+  setHidden('view-drawdown', v!=='drawdown');
   setHidden('view-corr', v!=='corr');
   setHidden('view-funding', v!=='funding');
   setHidden('view-sessions', v!=='sessions');
@@ -935,6 +938,7 @@ function showView(v){
   if(v==='report'){ if(el('view-report')) openReportView(); else { showView('markets'); return; } }
   if(v==='admin'){ if(el('view-admin')&&IS_ADMIN) openAdmin(); else { showView('markets'); return; } }
   if(v==='sectors') renderSectors();
+  if(v==='drawdown'){ if(el('view-drawdown')) openDrawdown(); else { showView('markets'); return; } }
   if(v==='housing'){ if(el('view-housing')) openHousing(); else { showView('markets'); return; } }
   if(v==='liquidity'){ if(el('view-liquidity')) openLiquidity(); else { showView('markets'); return; } }
   if(!state.detail) setHash(v==='markets'?'':v);
