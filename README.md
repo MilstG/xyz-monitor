@@ -312,8 +312,8 @@ instant, and the per-IP rate limit stops being a per-user problem.
   is a long), the board and summary score the **direction-adjusted** move (positive = the call is
   right), and each call is also scored at **fixed 1d/7d horizons** (the first daily close past the
   mark) so the record isn't a function of when you look. Click a person in the summary to filter
-  to their record. The record is **delete-proof**: deleting a call removes its body, never its
-  stamp or score. A stamp card also carries a one-tap **⚑ alert** that arms a price alert at the
+  to their record. The record is **delete-proof** against its author: deleting a call removes its
+  body, never its stamp or score. A stamp card also carries a one-tap **⚑ alert** that arms a price alert at the
   called level (retest from above, reclaim from below). An operator can promote any stamped
   message into the Notes book, and the note keeps the message's own timestamp and price —
   re-stamping it at "now" would turn last Tuesday's call at 113.90 into a different, false claim
@@ -337,6 +337,19 @@ instant, and the per-IP rate limit stops being a per-user problem.
   (a record you cannot get out of the system is one you do not really have); and `/` to focus the
   conversation search, `j`/`k` to walk the rail, Escape to back out — folded into the app's own
   global key handler rather than competing with it, so Ctrl+K still belongs to the command palette.
+- **Moderation** (build 2026.09.23-94) — the operator can **edit or delete anybody's message**,
+  and **strike a call from the record altogether**. Same verbs, same `/api/dm` route as the author's
+  own edit and delete; the authorization is the admin flag decided at the route and passed down, so
+  the store never reads a cookie and a member's own path is untouched. A moderated row is honest
+  about it: the bubble reads "edited by gus", "message removed by gus" or "call removed by gus" —
+  the operator's name, never a bare "the operator" — and every act lands in the same audit log the
+  read-through writes to, with the words that were changed or removed. The strike is the one door
+  the record's delete-proofing does not close, because it is not the author's: the words stay
+  (deleted or not), the stamp, its side, its horizon and any early close go, so the row leaves the
+  board, the summary and the digest at once, and retention then ages it like any other prose. The
+  controls sit in the hover bar over any bubble (in the down color, so "delete" on your own message
+  and "delete" on theirs never read as the same button), on each row of the calls board, and in the
+  Admin panel's read-through — where the operator can act on a conversation they are not in.
 - **Operator read-through** (`/api/access/dm`) — on this deployment the operator can read every
   message, including conversations they are not in. It is a **separate, admin-gated surface** from
   `/api/dm` on purpose: folding a bypass into the membership filter would mean one bug in that

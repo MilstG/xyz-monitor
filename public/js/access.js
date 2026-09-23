@@ -5,7 +5,7 @@
 import { IS_ADMIN } from "./admin.js";
 import { el, esc } from "./core.js";
 import { fetchJSON } from "./data.js";
-import { dmSysLine } from "./messages.js";
+import { dmPost, dmSysLine } from "./messages.js";
 
 
 // ===== admin panel: access (members + invites) =================================================
@@ -185,6 +185,13 @@ async function admDmSearch(q){
   catch(e){ _admDmThread={error:String(e&&e.message||e)}; }
   loadAdmDmAudit(); renderAdmDm();
 }
+// One verb against /api/dm, then the conversation is re-read (which itself lands in the read log).
+async function admDmModerate(body,confirmText){
+  if(confirmText&&!confirm(confirmText)) return;
+  const res=await dmPost(body);
+  if(!res.ok){ alert((res.d&&res.d.error)||'could not do that'); return; }
+  if(_admDmThread&&_admDmThread.ok&&_admDmThread.thread) admDmOpen(_admDmThread.thread);
+}
 function admWhen(ts){ try{ return new Date(ts).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false}); }catch(_){ return ''; } }
 
 function renderAdmDm(){
@@ -215,9 +222,19 @@ function renderAdmDm(){
       +'<div class="adm-dmlog">'+(_admDmThread.messages||[]).map(m=>
         m.sys?('<div class="dm-sys">'+esc(dmSysLine(m,null))+'</div>')
         :('<div class="adm-dmrow"><span class="adm-dmwho">'+esc(m.sender)+'</span>'
-          +'<span class="adm-dmbody">'+esc(m.body||(m.file?('['+m.file.name+']'):'(deleted)')).replace(/\n/g,'<br>')
-          +(m.ref?' <span class="dm-tk-s">$'+esc(m.ref)+'</span>':'')+'</span>'
-          +'<span class="acc-mu">'+admWhen(m.ts)+'</span></div>')).join('')+'</div>';
+          +'<span class="adm-dmbody">'+esc(m.body||(m.file?('['+m.file.name+']'):m.deleted?(m.deletedBy?'(removed by '+m.deletedBy+')':'(deleted)'):'')).replace(/\n/g,'<br>')
+          +(m.ref?' <span class="dm-tk-s">$'+esc(m.ref)+'</span>':'')
+          +(m.editedBy?' <span class="dm-mk">edited by '+esc(m.editedBy)+'</span>':m.edited?' <span class="dm-mk">edited</span>':'')
+          +(m.callDropped?' <span class="dm-mk">call removed by '+esc(m.callDropped)+'</span>':'')+'</span>'
+          +'<span class="acc-mu">'+admWhen(m.ts)+'</span>'
+          // Moderation (build 2026.09.23-94), from the read-through as well as from the tab: the
+          // operator can act on a conversation they are not in, which is exactly what this
+          // panel is for. Same verbs, same route, same audit row.
+          +'<span class="adm-dmmod">'
+          +((m.ref&&m.refPx!=null)?'<button type="button" class="dm-tool dm-mod" data-admcalldrop="'+m.id+'" title="Remove this call from the record altogether \u2014 the words stay, the stamp and score go. Audited.">drop call</button> ':'')
+          +((!m.deleted&&!m.cmd&&!m.card)?'<button type="button" class="dm-tool dm-mod" data-admedit="'+m.id+'" title="Rewrite this message as the operator \u2014 the room sees it was edited by you. Audited.">edit</button> ':'')
+          +(!m.deleted?'<button type="button" class="dm-tool dm-mod" data-admdel="'+m.id+'" title="Delete this message as the operator \u2014 the room sees it was removed by you. Audited.">delete</button>':'')
+          +'</span></div>')).join('')+'</div>';
   }
 
   const audit=(_admDmAudit&&_admDmAudit.entries||[]).map(a=>
@@ -243,6 +260,14 @@ function admDmWire(){
   box.addEventListener('click',(e)=>{
     const t=e.target.closest('[data-admdm]');
     if(t){ admDmOpen(+t.dataset.admdm); return; }
+    const md=e.target.closest('[data-admdel]');
+    if(md){ admDmModerate({id:+md.dataset.admdel,drop:true},'Delete this message as the operator? Everyone in the conversation sees that you removed it, and the act is written to the audit log.'); return; }
+    const mc=e.target.closest('[data-admcalldrop]');
+    if(mc){ admDmModerate({callDrop:+mc.dataset.admcalldrop},'Remove this call from the record altogether? The words stay; the stamp, its score and its place in the summary are gone for everyone. This cannot be undone, and it is written to the audit log.'); return; }
+    const me=e.target.closest('[data-admedit]');
+    if(me){ const m=(_admDmThread&&_admDmThread.messages||[]).find(x=>x.id===+me.dataset.admedit);
+      const body=prompt('Rewrite this message as the operator \u2014 the room sees it was edited by you, and the act is written to the audit log.',m?m.body:'');
+      if(body!=null&&body.trim()&&(!m||body!==m.body)) admDmModerate({id:+me.dataset.admedit,body:body},null); return; }
     if(e.target.closest('#admDmGo')){ admDmSearch((el('admDmQ')||{}).value||''); return; }
     if(e.target.closest('#admDmClear')){ _admDmThread=null; _admDmQ=''; renderAdmDm(); return; }
   });
