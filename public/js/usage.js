@@ -76,13 +76,77 @@ function usUnquote(m){
 }
 const US={acc:null,lastSent:0,paused:false,me:null,mine:null,busy:false,sid:usSid(),
   acts:{}, perf:null, perfDone:false, hiddenSeen:false, errs:new Map(),   // (-110) counters, the paint sample, errors
-  ldSent:false};   // (-111) this page load has been counted
+  ldSent:false,   // (-111) this page load has been counted
+  tr:null, ctl:{}, srch:{}};   // (build 2026.09.24-112) the tab-path accumulator, control counts, search-burst stamps
+
+// ---- (build 2026.09.24-112) SITEWIDE tab paths and control usage ---------------------------------
+// Both ride the same beacon and are stored by the server WITHOUT a member id (uid '0', the sitewide
+// bucket): the operator sees "Markets → Trend 412 times", never who. Paused members send nothing.
+//
+// The control ALLOWLIST: the one table of every UI control that is counted. The server parses THIS
+// TEXT between the two marker comments as strict JSON at boot (src/usage-controls.js) and drops any
+// key not in it, so the table must stay JSON: double quotes, no comments inside, no trailing commas.
+// { group: { control: [values] } } — a group is a tab id, or 'header' (above every tab) or 'drawer'
+// (the ticker drawer, which has no collapsible sections: its per-section "go deeper" controls are
+// what is counted). Keys: '<group>.<control>' when the list is empty, else '<group>.<control>=<value>'.
+// Values are fixed option sets — column ids, window lengths, preset ids — never text, never a ticker,
+// never a number someone typed. Search boxes count "used" (one typing burst), never what was typed.
+const US_CONTROLS=/*US_CONTROLS{*/{
+  "header":{"scope":["stocks","crypto"],"search":[]},
+  "markets":{"window":["1h","4h","1d","7d","30d"],"group":["names","sectors","industries"],"weight":["vol","eq"],
+    "preset":["watch","notes","pos","clear"],"search":[],"csv":[],"share":[],
+    "col-on":["sess","px","funding","prem","m5","m15","h1","h4","d1","vcc","dopen","hopen","h4open","h12open","d7","d30","gap","trend","rs","rscc","vstape","dvb","dcap","hitr","rvol","beta","mom","momp","vol30","adr","dd","swr","ddy","yopen","mopen","doi","sqz","cascT","liq24","carry","vol","oi","pos","ma20","ma50","ma100","ma200","vwap","vsvwap","turn"],
+    "col-off":["sess","px","funding","prem","m5","m15","h1","h4","d1","vcc","dopen","hopen","h4open","h12open","d7","d30","gap","trend","rs","rscc","vstape","dvb","dcap","hitr","rvol","beta","mom","momp","vol30","adr","dd","swr","ddy","yopen","mopen","doi","sqz","cascT","liq24","carry","vol","oi","pos","ma20","ma50","ma100","ma200","vwap","vsvwap","turn"]},
+  "trend":{"side":["long","short"],"share":[]},
+  "sectors":{"window":["1h","4h","1d","7d","30d"],"weight":["vol","eq"],"grouping":["sector","ind"],"view":["flow","leaders"],"csv":[],"share":[]},
+  "corr":{"lookback":["30","90","180","365"],"top":["20","40","60"],"pairs":["10","20"],"search":[],"csv":[]},
+  "drawdown":{"since":["30","60","90","180","ytd","365"],"csv":[],"share":[]},
+  "funding":{"share":[]},
+  "charts":{"share":[]},
+  "signals":{"search":[]},
+  "actionable":{"side":["all","long","short"],"share":[]},
+  "backtest":{"csv":[]},
+  "news":{"search":[]},
+  "drawer":{"candles":["3","7","14","30","90"],"ledger-full":[],"news-all":[],"derivs-refresh":[],"share":[]}
+}/*}US_CONTROLS*/;
+function usCtlKeys(T){ const out=[]; for(const g of Object.keys(T)) for(const c of Object.keys(T[g])){ const v=T[g][c]; if(!v.length) out.push(g+'.'+c); else for(const x of v) out.push(g+'.'+c+'='+x); } return out; }
+const US_CTL_SET=new Set(usCtlKeys(US_CONTROLS));
+const US_CTL_N_MAX=20, US_CTL_KEYS_MAX=40, US_TR_BOUNCE_MS=2000, US_TR_N_MAX=30, US_TR_KEYS_MAX=40, US_SEARCH_BURST_MS=10000;
+// Tab paths (pure; `now` passed in, like the accumulator above). A transition from→to counts once the
+// destination has held the screen for 2s: a tab left inside 2s is a bounce and is skipped, so
+// A → B (1s) → C counts A→C, and A → B (1s) → A counts nothing. Re-selecting the tab you are on is not
+// a transition. The first tab that holds for 2s is the page load's ENTRY tab (once per load).
+function usTr(now,tab){ return {cur:tab||null,at:now,last:null,done:false,tr:{},en:null,enDone:false}; }
+function usTrSettle(t,now){
+  if(!t.cur||t.done||now-t.at<US_TR_BOUNCE_MS) return;
+  if(t.last==null){ if(!t.enDone){ t.en=t.cur; t.enDone=true; } }
+  else if(t.last!==t.cur){ const k=t.last+'>'+t.cur;
+    if(k in t.tr||Object.keys(t.tr).length<US_TR_KEYS_MAX) t.tr[k]=Math.min(US_TR_N_MAX,(t.tr[k]||0)+1); }
+  t.last=t.cur; t.done=true;
+}
+function usTrView(t,v,now){ if(!v||v===t.cur) return; usTrSettle(t,now); t.cur=v; t.at=now; t.done=false; }
+// Hand over what has settled (the tab on screen now counts if it has held 2s) and start fresh.
+function usTrTake(t,now){ usTrSettle(t,now); const out={tr:t.tr,en:t.en}; t.tr={}; t.en=null; return out; }
+function usTrGive(t,x){ for(const k in (x.tr||{})) t.tr[k]=Math.min(US_TR_N_MAX,(t.tr[k]||0)+x.tr[k]); if(x.en&&!t.en) t.en=x.en; }
+// One control use, at the control's own handler. Anything outside the allowlist is ignored here (and
+// dropped by the server); paused or signed out, nothing is counted at all.
+function usageCtl(k){
+  if(!US_CTL_SET.has(k)||US.paused||!usSignedIn()) return false;
+  if(!(k in US.ctl)&&Object.keys(US.ctl).length>=US_CTL_KEYS_MAX) return false;
+  US.ctl[k]=Math.min(US_CTL_N_MAX,(US.ctl[k]||0)+1); return true;
+}
+// A search box "used": one count per typing burst (no input for 10s ends the burst). The text is
+// never read — the handler passes only which box it is.
+function usageSearch(k,now){
+  const t=now!=null?now:usNow(), last=US.srch[k]||0; US.srch[k]=t;
+  return t-last>US_SEARCH_BURST_MS?usageCtl(k):false;
+}
 const US_ACTS_CLIENT=new Set(['csv','drawer-open']), US_ERR_MAX=20, US_ERRS_PER_BEACON=5, US_BODY_MAX=3800;
 function usSignedIn(){ return !!(typeof window!=='undefined'&&window.__ME&&window.__ME.uid); }
 function usNow(){ return Date.now(); }
 function usPwa(){ try{ return !!(window.matchMedia&&window.matchMedia('(display-mode: standalone)').matches)||window.navigator&&window.navigator.standalone===true; }catch(_){ return false; } }
 // Called by showView (backtest.js) on every tab switch — the one door every switch goes through.
-function usageView(v){ if(US.acc) usSetTab(US.acc,v,usNow()); }
+function usageView(v){ const now=usNow(); if(US.acc) usSetTab(US.acc,v,now); if(US.tr&&!US.paused) usTrView(US.tr,v,now); }   // (-112) + the tab path
 // (-110) A client-only action: counted, never described. Anything outside the two-word list is
 // ignored (the server would drop it anyway); paused or signed out, nothing is counted at all.
 function usageAct(k){ if(!US_ACTS_CLIENT.has(k)||US.paused||!usSignedIn()) return; US.acts[k]=Math.min(50,(US.acts[k]||0)+1); }
@@ -123,8 +187,13 @@ function usageFlush(force){
   let tot=0; for(const k in tabs) tot+=tabs[k];
   const acts=US.acts, hasActs=Object.keys(acts).length>0;
   const errs=[...US.errs.values()].filter(e=>e.c>0).slice(0,US_ERRS_PER_BEACON);
-  if(tot<1000&&!hasActs&&US.perf==null&&!errs.length){ usGive(US.acc,tabs,hr); return false; }   // under a second is not worth a request
+  // (-112) the settled tab paths, the entry tab (once per load) and the control counts
+  const tp=US.tr?usTrTake(US.tr,now):{tr:{},en:null}, ctl=US.ctl, hasTr=Object.keys(tp.tr).length>0, hasCtl=Object.keys(ctl).length>0;
+  if(tot<1000&&!hasActs&&US.perf==null&&!errs.length&&!hasTr&&!hasCtl&&!tp.en){ usGive(US.acc,tabs,hr); return false; }   // under a second is not worth a request
   const out={tabs,pwa:usPwa(),s:US.sid};
+  if(hasTr) out.tr=tp.tr;
+  if(tp.en) out.en=tp.en;
+  if(hasCtl) out.ctl=ctl;
   if(tot>0&&Object.keys(hr).length) out.h=hr;
   const b=state.bootBuild||state.build; if(b) out.b=String(b);
   if(b&&!US.ldSent) out.ld=1;
@@ -133,11 +202,12 @@ function usageFlush(force){
   if(errs.length&&b) out.errs=errs.map(e=>({m:e.m,f:e.f,l:e.l,c:e.c}));
   let body=JSON.stringify(out);
   while(body.length>US_BODY_MAX&&out.errs&&out.errs.length){ out.errs.pop(); if(!out.errs.length) delete out.errs; body=JSON.stringify(out); }   // the server's 4 KB cap
+  for(const f of ['ctl','tr']) while(body.length>US_BODY_MAX&&out[f]){ const ks=Object.keys(out[f]); delete out[f][ks[ks.length-1]]; if(ks.length<=1) delete out[f]; body=JSON.stringify(out); }   // (-112) never reached at the caps; a bound all the same
   let sent=false;
   try{ if(navigator.sendBeacon) sent=navigator.sendBeacon('/api/usage',body); }catch(_){ sent=false; }
   if(!sent){ try{ fetch('/api/usage',{method:'POST',body,keepalive:true,headers:{'content-type':'text/plain'}}).catch(()=>{}); sent=true; }catch(_){ } }
-  if(!sent){ usGive(US.acc,tabs,hr); return false; }
-  US.acts={}; if(out.perf!=null) US.perf=null; if(out.ld) US.ldSent=true;
+  if(!sent){ usGive(US.acc,tabs,hr); if(US.tr) usTrGive(US.tr,tp); return false; }   // (-112) the paths go back too; ctl was never cleared
+  US.acts={}; US.ctl={}; if(out.perf!=null) US.perf=null; if(out.ld) US.ldSent=true;
   for(const e of (out.errs||[])){ const x=US.errs.get(e.m+'\u0001'+e.f+':'+e.l); if(x) x.c=0; }   // sent once; later hits ride as a count
   US.lastSent=now; return true;
 }
@@ -146,6 +216,7 @@ export function __boot_usage_1(){
   US.paused=!!window.__ME.usagePaused;
   const vis=typeof document==='undefined'||document.visibilityState!=='hidden';
   US.acc=usAcc(usNow(),state.view||'markets',vis);
+  US.tr=usTr(usNow(),state.view||'markets');   // (-112) this page load's tab path starts on the tab it opened on
   const onIn=()=>{ if(US.acc) usInput(US.acc,usNow()); };
   for(const ev of ['pointerdown','pointermove','keydown','wheel','scroll','touchstart'])
     try{ document.addEventListener(ev,onIn,{passive:true,capture:true}); }catch(_){ }
@@ -181,7 +252,9 @@ function usageCardHtml(){
   const top=d&&d.tabs&&d.tabs[0]?esc(d.tabs[0].label):'—';
   return '<div class="dm-sh" style="padding:0 0 6px">Your usage</div>'
     // (build 2026.09.24-110 follow-up) everything the member guide (docs.html) lists, in the same order
-    +'<div class="us-disc">The operator can see this summary for every member: which tabs you open and for how long (only while the page is visible and you have used it in the last five minutes); roughly which hour of the week that was (Eastern time); the kind of device (desktop, mobile or tablet, installed or not); how many times you use a few features (calls, targets, alerts, shares, CSV exports, asks, AI reports, ticker drawer opens, linking Telegram, turning on push — the count only, never which ticker); and, to catch bugs, how long the page took to first show the markets table, which build your tab is running, how many times you load the page, and any JavaScript errors it hit (the error message with quoted text removed, cut to 200 characters, and file:line). It never records what you search, which filters or columns you set, or which tickers you look at. Opening your detail is logged in the admin audit. Kept '+((d&&d.keepDays)||30)+' days, then only sitewide totals remain — except a yes/no per week you were active (for join-week retention), kept 8 weeks, and one total per month (minutes on screen and active days, for month-over-month trends), kept for this month and last.</div>'
+    +'<div class="us-disc">The operator can see this summary for every member: which tabs you open and for how long (only while the page is visible and you have used it in the last five minutes); roughly which hour of the week that was (Eastern time); the kind of device (desktop, mobile or tablet, installed or not); how many times you use a few features (calls, targets, alerts, shares, CSV exports, asks, AI reports, ticker drawer opens, linking Telegram, turning on push — the count only, never which ticker); and, to catch bugs, how long the page took to first show the markets table, which build your tab is running, how many times you load the page, and any JavaScript errors it hit (the error message with quoted text removed, cut to 200 characters, and file:line). It never records what you search, which tickers you look at or your filter values, and which filters or columns you set is never linked to you. Opening your detail is logged in the admin audit. Kept '+((d&&d.keepDays)||30)+' days, then only sitewide totals remain — except a yes/no per week you were active (for join-week retention), kept 8 weeks, and one total per month (minutes on screen and active days, for month-over-month trends), kept for this month and last.</div>'
+    // (build 2026.09.24-112) the sitewide-only counts, said separately because nobody's name is on them
+    +'<div class="us-disc">Also collected, sitewide and not linked to you (totals with no member attached, kept 90 days): navigation paths — which tab people move to from which, and the first tab a page load settles on; control-usage counts from a fixed list — the Markets column picker (which column), window and scope buttons, filter presets (the preset name only), CSV and share buttons, drawer sections, and whether a search box was used (never the text); and screen time per tab by device class. Never text, never tickers, never filter values beyond those preset names. Paused, you add nothing to these either.</div>'
     +(d&&d.ok&&!paused?'<div class="us-kpis">'+k('active days · '+(d.keepDays||30)+'d',String(d.activeDays||0))+k('on screen',usFmtH(d.ms||0))+k('top tab',top)+'</div>'
       +usMonthsHtml(d)
       +((d.acts||[]).some(a=>a.n>0)?'<div class="us-acts">'+(d.acts||[]).filter(a=>a.n>0).map(a=>'<span class="acc-chip on">'+esc(US_ACT_CHIP[a.key]||a.key)+' '+(+a.n||0)+'</span>').join('')+'</div>':''):'')
@@ -204,10 +277,12 @@ async function usagePause(on){
     if(r.ok&&d.ok){
       US.paused=!!d.paused; if(window.__ME) window.__ME.usagePaused=US.paused;
       if(US.paused&&US.acc) US.acc.acc={};                    // what was pending goes too: paused means from the click
-      if(US.paused){ US.acts={}; US.perf=null; US.errs.clear(); }   // (-110) counters, the paint sample and errors too
-      else if(US.acc) US.lastSent=0;
+      if(US.paused){ US.acts={}; US.perf=null; US.errs.clear(); US.ctl={}; US.tr=null; }   // (-110) counters, the paint sample and errors too; (-112) paths and controls
+      else { if(US.acc) US.lastSent=0;
+        // (-112) a fresh path from the tab on screen; this load's entry tab is not counted again
+        US.tr=usTr(usNow(),state.view||'markets'); US.tr.enDone=true; }
     }
   }catch(_){ }
   US.busy=false; usageMeLoad();
 }
-export { US, usUnquote, usAcc, usCounting, usGive, usHrAdd, usInput, usSetTab, usSetVis, usSettle, usTake, usTakeHr, usageAct, usageCardHtml, usageErr, usageFirstPaint, usageFlush, usageMeLoad, usagePaint, usagePause, usageView };
+export { US, US_CONTROLS, US_CTL_SET, usCtlKeys, usTr, usTrGive, usTrSettle, usTrTake, usTrView, usageCtl, usageSearch, usUnquote, usAcc, usCounting, usGive, usHrAdd, usInput, usSetTab, usSetVis, usSettle, usTake, usTakeHr, usageAct, usageCardHtml, usageErr, usageFirstPaint, usageFlush, usageMeLoad, usagePaint, usagePause, usageView };

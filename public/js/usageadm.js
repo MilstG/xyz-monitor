@@ -11,10 +11,15 @@
 // affected tab's reach before/after; the post-deploy verdict card; the error triage list with a
 // resolve toggle (POST /api/admin/usage/errors — the only write this fold makes, by signature).
 // Marker details are operator config (feature keys, build stamps) and still go through esc().
+// (build 2026.09.24-112) Sitewide sections (no member in any of them): tab paths (top transitions,
+// "where people go from X", entry tabs) with a READ-ONLY suggested nav order; control usage per tab
+// with "never used in range" highlighted and the quiet-controls list; time per tab by device class.
+// Tab labels, control keys and values all come from the payload and still go through esc().
 import { el, esc } from "./core.js";
 
 const UA={r:7,data:null,err:null,loading:false,loadedAt:0,msort:{k:'days',d:-1},tsort:{k:'ms',d:-1},sel:null,detail:null,wired:false,
-  triBusy:null,triErr:null};   // (-111) the triage toggle in flight, and its last error
+  triBusy:null,triErr:null,   // (-111) the triage toggle in flight, and its last error
+  pathTab:null,ctlTab:null};   // (-112) the tab picked for "where people go from X", and for its controls
 const UA_STALE_MS=60000;
 
 async function uaLoad(){
@@ -213,6 +218,78 @@ function uaMarksHtml(D){
     +'<div class="acc-note">Reach = members who opened the tab ÷ members active (≥1 min on screen) in the window: the 7 ET days before the change day against the 7 after it, or the days since (“Nd”); the change day itself is in neither. “small n” = under 5 active members. Windows are clipped to the '+(D.keepDays||30)+'-day per-member retention. Markers are operator config history (no member data), kept 90 days.</div>';
 }
 
+// ---- (build 2026.09.24-112) sitewide: tab paths, the suggested nav order, controls, device split -------
+const UA_DEV_LBL={desktop:'desktop',mobile:'mobile',tablet:'tablet',pwa:'PWA'};
+function uaSelHtml(kind,opts,cur){
+  return '<select class="us-sel" data-uasel="'+kind+'" aria-label="pick a tab">'+opts.map(o=>'<option value="'+esc(o.key)+'"'+(o.key===cur?' selected':'')+'>'+esc(o.label)+'</option>').join('')+'</select>';
+}
+function uaSplitRows(rows,lblOf){
+  return rows.map(r=>{ const w=Math.max(0,Math.min(100,(+r.share||0)*100));
+    return '<div class="us-fr"><span>'+esc(lblOf(r))+'</span><span class="us-track"><span style="width:'+w.toFixed(1)+'%"></span></span><span class="v">'+(+r.n||0)+' · '+Math.round(w)+'%</span></div>'; }).join('');
+}
+function uaPathsHtml(S){
+  const P=S&&S.paths; if(!P) return '';
+  const head='<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Tab paths · sitewide</div>';
+  const top=(P.top||[]).length?'<div class="us-tw" style="border:0"><table class="us-tbl us-paths"><thead><tr><th>from</th><th>to</th><th class="n">times</th><th class="n">share</th></tr></thead><tbody>'
+    +P.top.map(e=>'<tr><td>'+esc(e.fromLabel||e.from)+'</td><td>→ '+esc(e.toLabel||e.to)+'</td><td class="n">'+(+e.n||0)+'</td><td class="n">'+uaPct(e.share)+' <span class="us-bar b" style="width:'+Math.round((+e.share||0)*60)+'px"></span></td></tr>').join('')
+    +'</tbody></table></div>':'<div class="acc-note" style="margin:0">No tab-to-tab moves in this range yet.</div>';
+  const from=P.from||[];
+  if(!UA.pathTab||!from.some(x=>x.key===UA.pathTab)) UA.pathTab=from.length?from[0].key:null;
+  const sel=from.find(x=>x.key===UA.pathTab);
+  const out=from.length?'<div class="us-row" style="margin:0 0 var(--sp-2)"><span class="acc-mu">where people go from</span> '+uaSelHtml('path',from,UA.pathTab)
+    +(sel?' <span class="acc-mu">'+(+sel.n||0)+' moves</span>':'')+'</div>'+(sel?uaSplitRows(sel.to||[],r=>r.label||r.key):''):'<div class="acc-note" style="margin:0">—</div>';
+  const E=P.entry||{};
+  const entry=(E.rows||[]).length?uaSplitRows(E.rows,r=>r.label||r.key):'<div class="acc-note" style="margin:0">No page loads settled on a tab in this range yet.</div>';
+  return head+'<div class="us-grid2"><div class="us-card"><h4>Top transitions</h4><div class="sub">tab → tab moves in range, top 15 of '+(+P.total||0)+' (a tab left inside 2s is a bounce and skipped; re-selecting the same tab is not a move)</div>'+top+'</div>'
+    +'<div class="us-card"><h4>Where people go next</h4><div class="sub">the outbound split of one tab’s moves</div>'+out
+    +'<h4 style="margin-top:var(--sp-3)">Entry tabs</h4><div class="sub">the first tab each page load settled on ('+(+E.total||0)+' loads)</div>'+entry+'</div></div>'
+    +uaNavHtml(S.nav);
+}
+// Read-only: the ribbon is changed in Features, never from here.
+function uaNavHtml(N){
+  if(!N||!(N.current||[]).length) return '';
+  const line=(xs)=>xs.map((x,i)=>'<span class="us-navk">'+(i+1)+'</span>'+esc(x.label||x.key)).join(' <span class="acc-mu">·</span> ');
+  return '<div class="us-card us-nav" style="margin-top:var(--sp-3)"><h4>Suggested order'+(N.same?' <span class="acc-chip on">matches the current order</span>':'')+'</h4>'
+    +'<div class="sub">movable tabs ranked by reach × hours in range (ties keep the current place) — a suggestion only; menus and moves live in Features</div>'
+    +'<div class="us-navl"><b>suggested</b> '+line(N.suggested||[])+'</div><div class="us-navl"><b>current</b> '+line(N.current||[])+'</div></div>';
+}
+function uaCtlWord(x){ return esc(x.control)+(x.value!=null?' = <span class="mono">'+esc(x.value)+'</span>':''); }
+function uaControlsHtml(S){
+  const C=S&&S.controls; if(!C) return '';
+  const G=(C.groups||[]);
+  const head='<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Controls · sitewide · '+(+C.total||0)+' uses</div>';
+  if(C.error) return head+'<div class="acc-note neg" style="margin:0">control allowlist unavailable — '+esc(C.error)+'</div>';
+  if(!UA.ctlTab||!G.some(g=>g.tab===UA.ctlTab)) UA.ctlTab=(G.find(g=>g.tab==='markets')||G[0]||{}).tab||null;
+  const g=G.find(x=>x.tab===UA.ctlTab);
+  let tbl='';
+  if(g){
+    const cols=(g.items||[]).filter(x=>x.control==='col-on'||x.control==='col-off');
+    const rows=(g.items||[]).filter(x=>!(x.control==='col-on'||x.control==='col-off')||x.n>0);
+    tbl='<div class="us-tw" style="border:0"><table class="us-tbl us-ctl"><thead><tr><th>control</th><th class="n">uses</th></tr></thead><tbody>'
+      +rows.map(x=>'<tr'+(x.n===0?' class="us-never"':'')+'><td>'+uaCtlWord(x)+(x.n===0?' <span class="acc-chip warn">never used in range</span>':'')+'</td><td class="n">'+(+x.n||0)+'</td></tr>').join('')
+      +'</tbody></table></div>'
+      +(cols.length&&g.colsNever?'<div class="acc-note" style="margin:var(--sp-1) 0 0">'+(+g.colsNever.length||0)+' of '+new Set(cols.map(x=>x.value)).size+' columns never toggled either way in range'+(g.colsNever.length?': <span class="mono">'+g.colsNever.map(esc).join(' ')+'</span>':'')+'</div>':'')
+      +(g.active?'':'<div class="acc-note" style="margin:var(--sp-1) 0 0">No screen time on this tab in range, so its controls are not called quiet.</div>');
+  }
+  const Q=C.quiet||[];
+  const quiet=Q.length?'<div class="us-quiet">'+Q.map(q=>'<span class="acc-chip warn" title="'+esc(q.key)+'">'+esc(q.label)+' · '+uaCtlWord(q)+'</span>').join('')+'</div>'
+    :'<div class="acc-note" style="margin:0">Every control on a tab people used was used at least once.</div>';
+  return head+'<div class="us-grid2"><div class="us-card"><h4>Controls by use</h4><div class="sub">'+uaSelHtml('ctl',G.map(x=>({key:x.tab,label:x.label+' · '+(+x.n||0)})),UA.ctlTab)+' allowlisted controls, most used first</div>'+tbl+'</div>'
+    +'<div class="us-card"><h4>Quiet controls · '+Q.length+'</h4><div class="sub">never used in range, on tabs that had screen time — candidates to simplify, like the quiet tabs</div>'+quiet+'</div></div>'
+    +'<div class="acc-note">Counts only, from a fixed allowlist of '+(+C.allowlist||0)+' control keys (column ids, window and scope options, preset ids, CSV, share, drawer sections, “search used”). Never text, never a ticker, never a filter value. Stored without a member id.</div>';
+}
+function uaDevicesHtml(S){
+  const D=S&&S.devices; if(!D) return '';
+  const cls=D.classes||['desktop','mobile','tablet','pwa'], rows=D.rows||[];
+  const head='<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Device split per tab · sitewide</div>';
+  if(!rows.length) return head+'<div class="acc-note" style="margin:0">No screen time in this range yet.</div>';
+  const leg='<div class="us-mixleg">'+cls.map((c,i)=>'<span><i class="c'+i+'"></i>'+esc(UA_DEV_LBL[c]||c)+'</span>').join('')+'</div>';
+  return head+'<div class="us-card">'+leg+rows.map(r=>{ const tot=+r.ms||0;
+    return '<div class="us-devr"><span>'+esc(r.label||r.key)+'</span><span class="us-mix">'+cls.map((c,i)=>{ const v=+((r.dev||{})[c])||0; return v>0&&tot>0?'<span class="c'+i+'" style="width:'+(v/tot*100).toFixed(1)+'%" title="'+esc(UA_DEV_LBL[c]||c)+' '+Math.round(v/tot*100)+'%"></span>':''; }).join('')+'</span><span class="v">'+uaHours(tot)+'</span></div>'; }).join('')
+    +'</div><div class="acc-note">Screen time on each tab by the device class it came from (desktop, mobile, tablet; PWA = installed, any size). Kept '+(+S.keepDays||90)+' days, without a member id.</div>';
+}
+function uaSiteHtml(D){ const S=D&&D.site; if(!S) return ''; return uaPathsHtml(S)+uaControlsHtml(S)+uaDevicesHtml(S); }
+
 // ---- the daily-active chart: bars per ET day + the trailing 7-day mean ---------------------------
 function uaDauSvg(series,marks){
   const W=640,H=150,P={l:26,r:6,t:8,b:20}, n=series.length||1;
@@ -337,7 +414,7 @@ function uaRender(){
       +'<td class="n">'+(m.paused?'':uaDelta(m.trend))+'</td></tr>').join('')
     +'</tbody></table></div>'+uaDetailHtml()
     +'<div class="acc-note">“Lapsed” = no activity for more than 10 days. Opening a member’s detail is logged (All messages → Read log); these sitewide numbers are not. Members see their own summary, and can pause it, in Messages.</div>';
-  box.innerHTML='<div class="us-row">'+seg+chips+'</div>'+kpis+dau+uaMarksHtml(D)+tabs+adopt+members+uaHealthHtml(D.health);
+  box.innerHTML='<div class="us-row">'+seg+chips+'</div>'+kpis+dau+uaMarksHtml(D)+tabs+uaSiteHtml(D)+adopt+members+uaHealthHtml(D.health);   // (-112) the sitewide sections after the tab table
 }
 
 function uaWire(){
@@ -355,5 +432,8 @@ function uaWire(){
     const row=e.target.closest('[data-uah]'); if(row){ uaOpenMember(row.dataset.uah); return; }
   });
   box.addEventListener('keydown',(e)=>{ const row=e.target.closest&&e.target.closest('[data-uah]'); if(row&&e.key==='Enter') uaOpenMember(row.dataset.uah); });
+  // (-112) the two tab pickers (a view choice only — nothing is fetched or written)
+  box.addEventListener('change',(e)=>{ const s=e.target.closest&&e.target.closest('[data-uasel]'); if(!s) return;
+    if(s.dataset.uasel==='path') UA.pathTab=s.value; else if(s.dataset.uasel==='ctl') UA.ctlTab=s.value; uaRender(); });
 }
-export { UA, openUsageAdm, uaCohortHtml, uaDauSvg, uaFunnelHtml, uaHealthHtml, uaHeatSvg, uaMarksHtml, uaRegressCard, uaRender, uaTriage, uaTriageHtml };
+export { UA, openUsageAdm, uaCohortHtml, uaControlsHtml, uaDauSvg, uaDevicesHtml, uaFunnelHtml, uaHealthHtml, uaHeatSvg, uaMarksHtml, uaNavHtml, uaPathsHtml, uaRegressCard, uaRender, uaSiteHtml, uaTriage, uaTriageHtml };

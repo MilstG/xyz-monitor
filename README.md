@@ -646,6 +646,39 @@ instant, and the per-IP rate limit stops being a per-user problem.
     month's screen time per covered day with last month's (blank until both cover a week). The first
     open backfills them from the kept daily rows and notes the first day covered. Disclosed on the
     member's card (which now lists their months), in the member guide and here.
+- **Usage: sitewide tab paths, control usage and quiet controls, device split per tab**
+  (build 2026.09.24-112) — roadmap item 2. Everything here is **sitewide only**: stored under
+  `uid '0'` in `usage_day`, never a member's uid (the beacon's member is used only to refuse a
+  paused or disabled account and to cap what one account adds per ET day, in memory), kept **90
+  days**. A paused member's beacon contributes nothing (the route and `usageRecord` both refuse it,
+  and the browser stops counting at the click).
+  - **Tab paths** (`kind='tr'`, key `<from>><to>`, both tab ids of the feature manifest): counted
+    from `showView` — a move counts once the destination has held the screen **2s** (a quicker exit
+    is a bounce: A → B (1s) → C counts A→C), re-selecting the tab you are on is not a move. The first
+    tab a page load settles on is its **entry tab** (`kind='en'`, once per page session at the gate).
+    The fold shows the **top 15 transitions**, **"where people go from X"** (pick a tab → its
+    outbound split) and entry tabs, plus a read-only **suggested order** line: the movable tabs
+    ranked by reach × hours in range, beside the ribbon's current order (nothing is reordered).
+  - **Control usage** (`kind='ctl'`, key `<tab>.<control>[=<value>]`): a fixed allowlist, the
+    `US_CONTROLS` table in `public/js/usage.js`, counted at each control's existing handler — the
+    Markets column picker (`markets.col-on=<id>` / `col-off`, ids from the fixed column list), the
+    window / group / weight / scope / side / lookback segmented controls (values from each control's
+    fixed option set), filter presets (`markets.preset=watch|notes|pos|clear`), CSV and share buttons
+    per tab, the drawer's section controls (it has no collapsible sections: candle window, full
+    signal history, all news, derivs refresh, share), and **search used** (one count per typing
+    burst, never the text). The server parses **that same table text** at boot
+    (`src/usage-controls.js`, strict JSON between marker comments) and drops every other key, so
+    browser and server cannot drift; a parity test pins it and the column ids against `base.js`.
+    Clamped per beacon (≤ 20 per key, ≤ 40 keys; transitions ≤ 30 per key and no more than the
+    accepted wall time can hold at one per 2s) and per account per ET day (2,000). The fold lists
+    each tab's controls by use with **"never used in range"** highlighted, and a **Quiet controls**
+    list (never used, on tabs that had screen time) — the control-level twin of the quiet-tab flag;
+    columns never toggled either way are summarised in one line.
+  - **Device split per tab** (`kind='tdev'`, key `<tab>|desktop|mobile|tablet|pwa`, ms): screen time
+    per tab by device class, as a stacked bar per tab.
+  - Disclosed on the member's card, in the member guide and here: sitewide (not linked to you)
+    navigation paths and control-usage counts; never text, tickers or filter values beyond the
+    allowlisted preset ids.
 - **Admin panel folds** — the panel had grown to eight full-height boxes, so reaching the one you
   wanted meant scrolling past the seven you did not. Every segment is now a collapsed row naming
   what is inside it, with an expand-all/collapse-all control. Each fold wraps its box from

@@ -17,7 +17,7 @@ import { renderDrawerPos, savePrefs } from "./prefs.js";
 import { aiPick, openAiReport } from "./report.js";
 import { shChartCard, shSvgPng, shSvgResolve, shThemeVar } from "./share.js";
 import { EV_LABELS, fillDrawerNews, fmtAge } from "./trend.js";
-import { usageAct } from "./usage.js";
+import { usageAct, usageCtl } from "./usage.js";
 
 
 // ===== per-ticker detail drawer =====
@@ -205,7 +205,7 @@ async function loadDrawerCandles(coin){
     _dcand={coin,days,cd};
     const seg=[3,7,14,30,90].map(d=>`<button type="button" class="cdtf${d===days?' on':''}" data-d="${d}">${d}d</button>`).join('');
     box.innerHTML=`<div class="dsec" style="display:flex;align-items:center;gap:8px">Hourly candles <span class="cdtf-seg" style="margin-left:auto">${seg}</span></div>`+candleSvg(cd);
-    box.querySelectorAll('.cdtf').forEach(b=>b.addEventListener('click',()=>{ state.candTf=+b.dataset.d; loadDrawerCandles(coin); }));
+    box.querySelectorAll('.cdtf').forEach(b=>b.addEventListener('click',()=>{ usageCtl('drawer.candles='+b.dataset.d); state.candTf=+b.dataset.d; loadDrawerCandles(coin); }));
     attachLineHover();
   }catch(_){ }
 }
@@ -353,7 +353,7 @@ function renderDerivs(box,coin,d){
 function dzWire(box,coin,d){
   const btn=box.querySelector('#dzref');
   if(btn){ if(d.refreshInMs>0){ btn.disabled=true; btn.textContent=`refresh \u00b7 ${Math.ceil(d.refreshInMs/1000)}s`; setTimeout(()=>{ if(state.detail===coin&&btn.isConnected){ btn.disabled=false; btn.textContent='refresh'; } },d.refreshInMs+250); }
-    btn.onclick=async()=>{ btn.disabled=true; btn.textContent='\u2026';
+    btn.onclick=async()=>{ usageCtl('drawer.derivs-refresh'); btn.disabled=true; btn.textContent='\u2026';
       try{ const r=await fetch('/api/derivs/refresh',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({coin})});
         const j=await r.json().catch(()=>null);
         if(r.status===429&&j&&j.retryInMs!=null){ btn.textContent=`cooldown \u00b7 ${Math.ceil(j.retryInMs/1000)}s`; setTimeout(()=>{ if(state.detail===coin) loadDrawerDerivs(coin); },j.retryInMs+250); return; }
@@ -414,7 +414,7 @@ async function loadDrawerLedger(coin){
       +`</div>`
       +(chips?`<div class="dsplit" style="flex-wrap:wrap;gap:6px">${chips}</div>`:'');
     const fb=el('dledger-full');
-    if(fb) fb.onclick=()=>{ const t=d.ticker||coin; closeDetail(); openSigHistory(t); };
+    if(fb) fb.onclick=()=>{ usageCtl('drawer.ledger-full'); const t=d.ticker||coin; closeDetail(); openSigHistory(t); };   // (build 2026.09.24-112) counted, never the ticker
   }catch(_){ box.innerHTML=''; }
 }
 // Full history panel on the Signals tab, driven by the static #sighist-q search input.

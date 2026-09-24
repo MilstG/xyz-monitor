@@ -29,8 +29,27 @@
 //         both sides for a browser clock that is a little off — and they are scaled down to the
 //         accepted screen time. What they leave uncovered lands in the arrival hour (accounts.js).
 //   load  "this is the page load's first beacon": let through once per page session.
+//
+// (build 2026.09.24-112) Three sitewide fields ride through too (stored without the uid):
+//   tr    tab→tab transition counts. Merged per key (≤ maxTrN each, ≤ maxTrKeys keys); at accept the
+//         TOTAL is clamped to what the accepted wall time allows — a transition needs its destination
+//         held for trDwellMs, so a window of W ms holds at most floor(W / trDwellMs) + 1 of them.
+//   en    the page load's entry tab: let through once per page session, like load.
+//   ctl   control-use counts, merged per key (≤ maxCtlN each, ≤ maxCtlKeys keys).
 
-const DEF = { minGapMs: 30000, maxFlushMs: 120000, uidRate: 2, maxSids: 8, maxHeld: 5000, idleMs: 15 * 60000, maxActs: 50, maxErrs: 5, hrSlackMs: 60000, maxHrs: 8 };
+const DEF = { minGapMs: 30000, maxFlushMs: 120000, uidRate: 2, maxSids: 8, maxHeld: 5000, idleMs: 15 * 60000, maxActs: 50, maxErrs: 5, hrSlackMs: 60000, maxHrs: 8,
+  trDwellMs: 2000, maxTrN: 30, maxTrKeys: 40, maxCtlN: 20, maxCtlKeys: 40 };   // (build 2026.09.24-112)
+// (-112) Add counts `b` into a copy of `a`, per key, capped per key and in key count. Null-prototype
+// objects: the keys were validated upstream, and a copy never inherits anything either way.
+function addCounts(a, b, perKey, maxKeys) {
+  const out = Object.assign(Object.create(null), a || {});
+  let n = Object.keys(out).length;
+  for (const [k, v] of Object.entries(b || {})) {
+    if (k in out) out[k] = Math.min(perKey, out[k] + v);
+    else if (n < maxKeys) { out[k] = Math.min(perKey, v); n++; }
+  }
+  return out;
+}
 
 function createUsageGate(opts) {
   const o = Object.assign({}, DEF, opts || {});
@@ -39,7 +58,8 @@ function createUsageGate(opts) {
   const budget = new Map();   // uid -> {avail, ts}
   let heldN = 0;
 
-  const empty = (p) => !p || (!Object.keys(p.tabs || {}).length && !Object.keys(p.acts || {}).length && p.perf == null && !(p.errs || []).length && !p.load);
+  const empty = (p) => !p || (!Object.keys(p.tabs || {}).length && !Object.keys(p.acts || {}).length && p.perf == null && !(p.errs || []).length && !p.load
+    && !Object.keys(p.tr || {}).length && !Object.keys(p.ctl || {}).length && !p.en);   // (-112)
   // Merge a newer payload `b` into an older held one `a` (same page session, so the same build).
   function merge(a, b) {
     if (!a) return b;
@@ -51,6 +71,10 @@ function createUsageGate(opts) {
     out.hrs = Object.assign({}, a.hrs);
     for (const [k, v] of Object.entries(b.hrs || {})) if (k in out.hrs || Object.keys(out.hrs).length < o.maxHrs) out.hrs[k] = Math.min(1e9, (out.hrs[k] || 0) + v);
     out.load = !!(a.load || b.load);
+    // (-112) paths and controls add up; the entry tab is the first one the session named
+    out.tr = addCounts(a.tr, b.tr, o.maxTrN, o.maxTrKeys);
+    out.ctl = addCounts(a.ctl, b.ctl, o.maxCtlN, o.maxCtlKeys);
+    out.en = a.en || b.en || null;
     for (const e of b.errs || []) {
       const x = out.errs.find((y) => y.loc === e.loc && y.msg === e.msg);
       if (x) x.c = Math.min(o.maxActs, x.c + e.c); else if (out.errs.length < o.maxErrs) out.errs.push(Object.assign({}, e));
@@ -81,7 +105,13 @@ function createUsageGate(opts) {
     if (hs > tot) { for (const k of Object.keys(hrs)) hrs[k] = Math.floor(hrs[k] * tot / hs); }
     const load = !!p.load && !s.loaded;
     if (load) s.loaded = true;
-    const out = Object.assign({}, p, { tabs, hrs, load });
+    // (-112) transitions: no more than the accepted wall time can hold (one per trDwellMs of dwell)
+    const tr = Object.create(null);
+    let trLeft = Math.floor(sidCap / o.trDwellMs) + 1;
+    for (const [k, v] of Object.entries(p.tr || {})) { if (trLeft <= 0) break; const c = Math.min(v, trLeft); tr[k] = c; trLeft -= c; }
+    const en = p.en && !s.entered ? p.en : null;
+    if (en) s.entered = true;
+    const out = Object.assign({}, p, { tabs, hrs, load, tr, en });
     if (!empty(out)) s.last = now;
     return out;
   }
@@ -105,7 +135,7 @@ function createUsageGate(opts) {
         if (y.held && release) { const h = y.held; y.held = null; heldN--; release(uid, accept(y, h, now)); }
         drop(old);
       }
-      s = { uid, sid: sid || "", last: 0, held: null, loaded: false };
+      s = { uid, sid: sid || "", last: 0, held: null, loaded: false, entered: false };
       sess.set(k, s); set.add(k); byUid.set(uid, set);
     }
     if (s.last && now - s.last < o.minGapMs) {

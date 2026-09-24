@@ -15,7 +15,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.24-111";
+const VERSION = "2026.09.24-112";
 // (build 2026.09.24-107) Distinguishes this process from the last one in ETags built on
 // per-process counters (a restart must never 304 a client onto a different body).
 const BOOT_NONCE = Date.now().toString(36) + crypto.randomBytes(3).toString("hex");
@@ -1663,10 +1663,56 @@ async function buildServer() {
         if (Number.isFinite(ms) && ms > 0) hrs[k] = Math.min(USAGE_MAX_FLUSH_MS, ms);
       }
     }
-    return { tabs, pwa: b.pwa === true, acts, build, rawBuild, sid, perf, errs: build ? errs : [], hrs, load: !!build && b.ld === 1 };
+    // (build 2026.09.24-112) sitewide tab paths, the entry tab and control counts (usageSiteClamp)
+    const site = usageSiteClamp(b);
+    return { tabs, pwa: b.pwa === true, acts, build, rawBuild, sid, perf, errs: build ? errs : [], hrs, load: !!build && b.ld === 1,
+      tr: site.tr, en: site.en, ctl: site.ctl };
+  }
+  // (build 2026.09.24-112) The beacon's sitewide fields, all optional, all validated against allowlists:
+  //   tr   {'<from>><to>' -> n}: tab→tab transitions; both ends must be tab ids of the feature manifest
+  //        and differ; ≤ USAGE_MAX_TR_KEYS keys, each n clamped to USAGE_MAX_TR_N. The gate clamps the
+  //        total again to what the accepted wall time allows (one per 2s dwell).
+  //   en   the page load's entry tab (a tab id), once per page session (the gate).
+  //   ctl  {'<group>.<control>[=<value>]' -> n}: control uses; the key must be in the US_CONTROLS
+  //        allowlist (public/js/usage.js, parsed by src/usage-controls.js — the same text the browser
+  //        runs); ≤ USAGE_MAX_CTL_KEYS keys, each n clamped to USAGE_MAX_CTL_N.
+  // Every key is checked against a Set, so '__proto__', 'constructor' and friends are simply unknown;
+  // the output objects are null-prototype all the same. accounts.js stores all three under uid '0'.
+  const USAGE_MAX_TR_KEYS = 40, USAGE_MAX_TR_N = 30, USAGE_MAX_CTL_KEYS = 40, USAGE_MAX_CTL_N = 20;
+  const USAGE_CTL = require("./src/usage-controls").usageControls();
+  if (USAGE_CTL.error) log("usage: control allowlist unavailable (" + USAGE_CTL.error + ") — control counts are dropped");
+  const usageObj = (x) => x && typeof x === "object" && !Array.isArray(x);
+  function usageSiteClamp(b) {
+    const tr = Object.create(null), ctl = Object.create(null);
+    if (usageObj(b.tr)) {
+      let n = 0;
+      for (const [k, v] of Object.entries(b.tr)) {
+        if (n >= USAGE_MAX_TR_KEYS) break;
+        const i = typeof k === "string" ? k.indexOf(">") : -1;
+        if (i < 0) continue;
+        const from = k.slice(0, i), to = k.slice(i + 1);
+        if (from === to || !USAGE_TAB_KEYS.has(from) || !USAGE_TAB_KEYS.has(to)) continue;
+        const c = Math.trunc(Number(v));
+        if (!Number.isFinite(c) || c <= 0) continue;
+        tr[k] = Math.min(USAGE_MAX_TR_N, c); n++;
+      }
+    }
+    if (usageObj(b.ctl)) {
+      let n = 0;
+      for (const [k, v] of Object.entries(b.ctl)) {
+        if (n >= USAGE_MAX_CTL_KEYS) break;
+        if (!USAGE_CTL.keys.has(k)) continue;
+        const c = Math.trunc(Number(v));
+        if (!Number.isFinite(c) || c <= 0) continue;
+        ctl[k] = Math.min(USAGE_MAX_CTL_N, c); n++;
+      }
+    }
+    const en = typeof b.en === "string" && USAGE_TAB_KEYS.has(b.en) ? b.en : null;
+    return { tr, en, ctl };
   }
   function usageStore(uid, p, now) {
-    const r = ACCOUNTS.usageRecord(uid, p.tabs, p.dev, now, { acts: p.acts, build: p.build, perf: p.perf, errs: p.errs, hrs: p.hrs, load: p.load });
+    const r = ACCOUNTS.usageRecord(uid, p.tabs, p.dev, now, { acts: p.acts, build: p.build, perf: p.perf, errs: p.errs, hrs: p.hrs, load: p.load,
+      tr: p.tr, en: p.en, ctl: p.ctl });   // (build 2026.09.24-112) stored sitewide, without the uid
     if (r.stored) ACCOUNTS.touch(uid);
     return r;
   }
@@ -2365,7 +2411,11 @@ async function buildServer() {
     const key = [BOOT_NONCE, ACCOUNTS.usageGen(), r, ACCOUNTS.countUsers(), [...online].sort().join(","), stale, Math.floor(Date.now() / 60000)].join(".");
     let hit = usageBodies.get(r);
     if (!hit || hit.key !== key) {
-      const body = ACCOUNTS.usageSummary({ r, online, tabs: USAGE_TABS(), build: VERSION, stale });
+      // (build 2026.09.24-112) navOrder: the ribbon's movable tabs as the menus hold them now, for the
+      // read-only "suggested order" line (a menu move is a usage_mark, which bumps the cache key)
+      let navOrder = null;
+      try { navOrder = poller.getNavGroups().reduce((a, g) => a.concat(g.views || []), []); } catch (_) {}
+      const body = ACCOUNTS.usageSummary({ r, online, tabs: USAGE_TABS(), build: VERSION, stale, navOrder });
       body.publicOn = USAGE_PUBLIC; body.beacon = true;
       hit = { key, body, tag: 'W/"u' + crypto.createHash("sha1").update(key).digest("base64url").slice(0, 16) + '"' };
       usageBodies.set(r, hit);

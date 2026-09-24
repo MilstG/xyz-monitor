@@ -8,6 +8,7 @@ import { el, esc, fmtPrice, isoUtc, state, store } from "./core.js";
 import { fetchJSON } from "./data.js";
 import { openDetail } from "./drawer.js";
 import { aiPick } from "./report.js";
+import { usageCtl } from "./usage.js";
 
 
 // ===== actionable tab =====
@@ -30,7 +31,7 @@ function openActionable(){
   if(!_actWired){ _actWired=true;
     const seg=el('actside');
     if(seg) seg.addEventListener('click',(e)=>{ const b=e.target.closest('button[data-aside]'); if(!b) return;
-      _actSide=b.dataset.aside;
+      _actSide=b.dataset.aside; usageCtl('actionable.side='+b.dataset.aside);   // (build 2026.09.24-112) usage: sitewide control count
       seg.querySelectorAll('button').forEach(x=>x.classList.toggle('active',x===b));
       renderActionable(); });
     const ce=el('act-noearn'); if(ce) ce.addEventListener('change',renderActionable);

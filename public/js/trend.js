@@ -10,6 +10,7 @@ import { G, el, esc, fmtPrice, lazyCall, overlayPop, overlayPush, safeHref, stat
 import { fetchJSON } from "./data.js";
 import { openDetail } from "./drawer.js";
 import { warmCount } from "./nav.js";
+import { usageCtl, usageSearch } from "./usage.js";
 
 // News tab state — declared here because every reader and writer lives in this module (the split
 // moved it out of the signals-tab section, where nothing used it).
@@ -41,7 +42,7 @@ function openTrend(){
   if(!_trendWired){ _trendWired=true;
     const seg=el('trendside');
     if(seg) seg.addEventListener('click',(e)=>{ const b=e.target.closest('button[data-side]'); if(!b) return;
-      _trendSide=b.dataset.side;
+      _trendSide=b.dataset.side; usageCtl('trend.side='+b.dataset.side);   // (build 2026.09.24-112) usage: sitewide control count
       seg.querySelectorAll('button').forEach(x=>x.classList.toggle('active',x===b));
       renderTrend(); });
   }
@@ -528,7 +529,7 @@ function renderNews(){
 }
 function bindNews(box){
   const nf=box.querySelector('#nfilter');
-  if(nf){ let nfT=null; nf.oninput=()=>{ newsFilter=nf.value; clearTimeout(nfT); nfT=setTimeout(()=>{ renderNews(); const el2=document.getElementById('nfilter'); if(el2){ el2.focus(); el2.setSelectionRange(el2.value.length,el2.value.length); } },120); }; }
+  if(nf){ let nfT=null; nf.oninput=()=>{ usageSearch('news.search'); newsFilter=nf.value; clearTimeout(nfT); nfT=setTimeout(()=>{ renderNews(); const el2=document.getElementById('nfilter'); if(el2){ el2.focus(); el2.setSelectionRange(el2.value.length,el2.value.length); } },120); }; }
   box.querySelectorAll('[data-nm]').forEach(b=>b.onclick=()=>{ newsMode=b.dataset.nm; renderNews(); });
   box.querySelectorAll('[data-nv]').forEach(b=>b.onclick=()=>{ newsView=b.dataset.nv; renderNews(); });
   { const g=box.querySelector('#ntg-gear'); if(g) g.onclick=()=>{ newsTgOpen=!newsTgOpen; if(newsTgOpen) loadTgChannels(); renderNews(); }; }
@@ -586,7 +587,7 @@ function fillDrawerNews(){
   }
   s+=`<div style="display:flex;gap:10px;align-items:center;margin-top:5px"><span id="dnews-all" class="sec" style="cursor:pointer;font-size:var(--fs-xs);text-decoration:underline;text-underline-offset:2px" data-tip="jump to the News tab filtered to this name">all ${esc(r.ticker)} news \u2192</span><span style="flex:1"></span>${d.fetchedAt?`<span class="sec" style="font-size:var(--fs-xs)">fetched ${fmtAge(now-d.fetchedAt)} ago</span>`:''}</div>`;
   box.innerHTML=s;
-  const fb=el('dnews-all'); if(fb) fb.onclick=()=>{ newsFilter=String(r.ticker); newsMode='all'; showView('news'); };
+  const fb=el('dnews-all'); if(fb) fb.onclick=()=>{ usageCtl('drawer.news-all'); newsFilter=String(r.ticker); newsMode='all'; showView('news'); };
 }
 function fmtAge(ms){ if(ms==null) return ''; const h=ms/3600000; if(h<1) return Math.max(1,Math.round(ms/60000))+'m'; if(h<48) return h.toFixed(h<10?1:0)+'h'; return (h/24).toFixed(1)+'d'; }
 function sigRecFullPref(){ try{ return localStorage.getItem('xyz-sigrecfull')==='1'; }catch(_){ return false; } }

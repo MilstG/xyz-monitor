@@ -45,8 +45,9 @@ test("-109 usage store: beacons roll up per (ET day, member, kind, key) in one f
   A.usageRecord(ANN, { markets: 40000 }, "desktop", now);
   A.usageRecord(BOB, { trend: 30000 }, "mobile-pwa", now);
   assert.equal(A._db.prepare("SELECT COUNT(*) AS n FROM usage_day").get().n, 0, "nothing touches SQLite on the request path");
-  assert.equal(A.usagePending(), 7, "ann: markets, trend, device, hour; bob: trend, device, hour (the -110 heatmap row)");
-  assert.equal(A.usageFlush(), 7, "one row per (day, uid, kind, key)");
+  // (-112) + one sitewide device-per-tab row per (tab, class): markets|desktop, trend|desktop, trend|pwa (uid '0')
+  assert.equal(A.usagePending(), 10, "ann: markets, trend, device, hour; bob: trend, device, hour (the -110 heatmap row); 3 sitewide tdev rows");
+  assert.equal(A.usageFlush(), 10, "one row per (day, uid, kind, key)");
   assert.equal(A.usageGen(), g0 + 1);
   const row = A._db.prepare("SELECT * FROM usage_day WHERE uid = ? AND kind = 'tab' AND key = 'markets'").get(ANN);
   assert.equal(row.ms, 90000); assert.equal(row.n, 2); assert.equal(row.day, require("../src/compute").etDayStr(now), "day = the ET calendar day");
@@ -88,7 +89,7 @@ test("-109 usage store: pausing stops recording from the click on, and blanks th
   const now = Date.now();
   A.usageRecord(ANN, { markets: 90000 }, "desktop", now);
   assert.equal(A.setUsagePaused(ANN, true).paused, true);
-  assert.equal(A.usagePending(), 3, "what was recorded before the click stays (tab, device, hour)");
+  assert.equal(A.usagePending(), 4, "what was recorded before the click stays (tab, device, hour; (-112) + the sitewide device-per-tab row)");
   assert.deepEqual(A.usageRecord(ANN, { markets: 90000 }, "desktop", now), { ok: true, stored: false });
   assert.equal(A.usagePaused(ANN), true);
   const s = A.usageSummary({ r: 7, tabs: TABS, now });
@@ -287,7 +288,8 @@ test("-109 beacon: flushes through sendBeacon, keeps minutes inside the 30s gap,
     assert.equal(U.usageFlush(false), true);
     assert.match(sent[0][1].s, /^[0-9a-z]{12}$/, "(-110 follow-up) the per-page-load session id");
     // (-111) the same minutes split by clock hour (UTC hour index 0 here: t starts at 1,000,000 ms)
-    assert.deepEqual(sent[0], ["/api/usage", { tabs: { markets: 45000 }, pwa: true, s: U.US.sid, h: { 0: 45000 } }]);
+    // (-112) + the page load's entry tab (the first tab that held the screen for 2s)
+    assert.deepEqual(sent[0], ["/api/usage", { tabs: { markets: 45000 }, pwa: true, s: U.US.sid, h: { 0: 45000 }, en: "markets" }]);
     t += 10000; U.usageView("trend"); t += 5000;
     assert.equal(U.usageFlush(false), false, "inside the server's 30s gap: held, not dropped");
     t += 30000;

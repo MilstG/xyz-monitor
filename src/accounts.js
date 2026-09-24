@@ -143,7 +143,8 @@ function firstTickerRef(body) {
   return m ? m[1].toUpperCase() : "";
 }
 
-const { callRead, callTarget, callBarReaches, inCashSession, marketSessions, callSessionClose, etDayStr, etParts } = require("./compute");
+const { callRead, callTarget, callBarReaches, inCashSession, marketSessions, callSessionClose, etDayStr, etParts, FEATURES, NAV_VIEW_ORDER } = require("./compute");
+const { usageControls } = require("./usage-controls");   // (build 2026.09.24-112) the control allowlist
 const { homeMkt } = require("./sectors");
 
 function openAccounts(dataDir, opts) {
@@ -408,6 +409,14 @@ CREATE TABLE IF NOT EXISTS usage_day (
 --          previous month only, so the member "trend" at 30d has something to compare with.
 --   'hr'   now bucketed by the hour the minutes were SPENT in (the beacon carries them per hour),
 --          stored under that hour's ET day; the beacon's arrival hour is only the fallback.
+-- (build 2026.09.24-112) SITEWIDE-ONLY kinds: always uid '0', never a member's uid (the beacon's
+-- member is used only to refuse a paused one and to bound what one member can add per day):
+--   'tr'   key = '<from>><to>': tab→tab transitions (both tab ids of the manifest); n = times.
+--   'en'   key = a tab id: the page load's entry tab; n = page loads that settled there first.
+--   'ctl'  key = '<group>.<control>[=<value>]' from the US_CONTROLS allowlist (public/js/usage.js);
+--          n = uses. Never text, never a ticker, never a typed value.
+--   'tdev' key = '<tab>|<desktop|mobile|tablet|pwa>'; ms = screen time on that tab from that class.
+--   Kept USAGE_SITE_KEEP_DAYS (90) days, then deleted (the 30-day fold never touches uid '0').
 -- usage_err: one row per distinct error key, at most 200 per build; its message is truncated to
 -- 200 characters by the server and is browser-supplied, so every reader escapes it. Rows no hit
 -- has touched for the retention window go with the daily fold.
@@ -2640,6 +2649,8 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       SELECT substr(day, 1, 7) || '-01', uid, 'mo', substr(day, 1, 7), SUM(s >= 60000), SUM(s) FROM (SELECT day, uid, SUM(ms) AS s
         FROM usage_day WHERE kind = 'tab' AND uid <> '${USAGE_SITE}' GROUP BY day, uid) GROUP BY substr(day, 1, 7), uid`),
     tabMin: db.prepare(`SELECT MIN(day) AS d FROM usage_day WHERE kind = 'tab' AND uid <> '${USAGE_SITE}'`),
+    // (build 2026.09.24-112) the sitewide-only kinds age out at USAGE_SITE_KEEP_DAYS
+    siteDrop: db.prepare(`DELETE FROM usage_day WHERE uid = '${USAGE_SITE}' AND kind IN ('tr','en','ctl','tdev') AND day < ?`),
   };
   let usagePend = new Map(), usageErrPend = new Map(), usageGeneration = 0;
   // (build 2026.09.24-110 follow-up) Every error row there is (stored or pending): key -> {build,
@@ -2797,6 +2808,42 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     else usageErrPend.set(key, { key, build, loc: e.loc, msg: e.msg, firstAt: now, lastAt: now });
     return key;
   }
+  // ---- (build 2026.09.24-112) sitewide-only: tab paths, entry tabs, control usage, device per tab ----
+  // Written under uid '0' and nowhere else: the member id reaches this code only to refuse a paused or
+  // disabled member (usageRecord's first line) and to bound what one member can add per ET day (an
+  // in-memory counter, never stored). Keys are re-checked here against the same allowlists the server
+  // validated with, so a caller that skipped usageClamp still cannot mint a key.
+  const USAGE_SITE_KEEP_DAYS = 90;
+  const USAGE_SITE_PER_DAY = 2000;   // transitions + control uses one member can add per ET day
+  const USAGE_TR_N = 30, USAGE_CTL_N = 20, USAGE_SITE_KEYS = 40;
+  const USAGE_TAB_SET = new Set(FEATURES.filter((f) => f.kind === "tab").map((f) => f.key));
+  const USAGE_CTL = usageControls();
+  const USAGE_DEVS = ["desktop", "mobile", "tablet", "pwa"];
+  const usageDevClass = (d) => (/-pwa$/.test(d) ? "pwa" : d === "mobile" || d === "tablet" ? d : "desktop");
+  const usageSiteToday = new Map();   // uid -> {day, n}: in memory only
+  function usageSiteRecord(uid, day, tabs, dev, x) {
+    let tdev = 0, tr = 0, ctl = 0, en = 0;
+    const cls = dev ? usageDevClass(String(dev)) : null;
+    if (cls) for (const [k, ms] of Object.entries(tabs || {})) if (ms > 0 && USAGE_TAB_SET.has(k)) { usageAdd(USAGE_SITE, day, "tdev", k + "|" + cls, 1, ms); tdev += ms; }
+    let q = usageSiteToday.get(uid);
+    if (!q || q.day !== day) { if (usageSiteToday.size > 5000) usageSiteToday.clear(); q = { day, n: 0 }; usageSiteToday.set(uid, q); }   // a bound, not a policy
+    const take = (v, cap) => { const c = Math.min(cap, Math.trunc(Number(v)) || 0, USAGE_SITE_PER_DAY - q.n); if (c <= 0) return 0; q.n += c; return c; };
+    let keys = 0;
+    for (const [k, v] of Object.entries((x && x.tr) || {})) {
+      if (keys >= USAGE_SITE_KEYS) break;
+      const i = k.indexOf(">"), a = k.slice(0, i), b = k.slice(i + 1);
+      if (i < 0 || a === b || !USAGE_TAB_SET.has(a) || !USAGE_TAB_SET.has(b)) continue;
+      const c = take(v, USAGE_TR_N); if (c) { usageAdd(USAGE_SITE, day, "tr", k, c, 0); tr += c; keys++; }
+    }
+    keys = 0;
+    for (const [k, v] of Object.entries((x && x.ctl) || {})) {
+      if (keys >= USAGE_SITE_KEYS) break;
+      if (!USAGE_CTL.keys.has(k)) continue;
+      const c = take(v, USAGE_CTL_N); if (c) { usageAdd(USAGE_SITE, day, "ctl", k, c, 0); ctl += c; keys++; }
+    }
+    if (x && typeof x.en === "string" && USAGE_TAB_SET.has(x.en)) { usageAdd(USAGE_SITE, day, "en", x.en, 1, 0); en = 1; }
+    return { tdev, tr, ctl, en };
+  }
   // One accepted beacon: {tab -> ms} already validated and clamped by the server, plus the device.
   // (-110) `extra` = {acts: {csv|drawer-open -> n}, build, perf: ms|null, errs: [{msg, loc, c}]} —
   // validated and clamped by the server too.
@@ -2829,7 +2876,8 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       const key = usageErrNote(uid, build, e, t);
       if (key) { usageAdd(uid, day, "err", key, e.c, 0); errs += e.c; } else errDropped++;
     }
-    return { ok: true, stored: tot > 0 || acts > 0 || perf > 0 || errs > 0 || load > 0, ms: tot, acts, perf, errs, errDropped, load };
+    const site = usageSiteRecord(uid, day, tabs, dev, x);   // (build 2026.09.24-112) uid '0' only
+    return { ok: true, stored: tot > 0 || acts > 0 || perf > 0 || errs > 0 || load > 0, ms: tot, acts, perf, errs, errDropped, load, site };
   }
   // (build 2026.09.24-111) The heatmap's buckets: the beacon carries its minutes per clock hour
   // (`hrs` = {UTC hour index -> ms}; ET offsets are whole hours, so a UTC hour IS one ET hour), already
@@ -2913,7 +2961,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     const cut = usageDayShift(usageToday(t), -(USAGE_KEEP_DAYS - 1));   // oldest day still kept per member
     db.exec("BEGIN IMMEDIATE");
     let dropped, errs;
-    const extra = { mo: 0, marks: 0, triage: 0 };
+    const extra = { mo: 0, marks: 0, triage: 0, site: 0 };
     try {
       US.wkFill.run("0000-00-00");
       // (-110 follow-up) whole weeks: the Monday USAGE_WK_KEEP_DAYS before this week's is the oldest kept
@@ -2926,6 +2974,8 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       extra.mo = Number(US.moDrop.run(moCut).changes || 0);
       extra.marks = Number(US.markPrune.run(t - USAGE_MARK_KEEP_DAYS * 864e5).changes || 0);
       US.lastPrune.run(t - 864e5);
+      // (-112) the sitewide paths / controls / device-per-tab rows keep 90 days
+      extra.site = Number(US.siteDrop.run(usageDayShift(usageToday(t), -(USAGE_SITE_KEEP_DAYS - 1))).changes || 0);
       const sigs = new Set(US.errAll.all().map((e) => usageSig(e.key)));
       for (const r of US.triAll.all()) if (!sigs.has(r.sig)) { US.triDel.run(r.sig); extra.triage++; }
       db.exec("COMMIT");
@@ -2933,7 +2983,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     catch (e) { try { db.exec("ROLLBACK"); } catch (_) {} throw e; }
     for (const [uid, x] of [...usageLast]) if (t - x.at > 864e5) usageLast.delete(uid);
     if (errs) usageErrReload();
-    if (dropped || errs || extra.mo || extra.marks || extra.triage) usageGeneration++;
+    if (dropped || errs || extra.mo || extra.marks || extra.triage || extra.site) usageGeneration++;
     return Object.assign({ ok: true, cut, dropped, errs }, extra);
   }
   function setUsagePaused(uid, on) {
@@ -3161,6 +3211,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     // first-paint histograms per build (+ the last day each build was seen); errors per key.
     const actWho = new Map(), actHits = new Map(), heat = Array.from({ length: 7 }, () => new Array(24).fill(0));
     const perfHist = new Map(), errHits = new Map(), errWho = new Map(), errRows = [];
+    const site = { tr: new Map(), en: new Map(), ctl: new Map(), tdev: new Map() };   // (-112)
     const bump = (m, k, v) => m.set(k, (m.get(k) || 0) + v);
     const addTo = (m, k, v) => { if (!m.has(k)) m.set(k, new Set()); m.get(k).add(v); };
     for (const row of US.range.all(pFrom, today)) {
@@ -3182,6 +3233,12 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
         if (!perfHist.has(b)) perfHist.set(b, new Map());
         bump(perfHist.get(b), bin, row.n);
       } else if (row.kind === "err" && !o.lite) errRows.push(row);   // (-110 follow-up) kept to the two builds below
+      // (build 2026.09.24-112) the sitewide-only kinds (uid '0' by construction; read whatever the uid)
+      else if (o.lite) continue;
+      else if (row.kind === "tr") bump(site.tr, row.key, row.n);
+      else if (row.kind === "en") bump(site.en, row.key, row.n);
+      else if (row.kind === "ctl") bump(site.ctl, row.key, row.n);
+      else if (row.kind === "tdev") bump(site.tdev, row.key, row.ms);
     }
     const activeOn = new Map();   // day -> Set(uid)
     const uActive = new Map();    // uid -> {days, ms}
@@ -3279,6 +3336,9 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
         medMinPerDay: usageMed(memberDayMin),
         newMembers: newMembers.length, newActive: newMembers.filter((u) => uActive.has(u.uid)).length },
       series, tabs: tabRows, members: memberRows,
+      // (build 2026.09.24-112) sitewide: tab paths + entry tabs + the nav-order suggestion, control
+      // usage + quiet controls, time per tab by device class
+      site: o.lite ? null : usageSitewide(site, tabs, tabRows, o.navOrder, (actHits.get("drawer-open") || 0) > 0),
       funnel, heat: { ms: heat, total: heatTot, peak, coreShare: heatTot ? core / heatTot : null },
       cohorts: o.lite ? null : usageCohorts(today, members, USAGE_WK_COHORTS),
       health: { build, perf: { cur: perfOf(build), prev: perfOf(prev) },
@@ -3287,6 +3347,77 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
         // (-111) the post-deploy verdict for this build, and the error triage list
         regress: build && !o.lite ? usageRegress(build, now) : null,
         triage: o.lite ? null : usageTriage(now) } };
+  }
+  // (build 2026.09.24-112) The sitewide sections of the summary. `site` = the range's rows summed per
+  // key (Maps); `tabs` = the manifest's tabs [{key, label, gate}]; `tabRows` = the summary's tab table
+  // (reach, ms); `navOrder` = the ribbon's movable tabs in their current order.
+  //   paths     top 15 transitions; per tab, where people go from it (outbound split); entry tabs.
+  //   nav       a READ-ONLY suggested order of the movable tabs by reach × hours (ties keep the
+  //             current order), beside the current order. Nothing is ever reordered from here.
+  //   controls  per group every allowlisted control with its count (zero included), sorted by use;
+  //             "quiet" = never used in range on a tab that had screen time in range (a control on
+  //             a tab nobody opened says nothing about the control). Column toggles are summarised as
+  //             the columns never toggled either way, not listed one quiet row each.
+  //   devices   time per tab split desktop / mobile / tablet / PWA.
+  const USAGE_PATHS_TOP = 15;
+  function usageSitewide(site, tabs, tabRows, navOrder, drawerUsed) {
+    const label = new Map((tabs || []).map((t) => [t.key, t.label]));
+    const row = new Map((tabRows || []).map((t) => [t.key, t]));
+    const nameOf = (k) => label.get(k) || (k === "header" ? "Header (every tab)" : k === "drawer" ? "Ticker drawer" : k);
+    // paths
+    const edges = [];
+    for (const [k, n] of site.tr) {
+      const i = k.indexOf(">"), a = k.slice(0, i), b = k.slice(i + 1);
+      if (i < 0 || a === b || !label.has(a) || !label.has(b) || !(n > 0)) continue;
+      edges.push({ from: a, to: b, n });
+    }
+    edges.sort((x, y) => y.n - x.n || (x.from + ">" + x.to < y.from + ">" + y.to ? -1 : 1));
+    const total = edges.reduce((s, e) => s + e.n, 0);
+    const outOf = new Map();
+    for (const e of edges) { const x = outOf.get(e.from) || { key: e.from, label: nameOf(e.from), n: 0, to: [] }; x.n += e.n; x.to.push({ key: e.to, label: nameOf(e.to), n: e.n }); outOf.set(e.from, x); }
+    const from = [...outOf.values()].sort((a, b) => b.n - a.n || (a.key < b.key ? -1 : 1));
+    for (const x of from) for (const t of x.to) t.share = t.n / x.n;
+    const ens = [...site.en].filter(([k, n]) => label.has(k) && n > 0).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
+    const enTot = ens.reduce((s, x) => s + x[1], 0);
+    const paths = { total, top: edges.slice(0, USAGE_PATHS_TOP).map((e) => ({ from: e.from, fromLabel: nameOf(e.from), to: e.to, toLabel: nameOf(e.to), n: e.n, share: total ? e.n / total : 0 })),
+      from, entry: { total: enTot, rows: ens.map(([k, n]) => ({ key: k, label: nameOf(k), n, share: n / enTot })) } };
+    // the nav suggestion: movable tabs that are not switched off, by reach × hours
+    const cur = (navOrder || NAV_VIEW_ORDER).filter((k) => row.has(k) && row.get(k).gate !== "off");
+    const score = (k) => { const t = row.get(k); return (t.reach || 0) * (t.ms || 0) / 3600e3; };
+    const suggested = cur.map((k, i) => ({ key: k, label: nameOf(k), score: score(k), reach: row.get(k).reach, ms: row.get(k).ms, i }))
+      .sort((a, b) => b.score - a.score || a.i - b.i).map(({ i, ...x }) => x);
+    const nav = { current: cur.map((k) => ({ key: k, label: nameOf(k) })), suggested, same: suggested.every((x, i) => x.key === cur[i]) };
+    // controls
+    const groups = [], quiet = [];
+    let ctlTotal = 0;
+    for (const [g, ctrls] of Object.entries(USAGE_CTL.table)) {
+      const items = [];
+      for (const [c, vals] of Object.entries(ctrls)) for (const v of vals.length ? vals : [null]) {
+        const key = g + "." + c + (v == null ? "" : "=" + v);
+        items.push({ key, control: c, value: v, n: site.ctl.get(key) || 0 });
+      }
+      items.sort((a, b) => b.n - a.n || (a.key < b.key ? -1 : 1));
+      const n = items.reduce((s, x) => s + x.n, 0); ctlTotal += n;
+      const t = row.get(g);
+      const active = g === "header" ? total + enTot > 0 || [...row.values()].some((x) => x.ms > 0) : g === "drawer" ? drawerUsed || n > 0 : !!(t && t.ms > 0);
+      const cols = items.filter((x) => x.control === "col-on" || x.control === "col-off");
+      const colIds = [...new Set(cols.map((x) => x.value))];
+      const colsNever = colIds.filter((id) => !cols.some((x) => x.value === id && x.n > 0)).sort();
+      if (active) for (const x of items) if (x.n === 0 && x.control !== "col-on" && x.control !== "col-off") quiet.push({ tab: g, label: nameOf(g), key: x.key, control: x.control, value: x.value });
+      groups.push({ tab: g, label: nameOf(g), active, n, items, colsNever: colIds.length ? colsNever : null, gate: t ? t.gate : null });
+    }
+    const colGroup = groups.find((x) => x.colsNever && x.active);
+    const controls = { total: ctlTotal, groups, quiet, colsNever: colGroup ? { tab: colGroup.tab, label: colGroup.label, ids: colGroup.colsNever } : null, allowlist: USAGE_CTL.keys.size, error: USAGE_CTL.error || null };
+    // device split per tab
+    const dev = new Map();
+    for (const [k, ms] of site.tdev) {
+      const i = k.lastIndexOf("|"), tab = k.slice(0, i), c = k.slice(i + 1);
+      if (i < 0 || !label.has(tab) || !USAGE_DEVS.includes(c) || !(ms > 0)) continue;
+      const x = dev.get(tab) || { key: tab, label: nameOf(tab), ms: 0, dev: { desktop: 0, mobile: 0, tablet: 0, pwa: 0 } };
+      x.ms += ms; x.dev[c] += ms; dev.set(tab, x);
+    }
+    const devices = { classes: USAGE_DEVS.slice(), rows: [...dev.values()].sort((a, b) => b.ms - a.ms || (a.key < b.key ? -1 : 1)) };
+    return { keepDays: USAGE_SITE_KEEP_DAYS, paths, nav, controls, devices };
   }
   // One member's last USAGE_KEEP_DAYS days: minutes per day, tab mix, device mix. Shared by the
   // member's own card (usageMine) and the operator's drill-in (usageMember, which AUDITS).
@@ -3452,6 +3583,8 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     // (build 2026.09.24-111) markers, the regression check, error triage, stale builds, monthly rows
     usageMark, usageAlertOnce, usageBuildInfo, usageRegress, usageTriage, usageTriageSet, usageTriageSweep,
     usageLastBuild, usageStale, usageSig, USAGE_REG, USAGE_MARK_KEEP_DAYS, USAGE_MO_KEEP, USAGE_LOADS_PER_DAY,
+    // (build 2026.09.24-112) the sitewide-only kinds' bounds
+    USAGE_SITE_KEEP_DAYS, USAGE_SITE_PER_DAY, usageDevClass,
     pendingEscalations, markEscalated,
     setPxHistory,
     // browser push subscriptions — stored here, delivered by the server (which holds the keys)

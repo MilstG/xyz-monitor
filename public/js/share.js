@@ -24,6 +24,7 @@ import { BASKETS, dvbBasketDef, sparkline } from "./corr.js";
 import { fetchJSON } from "./data.js";
 import { drawerCandleCard, openDetail } from "./drawer.js";
 import { earnShareRows } from "./notes.js";
+import { usageCtl } from "./usage.js";
 
 // Columns that are not data: the ticker cell (rail, star, marker) and the personal position overlay.
 const SKIP_COLS = new Set(["ticker", "pos"]);
@@ -507,6 +508,7 @@ async function shareOpen(card) {
   // A chart is rasterised before it can be previewed, so its capture hands back a promise.
   if (card && typeof card.then === "function") { try { card = await card; } catch (_) { card = null; } }
   if (!card) { pushToast("nothing to share here"); return; }
+  usageCtl((state.detail ? "drawer" : state.view) + ".share");   // (build 2026.09.24-112) the share button, per tab (sitewide) — never the card
   cur = card; picked = picked || null;
   const s = sheetEl(); s.hidden = false; el("sharebg").hidden = false;
   overlayPush("share", shareClose);
