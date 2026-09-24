@@ -748,13 +748,18 @@ test("mobile suite -100: touch parity, mobile preset and PWA shell are fully wir
   assert.ok(app.includes("serviceWorker.register('/sw.js')"), "SW registration missing");
   assert.ok(srv.includes("PWA_MANIFEST") && srv.includes("PWA_SW"), "inline PWA payloads missing from server");
   // The worker lives in public/sw.js since -66 (it grew push handlers); the server reads it at
-  // boot with the old inline no-op as fallback. The contract stands either way: a fetch handler
-  // for installability, ZERO caching or interception — a stale client is worse than no client.
+  // boot with the old inline no-op as fallback. The contract: a fetch handler for installability,
+  // and (since build 2026.09.24-103) interception ONLY for this build's exact-stamped static assets —
+  // never /api, HTML or an unversioned URL; a stale client is still worse than no client. The
+  // behavioral half of this contract runs the worker in a vm (client-perf.test.js).
   assert.ok(/const PWA_SW = \(\(\) => \{/.test(srv) && srv.includes('"public", "sw.js"'), "PWA_SW must read the worker file at boot");
   assert.ok(/return "self\.addEventListener\('install'/.test(srv), "the inline no-op fallback must survive — installability must not break on a missing file");
   const swf = fs.readFileSync(path.join(__dirname, "..", "public", "sw.js"), "utf8");
   assert.ok(swf.includes('addEventListener("fetch"'), "SW needs a fetch handler for installability");
-  assert.ok(!swf.includes("caches") && !swf.includes("respondWith"), "SW must not cache or intercept — stale-client hazard");
+  assert.ok(swf.includes('const BUILD = "{{build}}";') && srv.includes('"sw.js"), "utf8").split("{{build}}").join(VERSION)'), "the worker's only cacheable stamp is the build the server stamps into it");
+  assert.ok(swf.includes('url.search !== "?v=" + BUILD') && swf.includes('if (!isVersionedAsset(url)) return;'), "SW intercepts nothing but exact-stamped assets — stale-client hazard");
+  assert.equal(swf.split("respondWith").length - 1, 1, "exactly one interception site");
+  assert.ok(swf.includes('k.indexOf(ASSET_PREFIX) === 0 && k !== ASSET_CACHE') , "activate purges every other build's cache");
   assert.ok(swf.includes('addEventListener("push"') && swf.includes("showNotification"), "the push leg renders notifications");
   assert.ok(swf.includes('addEventListener("notificationclick"'), "and a click lands the reader in the app");
   // Mobile CSS: sticky ticker column, full-width drawer, scrollable tab strip, touch targets.
@@ -922,7 +927,7 @@ test("deep archive + CHARTS tab: source + wiring manifest (store, capture lane, 
   assert.ok(app.includes("'markets','focus','funds','trend','charts'"), "HASH_VIEWS must route #charts");
   assert.ok(app.includes("'markets','trend','charts','report'"), "CRYPTO_VIEWS must keep charts visible in crypto scope");
   assert.ok(app.includes("{v:'charts',label:'Charts'}"), "command palette must reach charts");
-  assert.ok(app.includes("setHidden('view-charts'") && app.includes("if(v==='charts'){ if(el('view-charts')) openCharts();"), "showView must wire the charts section");
+  assert.ok(app.includes("setHidden('view-charts'") && app.includes("if(v==='charts'){ if(el('view-charts')) lazyCall('charts','openCharts');"), "showView must wire the charts section");
   // the crosshair/readout hover contract holds on every pane (standing requirement: all charts hover)
   assert.ok(app.includes("chHoverAll(p,tAt(e))") && app.includes("hover for OHLC"), "per-pane crosshair + OHLC readout wired");
   // intraday base stays under the route cap so the server never coarsens it off the 5m grid —
@@ -1402,7 +1407,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.24-102"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.24-103"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -1900,10 +1905,10 @@ test("whale wiring manifest: feature keys, routes, tab markup, terminal + planne
   assert.ok(ih.includes('data-view="funds"') && ih.includes('id="view-funds"'), "tab button + section in the shell");
   const app = require("./_client").clientSource();
   assert.ok(app.includes("'funds'") && /setHidden\('view-funds', v!=='funds'\)/.test(app), "showView wired");
-  assert.ok(/if\(v==='funds'\)\{ if\(el\('view-funds'\)\) openFunds\(\)/.test(app), "open hook");
-  assert.ok(/h==='whale'\|\|h==='13f'\) return termWhale/.test(app), "termExec routes whale");
+  assert.ok(/if\(v==='funds'\)\{ if\(el\('view-funds'\)\) lazyCall\('funds','openFunds'\)/.test(app), "open hook");
+  assert.ok(/h==='whale'\|\|h==='13f'\) return lazyCall\('insiders','termWhale'/.test(app), "termExec routes whale");
   assert.ok(app.includes("'fund','etf','whale'"), "TERM_VERBS carries whale (completion engine)");
-  assert.ok(app.includes("data-whale=") && app.includes("whlOpenFund(k)"), "news filings lane deep-links a whale row to the FUNDS tab, never a ticker drawer");
+  assert.ok(app.includes("data-whale=") && app.includes("lazyCall('funds','whlOpenFund',k)"), "news filings lane deep-links a whale row to the FUNDS tab, never a ticker drawer");
   assert.ok(app.includes("no prior filing ingested") && app.includes("share count not claimed"), "honest-null framing rendered, not implied");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   assert.ok(pol.includes("whale <FUND>") && pol.includes("whale season") && pol.includes("context.whales"), "planner grammar advertises the family and the watchlist rides the context");

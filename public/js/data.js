@@ -7,13 +7,12 @@ import { notifyNewBuild } from "./alerts.js";
 import { updateBenchNote } from "./backtest.js";
 import { COLS } from "./base.js";
 import { _earnLast, _newsLast, _setupLast, _sigLast, loadEarnSetups, loadEarnings, loadNews, loadSignals, renderMacroStrip } from "./calendar.js";
-import { DAY, HOUR, TF_MAP, TF_MS, activeRows, clamp, detectBenchmark, el, esc, fmtUsd, isoUtc, recomputeChanges, regimeDetail, setPrice, state } from "./core.js";
+import { DAY, HOUR, TF_MAP, TF_MS, activeRows, clamp, detectBenchmark, el, esc, fmtUsd, isoUtc, lazyLoaded, recomputeChanges, regimeDetail, setPrice, state } from "./core.js";
 import { COMPG, dailyReturns, openCorr, renderCompg } from "./corr.js";
-import { computeSqueeze, render, renderRegimeStrip, rowSessState, scheduleRender, updateMovers } from "./markets.js";
+import { computeSqueeze, mktPaintable, render, renderRegimeStrip, rowSessState, scheduleRender, updateMovers } from "./markets.js";
 import { _hsgLast, _liqLast, loadHousing, loadLiquidity } from "./notes.js";
 import { aiFmtAgo } from "./report.js";
 import { renderSectors } from "./sectors.js";
-import { renderDrawdown } from "./drawdown.js";
 import { loadTriggers } from "./triggers.js";
 
 
@@ -158,10 +157,24 @@ function applySnapshot(s){
     if(prev!=null&&prev!==sig) loadDaily();
     state._hmSig=sig; }
   updateBenchNote();
-  updateAggregates(); render(); updateMovers(); updateSyncProgress(); renderRegimeStrip();
+  // render() always derives + evaluates alerts; its DOM paint, the movers and the regime strip only
+  // run while Markets is on screen — otherwise G.mktDirty and showView('markets') / foregrounding
+  // paint once (build 2026.09.24-103).
+  updateAggregates(); render(); if(mktPaintable()){ updateMovers(); renderRegimeStrip(); } updateSyncProgress();
 }
 function applyDaily(d){ if(!d||!d.daily) return;
   if(!state._ohSnap) state.offHours = d.offHours || {closed:false};   // legacy path: only until a snapshot has shipped the fresher copy
+  // Unchanged-body skip (build 2026.09.24-103). The warm-up cadence pulls /api/daily every 20s and
+  // the server answers 304 while its content version (dataTs, the same value its ETag is minted
+  // from) holds — but fetch() turns a 304 into a 200 carrying the CACHED body, so every pull used to
+  // re-walk ~140 series, null every per-row memo (_dret/_wrL/_dlvl/...), and repaint the matrix and
+  // the sectors map from scratch for identical data. Skip when the same version has already been
+  // applied to the same row set: the key carries how many of the body's coins have a row, so a
+  // daily that landed before the first snapshot (boot races the two) still applies once rows exist.
+  if(d.dataTs){ let have=0; for(const coin in d.daily) if(state.rows.has(coin)) have++;
+    const key=d.dataTs+'|'+have+'|'+state.rows.size;
+    if(key===state._dailyKey) return;
+    state._dailyKey=key; }   // an unversioned body (older server, empty fallback) always applies
   for(const coin in d.daily){ const r=state.rows.get(coin); if(!r) continue;
     const arr=d.daily[coin];
     r.daily=Array.isArray(arr)?arr.map(p=>({t:p[0], c:p[1], h:p[2], v:p[3]})):r.daily;   // h/v are additive tuple columns (2026.07.24-04) — absent on an older server, undefined here
@@ -182,7 +195,7 @@ function applyDaily(d){ if(!d||!d.daily) return;
     // panel had no path back from empty and stayed broken-looking for the life of the page.
     if(COMPG._empty && el('compg') && !el('compg').hidden) renderCompg(); }
   if(!el('view-sectors').hidden) renderSectors();   // leaders map + sector corr fill in live as daily coverage grows
-  { const dv=el('view-drawdown'); if(dv&&!dv.hidden) renderDrawdown(); }   // the study is a pure function of these closes
+  { const dv=el('view-drawdown'), dd=lazyLoaded('drawdown'); if(dv&&!dv.hidden&&dd) dd.renderDrawdown(); }   // (-103: lazy tab — only an already-loaded study repaints; one still loading renders these closes on open)   // the study is a pure function of these closes
 }
 function updateAggregates(){ const rows=activeRows(); let v=0,o=0;
   for(const r of rows){ if(r.vol)v+=r.vol; if(r.oi)o+=r.oi; }

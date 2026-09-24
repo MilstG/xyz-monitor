@@ -5,11 +5,10 @@
 import { IS_ADMIN, applyHash, featureOn, tabVisible } from "./admin.js";
 import { showView } from "./backtest.js";
 import { earnDiffC, earnNext, earnSessLbl, loadEarnings, loadNews, secShort } from "./calendar.js";
-import { DAY, G, SCROLL_B, TF_MAP, activeRows, clamp, el, esc, fmtPrice, fmtUsd, inScope, median, state } from "./core.js";
+import { DAY, G, SCROLL_B, TF_MAP, activeRows, clamp, el, esc, fmtPrice, fmtUsd, inScope, lazyCall, median, state } from "./core.js";
 import { BASKETS, RATIO, basketByName, basketMutate, dailyReturns, isBasketName, loadBaskets, openCompg, openRatio, renderCorr, syncCorrLookback, tfLabel } from "./corr.js";
 import { computeDerived, fetchJSON, loadDaily, loadSnapshot, renderAskBudget, updateFreshTray } from "./data.js";
 import { openDetail } from "./drawer.js";
-import { termCongress, termEarnBackfill, termInsiders, termWhale } from "./insiders.js";
 import { applyTabOrder, applyTabVisibility, buildTabGroups, scheduleDaily, setWindow, startCycle, startEvents, wireTabDrag } from "./nav.js";
 import { epsFmt, epsPairFmt } from "./notes.js";
 import { loadPositions, prefsPullAll } from "./prefs.js";
@@ -429,10 +428,10 @@ function termExec(cmdStr){ const p=cmdStr.trim().split(/\s+/), h=p[0].toLowerCas
   if(h==='news'){ const rr=termFind(p[1]); const nn=p.slice(1).map(x=>/^\d+$/.test(x)?+x:null).find(x=>x!=null); return termNewsCmd(rr?rr.ticker.toUpperCase():null,nn); }
   if(h==='reports') return termReports();
   if(h==='fund'||h==='bs'||h==='balance') return termFund(p[1]);
-  if(h==='whale'||h==='13f') return termWhale(p.slice(1));
-  if(h==='congress') return termCongress(p.slice(1));
-  if(h==='insiders'||h==='form4') return termInsiders(p.slice(1));
-  if(h==='holds'||h==='who') return termWhale(['who'].concat(p.slice(1)));
+  if(h==='whale'||h==='13f') return lazyCall('insiders','termWhale',p.slice(1));
+  if(h==='congress') return lazyCall('insiders','termCongress',p.slice(1));
+  if(h==='insiders'||h==='form4') return lazyCall('insiders','termInsiders',p.slice(1));
+  if(h==='holds'||h==='who') return lazyCall('insiders','termWhale',['who'].concat(p.slice(1)));
   if(h==='etf'||h==='holdings') return termEtf(p[1]);
   if(h==='vs'||h==='compare'){ const a=termFind(p[1]), b=termFind(p[2]); return (a&&b)?termCompare(a,b):termErr('usage: vs <a> <b>'); }
   if(h==='comp'){ const cr=state.scope==='crypto';
@@ -443,7 +442,7 @@ function termExec(cmdStr){ const p=cmdStr.trim().split(/\s+/), h=p[0].toLowerCas
   if(h==='ratio') return termRatio(p.slice(1));
   if(h==='report'||h==='ai'){ const rr=termFind(p[1])||termFind(p[0]); return rr?termReport(rr):termErr('usage: report <ticker>'); }
   if(h==='earnings'||h==='earn'){ const a1=(p[1]||'').toLowerCase();
-    if(a1==='backfill') return termEarnBackfill(p.slice(2));
+    if(a1==='backfill') return lazyCall('insiders','termEarnBackfill',p.slice(2));
     if(!p[1]||['today','tomorrow','week','recent'].includes(a1)) return termEarnCal(a1||'today');
     const rr=termFind(p[1]); return rr?termEarnings(rr):termErr('usage: earnings [ticker | today | tomorrow | week | recent | backfill [days]]'); }
   if(h==='corr') return termCorr(p[1],p[2]);
@@ -1110,17 +1109,31 @@ function renderTreemap(){
   }
 
   // --- dispatch ------------------------------------------------------------
-  document.addEventListener('mousemove', function(e){
+  // rAF-coalesced (build 2026.09.24-103): this is a capture-phase listener on the whole document,
+  // so it used to run closest() + the title hoist on EVERY pointer event anywhere in the app — a
+  // fast mouse fires several per frame, and only the last position of a frame can ever be seen.
+  // The move now just records the latest target/coords and asks for one frame; the frame runs the
+  // exact dispatch the handler always ran, on the newest event. Same readouts, same crosshair,
+  // at most once per frame. (Touch paths below call handleSpark directly and are unaffected.)
+  var mv={e:null, raf:0};
+  function moveFrame(){ mv.raf=0; var e=mv.e; mv.e=null; if(!e) return;
     var t=e.target;
-    var spark = t.closest && t.closest('svg.tspark, svg[data-series]');
+    var spark = t && t.closest && t.closest('svg.tspark, svg[data-series]');
     if(spark){ handleSpark(spark,e); return; }
-    var node = tipNode(t);
+    var node = t ? tipNode(t) : null;
     if(node){ var raw=hoist(node); if(raw){ clearCross(); show(fmtTitle(raw), e.clientX, e.clientY); return; } }
     hide();
+  }
+  document.addEventListener('mousemove', function(e){
+    mv.e={target:e.target, clientX:e.clientX, clientY:e.clientY};
+    if(!mv.raf) mv.raf=(typeof requestAnimationFrame==='function')?requestAnimationFrame(moveFrame):(moveFrame(),0);
   }, true);
-  document.addEventListener('mouseleave', hide, true);
-  window.addEventListener('scroll', hide, true);
-  window.addEventListener('blur', hide);
+  // A leave/scroll/blur also drops any move still waiting for its frame, or that frame would
+  // re-show the tip the hide just cleared.
+  function hideNow(){ mv.e=null; hide(); }
+  document.addEventListener('mouseleave', hideNow, true);
+  window.addEventListener('scroll', hideNow, true);
+  window.addEventListener('blur', hideNow);
 
   // --- touch parity (standing requirement: every hover readout must work on touch) ---------
   // Convention: TAP keeps its click action untouched; LONG-PRESS (~420ms) is the hover. On a

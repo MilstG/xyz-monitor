@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.24-102";
+const VERSION = "2026.09.24-103";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -2229,7 +2229,10 @@ async function buildServer() {
   // The worker grew push handlers (build -66) and moved to its own file; the inline string
   // survives only as the fallback if the file ever goes missing — installability must not break.
   const PWA_SW = (() => {
-    try { return fs.readFileSync(path.join(__dirname, "public", "sw.js"), "utf8"); }
+    // The "{{build}}" slot names the ONLY asset stamp the worker may cache (build 2026.09.24-103) —
+    // and makes every deploy's sw.js byte-different, so the browser installs the new worker and its
+    // activate purges last build's asset cache.
+    try { return fs.readFileSync(path.join(__dirname, "public", "sw.js"), "utf8").split("{{build}}").join(VERSION); }
     catch (_) { return "self.addEventListener('install',()=>self.skipWaiting());self.addEventListener('activate',e=>e.waitUntil(self.clients.claim()));self.addEventListener('fetch',()=>{});"; }
   })();
   fastify.get("/manifest.webmanifest", async (req, reply) => reply.type("application/manifest+json").header("cache-control", "no-cache").send(PWA_MANIFEST));
@@ -2303,7 +2306,10 @@ async function buildServer() {
   // is as immutable as the entry's — a browser can never pair this build's entry with last build's
   // module, and every module rides the immutable-cache tier below. The files on disk stay
   // unstamped: tests and editors read plain modules.
-  const stampImports = (js) => js.replace(/((?:^|[\s;])import\s*(?:[^'"]*?\s*from\s*)?["'])(\.{1,2}\/[^'"?]+\.js)(["'])/g, (m, a, spec, q) => a + spec + "?v=" + VERSION + q);
+  // Dynamic import("./x.js") is stamped too (build 2026.09.24-103): core.js lazy-loads the tab-only
+  // modules by literal specifier, and an unstamped lazy URL would be a SECOND module instance of a
+  // file its eager neighbours import stamped — two copies of its state, and no immutable caching.
+  const stampImports = (js) => js.replace(/((?:^|[\s;>(])import\s*(?:\(\s*|[^'"(]*?\s*from\s*)?["'])(\.{1,2}\/[^'"?]+\.js)(["'])/g, (m, a, spec, q) => a + spec + "?v=" + VERSION + q);
   const CLIENT_MODULES = (() => { try { return fs.readdirSync(path.join(__dirname, "public", "js")).filter((f) => /^[a-z0-9_-]+\.js$/.test(f)).sort(); } catch (_) { return []; } })();
   const PRECOMP = (() => {
     const out = {};
@@ -2355,6 +2361,9 @@ async function buildServer() {
     let h = fs.readFileSync(path.join(__dirname, "public", "index.html"), "utf8");
     const a = h.includes('src="/app.js"'), c = h.includes('href="/styles.css"');
     h = h.replace('src="/app.js"', `src="/app.js?v=${VERSION}"`).replace('href="/styles.css"', `href="/styles.css?v=${VERSION}"`);
+    // modulepreload hints (build 2026.09.24-103) carry the same stamp, or the preload would warm a
+    // URL the entry's stamped imports never ask for.
+    h = h.replace(/(<link rel="modulepreload" href="\/js\/[a-z0-9_-]+\.js)(")/g, (m, a, q) => a + "?v=" + VERSION + q);
     h = h.split("<script>").join(`<script nonce="${CSP_NONCE_SLOT}">`);   // inline scripts only: the src= tag never matches
     if (!a || !c) log("WARN: index.html asset tags drifted — version stamp incomplete (cache-busting degraded, app still serves)");
     const i = h.indexOf(FLAG_SLOT);

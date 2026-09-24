@@ -115,14 +115,16 @@ test("drawdown tab: wired end to end — manifest, markup, routing, scope, dispa
   assert.ok(html.includes('id="rvd-ctrls"') && html.includes('id="rvd-wrap"'), "the renderer's two mount points");
   const app = require("./_client").clientSource();
   assert.ok(require("./_client").CLIENT_MODULES.includes("drawdown"), "the suite's module list carries drawdown");
-  assert.ok(fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8").includes('import "./js/drawdown.js";'), "the entry loads the module");
+  // Lazy since build 2026.09.24-103: a tab-only module, imported by core.js lazyCall on first open.
+  assert.ok(fs.readFileSync(path.join(__dirname, "..", "public", "js", "core.js"), "utf8").includes('drawdown:()=>import("./drawdown.js"),'), "the lazy loader carries the module");
+  assert.ok(!fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8").includes('"./js/drawdown.js"'), "and the entry no longer loads it eagerly");
   const hv = app.match(/const HASH_VIEWS=new Set\(\[([^\]]*)\]\)/);
   assert.ok(hv && hv[1].includes("'drawdown'"), "#drawdown routes");
   assert.ok(/const CRYPTO_VIEWS=new Set\(\[[^\]]*'drawdown'/.test(app), "the study runs in crypto scope too");
   assert.ok(app.includes("setHidden('view-drawdown', v!=='drawdown');"), "showView hides/shows the section");
-  assert.ok(app.includes("if(v==='drawdown'){ if(el('view-drawdown')) openDrawdown(); else { showView('markets'); return; } }"), "showView dispatches the renderer, with the missing-section bounce");
-  assert.ok(app.includes("if(state.view==='drawdown') renderDrawdown();"), "a scope flip repaints the study for the other universe");
-  assert.ok(/const dv=el\('view-drawdown'\); if\(dv&&!dv\.hidden\) renderDrawdown\(\);/.test(app), "applyDaily repaints an open tab when closes land");
+  assert.ok(app.includes("if(v==='drawdown'){ if(el('view-drawdown')) lazyCall('drawdown','openDrawdown'); else { showView('markets'); return; } }"), "showView dispatches the renderer (lazily), with the missing-section bounce");
+  assert.ok(app.includes("if(state.view==='drawdown') lazyCall('drawdown','renderDrawdown');"), "a scope flip repaints the study for the other universe");
+  assert.ok(/const dv=el\('view-drawdown'\), dd=lazyLoaded\('drawdown'\); if\(dv&&!dv\.hidden&&dd\) dd\.renderDrawdown\(\);/.test(app), "applyDaily repaints an open (loaded) tab when closes land");
   assert.ok(/const HELP=\{[\s\S]*?\n  drawdown:`/.test(app), "the ? explainer has an entry");
   assert.ok(app.includes("{v:'drawdown',label:'Drawdown'}"), "the command palette literal names it");
   const docs = fs.readFileSync(path.join(__dirname, "..", "public", "docs.html"), "utf8");
@@ -131,7 +133,7 @@ test("drawdown tab: wired end to end — manifest, markup, routing, scope, dispa
   for (const pin of [".rvd-title", ".rvd-sub", ".rvd-head", ".rvd-tbl", ".rvdsvg.hv .rvd-dot:not(.hot)", ".rvd-legend i.late", ".rvd-late"])
     assert.ok(css.includes(pin), "css pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.24-102"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.24-103"'), "build stamp");
   // the renderer's contract with the DOM: closes only, the caption says so, and the CSV carries the dates
   const src = fs.readFileSync(path.join(__dirname, "..", "public", "js", "drawdown.js"), "utf8");
   assert.ok(src.includes("intraday lows are not in the daily feed"), "the caption discloses close-to-close");

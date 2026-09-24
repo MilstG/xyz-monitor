@@ -318,6 +318,24 @@ test("modules: the entry is a module, every /js module is served stamped, precom
   assert.ok((await get("/js/markets.js", gus)).body.includes(`from "./core.js?v=${VERSION}"`), "and stamped on the wire");
 });
 
+test("modules -103: lazy import() specifiers, modulepreload hints and the service worker all carry the build stamp", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const { VERSION } = require("../server.js");
+  const core = (await get("/js/core.js?v=" + VERSION, gus)).body;
+  for (const m of ["charts", "drawdown", "funds", "insiders", "positioning"])
+    assert.ok(core.includes(`${m}:()=>import("./${m}.js?v=${VERSION}")`), "lazy specifier stamped on the wire: " + m);
+  assert.ok(!/import\("\.\/[a-z]+\.js"\)/.test(core), "no unstamped dynamic import survives");
+  const entry = (await get("/app.js?v=" + VERSION, gus)).body;
+  assert.ok(!entry.includes("/charts.js") && !entry.includes("/insiders.js"), "the entry does not pull the lazy tabs");
+  const shell = (await get("/", gus)).body;
+  for (const m of ["core", "data", "markets"])
+    assert.ok(shell.includes(`<link rel="modulepreload" href="/js/${m}.js?v=${VERSION}">`), "modulepreload stamped: " + m);
+  const sw = await get("/sw.js", gus);
+  assert.equal(sw.statusCode, 200); assert.equal(sw.headers["cache-control"], "no-cache");
+  assert.ok(sw.body.includes(`const BUILD = "${VERSION}";`) && !sw.body.includes("{{build}}"), "the worker knows exactly one cacheable stamp");
+  assert.ok(sw.body.includes('addEventListener("push"'), "push handling ships intact");
+});
+
 // ===== security batch 2026.09.20 ===============================================================
 test("security -20: JSON inside inline scripts is HTML-safe — ?next= and a renamed display cannot close the script tag", async () => {
   // The login page: a ?next= that used to pass safeNext (no whitespace) and land raw inside

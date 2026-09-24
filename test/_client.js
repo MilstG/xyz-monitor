@@ -13,10 +13,25 @@ function declassify(js) {
     .map((l) => l.replace(/^export function __boot_/, "function __boot_")).join("\n");
 }
 let memo = null;
+// Tab-only modules the entry no longer imports (build 2026.09.24-103): in the browser core.js
+// lazyCall() imports one on first use and runs its __boot_* functions then. The sandbox holds every
+// module already, so it models the fully-loaded session: those boots run after the entry's own,
+// in the same name order lazyMod uses. Derived from core.js's LAZY_IMPORTERS, never a second list.
+function lazyModules() {
+  const core = fs.readFileSync(path.join(__dirname, "..", "public", "js", "core.js"), "utf8");
+  const blk = core.slice(core.indexOf("const LAZY_IMPORTERS={"), core.indexOf("};", core.indexOf("const LAZY_IMPORTERS={")));
+  return [...blk.matchAll(/([a-z]+):\(\)=>import\("\.\/([a-z]+)\.js"\)/g)].map((m) => m[2]);
+}
 function clientSource() {
   if (memo) return memo;
   const parts = CLIENT_MODULES.map((m) => declassify(fs.readFileSync(path.join(__dirname, "..", "public", "js", m + ".js"), "utf8")));
   parts.push(declassify(fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8")));
+  const boots = [];
+  for (const m of lazyModules()) {
+    const src = fs.readFileSync(path.join(__dirname, "..", "public", "js", m + ".js"), "utf8");
+    for (const b of [...src.matchAll(/^export function (__boot_[a-z0-9_]+)\(/gm)].map((x) => x[1]).sort()) boots.push(b + "();");
+  }
+  parts.push(boots.join("\n"));
   return (memo = '"use strict";\n' + parts.join("\n"));
 }
-module.exports = { clientSource, CLIENT_MODULES, declassify };
+module.exports = { clientSource, CLIENT_MODULES, declassify, lazyModules };

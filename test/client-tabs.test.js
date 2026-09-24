@@ -844,8 +844,11 @@ test("sse push 2026.07.29-07: client — poll survives stretched, snaps back on 
   assert.ok(app.includes("function _cycleMs(){ return _sseOk?Math.max(state.refreshMs,120000):state.refreshMs; }"),
     "healthy stream stretches the poll to a 120s fallback — never kills it (half-open streams are real)");
   assert.ok(/_sseSrc\.onerror=\(\)=>\{\s*\n\s*if\(_sseOk\)\{ _sseOk=false; startCycle\(\); \}/.test(app), "stream error snaps cadence back instantly");
-  assert.ok(app.includes("if(d&&d.dataTs&&d.dataTs!==state.dataTs){ loadSnapshot();"),
-    "a pushed version triggers the EXISTING loadSnapshot — the stream changes when we pull, never what");
+  // Since build 2026.09.24-103 through pullSnapshot, which is loadSnapshot while visible (and a
+  // dirty flag / slow alert pull while hidden) — still the one pull path, never a second one.
+  assert.ok(app.includes("if(d&&d.dataTs&&d.dataTs!==state.dataTs){ pullSnapshot();"),
+    "a pushed version triggers the EXISTING pull path — the stream changes when we pull, never what");
+  assert.ok(/function pullSnapshot\(\)\{[\s\S]*?\n  loadSnapshot\(\); return true;\n\}/.test(app), "pullSnapshot ends in the same loadSnapshot");
   assert.ok(app.includes("startEvents();   // push channel first"), "stream armed at boot");
   // startCycle must derive its interval through _cycleMs so a stretch/snap re-arm actually re-times.
   assert.ok(app.includes("const ms=_cycleMs(); cycleTimer=setInterval("), "cycle interval derives from _cycleMs");

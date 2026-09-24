@@ -1126,7 +1126,9 @@ async function dmMicToggle(){
   _dmRec=rec; _dmRecT0=Date.now();
   rec.start();
   dmMicPaint();
-  _dmRecTimer=setInterval(dmMicPaint,1000);
+  // (build 2026.09.24-103) The tick only repaints while a take is actually running and the page is
+  // visible; the elapsed seconds derive from _dmRecT0, so the first visible tick is exact.
+  _dmRecTimer=setInterval(()=>{ if(!_dmRec||document.hidden) return; dmMicPaint(); },1000);
 }
 function dmMicPaint(){
   const btn=el('dm-mic'); if(!btn) return;

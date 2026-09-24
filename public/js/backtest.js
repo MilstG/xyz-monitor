@@ -6,21 +6,16 @@ import { openActionable, renderActionable } from "./actionable.js";
 import { IS_ADMIN, attachLineHover, featureOn, hoverChart, lcGrid, lcTicks, loadAnalytics, loadFunding, openAdmin, openFunding, renderFunding, renderSessions, sCap, sCard, sHead, sLeg, sessDate, syncAnalyticsSlot, syncFundingSlot, tabVisible } from "./admin.js";
 import { pushToast, setHash } from "./alerts.js";
 import { openEarnings, openNews, openSignals, setSigTabBadge } from "./calendar.js";
-import { openCharts } from "./charts.js";
-import { DAY, activeRows, clamp, el, esc, inScope, momColor, overlayCloseAll, scopeBench, state } from "./core.js";
+import { DAY, G, activeRows, clamp, el, esc, inScope, lazyCall, momColor, overlayCloseAll, scopeBench, state } from "./core.js";
 import { BASKETS, basketScopeList, basketVirtualRow, compgAuto, dailyFunding, dailyLevels, dailyOI, dailyReturns, loadBaskets, openCorr, overnightReturns, renderCorr, syncCorrLookback } from "./corr.js";
 import { fetchJSON, loadDaily, updateAggregates } from "./data.js";
 import { openFocus } from "./focus.js";
-import { openFunds } from "./funds.js";
-import { openCongress, openInsiders } from "./insiders.js";
-import { buildHead, render, renderRegimeStrip, syncGrpSeg, updateDrillChip, updateMovers } from "./markets.js";
+import { buildHead, paintMarkets, render, renderRegimeStrip, syncGrpSeg, updateDrillChip, updateMovers } from "./markets.js";
 import { openDM } from "./messages.js";
 import { applyTabVisibility, closeHelp, closeTabMenus, syncTabGroups } from "./nav.js";
 import { openHousing, openLiquidity, openNotes } from "./notes.js";
-import { drawSessions } from "./positioning.js";
 import { openReportView } from "./report.js";
 import { renderSectors } from "./sectors.js";
-import { openDrawdown, renderDrawdown } from "./drawdown.js";
 import { attachRetestControls, loadRetestStudy, renderRetestSection } from "./retest.js";
 import { openTrend, renderSignals, renderTrend } from "./trend.js";
 
@@ -866,10 +861,10 @@ function applyScope(){
   syncGrpSeg();   // markets group lens: hide the industries button on crypto (coerced to sectors), relabel names 'stocks'/'coins'
   if(state.view==='corr' && !el('view-corr').hidden){ state.corr.pair=null; state.corr.selected=null; renderCorr(); setTimeout(compgAuto,60); }   // repaint the matrix for the new universe/data source, then auto-open COMP/G for it
   if(state.view==='trend') renderTrend();   // scope flip repaints the board for the new universe
-  if(state.view==='drawdown') renderDrawdown();   // same study, the other universe's closes
+  if(state.view==='drawdown') lazyCall('drawdown','renderDrawdown');   // same study, the other universe's closes
   state.backtest.picks=[];   // a backtest target belongs to one universe: xyz names don't exist in the crypto scope and vice versa
   if(state.view==='backtest') drawBacktest();   // scope flip re-runs the test on the new universe + benchmark
-  if(state.view==='sessions'){ syncAnalyticsSlot(); drawSessions(); loadAnalytics(); }   // -17: repaint sessions for the new universe (its own analytics payload)
+  if(state.view==='sessions'){ syncAnalyticsSlot(); lazyCall('positioning','drawSessions'); loadAnalytics(); }   // -17: repaint sessions for the new universe (its own analytics payload)
   if(state.view==='funding'){ syncFundingSlot(); renderFunding(); loadFunding(); }   // same contract: repaint from this universe's slot, then refresh it
   if(state.view==='signals') renderSignals();       // scope flip re-filters the cards to the new universe
   if(state.view==='actionable') renderActionable();  // ...and the actionable board with them
@@ -950,11 +945,14 @@ function showView(v){
   setHidden('view-admin', v!=='admin');
   setHidden('view-housing', v!=='housing');
   setHidden('view-liquidity', v!=='liquidity');
-  { const tm=el('view-treemap'); if(tm) tm.hidden=v!=='treemap'; }   // the runtime-injected treemap (no static section): ← / ⌂ and the palette leave it the same way a tab click does
+  { const tm=el('view-treemap'); if(tm) tm.hidden=v!=='treemap'; }
+  // Snapshots that landed while another tab was on top derived + evaluated alerts but deferred the
+  // markets DOM (render()'s paint gate) — pay that one paint now, on the way in (build 2026.09.24-103).
+  if(v==='markets'&&G.mktDirty) paintMarkets();   // the runtime-injected treemap (no static section): ← / ⌂ and the palette leave it the same way a tab click does
   if(v==='focus'){ if(el('view-focus')) openFocus(); else { showView('markets'); return; } }
-  if(v==='funds'){ if(el('view-funds')) openFunds(); else { showView('markets'); return; } }
+  if(v==='funds'){ if(el('view-funds')) lazyCall('funds','openFunds'); else { showView('markets'); return; } }
   if(v==='trend'){ if(el('view-trend')) openTrend(); else { showView('markets'); return; } }
-  if(v==='charts'){ if(el('view-charts')) openCharts(); else { showView('markets'); return; } }
+  if(v==='charts'){ if(el('view-charts')) lazyCall('charts','openCharts'); else { showView('markets'); return; } }
   if(v==='corr'){ openCorr(); setTimeout(compgAuto,60); }   // COMP/G auto-opens with the tab — no launcher button
   if(v==='funding'){ if(el('view-funding')) openFunding(); else { showView('markets'); return; } }
   if(v==='sessions') renderSessions();
@@ -964,13 +962,13 @@ function showView(v){
   if(v==='news'){ if(el('view-news')) openNews(); else { showView('markets'); return; } }
   if(v==='notes'){ if(el('view-notes')) openNotes(); else { showView('markets'); return; } }
   if(v==='dm'){ if(el('view-dm')) openDM(); else { showView('markets'); return; } }
-  if(v==='congress'){ if(el('view-congress')) openCongress(); else { showView('markets'); return; } }
-  if(v==='insiders'){ if(el('view-insiders')) openInsiders(); else { showView('markets'); return; } }
+  if(v==='congress'){ if(el('view-congress')) lazyCall('insiders','openCongress'); else { showView('markets'); return; } }
+  if(v==='insiders'){ if(el('view-insiders')) lazyCall('insiders','openInsiders'); else { showView('markets'); return; } }
   if(v==='backtest'){ if(el('view-backtest')) renderBacktest_load(); else { showView('markets'); return; } }
   if(v==='report'){ if(el('view-report')) openReportView(); else { showView('markets'); return; } }
   if(v==='admin'){ if(el('view-admin')&&IS_ADMIN) openAdmin(); else { showView('markets'); return; } }
   if(v==='sectors') renderSectors();
-  if(v==='drawdown'){ if(el('view-drawdown')) openDrawdown(); else { showView('markets'); return; } }
+  if(v==='drawdown'){ if(el('view-drawdown')) lazyCall('drawdown','openDrawdown'); else { showView('markets'); return; } }
   if(v==='housing'){ if(el('view-housing')) openHousing(); else { showView('markets'); return; } }
   if(v==='liquidity'){ if(el('view-liquidity')) openLiquidity(); else { showView('markets'); return; } }
   if(!state.detail) setHash(v==='markets'?'':v);

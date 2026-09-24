@@ -27,6 +27,11 @@ function aiFmtAgo(ms){ if(ms==null||ms<0) return 'just now'; const s=Math.round(
 // regenerate button unlocks the moment the cooldown lapses — no waiting on the 60s data poll. Cheap:
 // it no-ops whenever the report elements aren't on the page.
 function aiTickCountdown(){
+  // (build 2026.09.24-103) Nothing to count for a background page or while another tab is on top:
+  // two getElementById calls and a textContent write per second, forever, for no reader. Opening
+  // the Report tab (or foregrounding) catches up on the very next tick — the values are derived
+  // from Date.now(), never accumulated, so a skipped tick loses nothing.
+  if(document.hidden||state.view!=='report') return;
   const cd=el('ai-cd');
   if(cd){ const until=+cd.dataset.until, left=until-Date.now();
     cd.textContent=aiFmtCountdown(left);

@@ -758,6 +758,37 @@ The history stays as `[ts, oi, funding]` arrays (~210 MB of heap for 150 markets
 bench): moving it to columnar typed arrays would touch every reader that indexes `s[0]`/`s[1]`/`s[2]`
 (the ΔOI and funding windows, the studies, the drawer series, the sector spines), so it is deferred.
 
+**Performance, client (build 2026.09.24-103).** The browser side of the same idea: do nothing for a
+page nobody is looking at, and never recompute what has not changed. A hidden tab no longer pulls
+`/api/snapshot` on pokes or polls (nor `/api/daily` on its timer): it remembers that something
+moved and pulls once when it becomes visible again. The exception is this browser's own alert
+rules (squeeze / momentum / beta, evaluated client-side and delivered as desktop notifications —
+Telegram and web push are server-side and never needed the tab): while at least one exists, a
+hidden tab keeps one background pull per minute so those rules still fire. `render()` always
+derives and evaluates alerts, but the markets DOM (table or lens, action lists, movers, regime
+strip) paints only while Markets is the visible view; otherwise it is marked dirty and painted once
+on the way back. `/api/daily` bodies whose version is already applied (a 304 comes back from
+`fetch()` as the cached body) are skipped outright instead of invalidating every per-row memo and
+repainting the matrix and sectors map. Correlation aligns returns once into a dense `Float64Array`
+and runs Pearson over it with the old arithmetic in the old order — identical to 1e-12, pinned
+against the previous builder — memoized on (lookback, day, rows, each row's daily-array identity)
+and shared by the Corr tab, the sectors board (which needs the full N×N for its sector×sector
+panel) and the markets lens; clustering uses numeric indices instead of string-keyed Maps. On a
+synthetic 140 × 365-day fixture in Node: `buildCorr` 144 → 31 ms (90d: 54 → 15 ms; memo hit
+≈0.02 ms), `clusterOrder` ~40–55 → ~2 ms. The matrix cells carry no data attributes (position +
+the cached matrix say everything), and hover rebuilds the tooltip, readout and header highlight
+only when the hovered cell changes. The document-wide tooltip mousemove is coalesced to one
+dispatch per animation frame; the report countdown and voice-note ticks sleep when nobody can see
+them. Five tab-only modules (charts, drawdown, funds, insiders, positioning — 264 KB of 1.72 MB)
+load on first use through `lazyCall` in `core.js` (literal `import()` specifiers, which the server
+now stamps with `?v=<build>` like static imports, so a lazy module is the same immutable-cached
+instance its neighbours would import); the eager graph drops to 1.47 MB raw, and the shell
+`modulepreload`s core/data/markets. The service worker answers exactly this build's stamped
+`/app.js`, `/js/*.js` and `/styles.css` cache-first from an `xyz-static-<build>` cache (the server
+stamps the build into `sw.js`, and activate purges other builds' caches); `/api/*`, HTML and
+unversioned URLs are never intercepted. Not done here, and the next step on first-load bytes: a
+minify/bundle build step (no new dependencies were in scope for this pass).
+
 ## Optional: earnings calendar (Finnhub)
 
 The Earnings tab and the markets-table E badges need a free Finnhub API key: sign up at

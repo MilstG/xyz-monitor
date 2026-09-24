@@ -270,4 +270,45 @@ function detectBenchmark(){
   for(const a of SP_ALIASES){ for(const r of state.rows.values()) if(r.uni!=='main'&&!r.delisted&&r.ticker.toUpperCase()===a) return r.coin; }
   for(const r of state.rows.values()){ if(r.uni!=='main'&&!r.delisted&&/(?:^|[^A-Z])(SPX|SP500|S&P)/i.test(r.ticker)) return r.coin; }
   return null; }
-export { COL_BY_KEY, DAY, DEFAULT_HIDDEN, DEFAULT_ORDER, G, HOUR, LAYOUT_V, LKEY, PKEY, RG_COLOR, RG_STORY, SCROLL_B, TF_MAP, TF_MS, activeRows, brkBar, claimDelta, clamp, detectBenchmark, el, esc, fmtFunding, fmtPct, fmtPrice, fmtUsd, inScope, isoUtc, lerp, liq24Cell, liveMark, maCell, median, mktGrp, momColor, overlayCloseAll, overlayCloseTop, overlayPop, overlayPush, overlayTop, parseAmount, pctTxt, recomputeChanges, regimeDetail, regimeMeter, regimeReadout, regimeTip, safeHref, scopeBench, setPrice, state, stdev, store, turnCell, vwapCell };
+// ===== lazy tab modules (build 2026.09.24-103) ================================================
+// The entry used to import every module eagerly — ~1.7 MB of unminified JS parsed and evaluated
+// before the first paint, including whole tabs most sessions never open. The modules below are
+// reached ONLY through a tab (or a terminal verb that is that tab's CLI), so they now load on first
+// use: showView / the verb calls lazyCall(name, fn, ...args), which imports the module once,
+// runs its __boot_* functions (what app.js used to run for it at startup) and then calls into it.
+// Kept eager, deliberately: anything another module calls synchronously (showView lives in
+// backtest.js, IS_ADMIN/featureOn/hoverChart in admin.js, aiPick in report.js, the unread pip and
+// SSE handlers in messages.js, renderRetestSection inside drawBacktest's HTML) — lazy-loading those
+// would mean restructuring, not a loader.
+// Specifiers are string LITERALS on purpose: the server stamps ?v=<build> onto every "./x.js"
+// import specifier it serves, dynamic import() included, so a lazy module resolves to the SAME URL
+// its eager neighbours import it by — one instance, one build, immutable-cached like the rest.
+const LAZY_IMPORTERS={
+  charts:()=>import("./charts.js"),
+  drawdown:()=>import("./drawdown.js"),
+  funds:()=>import("./funds.js"),
+  insiders:()=>import("./insiders.js"),
+  positioning:()=>import("./positioning.js"),
+};
+const LAZY={}, _lazyP={};
+// Namespace once loaded (booted), else null — for callers that should only act on an ALREADY
+// loaded module (a data refresh repainting an open tab), never trigger a load themselves.
+function lazyLoaded(name){ return LAZY[name]||null; }
+function lazyMod(name){
+  if(LAZY[name]) return Promise.resolve(LAZY[name]);
+  if(_lazyP[name]) return _lazyP[name];
+  const imp=LAZY_IMPORTERS[name]; if(!imp) return Promise.reject(new Error('unknown lazy module '+name));
+  return (_lazyP[name]=imp().then(m=>{
+    // Boot in name order (one per module today); a boot throwing is a module failing to load.
+    for(const k of Object.keys(m).filter(k=>k.startsWith('__boot_')).sort()) m[k]();
+    LAZY[name]=m; return m;
+  }, e=>{ delete _lazyP[name]; throw e; }));   // a failed fetch (offline blip) may be retried by the next click
+}
+function lazyCall(name, fn, ...args){
+  return lazyMod(name).then(m=>m[fn](...args)).catch(e=>{
+    try{ console.error('lazy module '+name+'.'+fn+' failed', e); }catch(_){}
+    const w=typeof document!=='undefined'&&document.getElementById('toastwrap');
+    if(w){ const t=document.createElement('div'); t.className='toast toast-sticky'; t.textContent='Could not load this tab ('+name+') — check the connection and try again'; t.onclick=()=>t.remove(); w.appendChild(t); }
+  });
+}
+export { COL_BY_KEY, DAY, DEFAULT_HIDDEN, DEFAULT_ORDER, G, HOUR, LAYOUT_V, LAZY_IMPORTERS, LKEY, PKEY, RG_COLOR, RG_STORY, SCROLL_B, TF_MAP, TF_MS, activeRows, brkBar, claimDelta, clamp, detectBenchmark, el, esc, fmtFunding, fmtPct, fmtPrice, fmtUsd, inScope, isoUtc, lazyCall, lazyLoaded, lazyMod, lerp, liq24Cell, liveMark, maCell, median, mktGrp, momColor, overlayCloseAll, overlayCloseTop, overlayPop, overlayPush, overlayTop, parseAmount, pctTxt, recomputeChanges, regimeDetail, regimeMeter, regimeReadout, regimeTip, safeHref, scopeBench, setPrice, state, stdev, store, turnCell, vwapCell };

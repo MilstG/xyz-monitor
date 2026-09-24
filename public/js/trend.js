@@ -6,10 +6,9 @@ import { attachLineHover, hoverChart, lcTicks } from "./admin.js";
 import { showView } from "./backtest.js";
 import { nowChip } from "./base.js";
 import { earnBadge, loadTgChannels, saveTgChannels, scopeGuard, secShort, tgChans } from "./calendar.js";
-import { G, el, esc, fmtPrice, overlayPop, overlayPush, safeHref, state } from "./core.js";
+import { G, el, esc, fmtPrice, lazyCall, overlayPop, overlayPush, safeHref, state } from "./core.js";
 import { fetchJSON } from "./data.js";
 import { openDetail } from "./drawer.js";
-import { whlOpenFund } from "./funds.js";
 import { warmCount } from "./nav.js";
 
 // News tab state — declared here because every reader and writer lives in this module (the split
@@ -544,7 +543,7 @@ function bindNews(box){
   box.querySelectorAll('[data-nflform]').forEach(b=>b.onclick=()=>{ newsFlForm=''; renderNews(); });
   box.querySelectorAll('.nform[data-form]').forEach(b=>b.onclick=()=>{ newsFlForm=b.dataset.form; renderNews(); });
   box.querySelectorAll('.nbadge[data-coin]').forEach(b=>b.onclick=()=>{ const c=b.dataset.coin; if(c) openDetail(c); });
-  box.querySelectorAll('.nbadge[data-whale]').forEach(b=>b.onclick=()=>{ const k=b.dataset.whale; showView('funds'); if(k) whlOpenFund(k); });
+  box.querySelectorAll('.nbadge[data-whale]').forEach(b=>b.onclick=()=>{ const k=b.dataset.whale; showView('funds'); if(k) lazyCall('funds','whlOpenFund',k); });
 }
 function fillDrawerNews(){
   const box=el('dnews'); if(!box||!state.detail) return;

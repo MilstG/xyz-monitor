@@ -5,13 +5,12 @@
 import { accWire, admDmWire, admFoldApply, admFoldWire, loadAccess, loadAdmDm, renderAccess, renderAdmDm } from "./access.js";
 import { HASH_VIEWS, pushToast, schedDaysClient } from "./alerts.js";
 import { showView } from "./backtest.js";
-import { clamp, el, esc, fmtUsd, lerp, state } from "./core.js";
+import { clamp, el, esc, fmtUsd, lazyCall, lerp, state } from "./core.js";
 import { _lastHealth, fetchJSON, renderAdmLoop, updateFreshTray } from "./data.js";
 import { openDetail } from "./drawer.js";
 import { FOC, focFetch } from "./focus.js";
 import { homeWallToEtMin, sessEx } from "./markets.js";
 import { TAB_GROUPS, applyTabVisibility, buildTabGroups, wireTabDrag } from "./nav.js";
-import { drawSessions } from "./positioning.js";
 import { shPanel } from "./share.js";
 import { termFind } from "./terminal.js";
 import { loadPush, pushAct, pushState } from "./triggers.js";
@@ -619,7 +618,7 @@ function applyHash(){ let h; try{ h=decodeURIComponent(location.hash.replace(/^#
   // showView re-checks anyway, but stopping here keeps a gated #hash from clearing the active view.
   if(HASH_VIEWS.has(h) && tabVisible(h)) showView(h); }
 let _analyticsInflight=false;
-function renderSessions(){ drawSessions(); loadAnalytics(); }
+function renderSessions(){ lazyCall('positioning','drawSessions'); loadAnalytics(); }
 async function loadAnalytics(){
   if(_analyticsInflight) return; _analyticsInflight=true;
   const cr=state.scope==='crypto';
@@ -632,7 +631,7 @@ async function loadAnalytics(){
   }
   catch(e){ if(cr){ state.analyticsCrypto=Object.assign(state.analyticsCrypto||{},{err:e.message||String(e)}); } else { state.analyticsStocks=Object.assign(state.analyticsStocks||{},{err:e.message||String(e)}); } syncAnalyticsSlot(); }
   finally{ _analyticsInflight=false; }
-  if(state.view==='sessions') drawSessions();
+  if(state.view==='sessions') lazyCall('positioning','drawSessions');
 }
 // Point state.analytics.{data,err,ts} at the slot for the live scope — preserves the many existing
 // call sites that read state.analytics.* while keeping per-universe payloads isolated.
@@ -904,8 +903,8 @@ function renderClocks(hc){
   return sHead('Hour-of-day clocks',`the robust timing layer — range volatility, volume and funding by ${_tz} hour`)+controls+twin+sCap(cap);
 }
 function attachClockControls(){
-  const sel=el('clocksel'); if(sel) sel.addEventListener('change',()=>{ state.analytics.clock.sel=sel.value; drawSessions(); });
-  document.querySelectorAll('.clockmetric').forEach(b=>b.addEventListener('click',()=>{ state.analytics.clock.metric=b.dataset.m; drawSessions(); }));
+  const sel=el('clocksel'); if(sel) sel.addEventListener('change',()=>{ state.analytics.clock.sel=sel.value; lazyCall('positioning','drawSessions'); });
+  document.querySelectorAll('.clockmetric').forEach(b=>b.addEventListener('click',()=>{ state.analytics.clock.metric=b.dataset.m; lazyCall('positioning','drawSessions'); }));
 }
 
 // ---- asset-class composite overlays (pooled hour-of-day curves, from the Slice-3 hourClock data) ----
@@ -951,7 +950,7 @@ function renderClassOverlay(hc){
     : `Each class's pooled hour-of-day shape, normalized so 1× is its own daily average — this compares <b>timing</b>, not absolute size.${_szCash()?' Blue band = US cash session.':''} <b>Hover</b> for values.`;
   return sHead('Asset-class overlays','pooled hour-of-day shapes, one line per class')+controls+legend+sCard(overlayLineSvg(series, st.metric))+sCap(cap);
 }
-function attachOverlayControls(){ document.querySelectorAll('.ovmetric').forEach(b=>b.addEventListener('click',()=>{ state.analytics.overlay.metric=b.dataset.m; drawSessions(); })); }
+function attachOverlayControls(){ document.querySelectorAll('.ovmetric').forEach(b=>b.addEventListener('click',()=>{ state.analytics.overlay.metric=b.dataset.m; lazyCall('positioning','drawSessions'); })); }
 
 // ---- day-of-week 7x24 heatmap ----
 const WD_NAMES=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
@@ -996,8 +995,8 @@ function renderDow(dow){
   return sHead('Day-of-week × hour heatmap','the weekend-gap and Friday→Monday risk map')+controls+legend+`<div class="s-card" style="overflow-x:auto">${dowHeatSvg(r.grid, st.metric)}</div>`+sCap(cap);
 }
 function attachDowControls(){
-  const sel=el('dowsel'); if(sel) sel.addEventListener('change',()=>{ state.analytics.dow.sel=sel.value; drawSessions(); });
-  document.querySelectorAll('.dowmetric').forEach(b=>b.addEventListener('click',()=>{ state.analytics.dow.metric=b.dataset.m; drawSessions(); }));
+  const sel=el('dowsel'); if(sel) sel.addEventListener('change',()=>{ state.analytics.dow.sel=sel.value; lazyCall('positioning','drawSessions'); });
+  document.querySelectorAll('.dowmetric').forEach(b=>b.addEventListener('click',()=>{ state.analytics.dow.metric=b.dataset.m; lazyCall('positioning','drawSessions'); }));
 }
 
 // ---- funding heatmap: every market's carry, at 1h / 8h / 24h ----
@@ -1415,5 +1414,5 @@ function renderSeasonality(se){
   const cap = `Bar height = mean return in basis points; whiskers = ±1 standard error across ${isTS?"this name's trading days":'the cross-section'}. Grey bars are noise; green/red bars cleared |t|≥2. Blue band = US cash session. <b>Hover</b> a bar for its mean, t-stat and sample size.`;
   return sHead('Return seasonality by hour','quarantined — pick all, a sector or one name; grey is noise, colored cleared significance')+controls+banner+sCard(seasonBarSvg(v.hours))+sCap(cap);
 }
-function attachSeasonControls(){ const sel=el('seasonsel'); if(sel) sel.addEventListener('change',()=>{ state.analytics.season.sel=sel.value; drawSessions(); }); }
+function attachSeasonControls(){ const sel=el('seasonsel'); if(sel) sel.addEventListener('change',()=>{ state.analytics.season.sel=sel.value; lazyCall('positioning','drawSessions'); }); }
 export { IS_ADMIN, WD_NAMES, _hoverReg, _szCash, applyHash, attachClockControls, attachDowControls, attachLineHover, attachOverlayControls, attachSeasonControls, covPct, featureOn, fhLiveRefresh, fhShareCard, fp, hoverChart, lcGrid, lcTicks, loadAnalytics, loadFunding, openAdmin, openFunding, renderClassOverlay, renderClocks, renderClusters, renderDow, renderFunding, renderSeasonality, renderSessionDecomp, renderSessions, sCap, sCard, sHead, sLeg, sessDate, syncAnalyticsSlot, syncFundingSlot, tabVisible, toggleViewAsPublic };

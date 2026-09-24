@@ -10,7 +10,7 @@ import { COL_BY_KEY, DEFAULT_HIDDEN, DEFAULT_ORDER, G, PKEY, activeRows, el, esc
 import { exportCorr, exportMarkets, openCorr, renderCorr, renderCorrPairs } from "./corr.js";
 import { loadDaily, loadSnapshot, updateFreshness } from "./data.js";
 import { closeDetail, openDetail, runSigHist, toggleWatch } from "./drawer.js";
-import { buildHead, clearDrill, render, renderActionLists, renderRegimeStrip, scheduleRender, setGrp, sortedRows, syncGrpSeg, visibleCols } from "./markets.js";
+import { buildHead, clearDrill, paintMarkets, render, renderActionLists, renderRegimeStrip, scheduleRender, setGrp, sortedRows, syncGrpSeg, visibleCols } from "./markets.js";
 import { dmKeys, dmLoad, dmRefreshOpen, dmRender, dmState, dmSync, dmTypingFrame } from "./messages.js";
 import { renderHousing, renderLiquidity } from "./notes.js";
 import { shareSetSource, shareWireBoard, shareWireDrawer, shareWireTable } from "./share.js";
@@ -37,7 +37,7 @@ function dailyWarm(){
 }
 function scheduleDaily(){
   clearTimeout(dailyTimer);
-  dailyTimer=setTimeout(async()=>{ await loadDaily(); scheduleDaily(); }, dailyWarm()? 20*1000 : 15*60*1000);
+  dailyTimer=setTimeout(async()=>{ if(document.hidden) _dailyDirty=true; else await loadDaily(); scheduleDaily(); }, dailyWarm()? 20*1000 : 15*60*1000);
 }
 // Live warmup annotation for placeholder panels, fed by the snapshot's server-side counts.
 function warmCount(){
@@ -68,7 +68,7 @@ function startEvents(){ if(typeof EventSource==='undefined'||_sseSrc) return;
     // A pushed dataTs we already hold is a no-op (the initial sync frame, typically). A new one —
     // including the new `v` a redeploy pushes via the reconnect's first frame — pulls immediately;
     // applySnapshot's own short-circuit and alertVer handling then do exactly what they do on a poll.
-    if(d&&d.dataTs&&d.dataTs!==state.dataTs){ loadSnapshot(); nextCycle=Date.now()+_cycleMs(); }
+    if(d&&d.dataTs&&d.dataTs!==state.dataTs){ pullSnapshot(); nextCycle=Date.now()+_cycleMs(); }
     // The reconnect's first frame after a redeploy is the fastest new-build signal there is —
     // dataTs is a restarted counter that can coincide with the one this tab already holds, so
     // the version notice must not depend on that comparison triggering a pull.
@@ -90,7 +90,37 @@ function startEvents(){ if(typeof EventSource==='undefined'||_sseSrc) return;
     } };
 }
 function _cycleMs(){ return _sseOk?Math.max(state.refreshMs,120000):state.refreshMs; }
-function startCycle(){ clearInterval(cycleTimer); const ms=_cycleMs(); cycleTimer=setInterval(()=>{ loadSnapshot(); nextCycle=Date.now()+_cycleMs(); }, ms); nextCycle=Date.now()+ms; }
+// ===== hidden tabs idle (build 2026.09.24-103) ================================================
+// A background tab used to pull /api/snapshot on every poke and poll, and applySnapshot then ran
+// the whole derive + table rebuild for a page nobody was looking at — dozens of forgotten tabs
+// were dozens of full client pipelines per server cycle. Now the poke/poll path goes through
+// pullSnapshot: visible = pull exactly as before; hidden = remember that something moved
+// (_hiddenDirty) and pull ONCE on the visibilitychange back to visible.
+// The one exception is the in-browser alert evaluator (alerts.js: sqz/mom/beta rules, which fire
+// desktop Notifications and exist nowhere server-side — Telegram and web push are the SERVER's
+// escalation sweep and never needed this tab). While this browser holds at least one such rule a
+// hidden tab keeps a SLOW background pull (at most one per BG_PULL_MS) so those rules still fire
+// off-screen; the pull evaluates alerts but paints nothing (render()'s paint gate, markets.js).
+const BG_PULL_MS=60000;
+let _hiddenDirty=false, _bgPullAt=0, _dailyDirty=false;
+function pullSnapshot(){
+  if(document.hidden){
+    _hiddenDirty=true;
+    const rules=state.alerts&&state.alerts.rules;
+    if(!(rules&&rules.length)||Date.now()-_bgPullAt<BG_PULL_MS) return false;
+    _bgPullAt=Date.now();
+  }
+  loadSnapshot(); return true;
+}
+// Foregrounding catch-up: one pull if anything was skipped while hidden (poke, poll or daily
+// timer), and a paint if the markets table was left dirty by a background alert pull.
+function visibleCatchUp(){
+  if(document.hidden) return;
+  if(_hiddenDirty){ _hiddenDirty=false; loadSnapshot(); nextCycle=Date.now()+_cycleMs(); }
+  else if(G.mktDirty&&state.view==='markets') paintMarkets();
+  if(_dailyDirty){ _dailyDirty=false; loadDaily(); }
+}
+function startCycle(){ clearInterval(cycleTimer); const ms=_cycleMs(); cycleTimer=setInterval(()=>{ pullSnapshot(); nextCycle=Date.now()+_cycleMs(); }, ms); nextCycle=Date.now()+ms; }
 function setRefresh(ms){ state.refreshMs=ms; startCycle(); }
 function forceRefresh(){ loadSnapshot(); nextCycle=Date.now()+state.refreshMs; }
 // The countdown is honest about the push stream: while SSE is healthy the poll is only a
@@ -178,7 +208,8 @@ el('refresh').addEventListener('click', forceRefresh);
 // Foregrounding the tab: reopen a dead stream and pull messages once, whatever tab is showing.
 document.addEventListener('visibilitychange',()=>{ if(document.hidden) return;
   if(!_sseSrc) startEvents();
-  if(typeof dmSync==='function'&&dmState&&dmState.me){ try{ dmSync(); }catch(_){} } });
+  if(typeof dmSync==='function'&&dmState&&dmState.me){ try{ dmSync(); }catch(_){} }
+  visibleCatchUp(); });   // (build 2026.09.24-103) the one pull a hidden tab skipped, plus any deferred markets paint
 // Search-as-you-type re-rendered the whole table synchronously per keystroke; one frame is plenty.
 el('filter').addEventListener('input', e=>{ state.filter=e.target.value; scheduleRender(); savePrefs(); });
 el('body').addEventListener('click', e=>{ const star=e.target.closest('.star');

@@ -18,7 +18,7 @@ import { sectorShort } from "./sectors.js";
 
 // ===== rendering =====
 let renderQueued=false;
-function scheduleRender(){ if(renderQueued)return; renderQueued=true; requestAnimationFrame(()=>{renderQueued=false; render(); updateMovers();}); }
+function scheduleRender(){ if(renderQueued)return; renderQueued=true; requestAnimationFrame(()=>{renderQueued=false; render(); if(mktPaintable()) updateMovers();}); }
 function scCls(r){ return (r.candleTs && (Date.now()-r.candleTs>2*state.refreshMs+60000)) ? 'stale':''; }
 const XYZ_ONLY_COLS=new Set(['gap']);   // session-anchored concepts — a 24/7 market has none
 const MAIN_ONLY_COLS=new Set(['cascT','liq24']);   // aggregated-CEX derivs context — exists only for the crypto universe
@@ -743,6 +743,14 @@ function renderActionLists(){
     else c.addEventListener('click',()=>openDetail(c.dataset.coin));
   });
 }
+// True when the markets section is actually on screen: the Markets tab is the active view and the
+// page itself is visible. The table, movers, regime strip and action lists all live in
+// #view-markets, so this one predicate gates all four (build 2026.09.24-103).
+function mktPaintable(){ return state.view==='markets'&&!(typeof document!=='undefined'&&document.hidden); }
+// The full markets repaint a deferred (dirty) state owes: table/lens + action lists via render(),
+// then the movers row and the regime strip. Called by showView('markets') and the foregrounding
+// catch-up when G.mktDirty is set.
+function paintMarkets(){ render(); updateMovers(); renderRegimeStrip(); }
 function render(){
   if(!state.rows.size) return; computeDerived(); evaluateAlerts(); posDecorate();
   // Reconcile the note book against the digest riding the snapshot. The digest is authoritative:
@@ -756,7 +764,16 @@ function render(){
     loadNotes().then(()=>{ render(); if(state.detail) renderDrawerNotes(state.detail);
       if(el('view-notes')&&!el('view-notes').hidden) renderNotes(); });
   }
-  if(mktGrp()!=='names'){ renderGroupBoard(); return; }   // the markets #body always mirrors the active lens, whichever tab is on top
+  // Paint gate (build 2026.09.24-103). Everything above — derive, the in-browser alert evaluator,
+  // position decoration, the notes reconcile — is state other tabs and the bell read, so it runs on
+  // every call. Everything below is DOM that lives inside #view-markets: rebuilding a 140-row table
+  // for a hidden section (another tab on top) or a hidden page (background tab on its 60s alert
+  // pull) was pure waste. Mark it dirty instead; showView('markets') and the visibilitychange
+  // catch-up call paintMarkets() once, which re-enters here and paints exactly what the latest
+  // state says — the lens included.
+  if(!mktPaintable()){ G.mktDirty=true; return; }
+  G.mktDirty=false;
+  if(mktGrp()!=='names'){ renderGroupBoard(); return; }   // the markets #body always mirrors the active lens, on every paint
   const body=el('body'), rows=sortedRows(), vc=visibleCols();
   const fc=el('fcount'); if(fc){ const tot=activeRows().length; fc.textContent=(rows.length!==tot)?`showing ${rows.length} of ${tot}`:''; }
   { const c2=el('fcount2'); if(c2){ const tot=activeRows().length; const on=[state.watchOnly&&'\u2605 only',state.noteOnly&&'\u25e2 noted'].filter(Boolean).join(' \u00b7 ');
@@ -888,4 +905,4 @@ function renderRegimeStrip(){
     +mixHtml
     +`<span class="rs-m" data-tip="${esc(corrTip)}"><span class="rs-k">30d corr</span> ${corrTxt}</span>`;
 }
-export { adrCell, anchOpenCell, buildHead, carryCell, cdsHtml, clearDrill, colAdjacent, computeSqueeze, dcapCell, ddCell, ddyCell, dopenCell, drillMembers, gapCell, groupRowsSorted, hitCell, homeWallToEtMin, momCell, mompCell, oiCell, openCell, pctInner, premCell, railHtml, render, renderActionLists, renderRegimeStrip, rowSessState, rsCell, rvolCell, scCls, scheduleRender, sessCell, sessDrawerHtml, sessEx, setGrp, shade, sortedRows, sqzCell, syncGrpSeg, trendCell, updateDrillChip, updateMovers, visibleCols, volCell, vsTapeCell };
+export { adrCell, anchOpenCell, buildHead, carryCell, cdsHtml, clearDrill, colAdjacent, computeSqueeze, dcapCell, ddCell, ddyCell, dopenCell, drillMembers, gapCell, groupRowsSorted, hitCell, homeWallToEtMin, mktPaintable, momCell, mompCell, oiCell, openCell, paintMarkets, pctInner, premCell, railHtml, render, renderActionLists, renderRegimeStrip, rowSessState, rsCell, rvolCell, scCls, scheduleRender, sessCell, sessDrawerHtml, sessEx, setGrp, shade, sortedRows, sqzCell, syncGrpSeg, trendCell, updateDrillChip, updateMovers, visibleCols, volCell, vsTapeCell };
