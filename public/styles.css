@@ -2619,7 +2619,7 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .dm-callsum .grow{flex:1;min-width:70px}
 .dm-callhzrec{font-size:var(--fs-xs);color:var(--muted);white-space:nowrap}
 .dm-callsum span:not(.grow){font-family:var(--mono);font-size:var(--fs-xs)}
-.dm-callrow{align-self:stretch;display:grid;grid-template-columns:64px 1fr auto 74px 68px 68px 58px 52px 52px;gap:10px;align-items:center;
+.dm-callrow{align-self:stretch;display:grid;grid-template-columns:64px 1fr auto 74px 68px 68px 58px 52px 52px 118px;gap:10px;align-items:center;
   padding:7px 0;border-bottom:1px solid var(--grid);cursor:pointer;font-size:var(--fs-sm)}
 .dm-callrow:hover{background:var(--panel2)}
 .dm-callst{font-family:var(--mono);font-size:var(--fs-xs);white-space:nowrap}
@@ -2634,7 +2634,7 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .dm-callpx{color:var(--muted)}
 .dm-callnow{color:var(--text)}
 .dm-callmv{font-weight:700}
-@media (max-width:820px){ .dm-callrow{grid-template-columns:56px 1fr 58px} .dm-callrow .acc-mu,.dm-callpx,.dm-callhz{display:none} }
+@media (max-width:820px){ .dm-callrow{grid-template-columns:56px 1fr 58px} .dm-callrow .acc-mu,.dm-callpx,.dm-callhz,.dm-calltg{display:none} }
 /* the column-label row above the record, and the tombstone row */
 .dm-callhead{border-bottom:1px solid var(--border);padding-bottom:4px;cursor:default}
 .dm-callhead span{font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.8px;color:var(--dim)}
@@ -2645,6 +2645,30 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .dm-callsum{cursor:pointer;border-radius:var(--r-2);padding:1px 6px;margin:0 -6px}
 .dm-callsum:hover{background:var(--panel2)}
 .dm-callsum.sel{background:var(--panel2);outline:1px solid var(--accent-dim)}
+/* call targets (build 2026.09.24-95): the board's target cell, the binary record beside the % one,
+   the composer's target chip, and the row under a target's stamp — a progress bar from the sent mark
+   (zero line) to the target, the time-used triangle under it, a red tick at the stop, a status pill */
+.dm-calltg{font-family:var(--mono);font-size:var(--fs-xs);text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dm-calltgrec{font-size:var(--fs-xs);color:var(--muted);white-space:nowrap}
+.dm-tgpv b{color:var(--text)}
+.dm-tg{background:var(--bg);border:1px solid var(--border);border-top:none;border-radius:0 0 var(--r-2) var(--r-2);
+  padding:6px 10px 7px;margin-top:-1px;font-family:var(--mono);font-size:var(--fs-2xs);color:var(--muted)}
+.dm-tk:has(+ .dm-tg){border-bottom-left-radius:0;border-bottom-right-radius:0}
+.dm-tg-h{display:flex;align-items:center;gap:8px;justify-content:space-between}
+.dm-tg-h b{color:var(--text)}
+.dm-tg-pill{border:1px solid var(--border);border-radius:999px;padding:0 7px;white-space:nowrap}
+.dm-tg-pill.open{color:var(--accent);border-color:var(--accent-dim)}
+.dm-tg-pill.hit{color:var(--up);border-color:var(--up)}
+.dm-tg-pill.wrong{color:var(--down);border-color:var(--down)}
+.dm-tg-pill.miss,.dm-tg-pill.early{color:var(--muted)}
+.dm-tg-bar{position:relative;height:6px;margin:7px 0 9px;background:var(--panel2);border-radius:var(--r-1)}
+.dm-tg-bar i{position:absolute;display:block}
+.dm-tg-zero{top:-2px;bottom:-2px;width:1px;background:var(--faint)}
+.dm-tg-fill{top:0;bottom:0;border-radius:var(--r-1)}
+.dm-tg-fill.pos{background:var(--up)} .dm-tg-fill.neg{background:var(--down)}
+.dm-tg-stop{top:-3px;bottom:-3px;width:2px;margin-left:-1px;background:var(--down)}
+.dm-tg-clock{top:8px;width:0;height:0;margin-left:-4px;border-left:4px solid transparent;border-right:4px solid transparent;border-bottom:5px solid var(--text)}
+.dm-tg-f{line-height:1.4}
 /* direction chip on the stamp card + the one-tap alert hand (dm-dir, NOT dm-side — that's the rail) */
 .dm-dir{font-family:var(--mono);font-size:var(--fs-2xs);font-weight:700;letter-spacing:.5px;margin-left:7px;vertical-align:1px}
 .dm-tkbell{margin-left:8px;color:var(--muted)}

@@ -13013,6 +13013,11 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
   const dgDay = (ts) => { try { return new Date(ts).toISOString().slice(5, 10).replace("-", "/"); } catch (_) { return ""; } };
   const dgAge = (ms) => (ms < 3600e3 ? Math.max(1, Math.round(ms / 60e3)) + "m" : ms < 86400e3 ? Math.round(ms / 3600e3) + "h" : Math.round(ms / 86400e3) + "d");
   const dgPx = (v) => (v == null || !isFinite(v) ? "\u2014" : String(+(+v).toPrecision(6)));
+  // Call targets (build 2026.09.24-95): an open target says where it is going and how far along it
+  // is; a resolved one says how it resolved. The record's targets are hit/miss/wrong, in that order.
+  const dgTg = (x) => (x.tg ? " \u00b7 \u2192 " + dgPx(x.tg.px) + " by " + dgDay(x.tg.by) + (x.tg.prog != null ? " \u00b7 " + Math.round(Math.max(0, x.tg.prog) * 100) + "% there" : "") : "");
+  const dgTgRes = (x) => (!x.tg || !x.tg.res ? "" : x.tg.res === "hit" ? " \ud83c\udfaf hit " + dgPx(x.tg.px) : x.tg.res === "wrong" ? " stop " + dgPx(x.tg.stop)
+    : x.tg.res === "miss" ? " \u231b missed " + dgPx(x.tg.px) : "");
   function deskDigestText(owner, now) {
     const parts = ["<b>Desk digest</b> \u00b7 " + new Date(now).toISOString().slice(0, 10)];
     if (deskSource && owner) {
@@ -13027,13 +13032,13 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
           for (const x of open.slice(0, 6))
             parts.push(glyph(x) + " $" + dgEsc(dgTk(x.ref)) + " " + dgEsc(x.sender) + " \u00b7 " + dgPct(x.adj)
               + " \u00b7 " + dgAge(x.ageMs != null ? x.ageMs : now - x.ts) + " \u00b7 " + dgPx(x.refPx) + " \u2192 " + dgPx(x.px)
-              + (x.closeTs ? " \u00b7 closes " + dgDay(x.closeTs) : "") + (x.deleted ? " \u00b7 deleted" : ""));
+              + (x.closeTs ? " \u00b7 closes " + dgDay(x.closeTs) : "") + dgTg(x) + (x.deleted ? " \u00b7 deleted" : ""));
           if (open.length > 6) parts.push("+" + (open.length - 6) + " more open");
         }
         if (closedWeek.length) {
           parts.push("");
           parts.push("<b>Closed this week</b> \u00b7 final" + (closedWeek.some((x) => x.early) ? " (\u2298 = closed early)" : ""));
-          parts.push(closedWeek.slice(0, 8).map((x) => glyph(x) + " $" + dgEsc(dgTk(x.ref)) + " " + dgEsc(x.sender) + " " + dgPct(x.adj) + (x.adj > 0 ? " \u2713" : x.adj < 0 ? " \u2717" : "") + (x.early ? " \u2298" : "")).join(" \u00b7 "));
+          parts.push(closedWeek.slice(0, 8).map((x) => glyph(x) + " $" + dgEsc(dgTk(x.ref)) + " " + dgEsc(x.sender) + " " + dgPct(x.adj) + (x.adj > 0 ? " \u2713" : x.adj < 0 ? " \u2717" : "") + (x.early ? " \u2298" : "") + dgTgRes(x)).join(" \u00b7 "));
         }
         const rec = (c.summary || []).filter((e) => e.n);
         if (rec.length) {
@@ -13042,7 +13047,8 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
           for (const e of rec.slice(0, 4))
             parts.push(dgEsc(e.who) + " " + e.n + " \u00b7 " + Math.round(e.upPct * 100) + "% right \u00b7 avg " + dgPct(e.avg)
               + (e.best ? " \u00b7 best $" + dgEsc(dgTk(e.best.ref)) + " " + dgPct(e.best.adj) : "")
-              + (e.open ? " \u00b7 " + e.open + " open" : ""));
+              + (e.open ? " \u00b7 " + e.open + " open" : "")
+              + (e.tg && e.tg.hit + e.tg.miss + e.tg.wrong ? " \u00b7 targets " + e.tg.hit + "/" + e.tg.miss + "/" + e.tg.wrong + (e.tg.medHitD != null ? " \u00b7 median hit " + Math.round(e.tg.medHitD) + "d" : "") : ""));
         }
       }
     }

@@ -717,7 +717,7 @@ test("dm: /api/dm/call-read is gated like an ask from a chat, needs a real marke
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "js", "messages.js"), "utf8");
   assert.ok(/const ov=\(!dmState\.editing&&dmState\.callOverride&&dmState\.callOverride\.text===ta\.value\.trim\(\)\)/.test(app), "the client sends an override only for the exact (trimmed) text it was applied to");
   assert.ok(/id="dm-callask"/.test(app) && /id="dm-callapply"/.test(app) && /vague&&dmAskAllowed\(\)/.test(app), "the ask is offered only when the words decided nothing, and only where dm.ask allows");
-  assert.ok(/const vague=!ov&&!read\.sideWord&&words>=4;/.test(app), "vague means no direction word");
+  assert.ok(/const vague=!ov&&!tgOk&&!read\.sideWord&&words>=4;/.test(app), "vague means no direction word (and no target, build 2026.09.24-95)");
   assert.ok(/dmState\.callOverride\.text===ta\.value\.trim\(\)/.test(app), "the override is keyed on the trimmed text on both sides");
   // ai.ask off is the operator's model-spend switch: the reader honours it before dm.ask.
   assert.equal(JSON.parse((await post("/api/features", { key: "ai.ask", state: "off" }, gus)).body).ok, true);
@@ -764,4 +764,32 @@ test("dm -94: the operator edits and deletes a member's message and strikes a ca
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   assert.ok(/r = ACCOUNTS\.drop\(me\.uid, b\.id, isAdmin\(req\)\)/.test(srv) && /r = ACCOUNTS\.edit\(me\.uid, b\.id, b\.body, isAdmin\(req\)\)/.test(srv), "authz is decided at the route");
   assert.ok(/if \(r\.ok && r\.moderated\) \{ log\(.*dmPoke\(r\.thread, \{ refresh: Number\(r\.thread\) \}\); \}/.test(srv), "a moderated row tells the room to re-pull it");
+});
+
+// ===== build 2026.09.24-95: call targets over the wire ================================================
+test("dm -95: /api/dm/targets reads the record narrowed to targets; the operator's resolve-now is admin-only; the resolver is wired", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const cara = jar(); cara.absorb(await post("/login", { handle: "cara", password: "yet-another-long-pw" }));
+  assert.equal((await get("/api/dm/targets")).statusCode, 401);
+  const r = await get("/api/dm/targets", cara);
+  assert.equal(r.statusCode, 200);
+  const d = JSON.parse(r.body);
+  assert.ok(d.ok && Array.isArray(d.open) && Array.isArray(d.resolved) && Array.isArray(d.summary), r.body);
+  assert.equal(r.headers["cache-control"], "no-store");
+  // No markets in this suite, so nothing stamps and no target can exist: a target-shaped send is a plain message.
+  const members = JSON.parse((await get("/api/access", gus)).body).members;
+  const gusUid = members.find((m) => m.handle === "gus").uid;
+  const sent = JSON.parse((await post("/api/dm", { to: gusUid, body: "$NVDA to 250 by Oct 15" }, cara)).body);
+  assert.ok(sent.ok && sent.message.call === null);
+  // Resolve-now posts under other people's names: the operator's button, not a member's.
+  const no = await post("/api/dm/targets", {}, cara);
+  assert.equal(no.statusCode, 403); assert.deepEqual(JSON.parse(no.body), { ok: false, error: "forbidden" });
+  assert.equal((await post("/api/dm/targets", {})).statusCode, 401);
+  const yes = JSON.parse((await post("/api/dm/targets", {}, gus)).body);
+  assert.deepEqual(yes, { ok: true, resolved: 0 });
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(srv.includes("ACCOUNTS.setBarSource((coin, from, to) => (store.readCandles ? store.readCandles(coin, from, to) : []));"), "the resolver reads the 5m archive");
+  assert.ok(/setInterval\(\(\) => \{ try \{ targetTick\(\); \}/.test(srv), "the resolver runs on a timer");
+  assert.ok(/const post = ACCOUNTS\.send\(r\.sender, null, r\.text, null, \{ thread: r\.thread, cmd: "target \$"/.test(srv) && /dmPoke\(post\.thread\); dmMirror\(post\.thread\);/.test(srv),
+    "a resolution posts where the call was made, under its author, as a command result — the /alert road");
 });

@@ -305,6 +305,37 @@ instant, and the per-IP rate limit stops being a per-user problem.
   their final (⊘ marks an early close); the record over the last 30 days of closed calls per
   person with their best; the newest signals with side; earnings today; the day's movers split
   stocks / crypto. A section with nothing to say is absent.
+- **Call targets** (build 2026.09.24-95) — "$INTC to 32 by Oct 15": a call with more said, built
+  from the `xyz-monitor-call-targets-mock.html` proposal on the call machinery rather than beside
+  it. Same row, same stamp, same record: the target level and an optional stop are two more columns
+  on the stamped `dm_msg` row, and the **deadline is the lifecycle's horizon** (no second clock —
+  `+7d` moves it, *close call* resolves it `early`, which is neither a hit nor a miss). The grammar
+  is fixed and reads only what follows the ticker: a price (`32`, `$32.50`, `120k`, behind `to` /
+  `→` / `target` / `goes to`), then a deadline — `by Oct 15`, `by 10/15`, `by 2026-10-15`, `by
+  friday`, `eom`, `year end` (callRead's own date words) or `in 3w` / `in 10d` / `in 2 months` —
+  and an optional `unless 27` / `wrong under 27` / `stop 27`. `at` names an entry, a number with a
+  unit is a horizon and a number before `puts`/`calls` is a strike, so none of them is a target.
+  The side follows the target's side of the mark unless a short word (or an applied AI reading)
+  already decided it, and then the target must agree. Anything refused (no deadline, behind the
+  mark, a stop on the wrong side) sends as a **plain call** and the composer's preview says why —
+  never a wrong target. Server and client run a byte-identical reader (`compute.callTarget` /
+  `dmCallTarget`, held in step by a test). **Resolution** runs once a minute (`targetSweep`):
+  hits are intraday and misses are at the close — a hit or a stop is the first 5-minute bar
+  (from the archive the level scanner reads) that opened after the send and touched the level,
+  then the live mark for the bar still forming; a bar that touches both is `wrong`, the reading
+  that does not flatter the author; a miss is the first daily close at or past the deadline,
+  exactly the close a plain call's horizon reads. The result is written once (`tgRes`, `tgAt`,
+  `closePx` = the target, the stop or that close) and posts into the conversation the call was
+  made in, under its author's name, as a command result — the road a bound `/alert` fire takes, so
+  a synced phone mirrors it and nothing new rides the wire. A bar cursor makes a sweep O(new bars)
+  and a restart loses nothing. The stamp grows a **progress row** (price progress from the sent
+  mark to the target, a triangle for time used, a red tick at the stop, a status pill); the calls
+  board gains a target column and a **second, binary record** — hit / missed / wrong per person
+  and the median days to a hit — beside the % record, never instead of it; the desk digest names
+  each open target's level and progress and the binary record. `GET /api/dm/targets` reads the
+  record narrowed to targets; `POST /api/dm/targets` is the operator's resolve-now. Not in this
+  cut: per-member time zones (a date deadline ends at 24:00 UTC, as horizons already do), and a
+  close-through rule for hits (a one-bar wick through the level is a hit).
 - **The calls record** (`/api/dm/calls`) — every price-stamped message in one place, with the move
   since it was sent and a per-person summary. This is what the stamp was FOR: without somewhere to
   read them together, each call died in the conversation it was made in. Calls carry a
@@ -450,7 +481,7 @@ app footer, the `?` card.
 `docs/` also holds the longer reference pages — the feature map, system map, mechanics and signal
 reference — plus the design mocks that preceded the funding heatmap, notes, insiders,
 backtest-target and return/drawdown work, the site-shell redesign mock
-(`xyz-monitor-shell-redesign-mock.html`: one shell, one type scale, three controls — built in 2026.09.23-93: the shell, the tokens, every control family on one base, every controls row in zones, and no literal size or radius left in the stylesheet or the client; `test/client-shell.test.js` keeps it that way), the share-to-chat mock (`xyz-monitor-share-to-chat-mock.html`, now built — see **Share to chat** above) and the call-targets mock (`xyz-monitor-call-targets-mock.html`: "$INTC to 32 by Oct 15" as a tracked target that resolves on hit, miss or an invalidation level — a proposal, not yet built). The six reference pages are served at `/docs/ref/explainer`, `/docs/ref/howto`,
+(`xyz-monitor-shell-redesign-mock.html`: one shell, one type scale, three controls — built in 2026.09.23-93: the shell, the tokens, every control family on one base, every controls row in zones, and no literal size or radius left in the stylesheet or the client; `test/client-shell.test.js` keeps it that way), the share-to-chat mock (`xyz-monitor-share-to-chat-mock.html`, now built — see **Share to chat** above) and the call-targets mock (`xyz-monitor-call-targets-mock.html`: "$INTC to 32 by Oct 15" as a tracked target that resolves on hit, miss or an invalidation level — built in 2026.09.24-95, see **Call targets** above). The six reference pages are served at `/docs/ref/explainer`, `/docs/ref/howto`,
 `/docs/ref/features`, `/docs/ref/map`,
 `/docs/ref/mechanics` and `/docs/ref/signals` (nonce-stamped, same gate); the mocks are not served.
 

@@ -2937,3 +2937,49 @@ test("callRead: the client's copy reads every case exactly as the server does", 
     "lower risk $HOOD here", "$HOOD: bearish", "$HOOD 100 puts", "sell $HOOD 100 puts", "$HOOD by July 4", "$HOOD by 13/5", "$HOOD by 2/30", "$HOOD 53w"];
   for (const t of texts) assert.deepEqual(clientRead(t, "HOOD", now), callRead(t, "HOOD", now), "parity: " + t);
 });
+
+// ===== build 2026.09.24-95: call targets — the grammar, and the client copy in step ==================
+test("callTarget: a price and a deadline after the ticker, an optional stop, the side from the target unless a word decided it", () => {
+  const { callTarget } = require("../src/compute");
+  const DAY = 86400e3, now = Date.UTC(2026, 8, 22, 15, 0, 0);   // Tue Sep 22 2026 15:00Z
+  const T = (t, sym, mark, side) => callTarget(t, sym, mark, now, side);
+  // The mock's four examples read exactly as the mock says.
+  const intc = T("I think $INTC goes to 32 by Oct 15, wrong under 27", "INTC", 28.9);
+  assert.deepEqual(intc, { ok: true, px: 32, stop: 27, side: "long", horizonMs: 24 * DAY, word: "goes to 32 by Oct 15" });   // to the end of Oct 15 UTC, rounded up
+  const hood = T("$HOOD 125 in 2w", "HOOD", 113.9);
+  assert.ok(hood.ok && hood.px === 125 && hood.horizonMs === 14 * DAY && hood.stop === null && hood.side === "long", JSON.stringify(hood));
+  const tsla = T("short $TSLA to 300 by 10/31 unless 360", "TSLA", 341.55);
+  assert.ok(tsla.ok && tsla.side === "short" && tsla.px === 300 && tsla.stop === 360 && tsla.horizonMs === 40 * DAY, JSON.stringify(tsla));
+  const btc = T("$BTC 120k by year end", "BTC", 112400);
+  assert.ok(btc.ok && btc.px === 120000 && btc.side === "long", "k means thousands; year end is callRead's own word");
+  // Direction follows the target's side of the mark when no word decided it.
+  assert.equal(T("$NVDA 165 by friday", "NVDA", 176.4).side, "short");
+  assert.ok(T("$HOOD → 130 by 2026-10-15 stop 105", "HOOD", 113.9).ok, "arrow, ISO date, stop");
+  assert.equal(T("$HOOD to 32.50 in 10d", "HOOD", 30).px, 32.5, "decimals");
+  assert.equal(T("$HOOD to 125. By Oct 15", "HOOD", 113.9).px, 125, "a full stop after the number is punctuation, not a decimal");
+  // Not a target: horizons, strikes, entries, prose — silence, and the send stays a plain call.
+  for (const t of ["$HOOD 30d", "$HOOD 2 weeks", "$HOOD 100 puts by Oct 15", "long $HOOD at 113 by friday", "$HOOD looks heavy", "$HOOD 3 more days"])
+    assert.equal(T(t, "HOOD", 113.9), null, "no target in: " + t);
+  // Tried and refused: the composer says why; the server stores a plain call.
+  assert.match(T("$HOOD to 125", "HOOD", 113.9).error, /needs a deadline/);
+  assert.match(T("short $HOOD to 125 by Oct 15", "HOOD", 113.9).error, /short to 125 is behind the mark/, "the short word still wins, and the target must agree with it");
+  assert.match(T("$HOOD to 130 by Oct 15 stop 120", "HOOD", 113.9).error, /wrong side of the mark/);
+  assert.match(T("$HOOD to 130 by Oct 15", "HOOD", null).error, /no live mark/);
+  assert.match(T("$HOOD to 125 by Oct 15", "HOOD", 113.9, "short").error, /behind the mark/, "an applied reading decides the side too");
+  assert.equal(T("$HOOD to 125 in 999d", "HOOD", 113.9).error.includes("deadline"), true, "past a year is not a deadline");
+});
+
+test("callTarget: the client's copy reads every case exactly as the server does", () => {
+  const fs = require("fs"), path = require("path");
+  const { callTarget } = require("../src/compute");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "js", "messages.js"), "utf8");
+  const src = app.slice(app.indexOf("const CALL_SHORT_BEFORE="), app.indexOf("// The composer's preview:"));
+  const clientTarget = new Function(src + "\nreturn dmCallTarget;")();
+  const now = Date.UTC(2026, 8, 22, 15, 0, 0);
+  const texts = ["I think $HOOD goes to 132 by Oct 15, wrong under 97", "$HOOD 125 in 2w", "short $HOOD to 100 by 10/31 unless 130", "$HOOD 120k by year end",
+    "$HOOD 30d", "$HOOD 2 weeks", "$HOOD 100 puts by Oct 15", "long $HOOD at 113 by friday", "$HOOD to 125", "short $HOOD to 125 by Oct 15",
+    "$HOOD → 130 by 2026-10-15 stop 105", "$HOOD -> 130 by 2026-02-30", "$HOOD to 130 by Oct 15 stop 120", "$HOOD target 150 in 3 months", "$HOOD tgt 99 eom",
+    "$HOOD to 32.50 in 10d", "$HOOD to 125. By Oct 15", "$HOOD heading to 140 by next week invalidated under 100", "nothing here"];
+  for (const t of texts) for (const side of [null, "long", "short"])
+    assert.deepEqual(clientTarget(t, "HOOD", 113.9, now, side), callTarget(t, "HOOD", 113.9, now, side), "parity: " + t + " / " + side);
+});

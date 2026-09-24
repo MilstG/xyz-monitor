@@ -5831,6 +5831,60 @@ function callRead(text, sym, nowMs) {
   return { side, sideWord, horizonMs, horizonWord };
 }
 module.exports.callRead = callRead;
+// ---- call targets (build 2026.09.24-95) --------------------------------------------------------------
+// "$INTC to 32 by Oct 15": a call with more said — a price and a date, and optionally the level that
+// proves it wrong ("unless 27", "wrong under 27", "stop 27"). A target is read from the words right
+// AFTER the ticker, never guessed: the price must open the sentence (optionally behind to / → / ->
+// / target / tgt / goes to), and it needs a deadline — by Oct 15 · by 10/15 · by 2026-10-15 · by
+// friday · eom · year end (the same date words callRead takes) or in 3w · in 10d · in 2 months.
+// "at" is deliberately NOT a target word: "long $HOOD at 113" names an entry. A number followed by a
+// unit ("30d") is a horizon and a number followed by puts/calls is a strike, so neither is a target.
+// Direction follows the target's side of the mark unless a word (or the sender's applied reading)
+// already decided it — and then the target must agree with it. Returns null when the words carry no
+// target, {ok:false, error} when they tried and failed (the composer says why; the send stays a plain
+// call — never a wrong target), {ok:true, px, stop, side, horizonMs, word} otherwise. The client
+// carries a byte-identical copy (public/js/messages.js dmCallTarget); a test keeps them in step.
+const TG_NUM = "\\$?(\\d+(?:\\.\\d+)?)\\s*(k)?(?![\\w%/]|\\.\\d)";
+const TG_PX = new RegExp("^[\\s,:;\\u2014-]*((?:(?:goes|going|heading|headed|runs?|back)\\s+)?(?:to|\\u2192|->|target(?:ing)?|tgt)\\s*)?" + TG_NUM, "i");
+const TG_STOP = new RegExp("(?:^|\\W)(?:unless|stop(?:\\s+at)?|(?:wrong|invalid(?:ated)?)\\s+(?:under|over|above|below|at|if))\\s+" + TG_NUM, "i");
+function callTarget(text, sym, markPx, nowMs, sideOverride) {
+  const t = String(text || ""), S = String(sym || "").toUpperCase();
+  const i = S ? t.toUpperCase().indexOf("$" + S) : -1;
+  if (i < 0) return null;
+  const after = t.slice(i + S.length + 1, i + S.length + 81);
+  const p = TG_PX.exec(after);
+  if (!p) return null;
+  const rest = after.slice(p[0].length);
+  if (/^\s*(puts|calls)\b/i.test(rest)) return null;            // "$HOOD 100 puts" is a strike
+  const px = +p[2] * (p[3] ? 1000 : 1);
+  const DAY = 86400e3, now = Number.isFinite(+nowMs) ? +nowMs : Date.now();
+  let horizonMs = null, byWord = null, m;
+  const days = (d) => (d >= 1 && d <= 365 ? d * DAY : null);
+  if ((m = /(?:^|\W)in\s+(\d{1,3})\s*(d|days?|w|wks?|weeks?|mo|months?)\b/i.exec(rest))) {
+    const u = m[2].toLowerCase(), n = +m[1];
+    horizonMs = days(u[0] === "d" ? n : u[0] === "w" ? n * 7 : n * 30); byWord = horizonMs ? m[0].replace(/^\W/, "").trim() : null;
+  } else if ((m = /(?:^|\W)by\s+(\d{4})-(\d{2})-(\d{2})\b/i.exec(rest))) {
+    const end = Date.UTC(+m[1], +m[2] - 1, +m[3] + 1) - 1;
+    if (new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])).getUTCDate() === +m[3] && end > now) { horizonMs = days(Math.max(1, Math.ceil((end - now) / DAY))); byWord = horizonMs ? m[0].replace(/^\W/, "").trim() : null; }
+  } else {
+    // Every other date word is callRead's own: the rest of the sentence read as if it followed the ticker.
+    const r = callRead("$" + S + " " + rest, S, now);
+    if (r.horizonMs) { horizonMs = r.horizonMs; byWord = r.horizonWord; }
+  }
+  // A bare number with no target word and no deadline is prose ("$HOOD 2 weeks", "$NVDA 3 more"),
+  // not a failed target: stay silent. A target word with no deadline is an attempt — say what's missing.
+  if (!horizonMs) return p[1] ? { ok: false, px, error: "a target needs a deadline \u2014 by Oct 15 \u00b7 in 3w" } : null;
+  if (!(markPx > 0)) return { ok: false, px, error: "no live mark to aim from" };
+  const st = TG_STOP.exec(rest);
+  const stop = st ? +st[1] * (st[2] ? 1000 : 1) : null;
+  const read = callRead(t, S, now);
+  const side = sideOverride === "long" || sideOverride === "short" ? sideOverride : read.sideWord ? read.side : (px < markPx ? "short" : "long");
+  if (side === "long" ? px <= markPx : px >= markPx) return { ok: false, px, error: side + " to " + px + " is behind the mark (" + markPx + ")" };
+  if (stop != null && (side === "long" ? stop >= markPx : stop <= markPx)) return { ok: false, px, error: "the stop (" + stop + ") sits on the wrong side of the mark" };
+  const word = (p[0] + rest.slice(0, Math.max(0, rest.indexOf(byWord)) + byWord.length)).replace(/^[\s,:;\u2014-]+/, "").replace(/[\s,.;:]+$/, "");
+  return { ok: true, px, stop, side, horizonMs, word };
+}
+module.exports.callTarget = callTarget;
 
 module.exports.cardText = cardText;
 module.exports.cardTitle = cardTitle;

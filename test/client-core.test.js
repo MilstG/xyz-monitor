@@ -2679,3 +2679,42 @@ test("calls -88: the stamp shows the lifecycle, the author can close or extend, 
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   assert.ok(/\.dm-callrow\{[^}]*grid-template-columns:64px 1fr auto 74px 68px 68px 58px 52px 52px/.test(css), "the grid gained the status column");
 });
+
+// ===== build 2026.09.24-95: call targets on the client ==============================================
+test("targets -95: the stamp grows a target row — progress, time used, stop tick, pill — and the board and composer read targets", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "js", "messages.js"), "utf8");
+  // The row, run for real against four wire shapes: open & ahead, hit, wrong, missed.
+  const src = app.slice(app.indexOf("const DM_TG_ZERO="), app.indexOf("function dmDayShort(ts){"));
+  const row = new Function("fmtPx", "esc", "dmDayShort", src + "\nreturn dmTargetRow;")((v) => String(v), (s) => String(s), () => "Oct 15");
+  const DAY = 86400e3, now = Date.now(), ts = now - 6 * DAY;
+  const base = { refPx: 100, side: "long", ts, px: 106 };
+  const open = row(Object.assign({}, base, { call: { closed: false, tg: { px: 110, stop: 95, by: ts + 20 * DAY, res: null, at: null } } }));
+  assert.ok(/dm-tg-pill open/.test(open) && /60% there/.test(open) && /14d left/.test(open), open);
+  assert.ok(/<span class="pos">ahead<\/span> of its clock/.test(open), "60% of the move in 30% of the time is ahead of its clock");
+  assert.ok(/needs \+3\.8% more/.test(open), "and says what is left to go");
+  assert.ok(/class="dm-tg-fill pos" style="left:25\.0%;width:45\.0%"/.test(open), "the bar runs from the zero line 60% of the way to the target");
+  assert.ok(/class="dm-tg-stop" style="left:12\.5%"/.test(open), "the stop sits left of zero, halfway down the wrong-way side");
+  assert.ok(/class="dm-tg-clock" style="left:47\.5%"/.test(open), "the triangle marks 30% of the clock");
+  const hit = row(Object.assign({}, base, { call: { closed: true, closePx: 110, tg: { px: 110, stop: null, by: ts + 20 * DAY, res: "hit", at: ts + 9 * DAY } } }));
+  assert.ok(/dm-tg-pill hit/.test(hit) && /hit ✓ · 11d early/.test(hit) && /closed at the target/.test(hit), hit);
+  const wrong = row(Object.assign({}, base, { side: "short", call: { closed: true, closePx: 104, tg: { px: 90, stop: 104, by: ts + 20 * DAY, res: "wrong", at: ts + DAY } } }));
+  assert.ok(/wrong ✗ · stop 104/.test(wrong) && /class="dm-tg-fill neg"/.test(wrong) && /closed at the stop/.test(wrong), wrong);
+  const miss = row(Object.assign({}, base, { call: { closed: true, closePx: 107, tg: { px: 110, stop: null, by: ts + 5 * DAY, res: "miss", at: ts + 5 * DAY } } }));
+  assert.ok(/missed · 70% there/.test(miss) && /closed at the deadline’s close/.test(miss), miss);
+  assert.equal(row(Object.assign({}, base, { call: { closed: false, tg: null } })), "", "a plain call grows nothing");
+  // Wired: the stamp appends the row; the composer previews the target; the board has the column and the binary record.
+  assert.ok(app.includes("+(finalTxt||right)+'</div>'+dmTargetRow(m);"), "the stamp appends the target row");
+  assert.ok(app.includes("const tg=dmCallTarget(text,m[1],r.px,undefined,ov&&ov.side?ov.side:null);"), "the preview runs the server's reader against the mark it shows");
+  assert.ok(/no target: '\+esc\(tg\.error\)\+' \\u2014 sends as a plain call/.test(app), "a refused target says so, and says the send stays a plain call");
+  const board = app.slice(app.indexOf("function dmCallsHtml(){"), app.indexOf("async function dmFetchCalls(){"));
+  assert.ok(board.includes("'<span class=\"dm-calltg\">'+dmCallTgCell(c)+'</span></div>'") && board.includes(">target</span></div>'"), "the board gained a target column");
+  assert.ok(/x\.tg&&\(x\.tg\.hit\+x\.tg\.miss\+x\.tg\.wrong\)\?'<span class="dm-calltgrec"/.test(board) && /median hit /.test(board), "the summary carries the binary record beside the % one");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(/\.dm-callrow\{[^}]*grid-template-columns:64px 1fr auto 74px 68px 68px 58px 52px 52px 118px;/.test(css), "the grid gained the target column");
+  for (const pin of [".dm-tg{", ".dm-tg-bar{", ".dm-tg-fill.pos", ".dm-tg-stop{", ".dm-tg-clock{", ".dm-tg-pill.hit", ".dm-tg-pill.wrong", ".dm-calltg{", ".dm-calltgrec{", ",.dm-calltg{display:none}"])
+    assert.ok(css.includes(pin), "css pin missing: " + pin);
+  // The desk digest names a target's level and progress, and the binary record.
+  const pl = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pl.includes("+ dgTg(x) + (x.deleted ?") && pl.includes("+ dgTgRes(x)).join(") && pl.includes('" \\u00b7 targets " + e.tg.hit + "/" + e.tg.miss + "/" + e.tg.wrong'), "the digest carries targets");
+});

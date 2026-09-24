@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.23-94";
+const VERSION = "2026.09.24-95";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -739,6 +739,9 @@ async function buildServer() {
   // The calls scoreboard's fixed horizons read the poller's daily spine; the desk digest reads
   // the member's own calls record. Both injected here — neither module reaches into the other.
   ACCOUNTS.setPxHistory((coin, atTs) => (poller.dailyCloseAt ? poller.dailyCloseAt(coin, atTs) : null));
+  // Call targets (build 2026.09.24-95): a target's hit or stop is decided on the same 5-minute
+  // archive the level scanner and the sweep detector read — injected, so accounts.js never opens it.
+  ACCOUNTS.setBarSource((coin, from, to) => (store.readCandles ? store.readCandles(coin, from, to) : []));
   // The digest's record is the last 30 days of CLOSED calls; the board reads the lifetime.
   if (poller.setDeskSource) poller.setDeskSource((uid) => ACCOUNTS.calls(uid, { limit: 100, windowMs: 30 * 86400e3 }));
 
@@ -1551,6 +1554,27 @@ async function buildServer() {
     // conversations they are actually in.
     return ACCOUNTS.calls(me.uid, { by: str(q.by) || null, limit: one(q.limit), all: isAdmin(req) && one(q.all) === "1" });
   });
+  // Call targets (build 2026.09.24-95): the same record, narrowed to the calls that named a price and
+  // a date — open ones with how far along they are, resolved ones with how they resolved — and the
+  // binary record per person. A read over ACCOUNTS.calls, so the scope (your conversations; the
+  // operator's all-view) and the cleared-history floor are exactly the board's.
+  fastify.get("/api/dm/targets", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    const q = req.query || {};
+    const r = ACCOUNTS.calls(me.uid, { by: str(q.by) || null, limit: 500, all: isAdmin(req) && one(q.all) === "1" });
+    const tg = r.calls.filter((c) => c.tg);
+    return { ok: true, open: tg.filter((c) => !c.tg.res && !c.closed), resolved: tg.filter((c) => c.tg.res || c.closed),
+      summary: r.summary.filter((e) => e.tg).map((e) => ({ uid: e.uid, who: e.who, tg: e.tg })) };
+  });
+  // The operator's "resolve now": the same sweep the minute timer runs, on demand. Admin-only — it
+  // posts into conversations under their authors' names, which is not a member's button to press.
+  fastify.post("/api/dm/targets", { bodyLimit: 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "forbidden" });
+    return { ok: true, resolved: targetTick() };
+  });
   fastify.get("/api/dm/export/:id", (req, reply) => {
     reply.header("cache-control", "no-store");
     const me = dmMe(req, reply); if (!me) return;
@@ -1955,6 +1979,27 @@ async function buildServer() {
     b.evs.push(ev);
     if (!ruleFireArmed) { ruleFireArmed = true; setImmediate(() => { try { ruleFireFlush(); } catch (e) { log("rule fire flush failed (isolated): " + (e && e.message)); } }); }
   });
+
+  // ===== call targets: the resolver (build 2026.09.24-95) ============================================
+  // Once a minute, every open target is checked against the 5m archive, the live mark and (past its
+  // deadline) the deadline's daily close; ACCOUNTS.targetSweep writes each resolution once and hands
+  // back the line to post. The post takes the road a bound /alert fire takes: a command result under
+  // the AUTHOR's name, in the conversation the call was made in — so the room sees it, a synced phone
+  // mirrors it and the offline digest nudges the rest. Nothing new on the wire. The stamped row is
+  // re-pulled too (the `refresh` hint), so every open copy of the call repaints resolved. An author
+  // who has left the room (or is over the burst cap) gets no post; the resolution stands on the row.
+  function targetTick(now) {
+    let done;
+    try { done = ACCOUNTS.targetSweep(now); } catch (e) { log("target sweep failed (isolated): " + (e && e.message)); return 0; }
+    for (const r of done) {
+      dmPoke(r.thread, { refresh: Number(r.thread) });
+      const post = ACCOUNTS.send(r.sender, null, r.text, null, { thread: r.thread, cmd: "target $" + String(r.ref).replace(/^xyz:/, "") + " " + r.res });
+      if (!post.ok) { log("target post failed (message " + r.id + ", " + r.res + "): " + post.error); continue; }
+      dmPoke(post.thread); dmMirror(post.thread);
+    }
+    return done.length;
+  }
+  setInterval(() => { try { targetTick(); } catch (e) { log("target tick failed (isolated): " + (e && e.message)); } }, 60 * 1000).unref();
 
   // Sign-out is a state change, so it answers POST. GET stays for the nav button's plain
   // navigation (location.href='/logout') — but only when the browser says the navigation came

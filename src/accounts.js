@@ -142,7 +142,7 @@ function firstTickerRef(body) {
   return m ? m[1].toUpperCase() : "";
 }
 
-const { callRead } = require("./compute");
+const { callRead, callTarget } = require("./compute");
 
 function openAccounts(dataDir, opts) {
   const options = opts || {};
@@ -251,7 +251,14 @@ CREATE TABLE IF NOT EXISTS dm_msg (
   cmdAi INTEGER,                   -- 1 when that output came back from the AI fallback rather than the local grammar; NULL/0 otherwise
   editedBy TEXT,                   -- moderation (build 2026.09.23-94): the operator who rewrote somebody else's message, else NULL
   deletedBy TEXT,                  -- the operator who removed somebody else's message, else NULL
-  callDroppedBy TEXT               -- the operator who struck this row's call from the record, else NULL (the words stay)
+  callDroppedBy TEXT,              -- the operator who struck this row's call from the record, else NULL (the words stay)
+  -- Call targets (build 2026.09.24-95): "$INTC to 32 by Oct 15". The deadline is NOT its own column:
+  -- it is the lifecycle's horizon (ts + callH), so extending a target moves its deadline by construction.
+  tgPx REAL,                       -- the target level; the side follows from it unless the words said otherwise
+  tgStop REAL,                     -- the optional invalidation level ("unless 27"), else NULL
+  tgRes TEXT,                      -- 'hit' | 'wrong' | 'miss' | 'early', written ONCE; NULL while open
+  tgAt INTEGER,                    -- when it resolved; closePx carries the price it resolved at
+  tgSeen INTEGER                   -- the resolver's 5m-bar cursor: bars opening at/before this were already scanned
 ) STRICT;
 
 -- Tickers a member wants to hear about even when they are not looking. A message carrying one of
@@ -363,7 +370,8 @@ CREATE TABLE IF NOT EXISTS dm_webpush (
     dm_thread: [["kind", "TEXT NOT NULL DEFAULT 'dm'"], ["pairKey", "TEXT"], ["title", "TEXT"], ["createdBy", "TEXT"]],
     dm_msg: [["sys", "TEXT"], ["fileId", "TEXT"], ["via", "TEXT"], ["pinnedAt", "INTEGER"], ["pinnedBy", "TEXT"], ["replyTo", "INTEGER"], ["side", "TEXT"],
       ["cmd", "TEXT"], ["cmdAi", "INTEGER"], ["card", "TEXT"], ["callH", "INTEGER"], ["closedAt", "INTEGER"], ["closePx", "REAL"],
-      ["editedBy", "TEXT"], ["deletedBy", "TEXT"], ["callDroppedBy", "TEXT"]],
+      ["editedBy", "TEXT"], ["deletedBy", "TEXT"], ["callDroppedBy", "TEXT"],
+      ["tgPx", "REAL"], ["tgStop", "REAL"], ["tgRes", "TEXT"], ["tgAt", "INTEGER"], ["tgSeen", "INTEGER"]],
     dm_read: [["hiddenUpTo", "INTEGER NOT NULL DEFAULT 0"], ["clearedUpTo", "INTEGER NOT NULL DEFAULT 0"],
       ["boardNotify", "INTEGER NOT NULL DEFAULT 0"], ["tgSync", "INTEGER NOT NULL DEFAULT 0"]],
   };
@@ -446,9 +454,16 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     memAll: db.prepare("SELECT * FROM dm_member WHERE thread = ?"),
     memLeave: db.prepare("UPDATE dm_member SET leftAt = ? WHERE thread = ? AND uid = ? AND leftAt IS NULL"),
 
-    msgIns: db.prepare("INSERT INTO dm_msg (thread, sender, ts, body, ref, refPx, side, sys, fileId, via, replyTo, cmd, cmdAi, card, callH) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"),
+    msgIns: db.prepare("INSERT INTO dm_msg (thread, sender, ts, body, ref, refPx, side, sys, fileId, via, replyTo, cmd, cmdAi, card, callH, tgPx, tgStop) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"),
     callSetH: db.prepare("UPDATE dm_msg SET callH = ? WHERE id = ? AND sender = ?"),
-    callClose: db.prepare("UPDATE dm_msg SET closedAt = ?, closePx = ? WHERE id = ? AND sender = ? AND closedAt IS NULL"),
+    // An early close on a target is also its resolution ('early'): neither a hit nor a miss, and
+    // guarded on tgRes IS NULL so a close racing the resolver cannot overwrite a hit.
+    callClose: db.prepare("UPDATE dm_msg SET closedAt = ?, closePx = ?, tgRes = CASE WHEN tgPx IS NULL THEN NULL ELSE 'early' END, tgAt = CASE WHEN tgPx IS NULL THEN NULL ELSE ? END WHERE id = ? AND sender = ? AND closedAt IS NULL AND tgRes IS NULL"),
+    // The target resolver (build 2026.09.24-95): the open targets, oldest first, and one guarded
+    // write per resolution — written once, never revised, exactly like the stamp.
+    tgOpen: db.prepare("SELECT * FROM dm_msg WHERE tgPx IS NOT NULL AND tgRes IS NULL AND closedAt IS NULL AND ref IS NOT NULL AND refPx IS NOT NULL ORDER BY id LIMIT 500"),
+    tgResolve: db.prepare("UPDATE dm_msg SET tgRes = ?, tgAt = ?, closePx = ? WHERE id = ? AND tgRes IS NULL AND closedAt IS NULL"),
+    tgSeenSet: db.prepare("UPDATE dm_msg SET tgSeen = ? WHERE id = ?"),
     msgById: db.prepare("SELECT * FROM dm_msg WHERE id = ?"),
     msgEdit: db.prepare("UPDATE dm_msg SET body = ?, ref = ?, editedAt = ? WHERE id = ? AND sender = ? AND deletedAt IS NULL"),
     msgDrop: db.prepare("UPDATE dm_msg SET deletedAt = ?, body = '', fileId = NULL, card = NULL WHERE id = ? AND sender = ?"),
@@ -458,7 +473,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     // the words stand, and retainSweep now ages the row like any other prose.
     msgEditAdm: db.prepare("UPDATE dm_msg SET body = ?, editedAt = ?, editedBy = ? WHERE id = ? AND deletedAt IS NULL"),
     msgDropAdm: db.prepare("UPDATE dm_msg SET deletedAt = ?, deletedBy = ?, body = '', fileId = NULL, card = NULL WHERE id = ?"),
-    callDrop: db.prepare("UPDATE dm_msg SET ref = NULL, refPx = NULL, side = NULL, callH = NULL, closedAt = NULL, closePx = NULL, callDroppedBy = ? WHERE id = ?"),
+    callDrop: db.prepare("UPDATE dm_msg SET ref = NULL, refPx = NULL, side = NULL, callH = NULL, closedAt = NULL, closePx = NULL, tgPx = NULL, tgStop = NULL, tgRes = NULL, tgAt = NULL, tgSeen = NULL, callDroppedBy = ? WHERE id = ?"),
     msgPage: db.prepare("SELECT * FROM dm_msg WHERE thread = ? AND id < ? AND id > ? ORDER BY id DESC LIMIT ?"),
     msgSince: db.prepare("SELECT * FROM dm_msg WHERE thread = ? AND id > ? ORDER BY id LIMIT ?"),
     msgLast: db.prepare("SELECT * FROM dm_msg WHERE thread = ? ORDER BY id DESC LIMIT 1"),
@@ -1369,6 +1384,11 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (!m || !m.ref || !(m.refPx > 0)) return null;
     const h = callHorizonOf(m), hzTs = m.ts + h;
     if (m.closedAt) return { closed: true, early: true, closeTs: m.closedAt, closePx: m.closePx > 0 ? m.closePx : null, horizonMs: h };
+    // A resolved target (build 2026.09.24-95) closed where it resolved: at the target (hit), at the
+    // stop (wrong) or at the deadline's close (miss). Only the resolver writes these; until it has,
+    // a target past its deadline reads exactly as a plain call at its horizon — the same close.
+    if (m.tgRes === "hit" || m.tgRes === "wrong" || m.tgRes === "miss")
+      return { closed: true, early: false, closeTs: m.tgAt || hzTs, closePx: m.closePx > 0 ? m.closePx : null, horizonMs: h };
     const p = pxHistory(m.ref, hzTs);
     if (p != null && isFinite(p) && p > 0) return { closed: true, early: false, closeTs: hzTs, closePx: p, horizonMs: h };
     return { closed: false, early: false, closeTs: hzTs, closePx: null, horizonMs: h };
@@ -1378,7 +1398,107 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const st = callState(m);
     if (!st) return null;
     return { h: Math.round(st.horizonMs / CALL_DAY), closed: st.closed, early: st.early, closeTs: st.closeTs, closePx: st.closePx,
-      final: st.closed ? callAdj(m, st.closePx) : null };
+      final: st.closed ? callAdj(m, st.closePx) : null, tg: tgWire(m) };
+  }
+  // ---- call targets (build 2026.09.24-95) --------------------------------------------------------
+  // "$INTC to 32 by Oct 15, wrong under 27": a call with more said. Same row, same stamp, same
+  // record — the target, its optional stop and its resolution are three more columns beside the
+  // lifecycle, and the lifecycle's horizon IS the deadline (extend moves it; close early resolves
+  // it as 'early', which is neither a hit nor a miss). The wire carries the level, the stop, the
+  // deadline and the resolution; progress and time used are derived at read, on the client, from
+  // the same sent/now marks the stamp already shows — nothing that moves is stored.
+  function tgWire(m) {
+    if (!(m.tgPx > 0)) return null;
+    return { px: m.tgPx, stop: m.tgStop > 0 ? m.tgStop : null, by: m.ts + callHorizonOf(m), res: m.tgRes || null, at: m.tgAt || null };
+  }
+  // bars5m(coin, fromTs, toTs) -> [[ts, o, h, l, c, ...]] is injected by the server (the 5m
+  // archive the level scanner and the sweep detector already read); this module never opens it.
+  let bars5m = options.bars5m || (() => []);
+  function setBarSource(fn) { if (typeof fn === "function") bars5m = fn; }
+  const TG_BAR_MS = 5 * 60e3, TG_SCAN_MS = 3 * CALL_DAY, TG_SCAN_PASS = 10;
+  const tgTk = (ref) => String(ref || "").replace(/^xyz:/, "");
+  const tgNum = (v) => String(+(+v).toPrecision(6));
+  const tgDay = (ts) => { try { return new Date(ts).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }); } catch (_) { return ""; } };
+  const tgPct = (v) => (v >= 0 ? "+" : "\u2212") + Math.abs(v * 100).toFixed(1) + "%";
+  // The line a resolution posts under its author's name — hit, wrong or missed, with the numbers
+  // that make it checkable: where it was sent, where it closed, the raw move, and for a miss how
+  // much of the way it got (the % record gives partial credit; the binary record never does).
+  function tgLine(m, res, at, px) {
+    const tk = "$" + tgTk(m.ref), short = m.side === "short", raw = px / m.refPx - 1;
+    const sent = "sent " + tgNum(m.refPx) + " on " + tgDay(m.ts);
+    if (res === "hit") {
+      const early = Math.floor((m.ts + callHorizonOf(m) - at) / CALL_DAY);
+      return "\ud83c\udfaf " + tk + (short ? " short" : "") + " hit " + tgNum(m.tgPx) + " \u2014 target reached"
+        + (early >= 1 ? " " + early + " day" + (early === 1 ? "" : "s") + " early" : " on its last day") + " \u00b7 " + sent + ", " + tgPct(raw) + " \u00b7 the call closed at the target";
+    }
+    if (res === "wrong")
+      return "\u2717 " + tk + (short ? " short" : "") + " wrong \u2014 " + tgNum(m.tgStop) + " printed before " + tgNum(m.tgPx) + " \u00b7 " + sent
+        + " \u00b7 closed at the stop, " + tgPct(raw) + (callAdj(m, px) < 0 ? " against" : "");
+    const got = Math.max(0, Math.min(1, (px - m.refPx) / (m.tgPx - m.refPx)));
+    return "\u231b " + tk + (short ? " short" : "") + " missed " + tgNum(m.tgPx) + " \u2014 the " + tgDay(m.ts + callHorizonOf(m)) + " deadline passed at " + tgNum(px)
+      + ", " + Math.round(got * 100) + "% of the way \u00b7 " + sent + " \u00b7 closed at the deadline\u2019s close, " + tgPct(raw);
+  }
+  // The resolver. Hits are intraday and misses are at the close: a target is a LEVEL, and levels
+  // are touched, not closed through — so a hit (or the stop) is decided on the 5-minute bars that
+  // opened after the send and before the deadline, then on the live mark for the bar still
+  // forming; the deadline is a DATE, and dates end at the close, so a miss waits for the first
+  // daily close at or past it (the same close a plain call's horizon reads). A bar that touches
+  // both the stop and the target cannot say which printed first; it resolves 'wrong', the reading
+  // that does not flatter the author. The bar cursor (tgSeen) makes a sweep O(new bars), and the
+  // archive makes a restart lose nothing: bars printed while the server was down are scanned on
+  // the next pass. Returns what resolved, with the line to post; the server posts it (the /alert
+  // road: a command result under the author's name, in the conversation the call was made in).
+  function targetSweep(nowMs) {
+    const now = Number.isFinite(+nowMs) ? +nowMs : Date.now();
+    const out = [];
+    for (const m of S.tgOpen.all()) {
+      const long = m.side !== "short", by = m.ts + callHorizonOf(m), upTo = Math.min(now, by);
+      const stop = m.tgStop > 0 ? m.tgStop : null;
+      let res = null, at = null, px = null, seen = m.tgSeen || 0;
+      // The archive is read in TG_SCAN_MS windows, at most TG_SCAN_PASS of them per target per
+      // pass, so a year-long target first scanned after an outage costs a month of bars a minute
+      // rather than 100k rows at once. The live and deadline legs wait until the scan has caught
+      // up: neither may overrule a bar not yet read.
+      let caughtUp = false;
+      for (let k = 0; k < TG_SCAN_PASS && !res && !caughtUp; k++) {
+        // A window that would end inside the last day takes the rest of the way at once (it is at
+        // most a day of bars), so the cursor rule below never has to wait on a young stretch.
+        let scanTo = Math.min(upTo, Math.max(m.ts, seen) + TG_SCAN_MS);
+        if (scanTo > now - CALL_DAY) scanTo = upTo;
+        caughtUp = scanTo >= upTo;
+        let bars;
+        try { bars = bars5m(m.ref, Math.max(m.ts, seen + 1), scanTo) || []; } catch (_) { bars = []; }
+        for (const b of bars) {
+          const ts = +b[0], hi = +b[2], lo = +b[3];
+          // Only bars that OPENED after the send: the bar the call was sent inside carries prices
+          // from before it. The live-mark leg below covers that sliver.
+          if (!(ts >= m.ts) || ts <= seen || ts > scanTo || !(hi > 0) || !(lo > 0)) continue;
+          if (stop != null && (long ? lo <= stop : hi >= stop)) { res = "wrong"; at = ts; px = stop; break; }
+          if (long ? hi >= m.tgPx : lo <= m.tgPx) { res = "hit"; at = ts; px = m.tgPx; break; }
+          if (ts + TG_BAR_MS <= now) seen = ts;
+        }
+        // A stretch the archive has nothing for (a coin the 5m lane does not keep, a gap) is
+        // passed once scanned — it is over a day old by construction, and the lane would have
+        // written it by then — so the cursor never sticks.
+        if (!res && !caughtUp) seen = Math.max(seen, scanTo);
+      }
+      if (!res && caughtUp && now <= by) {
+        const live = markFor(m.ref);
+        if (live > 0) {
+          if (stop != null && (long ? live <= stop : live >= stop)) { res = "wrong"; at = now; px = stop; }
+          else if (long ? live >= m.tgPx : live <= m.tgPx) { res = "hit"; at = now; px = m.tgPx; }
+        }
+      }
+      if (!res && caughtUp && now > by) {
+        const p = pxHistory(m.ref, by);
+        if (p != null && isFinite(p) && p > 0) { res = "miss"; at = by; px = p; }
+      }
+      if (res) {
+        if (S.tgResolve.run(res, at, px, m.id).changes)
+          out.push({ id: m.id, thread: m.thread, sender: m.sender, ref: m.ref, side: long ? "long" : "short", res, at, px, text: tgLine(m, res, at, px) });
+      } else if (seen > (m.tgSeen || 0)) S.tgSeenSet.run(seen, m.id);
+    }
+    return out;
   }
   function callClose(uid, id) {
     const m = S.msgById.get(+id);
@@ -1389,7 +1509,8 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (st.closed) return { ok: false, error: st.early ? "already closed" : "that call closed at its horizon" };
     const px = markFor(m.ref);
     if (!(px > 0)) return { ok: false, error: "no live mark for " + m.ref + " right now" };
-    S.callClose.run(Date.now(), px, +id, uid);
+    const now = Date.now();
+    S.callClose.run(now, px, now, +id, uid);
     return { ok: true, thread: m.thread, message: wire(S.msgById.get(+id), uid) };
   }
   function callExtend(uid, id, days) {
@@ -1504,8 +1625,17 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     }
     const now = Date.now();
     const oDays = Math.trunc(+o.callDays);
-    const callH = ref && sym ? (oDays >= 1 && oDays <= CALL_MAX_D ? oDays * CALL_DAY : callHorizonFromText(text, sym)) : null;
-    const id = Number(S.msgIns.run(t.id, fromUid, now, text, ref, refPx, side, null, file ? file.id : null, o.via || null, replyTo, cmd, cmdAi, cardJson, callH).lastInsertRowid);
+    // A target (build 2026.09.24-95) is read off the same words, against the same stamped mark, and
+    // only on a typed message — a card's body is a table, not a sentence. Its deadline becomes the
+    // horizon and its side the call's side (an applied reading still decides the side, and a
+    // target that disagrees with it is dropped). Anything the grammar cannot read, or reads and
+    // refuses, stays a plain call: never a wrong target.
+    const tg = ref && sym && refPx > 0 && !cardJson ? callTarget(text, sym, refPx, now, o.callSide === "short" || o.callSide === "long" ? o.callSide : null) : null;
+    const tgOk = tg && tg.ok ? tg : null;
+    if (tgOk) side = tgOk.side;
+    const callH = ref && sym ? (tgOk ? tgOk.horizonMs : oDays >= 1 && oDays <= CALL_MAX_D ? oDays * CALL_DAY : callHorizonFromText(text, sym)) : null;
+    const id = Number(S.msgIns.run(t.id, fromUid, now, text, ref, refPx, side, null, file ? file.id : null, o.via || null, replyTo, cmd, cmdAi, cardJson, callH,
+      tgOk ? tgOk.px : null, tgOk ? tgOk.stop : null).lastInsertRowid);
     S.thrTouch.run(id, now, t.id);
     S.readUp.run(t.id, fromUid, id);            // your own message is read by definition
     return { ok: true, id, thread: t.id, message: wire(S.msgById.get(id), fromUid) };
@@ -1944,6 +2074,10 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
         chg1, adj1: adjOf(chg1), chg7, adj7: adjOf(chg7),
         closed, early: !!(st && st.early), closeTs: st ? st.closeTs : null, horizonD: st ? Math.round(st.horizonMs / DAY) : null,
         ageMs: Date.now() - m.ts,
+        // A target (build 2026.09.24-95): the level, the stop, the deadline, the resolution, and how
+        // far along it is — (end − sent) / (target − sent) against the same mark the move column
+        // reads, clamped to [−1, 1]: the one number the board and the digest both print.
+        tg: has && m.tgPx > 0 ? Object.assign(tgWire(m), { prog: endPx > 0 ? Math.max(-1, Math.min(1, (endPx - at) / (m.tgPx - at))) : null }) : null,
       });
     }
     // The summary is per person, because "who is right" is the only question a call record
@@ -1965,7 +2099,17 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const byWho = new Map();
     const tally = (e, k, v) => { if (v == null) return; const b = e[k]; b.n++; if (v > 0) b.up++; b.sum += v; };
     for (const c of out) {
-      const e = byWho.get(c.senderUid) || { uid: c.senderUid, who: c.sender, open: 0, closed: { n: 0, up: 0, sum: 0 }, best: null, worst: null, h1: { n: 0, up: 0, sum: 0 }, h7: { n: 0, up: 0, sum: 0 } };
+      const e = byWho.get(c.senderUid) || { uid: c.senderUid, who: c.sender, open: 0, closed: { n: 0, up: 0, sum: 0 }, best: null, worst: null, h1: { n: 0, up: 0, sum: 0 }, h7: { n: 0, up: 0, sum: 0 },
+        tg: { hit: 0, miss: 0, wrong: 0, open: 0, hitD: [] } };
+      // The second, binary record (build 2026.09.24-95): hit / miss / wrong per person over the
+      // targets resolved inside the window, and the median days from send to hit. An early close is
+      // neither and is left out; the % record above already scores it.
+      if (c.tg) {
+        const r = c.tg.res;
+        if (r === "hit" || r === "miss" || r === "wrong") {
+          if (!winMs || (c.tg.at || 0) >= nowTs - winMs) { e.tg[r]++; if (r === "hit") e.tg.hitD.push((c.tg.at - c.ts) / DAY); }
+        } else if (!r && !c.closed) e.tg.open++;
+      }
       if (c.closed && c.adj != null && (!winMs || c.closeTs >= nowTs - winMs)) {
         tally(e, "closed", c.adj);
         if (!e.best || c.adj > e.best.adj) e.best = { ref: c.ref, adj: c.adj };
@@ -1977,8 +2121,11 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const rec = (b) => (b.n ? { n: b.n, upPct: b.up / b.n, avg: b.sum / b.n } : null);
     const summary = [...byWho.values()].map((e) => {
       const cl = rec(e.closed);
+      const hd = e.tg.hitD.sort((a, b) => a - b), mid = hd.length >> 1;
+      const tg = e.tg.hit + e.tg.miss + e.tg.wrong + e.tg.open ? { hit: e.tg.hit, miss: e.tg.miss, wrong: e.tg.wrong, open: e.tg.open,
+        medHitD: hd.length ? (hd.length % 2 ? hd[mid] : (hd[mid - 1] + hd[mid]) / 2) : null } : null;
       return { uid: e.uid, who: e.who, open: e.open, n: cl ? cl.n : 0, upPct: cl ? cl.upPct : null, avg: cl ? cl.avg : null,
-        best: e.best, worst: e.worst, h1: rec(e.h1), h7: rec(e.h7) };
+        best: e.best, worst: e.worst, h1: rec(e.h1), h7: rec(e.h7), tg };
     }).filter((e) => e.n || e.open).sort((a, b) => (b.n - a.n) || (b.open - a.open));
     return { ok: true, calls: out, summary, windowMs: winMs, defaultHorizonD: CALL_DEFAULT_H / DAY };
   }
@@ -2196,6 +2343,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     createBoard, joinBoard, listBoards, setTweetSource,
     react, REACTIONS, putFile, readFile, removeFile, sweepFiles, sweepRetention, bridgeReply,
     watchList, setWatch, pin, pinsOf, calls, callClose, callExtend, callDrop, exportThread,
+    targetSweep, setBarSource,
     prefsGet, prefsPut,
     walletGet, walletSet, walletDrop, walletsAll,
     adminThreads, adminHistory, adminSearch, adminAuditLog,
