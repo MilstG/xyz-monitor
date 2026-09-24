@@ -32,6 +32,9 @@ instant, and the per-IP rate limit stops being a per-user problem.
   name's usual range — shown on the tab and in the drawer. Session-spanning ledger claims in
   force within 1 day of a print are tagged (E in claim history) so the earnings-conditioned
   base-rate split accrues out of sample.
+- **`/api/earnings/setups`** — pre-earnings setup cards for names reporting within 5 sessions:
+  reaction study + positioning into the print + run-up + implied vs typical, with a rule-composed
+  verdict line (build 2026.09.24-100; see the entry below).
 - **Housing tab** (`/api/housing`) — macro housing / MBS board: 30y mortgage rate, single-family vs
   multifamily starts, months' supply, new-home sales, median price and a BBB OAS proxy for non-QM
   spreads. Seven FRED series pulled in full history (needs `FRED_KEY`), refreshed every 6h,
@@ -294,6 +297,34 @@ instant, and the per-IP rate limit stops being a per-user problem.
   `allowed_updates` (the poll asks for it) and are read from private chats only — in a group
   Telegram would also require the bot to be an admin, and the reacting person could not be
   attributed; files over the Bot API's 20 MB download limit cannot be fetched at all.
+- **Pre-earnings setup card** (build 2026.09.24-100) — `/api/earnings/setups`: one card per
+  name reporting within the next **5 US sessions** (weekends skipped; exchange holidays are not
+  modeled, so a holiday week cards a name a day early). Each card combines (1) the reaction study
+  — typical (median) |move|, avg, up/down split, gap-and-hold vs gap-and-fade, sample size, the
+  +24h anchor median; (2) positioning into the print — live funding (APR) and its percentile vs
+  the name's own 31d hourly history, OI change over the run-up (the last 7 calendar days ≈ 5
+  sessions, off the sampled OI history), mark-vs-oracle premium with its z vs the 7d baseline;
+  (3) the run-up — the live mark vs the close 7 days back, against this name's median drift over
+  the same window before its past prints (≥ 3 prints with a hole-free 7-day spine); (4) implied
+  vs typical — the typical print move over the CURRENT usual daily move (mean |close-to-close|,
+  last 20 completed bars — the same baseline the study's expansion ratio uses), beside that ratio
+  at past prints: ≥ 1.3× the historical ratio reads "vol compressed", ≤ 1/1.3 "vol already
+  elevated". A verdict line is composed from fixed rules, no AI: *crowded long* = funding ≥ p90
+  with OI up ≥ 5% over the run-up (*crowded short* = ≤ p10 with the same build), the funding
+  extreme alone reads *longs paying up* / *shorts paying*, |OI| ≥ 10% with funding in between
+  reads *OI building* / *positions coming off*; a direction skew is named at ≥ 70% of prints one
+  way, a gap read at ≥ 3 gaps with ≥ 60% held or faded, a run-up at ≥ 3%; n < 4 is flagged thin.
+  e.g. *crowded long into print (funding p92, OI +18% in 5 sessions); typical move ±6.1%, gaps
+  and fades 7/10; …*. Every block the server cannot fill ships its reason and renders as
+  "n/a — why" (no study yet, < 4 days of funding for a percentile, OI history short of 7 days,
+  < ~17h of premium samples for a z, a calendar name with no live market). Its own route, not
+  more fields on `/api/earnings`: positioning moves every poll and would bust the calendar's 304;
+  the poller rebuilds at most once a minute (at once when the calendar is replaced) and keeps the
+  payload object — and so the ETag — while the content signature holds. Shown as a collapsible
+  **Setups** strip at the top of the Earnings tab (expanded cards survive re-renders) and as a
+  **Pre-earnings setup** section in the ticker drawer for a carded name (filled in place if the
+  pull lands after the drawer opened). Gated with the Earnings tab. A read of the setup, never a
+  call: the study is a base rate, and funding/OI describe who is positioned, not who is right.
 - **Chat alerts: `/alert`** (build 2026.09.21-83) — a threshold rule written where it will fire.
   `/alert NVDA > 200`, `/alert NVDA crosses down 180`, `/alert NVDA above 200ma`, `/alert HOOD d1
   > 5 big day`, `/alert any rvol > 3`; `/alert list` and `/alert off <id>` manage them; `/alert

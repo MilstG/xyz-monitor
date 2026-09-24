@@ -23,7 +23,7 @@ const { featuresFromHourly, bucketOpens, oiDeltaPct, fundingAvg, fundingHeat, FU
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
 const { pdfTextRuns, ptrRows, parsePtr, pdfImages, ccittTiff, ocrPtrRows } = require("./compute");
-const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, scrubPlaceholderActuals, earnReactionsFor, earnReactionCurve, overnightSplit, FINE_TOL, etWallToUtc, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, topicHit, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings, pickXbrlFacts, parseNportHoldings } = require("./compute");
+const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, scrubPlaceholderActuals, earnReactionsFor, earnReactionCurve, earnSetup, earnRunup, earnSessionsAhead, EARN_SETUP_SESSIONS, EARN_RUNUP_D, overnightSplit, FINE_TOL, etWallToUtc, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, topicHit, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings, pickXbrlFacts, parseNportHoldings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
 const { closedBars, closedLadder, emaLast, emaCrossOutcomes, emaCrossStudy, emaAlertState } = require("./compute");
 const { momPair, spearmanIC, duelStats, epResolve, epScore } = require("./compute");
@@ -4584,6 +4584,70 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       earnCache = Object.assign({}, earnCache, { dataTs: earnVer, study: earnStudy, printsN: earnPrints.length });
     }
     return changed;
+  }
+  // ===== Pre-earnings setup cards (build 2026.09.24-100) =======================================
+  // /api/earnings/setups: one card per name reporting within EARN_SETUP_SESSIONS US sessions (see
+  // compute.earnSetup). Its OWN route rather than more fields on /api/earnings: that payload's ETag
+  // rides the 6h calendar and moves rarely, while positioning moves every poll — folding live
+  // funding/OI into it would bust the calendar's 304 on every cycle for every client. Here the
+  // build is thin assembly over state the poller already holds (reaction study, daily spine, OI
+  // history, funding Map, premium ring), rebuilt at most once a minute (or at once when the
+  // calendar object is replaced), and the payload OBJECT is kept while its content signature
+  // holds — same ETag, a real 304, and the serialize/gzip memos stay warm.
+  let setupCache = null, setupBuilt = 0, setupSrc = null, setupSig = "", setupVer = 0;
+  const SETUP_MS = 60 * 1000;
+  function setupFundPct(r) {
+    // same loop (and the same >=96-sample bar) as the snapshot's fundPct — one definition
+    if (r.funding == null || !isFinite(r.funding) || !r.fundH || !r.fundH.size) return null;
+    const cut = Date.now() - 31 * DAY;
+    let n = 0, le = 0;
+    for (const [t, rate] of r.fundH) { if (t < cut || !isFinite(rate)) continue; n++; if (rate <= r.funding) le++; }
+    return n >= 96 ? Math.round((100 * le) / n) : null;
+  }
+  function buildEarnSetups(now) {
+    const cards = [];
+    const byTicker = new Map();
+    for (const p of earnPrints) { let a = byTicker.get(p.t); if (!a) { a = []; byTicker.set(p.t, a); } a.push(p); }
+    const seen = new Set();
+    for (const e of (earnCache && earnCache.entries) || []) {
+      if (!e || seen.has(e.t) || earnEntryState(e, now) !== "upcoming") continue;
+      const sessions = earnSessionsAhead(e.d, now);
+      if (sessions == null || sessions > EARN_SETUP_SESSIONS) continue;
+      seen.add(e.t);   // entries ship date-sorted: the first upcoming row per ticker is its next print
+      let r = e.coin ? rows.get(e.coin) : null;
+      if (!r) for (const x of rows.values()) if (x.uni === "xyz" && !x.delisted && x.ticker === e.t) { r = x; break; }
+      if (!r || r.delisted) {
+        cards.push({ t: e.t, coin: e.coin || null, d: e.d, s: e.s || "TBD", sessions, missing: "the market is not on the live board — no positioning or price data" });
+        continue;
+      }
+      const prem = r.px > 0 && r.oracle > 0 ? (r.px / r.oracle - 1) * 1e4 : null;
+      const pb = prem != null ? premBaseline(r) : null;
+      const h = hist.get(r.coin);
+      const oiChg = oiDeltaPct(h, r.oiBase, EARN_RUNUP_D * DAY);
+      cards.push(earnSetup({
+        t: e.t, coin: r.coin, d: e.d, s: e.s, sessions,
+        study: earnStudy[e.t] || null,
+        fund: r.funding != null && isFinite(r.funding) ? r.funding : null, fundPct: setupFundPct(r),
+        oiChg, oiWhy: oiChg == null ? (!(r.oiBase > 0) ? "no live open interest" : "OI history does not reach " + EARN_RUNUP_D + " days back yet") : null,
+        premBp: prem, premZ: pb && prem != null ? (prem - pb.m) / pb.sd : null,
+        runup: earnRunup(byTicker.get(e.t) || [], r.dailyRaw, r.px, now),
+      }));
+    }
+    cards.sort((a, b) => a.d < b.d ? -1 : a.d > b.d ? 1 : (a.t < b.t ? -1 : 1));
+    return cards;
+  }
+  function getEarnSetups() {
+    const now = Date.now();
+    if (setupCache && setupSrc === earnCache && now - setupBuilt < SETUP_MS) return setupCache;
+    setupBuilt = now; setupSrc = earnCache;
+    let cards = [], error = null;
+    if (!earnCache) error = "earnings calendar not fetched yet";
+    else { try { cards = buildEarnSetups(now); } catch (err) { error = "setup build failed"; log("buildEarnSetups error: " + (err && err.message)); } }
+    const sig = JSON.stringify(cards) + "|" + error;
+    if (setupCache && sig === setupSig) return setupCache;   // content unchanged: keep the object (same ETag)
+    setupSig = sig; setupVer = Math.max(now, setupVer + 1);   // monotonic: two changes in one ms never share an ETag
+    setupCache = { ts: now, dataTs: setupVer, sessions: EARN_SETUP_SESSIONS, runupD: EARN_RUNUP_D, error, cards, count: cards.length };
+    return setupCache;
   }
   // Operator surgery for feed-garbage prints: removes ticker|date from the print history and
   // the reaction study, rebuilds the payload immediately (ETag bumped), and TOMBSTONES the key
@@ -15013,6 +15077,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
         macroAsOf: macroCache ? macroCache.asOf : null,
         dataTs: Math.max(earnCache.dataTs || 0, earnLnVer, macroCache ? (macroCache.dataTs || 0) : 0) });
     },
+    getEarnSetups,   // pre-earnings setup cards (build 2026.09.24-100) — /api/earnings/setups
     voidEarnPrint,
     getTrend,
     getTrendPair,

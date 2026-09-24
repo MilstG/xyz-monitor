@@ -4757,6 +4757,166 @@ module.exports.earnReactionsFor = earnReactionsFor;
 module.exports.earnReactionCurve = earnReactionCurve;
 module.exports.earnPrintUtc = earnPrintUtc;
 module.exports.EARN_ANCHOR_H = EARN_ANCHOR_H;
+// ---- pre-earnings setup card (build 2026.09.24-100) -------------------------------------------
+// One card per name reporting within EARN_SETUP_SESSIONS US sessions: the reaction study (what a
+// print usually does), the positioning going INTO it (funding + its own-history percentile, OI
+// over the run-up, premium), the run-up drift vs this name's usual pre-print drift, and an
+// "implied vs typical" read — the typical print move against the CURRENT usual daily move, next to
+// the same ratio the study measured at past prints (xMed). All of it collapses into ONE verdict
+// line composed by fixed rules below — no model call, so the same inputs always read the same.
+// Every block that cannot be computed says so in a `why` string; a missing number is never a zero.
+// Run-up window: 5 US sessions ~ 7 calendar days. The perp's daily spine is 24/7 UTC days, so the
+// window is measured in CALENDAR days on the spine (the same bars the study reads) and labeled in
+// sessions for the reader. Session counting skips weekends only — exchange holidays are not
+// modeled, so a holiday week reads one session long (conservative: a name is carded a day early).
+const EARN_SETUP_SESSIONS = 5, EARN_RUNUP_D = 7;
+// Whole US sessions between the current ET day and the print date: 0 = reports today, 1 = next
+// weekday, ... null for a passed or malformed date.
+function earnSessionsAhead(dateStr, nowMs) {
+  const diff = earnDayDiff(dateStr, nowMs);
+  if (diff == null || diff < 0) return null;
+  const t = etDayStr(nowMs);
+  const base = Date.UTC(+t.slice(0, 4), +t.slice(5, 7) - 1, +t.slice(8, 10));
+  let n = 0;
+  for (let k = 1; k <= diff; k++) { const wd = new Date(base + k * DAY).getUTCDay(); if (wd !== 0 && wd !== 6) n++; }
+  return n;
+}
+// Run-up read off the daily spine ([{t, c}], UTC days, oldest first) and the live mark:
+//   now   : live mark vs the close of the last COMPLETED bar at or before now - 7d (the drift
+//           into this print so far), null when the spine does not reach back that far (±1.5d).
+//   usual : per past print, the close before the print day (daily[pi-1], the reaction study's own
+//           reference) vs the close 7 bars earlier — only where those 7 bars really span 7 days
+//           (a hole in the spine is not a run-up). >= 3 prints before it is called "usual".
+//   day   : mean |close-to-close| over the last 20 completed bars (>= 8) — the SAME baseline the
+//           study's expansion ratio (xMed) divides by, so typ/day and xMed are like for like.
+function earnRunup(prints, daily, px, nowMs) {
+  const now = nowMs == null ? Date.now() : nowMs;
+  const out = { now: null, nowWhy: null, usual: null, usualWhy: null, day: null, dayN: 0, dayWhy: null };
+  if (!Array.isArray(daily) || daily.length < 3) {
+    out.nowWhy = out.usualWhy = out.dayWhy = "daily candles for this name are not loaded yet";
+    return out;
+  }
+  const done = daily.filter((b) => b && Number.isFinite(+b.t) && Number.isFinite(b.c) && b.c > 0 && +b.t + DAY <= now);
+  // usual daily move
+  const last = done.slice(-21);
+  let s = 0, n = 0;
+  for (let k = 1; k < last.length; k++) { s += Math.abs(last[k].c / last[k - 1].c - 1) * 100; n++; }
+  if (n >= 8 && s > 0) { out.day = +(s / n).toFixed(2); out.dayN = n; }
+  else out.dayWhy = "fewer than 8 completed daily candles on the spine";
+  // drift so far
+  const target = now - EARN_RUNUP_D * DAY;
+  let ref = null;
+  for (let k = done.length - 1; k >= 0; k--) if (+done[k].t + DAY <= target) { ref = done[k]; break; }
+  if (!(px > 0)) out.nowWhy = "no live mark";
+  else if (!ref || target - (+ref.t + DAY) > 1.5 * DAY) out.nowWhy = "the daily spine does not reach " + EARN_RUNUP_D + " days back";
+  else out.now = +((px / ref.c - 1) * 100).toFixed(2);
+  // usual pre-print drift
+  const dayOf = (t) => { const x = new Date(t); return x.getUTCFullYear() + "-" + String(x.getUTCMonth() + 1).padStart(2, "0") + "-" + String(x.getUTCDate()).padStart(2, "0"); };
+  const idx = new Map();
+  for (let i = 0; i < daily.length; i++) if (daily[i] && Number.isFinite(daily[i].c)) idx.set(dayOf(+daily[i].t), i);
+  const runs = [];
+  for (const p of Array.isArray(prints) ? prints : []) {
+    if (!p || typeof p.d !== "string") continue;
+    const pi = idx.get(p.d);
+    if (pi == null || pi - 1 - EARN_RUNUP_D < 0 || +daily[pi].t > now) continue;
+    const a = daily[pi - 1 - EARN_RUNUP_D], b = daily[pi - 1];
+    if (!(a.c > 0) || !(b.c > 0) || Math.abs((+b.t - +a.t) - EARN_RUNUP_D * DAY) > DAY) continue;
+    runs.push((b.c / a.c - 1) * 100);
+  }
+  if (runs.length >= 3) out.usual = { n: runs.length, med: +median(runs).toFixed(2), up: runs.filter((x) => x > 0).length };
+  else out.usualWhy = runs.length ? "only " + runs.length + " past print" + (runs.length === 1 ? "" : "s") + " with a full " + EARN_RUNUP_D + "-day run-up on the retained spine (need 3)"
+    : "no past print with a full " + EARN_RUNUP_D + "-day run-up on the retained spine";
+  return out;
+}
+const earnSgn = (x, dp) => (x >= 0 ? "+" : "−") + Math.abs(x).toFixed(dp == null ? 1 : dp);
+// The verdict, composed deterministically from the card's blocks. Four clauses, each present only
+// when its inputs are: positioning, the reaction base rate, the run-up drift, implied-vs-typical.
+// Thresholds are fixed and disclosed here (and in the README), never tuned per name:
+//   crowded long  = funding >= p90 of its own 31d history AND OI up >= 5% over the run-up
+//   crowded short = funding <= p10 AND OI up >= 5%   (shorts paying to hold a growing book)
+//   longs / shorts paying = the funding extreme without the OI build; OI building / coming off =
+//   |OI| >= 10% with funding in between; otherwise "positioning neutral".
+//   direction skew = >= 70% of prints one way; gap read = >= 3 gaps and >= 60% held or faded.
+//   drift clause = |run-up| >= 3%; implied clause = typ/day, flagged "compressed" when it runs
+//   >= 1.3x the study's historical ratio, "elevated" when <= 1/1.3 of it.
+function earnSetupVerdict(c) {
+  const parts = [];
+  const p = c.pos || {}, fp = p.fundPct, oi = p.oiChg;
+  const bits = [fp != null ? "funding p" + fp : "funding pctile n/a", oi != null ? "OI " + earnSgn(oi, 0) + "% in " + EARN_SETUP_SESSIONS + " sessions" : "OI n/a"].join(", ");
+  if (fp == null && oi == null) parts.push("positioning n/a");
+  else if (fp != null && fp >= 90 && oi != null && oi >= 5) parts.push("crowded long into print (" + bits + ")");
+  else if (fp != null && fp <= 10 && oi != null && oi >= 5) parts.push("crowded short into print (" + bits + ")");
+  else if (fp != null && fp >= 90) parts.push("longs paying up (" + bits + ")");
+  else if (fp != null && fp <= 10) parts.push("shorts paying (" + bits + ")");
+  else if (oi != null && oi >= 10) parts.push("OI building into print (" + bits + ")");
+  else if (oi != null && oi <= -10) parts.push("positions coming off into print (" + bits + ")");
+  else parts.push("positioning neutral (" + bits + ")");
+  const r = c.react;
+  if (!r) parts.push("no reaction history");
+  else {
+    let s = "typical move ±" + r.medAbs.toFixed(1) + "%";
+    if (r.up / r.n >= 0.7) s += ", up " + r.up + "/" + r.n;
+    else if (r.up / r.n <= 0.3) s += ", down " + (r.n - r.up) + "/" + r.n;
+    if (r.gapRead === "fades") s += ", gaps and fades " + (r.gapN - r.gapHeld) + "/" + r.gapN;
+    else if (r.gapRead === "holds") s += ", gaps and holds " + r.gapHeld + "/" + r.gapN;
+    if (r.thin) s += " (thin: n=" + r.n + ")";
+    parts.push(s);
+  }
+  const d = c.drift || {};
+  if (d.now != null && Math.abs(d.now) >= 3)
+    parts.push((d.now > 0 ? "ran " : "sold off ") + earnSgn(d.now) + "% into print" + (d.usual ? " vs usual " + earnSgn(d.usual.med) + "%" : ""));
+  const im = c.implied || {};
+  if (im.ratio != null) {
+    const hist = im.histX != null ? " (past prints " + im.histX.toFixed(1) + "x)" : "";
+    parts.push(im.read === "compressed" ? "vol compressed: typical move = " + im.ratio.toFixed(1) + "x the current daily move" + hist
+      : im.read === "elevated" ? "vol already elevated: typical move only " + im.ratio.toFixed(1) + "x the current daily move" + hist
+      : "typical move = " + im.ratio.toFixed(1) + "x the current daily move" + hist);
+  }
+  return parts.join("; ");
+}
+// Assemble one card. Inputs are plain values the poller already holds (so this stays pure):
+//   { t, coin, d, s, sessions, study (earnReactionsFor + curve), fund (hourly rate), fundPct,
+//     fundWhy, oiChg, oiWhy, premBp, premZ, premWhy, runup (earnRunup) }
+function earnSetup(inp) {
+  const i = inp || {}, st = i.study, ru = i.runup || {};
+  const react = st && st.n > 0 ? {
+    n: st.n, avgAbs: st.avgAbs, medAbs: st.medAbs, up: st.up, xMed: st.xMed != null ? st.xMed : null,
+    gapN: st.gapN || 0, gapUp: st.gapUp || 0, gapHeld: st.gapHeld || 0,
+    gapRead: st.gapN >= 3 ? (st.gapHeld / st.gapN >= 0.6 ? "holds" : (st.gapN - st.gapHeld) / st.gapN >= 0.6 ? "fades" : null) : null,
+    h24: st.curve && st.curve.agg && st.curve.agg.h24 && st.curve.agg.h24.n > 0 ? st.curve.agg.h24.medAbs : null,
+    thin: st.n < 4,
+  } : null;
+  const fundApr = Number.isFinite(i.fund) ? +(i.fund * 24 * 365 * 100).toFixed(1) : null;
+  const pos = {
+    fundApr, fundPct: Number.isFinite(i.fundPct) ? i.fundPct : null,
+    fundWhy: fundApr == null ? "no live funding rate" : !Number.isFinite(i.fundPct) ? (i.fundWhy || "under 4 days of hourly funding history — no percentile yet") : null,
+    oiChg: Number.isFinite(i.oiChg) ? +i.oiChg.toFixed(1) : null,
+    oiWhy: Number.isFinite(i.oiChg) ? null : (i.oiWhy || "OI history does not reach " + EARN_RUNUP_D + " days back yet"),
+    premBp: Number.isFinite(i.premBp) ? +i.premBp.toFixed(1) : null, premZ: Number.isFinite(i.premZ) ? +i.premZ.toFixed(1) : null,
+    premWhy: Number.isFinite(i.premBp) ? (Number.isFinite(i.premZ) ? null : "under ~17h of premium samples — no z-score yet") : (i.premWhy || "no oracle price"),
+  };
+  const drift = { now: ru.now != null ? ru.now : null, nowWhy: ru.nowWhy || null, usual: ru.usual || null, usualWhy: ru.usualWhy || null };
+  const implied = { typ: react ? react.medAbs : null, day: ru.day != null ? ru.day : null, ratio: null, histX: react ? react.xMed : null, read: null, why: null };
+  if (!react) implied.why = "no reaction history to size a typical move";
+  else if (implied.day == null) implied.why = ru.dayWhy || "no usual daily move";
+  else if (!(implied.day > 0)) implied.why = "flat tape — no daily move to compare against";
+  else {
+    implied.ratio = +(implied.typ / implied.day).toFixed(1);
+    if (implied.histX != null && implied.histX > 0)
+      implied.read = implied.ratio >= implied.histX * 1.3 ? "compressed" : implied.ratio <= implied.histX / 1.3 ? "elevated" : "usual";
+  }
+  const card = { t: i.t, coin: i.coin, d: i.d, s: i.s || "TBD", sessions: i.sessions,
+    react, reactWhy: react ? null : "no reaction history yet — needs past print dates matched to retained daily candles",
+    pos, drift, implied };
+  card.verdict = earnSetupVerdict(card);
+  return card;
+}
+module.exports.EARN_SETUP_SESSIONS = EARN_SETUP_SESSIONS;
+module.exports.EARN_RUNUP_D = EARN_RUNUP_D;
+module.exports.earnSessionsAhead = earnSessionsAhead;
+module.exports.earnRunup = earnRunup;
+module.exports.earnSetup = earnSetup;
+module.exports.earnSetupVerdict = earnSetupVerdict;
 
 // ===== Coinalyze derivatives context (crypto universe) ==========================================
 // Pure math over the packed deriv rows [ts, longLiqUsd, shortLiqUsd, oiUsd]. Fetch/assembly lives
@@ -6189,7 +6349,7 @@ const FEATURES = [
   { key: "funding",    kind: "tab", label: "Funding",     def: "public", routes: ["/api/funding"] },
   { key: "sessions",   kind: "tab", label: "Sessions",    def: "public", routes: ["/api/analytics"] },
   { key: "signals",    kind: "tab", label: "Signals",     def: "public", routes: ["/api/signals", "/api/ledger", "/api/triggers"] },
-  { key: "earnings",   kind: "tab", label: "Earnings",    def: "public", routes: ["/api/earnings"] },
+  { key: "earnings",   kind: "tab", label: "Earnings",    def: "public", routes: ["/api/earnings", "/api/earnings/setups"] },
   { key: "news",       kind: "tab", label: "News",        def: "public", routes: ["/api/news", "/api/news/channels"] },
   // HOUSING (build 2026.08.21-04): the macro housing / MBS board — FRED-fed, read-only. Ships
   // admin-only while it soaks (proxy panels need a second look before the group sees them).

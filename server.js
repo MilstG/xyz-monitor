@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.24-99";
+const VERSION = "2026.09.24-100";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -2585,6 +2585,12 @@ async function buildServer() {
   // dataTs like the other cached payloads, so an unchanged calendar revalidates to a 304.
   fastify.get("/api/earnings", (req, reply) =>
     serveCached(req, reply, poller.getEarnings(), { ts: 0, dataTs: 0, asOf: null, windowDays: 14, source: "finnhub", error: "not fetched yet", entries: [], recent: [], eligible: 0 }));
+  // Pre-earnings setup cards (build 2026.09.24-100): names reporting within ~5 sessions — reaction
+  // study + positioning into the print + implied-vs-typical + a rule-composed verdict line. Its
+  // own route so live positioning never busts the calendar's 304; the poller keeps the payload
+  // object (and so the ETag) while the content signature holds, rebuilding at most once a minute.
+  fastify.get("/api/earnings/setups", (req, reply) =>
+    serveCached(req, reply, poller.getEarnSetups(), { ts: 0, dataTs: 0, sessions: 5, runupD: 7, error: "not built yet", cards: [], count: 0 }));
   // Housing / MBS board — FRED-fed, 6h server refresh. ETag rides dataTs like the other cached
   // payloads, so an unchanged board revalidates to a 304.
   fastify.get("/api/housing", (req, reply) =>

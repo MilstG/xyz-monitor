@@ -131,7 +131,7 @@ test("drawdown tab: wired end to end — manifest, markup, routing, scope, dispa
   for (const pin of [".rvd-title", ".rvd-sub", ".rvd-head", ".rvd-tbl", ".rvdsvg.hv .rvd-dot:not(.hot)", ".rvd-legend i.late", ".rvd-late"])
     assert.ok(css.includes(pin), "css pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.24-99"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.24-100"'), "build stamp");
   // the renderer's contract with the DOM: closes only, the caption says so, and the CSV carries the dates
   const src = fs.readFileSync(path.join(__dirname, "..", "public", "js", "drawdown.js"), "utf8");
   assert.ok(src.includes("intraday lows are not in the daily feed"), "the caption discloses close-to-close");

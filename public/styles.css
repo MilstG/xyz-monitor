@@ -837,6 +837,21 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .earn-study.sec{color:var(--dim)}
 .earn-live{margin-left:auto;font-family:var(--mono);font-size:var(--fs-xs);cursor:help;white-space:nowrap}
 
+/* ===== pre-earnings setup cards (build 2026.09.24-100) ===== */
+.earn-setup{background:var(--panel);border-left:2px solid var(--accent);margin-bottom:2px;font-size:var(--fs-sm)}
+.earn-setup>summary{display:flex;align-items:center;gap:14px;padding:7px 10px;cursor:pointer;list-style:none}
+.earn-setup>summary::-webkit-details-marker{display:none}
+.earn-setup>summary:hover{background:var(--panel2)}
+.earn-setup[open]>summary{border-bottom:1px solid var(--border)}
+.setup-verdict{font-size:var(--fs-xs);line-height:1.45;color:var(--text);min-width:0;overflow-wrap:anywhere}
+.setup-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 16px;padding:8px 10px 10px}
+.setup-blk{min-width:0}
+.setup-h{font-family:var(--mono);font-size:var(--fs-xs);letter-spacing:.6px;text-transform:uppercase;color:var(--muted);margin-bottom:3px;cursor:help}
+.setup-kv{display:flex;justify-content:space-between;gap:10px;font-size:var(--fs-xs);line-height:1.6}
+.setup-kv>span:last-child{font-family:var(--mono);text-align:right;min-width:0;overflow-wrap:anywhere}
+#dsetup .setup-grid{padding:4px 0 8px}
+@media (max-width:640px){.earn-setup>summary{flex-wrap:wrap;gap:4px 10px}.earn-setup .earn-sess{min-width:0}}
+
 /* ===== trend leaderboard tab (build -47) ===== */
 .tsec-h{font-size:var(--fs-sm);text-transform:uppercase;letter-spacing:1.1px;font-weight:700;color:var(--text);
   margin:22px 2px 8px}

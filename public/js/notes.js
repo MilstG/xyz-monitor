@@ -600,6 +600,71 @@ function earnDrawerHtml(r){
   const hist=st?`${up?' · ':''}<span class="sec" data-tip="own reaction base rate — hover the Earnings tab row for the full breakdown">${st.n} print${st.n===1?'':'s'}, avg |${st.avgAbs}%|</span>`:'';
   return `<div class="dsub" style="margin-top:2px" data-shsec="earn" data-shlabel="Earnings reaction">${up}${hist}</div>`;
 }
+// ===== pre-earnings setup card (build 2026.09.24-100) =====
+// Server-built (/api/earnings/setups): every number and the verdict line arrive computed — the
+// client formats, it never re-derives. A block the server could not fill arrives with its reason
+// and renders as "n/a — why", never as a dash that could be read as zero.
+function setupNa(why){ return `<span class="na" data-tip="${esc(why||'not computable')}">n/a — ${esc(why||'not computable')}</span>`; }
+function setupPct(x,dp){ return x==null||!isFinite(x)?null:`<b class="${x>0?'pos':x<0?'neg':'sec'}">${x>=0?'+':'−'}${Math.abs(x).toFixed(dp==null?1:dp)}%</b>`; }
+function setupWhen(c){ return c.sessions===0?'reports today':c.sessions===1?'next session':'in '+c.sessions+' sessions'; }
+function earnSetupBodyHtml(c){
+  if(!c) return '';
+  if(c.missing) return `<div class="setup-grid"><div class="setup-blk">${setupNa(c.missing)}</div></div>`;
+  const k=(l,v)=>`<div class="setup-kv"><span class="sec">${l}</span><span>${v}</span></div>`;
+  const rx=c.react, p=c.pos||{}, dr=c.drift||{}, im=c.implied||{};
+  const react=rx?[
+      k('typical |move|',`<b>±${rx.medAbs.toFixed(1)}%</b> <span class="sec">median · avg ${rx.avgAbs.toFixed(1)}%</span>`),
+      k('direction',`${rx.up}↑ ${rx.n-rx.up}↓ <span class="sec">of ${rx.n}${rx.thin?' · thin sample':''}</span>`),
+      k('gaps',rx.gapN>0?`${rx.gapUp}/${rx.gapN} up · held ${rx.gapHeld}/${rx.gapN}${rx.gapRead?` <span class="sec">(${rx.gapRead==='holds'?'gaps hold':'gaps fade'})</span>`:''}`:setupNa('no gap history — gap stats need candle opens, which cover the live-fetched window only')),
+      rx.h24!=null?k('+24h from anchor',`|${rx.h24}%| <span class="sec">median</span>`):''].join('')
+    :setupNa(c.reactWhy);
+  const pos=[
+    k('funding',p.fundApr!=null?`${p.fundApr>=0?'+':''}${p.fundApr.toFixed(1)}% APR${p.fundPct!=null?` · <b${p.fundPct>=90||p.fundPct<=10?' style="color:var(--accent)"':''}>p${p.fundPct}</b> <span class="sec">vs own 31d</span>`:` · ${setupNa(p.fundWhy)}`}`:setupNa(p.fundWhy)),
+    k('OI, 5 sessions',p.oiChg!=null?setupPct(p.oiChg):setupNa(p.oiWhy)),
+    k('premium',p.premBp!=null?`${p.premBp>=0?'+':''}${p.premBp.toFixed(1)}bp${p.premZ!=null?` <span class="sec">(${p.premZ>=0?'+':''}${p.premZ.toFixed(1)}σ vs 7d)</span>`:''}`:setupNa(p.premWhy))].join('');
+  const drift=[
+    k('run-up so far',dr.now!=null?setupPct(dr.now)+' <span class="sec">last 7d (5 sessions)</span>':setupNa(dr.nowWhy)),
+    k('usual run-up',dr.usual?`${setupPct(dr.usual.med)} <span class="sec">median of ${dr.usual.n} · ${dr.usual.up}/${dr.usual.n} up</span>`:setupNa(dr.usualWhy))].join('');
+  const impl=im.ratio!=null
+    ?[k('typical / daily',`<b>${im.ratio.toFixed(1)}x</b> <span class="sec">±${im.typ.toFixed(1)}% vs ${im.day.toFixed(2)}%/day now</span>`),
+      k('past prints',im.histX!=null?`${im.histX.toFixed(1)}x${im.read&&im.read!=='usual'?` <span style="color:var(--accent)">· vol ${im.read} now</span>`:''}`:setupNa('the study has no expansion ratio yet (needs 8+ candles before each print)'))].join('')
+    :setupNa(im.why);
+  const blk=(h,tip,body)=>`<div class="setup-blk"><div class="setup-h" data-tip="${esc(tip)}">${h}</div>${body}</div>`;
+  return `<div class="setup-grid">`
+    +blk('Reaction study','this name’s own past prints on the perp’s daily closes — a base rate, not a prediction',react)
+    +blk('Positioning into the print','live funding and its percentile vs the name’s own 31d hourly history, OI change over the last 7 calendar days (~5 sessions), mark vs oracle premium',pos)
+    +blk('Run-up','drift into the print so far vs this name’s median drift over the same 7-day window before its past prints',drift)
+    +blk('Implied vs typical','the typical print move divided by the CURRENT usual daily move (mean |close-to-close| over 20 days) — next to the same ratio measured at past prints. Higher than usual = the print is big relative to how quiet the tape is now',impl)
+    +`</div>`;
+}
+function earnSetupCardHtml(c,open){
+  return `<details class="earn-setup" data-t="${esc(c.t)}"${open?' open':''}><summary><span class="earn-tk">${esc(c.t)}</span>`
+    +`<span class="earn-sess ${c.s==='BMO'?'bmo':c.s==='AMC'?'amc':''}">${esc(setupWhen(c))} · ${esc(earnSessLbl(c.s))}</span>`
+    +`<span class="setup-verdict">${esc(c.verdict||c.missing||'')}</span></summary>${earnSetupBodyHtml(c)}</details>`;
+}
+// The Setups strip on the Earnings tab: collapsed cards, one per name inside the window. Which
+// cards are expanded survives the tab's re-renders (every payload pull repaints the whole body).
+const _setupOpen=new Set();
+function wireEarnSetups(box){
+  box.querySelectorAll('details.earn-setup').forEach(dt=>dt.addEventListener('toggle',()=>{ if(dt.open) _setupOpen.add(dt.dataset.t); else _setupOpen.delete(dt.dataset.t); }));
+}
+function earnSetupStripHtml(){
+  const d=state.earnSetups; if(!d) return '';
+  const cards=d.cards||[];
+  const tip=`names reporting within the next ${d.sessions||5} US sessions (weekends skipped; exchange holidays are not modeled). Each card: the reaction study, positioning going into the print, the run-up vs its usual, and the typical move vs the CURRENT daily range — composed into one rule-based verdict line (fixed thresholds: crowded = funding ≥ p90 / ≤ p10 of its own history with OI up ≥ 5% over 5 sessions). No AI; a read of the setup, never a call.`;
+  let h=`<div class="earn-day" data-tip="${esc(tip)}">PRE-EARNINGS SETUPS<span class="sec" style="margin-left:8px;text-transform:none;letter-spacing:0">next ${d.sessions||5} sessions · ${cards.length} name${cards.length===1?'':'s'}</span></div>`;
+  if(d.error&&!cards.length) return h+`<div class="sec" style="font-size:var(--fs-xs);margin-bottom:10px">n/a — ${esc(d.error)}</div>`;
+  if(!cards.length) return h+`<div class="sec" style="font-size:var(--fs-xs);margin-bottom:10px">No name on the calendar reports within the next ${d.sessions||5} sessions.</div>`;
+  return h+cards.map(c=>earnSetupCardHtml(c,_setupOpen.has(c.t))).join('')+'<div style="height:8px"></div>';
+}
+// Drawer section: only when this name has a print inside the window. Wrapped in #dsetup so a
+// setups pull that lands after the drawer opened can fill it in place (loadEarnSetups).
+function earnSetupDrawerHtml(r){
+  const c=r&&r.uni==='xyz'&&state.earnSetupMap?state.earnSetupMap.get(r.ticker):null;
+  if(!c) return '<div id="dsetup"></div>';
+  return `<div id="dsetup"><div class="dsec">Pre-earnings setup <span class="sec" style="font-weight:400;text-transform:none;letter-spacing:0">· ${esc(setupWhen(c))} · ${esc(earnSessLbl(c.s))}</span></div>`
+    +`<div class="setup-verdict" style="margin-bottom:6px">${esc(c.verdict||c.missing||'')}</div>${earnSetupBodyHtml(c)}</div>`;
+}
 // The earnings line as a card (build 2026.09.24-98): the next print and this name's own reaction
 // base rate, as label/value lines — the fields the line and its hover already print, no new math.
 function earnShareRows(r){
@@ -735,13 +800,13 @@ function renderEarnings(){
     if(e.k==='FOMC'&&e.d1&&macroStateC(e)==='upcoming'){ const d1f=earnDiffC(e.d1);
       if(d1f!=null&&d1f>=0){ let g1=mgroups.get(e.d1); if(!g1){g1=[];mgroups.set(e.d1,g1);}
         g1.push({_fomc1:true,e}); } } }
-  if(!groups.size&&!mgroups.size&&!repHtml){ box.innerHTML=head+cov+'<div class="msg">No upcoming events in the next '+(d.windowDays||14)+' days for this universe.</div>'; return; }
-  let html=head+cov+repHtml;
+  if(!groups.size&&!mgroups.size&&!repHtml){ box.innerHTML=head+cov+earnSetupStripHtml()+'<div class="msg">No upcoming events in the next '+(d.windowDays||14)+' days for this universe.</div>'; wireEarnSetups(box); return; }
+  let html=head+cov+earnSetupStripHtml()+repHtml;
   if(!groups.size&&!mgroups.size){
     html+='<div class="msg">No upcoming reports in the next '+(d.windowDays||14)+' days for this universe.</div>';
     box.innerHTML=html;
     box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',(ev)=>{ if(ev.target.closest('a,button')) return; const c=rw.dataset.coin; if(state.rows.has(c)) openDetail(c); }));   // in-place drawer — no tab switch
-  wireEarnVoid(box);
+  wireEarnVoid(box); wireEarnSetups(box);
     return;
   }
   const allDates=[...new Set([...groups.keys(),...mgroups.keys()])].sort();
@@ -776,6 +841,6 @@ function renderEarnings(){
   html+=`<div class="sec" style="font-size:var(--fs-xs);margin-top:14px;line-height:1.5">Dates and sessions are the feed\u2019s scheduled values and can move \u2014 companies reschedule. Session-spanning signals (breakout, gap, overnight drift) on names reporting \u2264 1 day out carry an <i>earnings</i> flag on the Signals tab and have their evidence contribution capped: the base rates weren\u2019t sampled around a known binary catalyst. Macro rows work the same way universe-wide \u2014 an FOMC/CPI/NFP print \u2264 1 day out flags session-spanning signals on <b>both</b> universes with the same cap, and events inside an open setup\u2019s horizon are flagged on the Actionable board (\u25c6) and in AI reports. Macro dates come from the Fed\u2019s published schedule and FRED; prior values are the previous print (labeled by month), never consensus \u2014 no street-estimate feed exists here, so there is no beat/miss verdict, only prior \u2192 actual and the tape.</div>`;
   box.innerHTML=html;
   box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',(ev)=>{ if(ev.target.closest('a,button')) return; const c=rw.dataset.coin; if(state.rows.has(c)) openDetail(c); }));   // in-place drawer — no tab switch
-  wireEarnVoid(box);
+  wireEarnVoid(box); wireEarnSetups(box);
 }
-export { _hsgLast, _liqLast, _notesLoading, earnDrawerHtml, earnShareRows, epsFmt, epsPairFmt, loadHousing, loadLiquidity, loadNotes, noteBadge, noteDrawerHtml, notesStale, openHousing, openLiquidity, openNotes, renderDrawerNotes, renderEarnings, renderHousing, renderLiquidity, renderNotes, wireDrawerNotes };
+export { _hsgLast, _liqLast, _notesLoading, earnDrawerHtml, earnSetupBodyHtml, earnSetupCardHtml, earnSetupDrawerHtml, earnSetupStripHtml, earnShareRows, epsFmt, epsPairFmt, loadHousing, loadLiquidity, loadNotes, noteBadge, noteDrawerHtml, notesStale, openHousing, openLiquidity, openNotes, renderDrawerNotes, renderEarnings, renderHousing, renderLiquidity, renderNotes, wireDrawerNotes };

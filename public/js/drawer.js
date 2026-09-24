@@ -12,7 +12,7 @@ import { corrColor, dailyReturns, pearson, sparkline } from "./corr.js";
 import { fetchJSON } from "./data.js";
 import { render, sessDrawerHtml, sessEx } from "./markets.js";
 import { openRuleFor, updateFocusChip } from "./nav.js";
-import { earnDrawerHtml, loadNotes, noteDrawerHtml, renderDrawerNotes, wireDrawerNotes } from "./notes.js";
+import { earnDrawerHtml, earnSetupDrawerHtml, loadNotes, noteDrawerHtml, renderDrawerNotes, wireDrawerNotes } from "./notes.js";
 import { renderDrawerPos, savePrefs } from "./prefs.js";
 import { aiPick, openAiReport } from "./report.js";
 import { shChartCard, shSvgPng, shSvgResolve, shThemeVar } from "./share.js";
@@ -78,6 +78,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
     <div id="dpos"></div>
     ${sessDrawerHtml(r)}
     ${earnDrawerHtml(r)}
+    ${earnSetupDrawerHtml(r)}
     ${noteDrawerHtml(r)}
     ${closes.length>2?`<div class="dsec">90-day price</div>${sparkline(closes,{color: closes[closes.length-1]>=closes[0]?'var(--up)':'var(--down)'})}`:''}
     <div id="dcandles"></div>

@@ -857,3 +857,16 @@ test("retest study -96: /api/retest-study rides the Backtest tab's gate, answers
   const C = require("../src/compute");
   assert.ok(C.FEATURES.find((f) => f.key === "backtest").routes.includes("/api/retest-study"), "the manifest owns the route");
 });
+
+test("earnings setups -100: the route is session-gated, serves the empty payload honestly, and revalidates to a 304", async () => {
+  assert.equal((await get("/api/earnings/setups")).statusCode, 401, "signed out: 401 like every API read");
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const r = await get("/api/earnings/setups", gus);
+  assert.equal(r.statusCode, 200);
+  const b = JSON.parse(r.body);
+  assert.deepEqual(b.cards, []); assert.equal(b.sessions, 5); assert.equal(b.runupD, 7);
+  assert.equal(b.error, "earnings calendar not fetched yet", "no calendar under test: the empty strip says why");
+  assert.ok(r.headers.etag, "ETag carried");
+  const again = await get("/api/earnings/setups", gus, { "if-none-match": r.headers.etag });
+  assert.equal(again.statusCode, 304, "unchanged content revalidates");
+});

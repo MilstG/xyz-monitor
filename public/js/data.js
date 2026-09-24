@@ -6,7 +6,7 @@ import { fhLiveRefresh } from "./admin.js";
 import { notifyNewBuild } from "./alerts.js";
 import { updateBenchNote } from "./backtest.js";
 import { COLS } from "./base.js";
-import { _earnLast, _newsLast, _sigLast, loadEarnings, loadNews, loadSignals, renderMacroStrip } from "./calendar.js";
+import { _earnLast, _newsLast, _setupLast, _sigLast, loadEarnSetups, loadEarnings, loadNews, loadSignals, renderMacroStrip } from "./calendar.js";
 import { DAY, HOUR, TF_MAP, TF_MS, activeRows, clamp, detectBenchmark, el, esc, fmtUsd, isoUtc, recomputeChanges, regimeDetail, setPrice, state } from "./core.js";
 import { COMPG, dailyReturns, openCorr, renderCompg } from "./corr.js";
 import { computeSqueeze, render, renderRegimeStrip, rowSessState, scheduleRender, updateMovers } from "./markets.js";
@@ -51,6 +51,8 @@ function maybePullSidecars(){
   { const vis=el('view-signals')&&!el('view-signals').hidden;
     if(Date.now()-_sigLast > (vis?60*1000:5*60*1000)) loadSignals(); }
   if(Date.now()-_earnLast > 10*60*1000) loadEarnings();   // 6h server refresh — 10 min client pull is already generous
+  { const vis=el('view-earnings')&&!el('view-earnings').hidden;   // setup cards carry live positioning: 1 min while the tab is open, 5 min otherwise (the drawer section reads them)
+    if(Date.now()-_setupLast > (vis?60*1000:5*60*1000)) loadEarnSetups(); }
   if(el('view-housing')&&!el('view-housing').hidden&&Date.now()-_hsgLast > 15*60*1000) loadHousing();   // 6h server refresh; only pulled while the tab is open
   if(el('view-liquidity')&&!el('view-liquidity').hidden&&Date.now()-_liqLast > 15*60*1000) loadLiquidity();
   renderMacroStrip();   // cheap re-derive so the strip flips at 8:30 / 14:00 ET between pulls
