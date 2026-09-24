@@ -556,9 +556,10 @@ test("candles tf param: the chart series IS the ladder series — the modal cann
   const r1 = p.getTfCandles("TCHART", "1h");
   assert.equal(r1.candles.length, 96, "1h: the ladder's 96-bar spine tail, not the drawer's days window");
   assert.equal(r1.candles[95][0], hourly[N - 1].t, "1h: tail ends at the last spine bar");
-  const g = withFormingDaily(daily, px, Date.now(), DAY);
+  const Cmp = require("../src/compute");
+  const g = Cmp.sessionFold(withFormingDaily(daily, px, Date.now(), DAY), Cmp.sessOffFn("US"));   // (-105) an xyz US name's D1 rung is its session view
   const rd = p.getTfCandles("TCHART", "1d");
-  assert.equal(rd.candles.length, g.length, "1d: through the withFormingDaily staleness guard");
+  assert.equal(rd.candles.length, g.length, "1d: through the withFormingDaily staleness guard, folded to sessions");
   // OHLC upgrade (build -73): closes-only bars — the synthetic forming bar included — take their
   // o/h/l from the REAL hourly aggregation of that UTC day when the spine covers it. That is
   // measured data, not fabrication: the invariant "never a fabricated flat candle" is preserved
@@ -851,7 +852,8 @@ test("daily payload v2 (2026.07.24-04): [t,c,h,v] tuples + per-name OI series, b
   const a = dc.daily["xyz:AAA"];
   assert.ok(a && a.length >= 60, "dailyRaw path ships");
   const row = a[a.length - 1];
-  assert.equal(row.length, 4, "tuple is [t,c,h,v]");
+  assert.equal(row.length, 5, "tuple is [t,c,h,v,l] (l since -105; the open is not shipped)");
+  assert.equal(row[4], 98, "the candle's own low ships (build 2026.09.24-105)");
   assert.ok(row[2] > row[1], "high above close (h = c+4 by construction)");
   assert.ok(row[3] > 0, "volume ships");
   const b = dc.daily["xyz:BBB"];
@@ -860,7 +862,7 @@ test("daily payload v2 (2026.07.24-04): [t,c,h,v] tuples + per-name OI series, b
   assert.ok(fullDay, "derived day volume is the summed hourly volume (24 x 10)");
   assert.ok(fullDay[2] >= fullDay[1] && fullDay[2] <= fullDay[1] + 1.5, "derived day high is the max hourly high");
   const e = dc.daily["ETH"];
-  assert.ok(e && e.length <= 94 && e[e.length - 1].length === 4, "crypto rides the same tuple under the MAIN_DAILY_DAYS cap");
+  assert.ok(e && e.length <= 94 && e[e.length - 1].length === 5, "crypto rides the same tuple under the MAIN_DAILY_DAYS cap");
   const oiA = dc.oi && dc.oi["xyz:AAA"];
   assert.ok(Array.isArray(oiA) && oiA.length >= 10, "OI daily series ships for the seeded history");
   assert.ok(oiA.every((k) => k.length === 2 && k[1] > 0), "OI rows are [day, oi]");
@@ -939,7 +941,8 @@ test("daily payload v3 (2026.07.24-06): warm closes-only bars overlay h/v from t
   // source pins: the persist map writes h/v, the sig carries the coverage terms
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  assert.ok(pol.includes("daily: r.dailyRaw ? r.dailyRaw.map((k) => [k.t, k.c, Number.isFinite(k.h) ? k.h : null, Number.isFinite(k.v) ? k.v : null]) : null"), "warm persist must write 4-tuples");
+  assert.ok(pol.includes("daily: r.dailyRaw ? r.dailyRaw.map(warmDailyTuple) : null"), "warm persist must write [t,c,h,v,l,o] tuples (-105)");
+  assert.ok(pol.includes("const a = [k.t, k.c, Number.isFinite(k.h) ? k.h : null, Number.isFinite(k.v) ? k.v : null, Number.isFinite(k.l) ? k.l : null, Number.isFinite(k.o) ? k.o : null];"), "h/v/l/o round-trip");
   assert.ok(pol.includes('+ ":" + ohlcN + ":" + oiN'), "content signature must carry the OHLC/OI coverage terms");
   assert.ok(pol.includes("function dailyTuples(r, hs)"), "the shared tuple builder must exist (one code path for both universes)");
 });
@@ -2678,7 +2681,7 @@ test("reliability: calendar lanes carry in-flight guards, the daily rebuild is d
   assert.ok(pol.includes("if (!(await fetchEarnings())) lastEarnOk = 0;"), "the operator-forced backfill notices a skipped republish and arms the staleness retry");
   assert.equal(pol.match(/async function fetchMacro\(\)/g).length, 1, "still exactly one fetch engine per lane");
   // refreshDaily -> one buildDaily per second (trailing edge); the harness's buildDailyNow stays the synchronous buildDaily.
-  assert.ok(/r\.dailyRaw = c; r\.dailyTs = Date\.now\(\); r\.isNew = false;\s*\n\s*scheduleBuildDaily\(\);/.test(pol), "refreshDaily schedules the rebuild");
+  assert.ok(/r\.dailyRaw = normDailyCandles\(c\); r\.dailyTs = Date\.now\(\); r\.isNew = false;\s*\n\s*scheduleBuildDaily\(\);/.test(pol), "refreshDaily schedules the rebuild");
   assert.ok(/function scheduleBuildDaily\(\) \{\s*\n\s*if \(buildDailyT\) return;\s*\n\s*buildDailyT = setTimeout\(/.test(pol) && /\}, 1000\);\s*\n\s*if \(buildDailyT\.unref\) buildDailyT\.unref\(\);/.test(pol), "one trailing 1s timer, unref'd");
   assert.ok(pol.includes("buildDailyNow: buildDaily,"), "the harness entry is still the synchronous rebuild");
   // persistLedger: the alert path batches (~2s trailing), the signals pass and the shutdown export force.
@@ -2722,9 +2725,9 @@ test("study wiring 2026.09.20: hourly funding nets the daily base rates, the 5m 
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   assert.ok(pol.includes("split: r._st.ovsplit || null"), "the ondrift card carries the overnight split");
   assert.ok(pol.includes("st.gap = studyGapFade(hs, wins, 3 * HOUR, fine);") && pol.includes("st.ondrift = offDriftStats(hs, wins, 3 * HOUR, fine);"), "gap and drift studies take the fine series");
-  assert.ok(pol.includes("earnReactionsFor(prints, row.dailyRaw, now, row.hourlyRaw)") && pol.includes("earnReactionCurve(prints, row.hourlyRaw, { now })"), "the earnings study anchors on the hourly spine and ships the curve");
+  assert.ok(pol.includes("earnReactionsFor(prints, row.dailyRaw, now, row.hourlyRaw, { off: sessOffOf(row) })") && pol.includes("earnReactionCurve(prints, row.hourlyRaw, { now })"), "the earnings study anchors on the hourly spine and ships the curve");
   assert.ok(pol.includes("detectPead(prints, r.dailyRaw, r.px, sd30, r.hourlyRaw, now)"), "PEAD reads the print anchor off the hourly spine");
-  assert.ok(pol.includes("meanPairwiseCorr(top.map((r) => r.dailyRaw), REGIME_LOOKBACK, Date.now())"), "the regime correlation excludes the open day");
+  assert.ok(pol.includes("meanPairwiseCorr(top.map((r) => sessFoldOf(r, r.dailyRaw)), REGIME_LOOKBACK, Date.now())"), "the regime correlation excludes the open day");
   assert.ok(/rvolMulti\(hs, RVOL_WINS, nowMs, undefined, r\.uni === "xyz" \? "ET" : undefined\)/.test(pol), "equity rvol is keyed on the ET clock");
 });
 
@@ -2768,12 +2771,13 @@ test("rules: /alert grammar parses what people type, in plain words either way",
 
 test("rules: the 200-day MA rides the snapshot row, and a conversation-bound rule fires into its sink, quiet on the wire", () => {
   const { p } = ruleHarness();
-  const closes = (v) => Array.from({ length: 205 }, (_, i) => ({ t: i, c: v }));
+  // (-105) the 200 is 200 SESSIONS: 320 UTC days from 2024-10-04 hold ~218 US sessions
+  const closes = (v) => Array.from({ length: 320 }, (_, i) => ({ t: (20000 + i) * 86400e3, c: v }));
   p.seedRowNow("AAA", { ticker: "AAA", px: 95, uni: "xyz", ref: { p1h: 100, p4h: 100, p7d: 100, p30d: 100 }, dailyRaw: closes(100) });
   p.seedRowNow("BBB", { ticker: "BBB", px: 95, uni: "xyz", ref: { p1h: 100, p4h: 100, p7d: 100, p30d: 100 }, dailyRaw: closes(100).slice(0, 150) });
   p.buildSnapshotNow();
   const row = (c) => p.getSnapshot().markets.find((r) => r.coin === c);
-  assert.equal(row("AAA").ma200, 100, "SMA of the last 200 daily closes");
+  assert.equal(row("AAA").ma200, 100, "SMA of the last 200 session closes");
   assert.equal(row("BBB").ma200, undefined, "under 200 closes: absent, never guessed");
 
   const fired = [];
@@ -3143,12 +3147,15 @@ test("getD1Retest: pending under five names, cached per (scope, definition, cool
   const odd = p.getD1Retest("stocks", "bogus", 7);
   assert.equal(odd.params.def, "board"); assert.equal(odd.params.cd, 5, "unknown values fall back to the defaults");
   assert.notEqual(p.getD1Retest("stocks", "board", 0).key, b.key, "each cooldown has its own body and validator");
-  assert.equal(p.getD1Retest("stocks", "touch", 5).side.long.n, 0, "first touch needs a true low the closes-only feed cannot show");
+  // (-105) session bars: a weekend's UTC closes fold into Monday's bar as its low — real prints, so
+  // a touch can now register on closes-only data, but never as a TRUE low
+  assert.equal(p.getD1Retest("stocks", "touch", 5).side.long.tl, 0, "closes-only bars never claim a true low, folded or not");
   assert.equal(p.getD1Retest("crypto", "board", 5).pending, true, "the universes never mix");
   for (let i = 1; i < b.events.length; i++) assert.ok(b.events[i - 1].t >= b.events[i].t, "newest first");
   assert.ok(b.events.length <= 500 && b.eventsTotal >= b.events.length);
   assert.ok(!("i" in b.events[0]) && b.events[0].ticker && Array.isArray(b.events[0].f), "the wire event drops the walk index");
   const pol = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "poller.js"), "utf8");
-  assert.ok(pol.includes("const bars = closedBars(mergedDailyBars(r), DAY, now);"), "the study reads the one merged daily source, forming day trimmed");
-  assert.ok(/if \(ov\) bars\.push\(\{ t: \+k\.t, c: \+ov\.c, h: \+ov\.h, l: \+ov\.l, v: [^\n]*, tl: true \}\);/.test(pol), "overlay bars flag their true extremes");
+  assert.ok(pol.includes("const bars = closedBars(sessDailyBars(r), DAY, now);"), "the study reads the one merged daily source in its session view (-105), forming day trimmed");
+  assert.ok(/if \(ov\) bars\.push\(\{ t: \+k\.t, c: \+ov\.c, h: \+ov\.h, l: \+ov\.l, v: [^\n]*, tl: true, o: \+ov\.o \}\);/.test(pol), "overlay bars flag their true extremes");
+  assert.ok(pol.includes("bars.push({ t: +k.t, c, h: isFinite(h) && h > 0 ? h : c, l: tl ? l : c, v: +k.v > 0 ? +k.v : 0, tl, o:"), "(-105) a daily candle's own low counts as true; a closes-only bar falls back to c, tl false");
 });

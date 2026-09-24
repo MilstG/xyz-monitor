@@ -235,10 +235,11 @@ function trendCell(r){
   if(!cl || cl.length<3) return '<td><span class="na">·</span></td>';
   const up=cl[cl.length-1]>=cl[0]; return `<td title="30d path">${miniSpark(cl, up?'var(--up)':'var(--down)')}</td>`; }
 function volCell(r){ if(r.vol30==null||!isFinite(r.vol30)) return '<td><span class="na" title="loading hourly history…">·</span></td>';
-  return `<td class="sec" title="annualized realized vol">${r.vol30.toFixed(0)}%</td>`; }
+  const est={YZ:'Yang-Zhang, last 20 closed sessions \u00d7\u221a252',c2c:'close-to-close \u03c3, last 20 session returns \u00d7\u221a252 (a bar without a true low in the window)',hourly:'hourly log returns \u00d7\u221a(24\u00b7365), forming hour excluded'}[r.vol30Est]||'annualized realized vol';
+  return `<td class="sec" title="annualized realized vol \u00b7 ${est}">${r.vol30.toFixed(0)}%</td>`; }
 function adrCell(r){ if(r.adr==null||!isFinite(r.adr)) return '<td><span class="na" title="loading hourly history…">·</span></td>';
   const t=Math.min(r.adr/8,1)*0.18;
-  return `<td class="sec" style="background:rgba(227,165,60,${t.toFixed(3)})" title="avg daily high−low as % of close, over ${state.tf==='30d'?'30d':'7d'}">${r.adr.toFixed(2)}%</td>`; }
+  return `<td class="sec" style="background:rgba(227,165,60,${t.toFixed(3)})" title="avg daily high−low as % of close, over ${r.uni!=='main'?(state.tf==='30d'?'21 sessions':'5 sessions'):(state.tf==='30d'?'30d':'7d')}">${r.adr.toFixed(2)}%</td>`; }
 function ddCell(r){ if(r.dd==null||!isFinite(r.dd)) return '<td><span class="na">·</span></td>';
   const c=r.dd>=-0.5?'pos':(r.dd<=-15?'neg':'sec'); return `<td class="${c}" title="distance below the 30-day high">${r.dd.toFixed(1)}%</td>`; }
 function ddyCell(r){ if(r.ddy==null||!isFinite(r.ddy)) return '<td><span class="na" title="needs daily history reaching Jan 1 \u2014 crypto retention is 31d, so outside January this is out of reach by design; equities fill in as the daily backfill loads">\u2014</span></td>';

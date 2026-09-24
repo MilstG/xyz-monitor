@@ -383,6 +383,9 @@ table.cmx td{width:var(--cell);height:var(--cell);min-width:var(--cell);padding:
 table.cmx td:hover{outline:2px solid var(--text);outline-offset:-1px}
 table.cmx td.diag{background:var(--panel2)!important}
 table.cmx td.nodata{background:var(--panel2)!important;background-image:repeating-linear-gradient(45deg,transparent,transparent 3px,rgba(124,135,148,.16) 3px,rgba(124,135,148,.16) 4px)!important}
+/* (build 2026.09.24-105) daily matrix: under the 10-return floor the cell reads n<10; a CI spanning 0 fades */
+table.cmx td.lown{color:var(--dim);letter-spacing:-.02em}
+table.cmx td.ns{opacity:.38}
 table.cmx th.corner{position:sticky;left:0;background:var(--panel);z-index:3}
 table.cmx th.cl{height:72px;width:var(--cell);vertical-align:bottom;cursor:pointer;padding:0;position:relative}
 table.cmx th.cl span{position:absolute;bottom:5px;left:calc(50% - 1px);transform-origin:left bottom;transform:rotate(-50deg);white-space:nowrap;font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted)}

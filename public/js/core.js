@@ -36,7 +36,7 @@ const store = { get(k){ try{ return localStorage.getItem(k); }catch(_){ return n
 const PKEY = 'xyzmon.prefs.v1';
 const LKEY = 'xyzmon.layouts.v1';
 function maCell(r,key,nD){ const v=r[key];
-  if(v==null||!isFinite(v)) return `<td><span class="na" title="needs ${nD} daily closes \u2014 ${r.uni==='main'&&nD>20?'crypto retention is 31d, so this MA is out of reach by design':'fills in as daily history loads'}">\u2014</span></td>`;
+  if(v==null||!isFinite(v)) return `<td><span class="na" title="needs ${nD} ${r.uni==='main'?'daily':'session'} closes \u2014 ${r.uni==='main'&&nD>50?'crypto history on the wire is ~90d, so this MA is out of reach by design':'fills in as daily history loads'}">\u2014</span></td>`;
   const above=r.px!=null&&isFinite(r.px)?r.px>=v:null, d=above!=null&&v>0?((r.px/v-1)*100):null;
   return `<td class="${above==null?'sec':(above?'pos':'neg')}" title="SMA${nD} ${fmtPrice(v)}${d!=null?` \u00b7 price ${d>=0?'+':''}${d.toFixed(1)}% ${d>=0?'above':'below'}`:''}">${fmtPrice(v)}</td>`; }
 function vwapCell(r){ const v=r.vwap30;
@@ -63,6 +63,7 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
   // it in place. grpSort is the lens's own sort (the names sort must survive a round trip);
   // grpDrill is the transient member filter a group-row click leaves behind — never persisted.
   grp:'names', grpWt:'vol', grpSort:{key:'d1',dir:'desc'}, grpDrill:null,
+  sessOff:null, sessOffV:0,   // (-105) the server's session calendars {US:Set, KR:Set, ...} of non-trading UTC days + a version for the sessDaily memo
   pos:new Map(), posOnly:false, posMeta:null,   // positions overlay (build 2026.09.16-79): coin -> held position, the ⬡ held filter, the last /api/positions envelope
   actOpen:true,   // action lists under the markets table: OPEN by default (-03), collapse persisted
   filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'30', ctf:'1d', topN:40, selected:null, search:'', topPairs:10, pair:null, showBuiltins:false},
@@ -128,6 +129,66 @@ function parseAmount(str){ if(str==null) return null; const s=String(str).trim()
   return v*mult; }
 function stdev(a){ if(a.length<2)return 0; const m=a.reduce((p,q)=>p+q,0)/a.length; let v=0; for(const x of a)v+=(x-m)*(x-m); return Math.sqrt(v/(a.length-1)); }
 function median(a){ if(!a.length)return 0; const s=[...a].sort((x,y)=>x-y),n=s.length; return n%2?s[(n-1)/2]:(s[n/2-1]+s[n/2])/2; }
+// ===== session-day daily view (build 2026.09.24-105) ============================================
+// Client twin of src/compute.js sessionFold — same rule, same output, held to it by a parity test
+// (test/accuracy.test.js). The UTC bar for date D (00:00Z D -> 00:00Z D+1 = 20:00 ET D-1 -> 20:00
+// ET D) contains the whole cash session of D, so a trading day's session bar IS its UTC bar; a
+// weekend / exchange-holiday bar folds into the next session bar (h max, l min, o first, c the
+// session's, v summed — no move lost). A fold still waiting for its session is a forming bar keyed
+// at that session's date (f:1). tl = every folded bar carried a real low. The calendar is the
+// server's (/api/daily sessOff: per calendar, the UTC day indexes that are NOT trading days), so
+// the client never re-derives holidays. Crypto: no fold (calendar days).
+function sessionFold(bars, off){
+  if(!Array.isArray(bars)||typeof off!=='function') return bars;
+  const num=x=>(x==null||x==='')?NaN:+x;
+  const out=[]; let p=null;
+  for(const k of bars){
+    if(!k) continue;
+    const t=+k.t, c=num(k.c);
+    if(!Number.isFinite(t)||!(c>0)) continue;
+    const h0=num(k.h), l0=num(k.l), o0=num(k.o), v0=num(k.v);
+    const hasL=k.tl!=null?!!k.tl:l0>0;
+    const h=h0>0?h0:c, l=l0>0?l0:c;
+    if(!p) p={t, o:o0>0?o0:null, h, l, c, v:v0>0?v0:null, tl:hasL, n:0};
+    else { if(h>p.h) p.h=h; if(l<p.l) p.l=l; p.c=c; p.t=t; if(v0>0) p.v=(p.v||0)+v0; if(!hasL) p.tl=false; }
+    p.n++;
+    if(!off(Math.floor(t/DAY))){ out.push(p); p=null; }
+  }
+  if(p){ let d=Math.floor(p.t/DAY)+1; for(let g=0;g<30&&off(d);g++) d++; p.t=d*DAY; p.f=1; out.push(p); }
+  return out;
+}
+// The row's session calendar: crypto none; a foreign-home listing its home exchange (r.hm); every
+// other xyz row (and a basket's virtual row) the US. `cal` overrides (a crypto row aligned onto a
+// session matrix). Null while the server's calendar has not shipped (an older server): calendar days.
+function sessCalOf(r){ return (!r||r.uni==='main')?null:(r.hm||'US'); }
+function sessOffFor(r, cal){ const c=cal!==undefined?cal:sessCalOf(r); if(!c) return null;
+  const S=state.sessOff&&state.sessOff[c]; return S?(d=>S.has(d)):null; }
+// r.daily in its session view, memoized on the daily array's identity and the calendar version.
+function sessDaily(r){ if(!r||!Array.isArray(r.daily)) return null;
+  if(r._sdSrc===r.daily&&r._sdV===state.sessOffV) return r._sd;
+  const off=sessOffFor(r), v=off?sessionFold(r.daily,off):r.daily;
+  r._sdSrc=r.daily; r._sdV=state.sessOffV; r._sd=v; return v; }
+// Bars whose period has ended (t + DAY <= now): the forming UTC day and a forming fold are dropped.
+function closedDaily(bars, now){ if(!Array.isArray(bars)) return bars; const n=now==null?Date.now():now; let e=bars.length;
+  while(e>0&&+bars[e-1].t+DAY>n) e--; return e===bars.length?bars:bars.slice(0,e); }
+// Yang-Zhang σ over the last n CLOSED session bars (build 2026.09.24-105), annualized ×√252 (per
+// session), in %. Needs n+1 bars and a TRUE low on each of the n (null otherwise — the caller falls
+// back, never guesses). A missing open is the prior close: a 24/7 perp opens where it last traded,
+// so the overnight term is then exactly 0 and YZ reduces to k·σ²(close-to-close) + (1−k)·Rogers-
+// Satchell — the range still carries the intraday excursion the close-to-close σ cannot see.
+//   o_i = ln(O/C₋₁), c_i = ln(C/O), rs_i = ln(H/C)·ln(H/O) + ln(L/C)·ln(L/O), k = 0.34/(1.34+(n+1)/(n−1))
+//   σ² = var(o) + k·var(c) + (1−k)·mean(rs)
+function yzVol(bars, n){
+  if(!Array.isArray(bars)||!(n>=2)||bars.length<n+1) return null;
+  const B=bars.slice(-(n+1)), os=[], cs=[]; let rs=0;
+  for(let i=1;i<B.length;i++){ const pc=+B[i-1].c, b=B[i], c=+b.c, h0=+b.h, l0=+b.l;
+    if(!(pc>0&&c>0&&h0>0&&l0>0)||!b.tl) return null;
+    const o=+b.o>0?+b.o:pc, h=Math.max(h0,o,c), l=Math.min(l0,o,c);
+    os.push(Math.log(o/pc)); cs.push(Math.log(c/o));
+    rs+=Math.log(h/c)*Math.log(h/o)+Math.log(l/c)*Math.log(l/o); }
+  const k=0.34/(1.34+(n+1)/(n-1)), v=a=>{ const m=a.reduce((p,q)=>p+q,0)/a.length; let s=0; for(const x of a) s+=(x-m)*(x-m); return s/(a.length-1); };
+  const s2=v(os)+k*v(cs)+(1-k)*rs/n;
+  return s2>0?Math.sqrt(s2*252)*100:null; }
 function linregR2(ys){ const n=ys.length; if(n<3)return {slope:0,r2:0};
   let sx=0,sy=0,sxx=0,sxy=0; for(let i=0;i<n;i++){sx+=i;sy+=ys[i];sxx+=i*i;sxy+=i*ys[i];}
   const d=n*sxx-sx*sx; if(d===0)return {slope:0,r2:0};
@@ -311,4 +372,4 @@ function lazyCall(name, fn, ...args){
     if(w){ const t=document.createElement('div'); t.className='toast toast-sticky'; t.textContent='Could not load this tab ('+name+') — check the connection and try again'; t.onclick=()=>t.remove(); w.appendChild(t); }
   });
 }
-export { COL_BY_KEY, DAY, DEFAULT_HIDDEN, DEFAULT_ORDER, G, HOUR, LAYOUT_V, LAZY_IMPORTERS, LKEY, PKEY, RG_COLOR, RG_STORY, SCROLL_B, TF_MAP, TF_MS, activeRows, brkBar, claimDelta, clamp, detectBenchmark, el, esc, fmtFunding, fmtPct, fmtPrice, fmtUsd, inScope, isoUtc, lazyCall, lazyLoaded, lazyMod, lerp, liq24Cell, liveMark, maCell, median, mktGrp, momColor, overlayCloseAll, overlayCloseTop, overlayPop, overlayPush, overlayTop, parseAmount, pctTxt, recomputeChanges, regimeDetail, regimeMeter, regimeReadout, regimeTip, safeHref, scopeBench, setPrice, state, stdev, store, turnCell, vwapCell };
+export { COL_BY_KEY, DAY, DEFAULT_HIDDEN, DEFAULT_ORDER, G, HOUR, LAYOUT_V, LAZY_IMPORTERS, LKEY, PKEY, RG_COLOR, RG_STORY, SCROLL_B, TF_MAP, TF_MS, activeRows, brkBar, claimDelta, clamp, closedDaily, detectBenchmark, el, esc, fmtFunding, fmtPct, fmtPrice, fmtUsd, inScope, isoUtc, lazyCall, lazyLoaded, lazyMod, lerp, liq24Cell, liveMark, maCell, median, mktGrp, momColor, overlayCloseAll, overlayCloseTop, overlayPop, overlayPush, overlayTop, parseAmount, pctTxt, recomputeChanges, regimeDetail, regimeMeter, regimeReadout, regimeTip, safeHref, scopeBench, sessCalOf, sessDaily, sessOffFor, sessionFold, setPrice, state, stdev, store, turnCell, vwapCell, yzVol };

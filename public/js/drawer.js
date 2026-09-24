@@ -8,7 +8,7 @@ import { showView } from "./backtest.js";
 import { nowChip } from "./base.js";
 import { loadNews } from "./calendar.js";
 import { DAY, G, activeRows, el, esc, fmtFunding, fmtPct, fmtPrice, fmtUsd, inScope, momColor, overlayPop, overlayPush, regimeReadout, state } from "./core.js";
-import { corrColor, dailyReturns, pearson, sparkline } from "./corr.js";
+import { corrColor, pearson, sessReturns, sparkline } from "./corr.js";
 import { fetchJSON } from "./data.js";
 import { render, sessDrawerHtml, sessEx } from "./markets.js";
 import { openRuleFor, updateFocusChip } from "./nav.js";
@@ -21,8 +21,8 @@ import { EV_LABELS, fillDrawerNews, fmtAge } from "./trend.js";
 
 // ===== per-ticker detail drawer =====
 function comoversFor(coin, L){ const me=state.rows.get(coin); if(!me||!me.daily) return null;
-  const mr=dailyReturns(me); if(!mr) return null; const cutoff=Math.floor(Date.now()/DAY)-L, res=[];
-  for(const r of activeRows()){ if(r.coin===coin||!r.daily) continue; const or=dailyReturns(r); if(!or) continue;
+  const mr=sessReturns(me); if(!mr) return null; const cutoff=Math.floor(Date.now()/DAY)-L, res=[];   // session returns, forming bar dropped (-105): the matrix's own definition
+  for(const r of activeRows()){ if(r.coin===coin||!r.daily) continue; const or=sessReturns(r); if(!or) continue;
     const a=[],b=[]; for(const [d,v] of mr){ if(d<cutoff)continue; const w=or.get(d); if(w!==undefined){a.push(v);b.push(w);} }
     if(a.length<20) continue; const c=pearson(a,b); if(c!=null&&isFinite(c)) res.push([r.ticker,c]); }
   res.sort((x,y)=>y[1]-x[1]); return res; }

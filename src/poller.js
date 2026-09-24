@@ -14,6 +14,7 @@ const {
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
 } = require("./compute");
 const { pxRingPush, pxRingRef, dipReclaim } = require("./compute");
+const { sessOffFn, sessOffDays, sessionFold, sessionTuples } = require("./compute");
 const { fomcResult } = require("./compute");
 const { focusSelect, focusGapSigma, focusLevelDist, firstHourStats, sessionCloseStats, FOCUS_CAP, FOCUS_PER_CLUSTER, focusPreview, focusDiff, FOCUS_PREVIEW_N, foldLiveMark,
   focusGate, focusLimits, FOCUS_HARD_VOL, FOCUS_HARD_OI, FOCUS_BELOW_N } = require("./compute");
@@ -887,7 +888,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // to the previous 31d fetch — the wider window must not leak into the feature math.
     const cut = now - HOURLY_FEAT_DAYS * DAY;
     const featWin = Array.isArray(r.hourlyRaw) ? r.hourlyRaw.filter((k) => k[0] >= cut) : [];
-    const { ref, feat } = featuresFromHourly(hoursToObj(featWin), now, HOUR, DAY);   // features read the object shape
+    const { ref, feat } = featuresFromHourly(hoursToObj(featWin), now, HOUR, DAY, sessOffOf(r));   // features read the object shape; session-day dr/volD on a calendar market (-105)
     r.ref = ref; r.feat = feat; r.hourlyTs = Date.now(); r.isNew = false;
   }
   async function refreshDaily(coin) {
@@ -899,7 +900,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // A non-array body (an upstream error page with a 200) must not replace a warm 370d spine:
     // needDaily would see a truthy value with a fresh stamp and not retry for six hours.
     if (!Array.isArray(c)) throw new Error("daily candles: non-array reply");
-    r.dailyRaw = c; r.dailyTs = Date.now(); r.isNew = false;
+    // (build 2026.09.24-105) Numeric o/h/l/c/v, low and open KEPT: candleSnapshot answers strings,
+    // and every `Number.isFinite(k.h)` downstream (the payload's high, the warm persist, the
+    // earnings study's closes) read a string as absent — the live feed shipped no highs at all and
+    // the lows were never read. One parse at the source; t stays the bar's UTC-day open.
+    r.dailyRaw = normDailyCandles(c); r.dailyTs = Date.now(); r.isNew = false;
     scheduleBuildDaily();
   }
   // The daily payload rebuild is a full pass over every market (closes, β, correlation matrix, the
@@ -919,6 +924,17 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     if (buildDailyT.unref) buildDailyT.unref();
   }
 
+  function normDailyCandles(c) {
+    const out = [];
+    for (const k of c) {
+      if (!k) continue;
+      const t = +k.t, cl = +k.c;
+      if (!Number.isFinite(t) || !Number.isFinite(cl)) continue;
+      const f = (x) => { const v = x == null || x === "" ? NaN : +x; return Number.isFinite(v) ? v : undefined; };
+      out.push({ t, o: f(k.o), h: f(k.h), l: f(k.l), c: cl, v: f(k.v) });
+    }
+    return out;
+  }
   // Prioritise newly listed markets, then highest 24h volume. Skips coins already being
   // fetched (identified by `prefix`) so a second worker claims the next candidate instead of
   // spinning on the one the first worker already holds — this is what makes the doubled
@@ -1247,7 +1263,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       .sort((a, b) => (b.vol || 0) - (a.vol || 0))
       .slice(0, REGIME_TOPN);
     if (top.length < 3) return { corr: null, n: top.length };
-    const { corr } = meanPairwiseCorr(top.map((r) => r.dailyRaw), REGIME_LOOKBACK, Date.now());   // the still-open day's partial return is not a return
+    const { corr } = meanPairwiseCorr(top.map((r) => sessFoldOf(r, r.dailyRaw)), REGIME_LOOKBACK, Date.now());   // the still-open day's partial return is not a return; session returns (-105)
     return { corr, n: top.length };
   }
   function percentileOf(v) {
@@ -1389,9 +1405,59 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // sources can never disagree about what a day looked like. Memo key: daily length + bucket
   // count — the profile moves when a day lands or the spine grows an hour, never on the 15s tick.
   // The one merged daily-bar source (-22, extracted -26): dailyRaw for depth (370d both
-  // universes), overlaid with the spine-derived daily buckets where they cover — true lows and
-  // summed hourly volume that dailyRaw structurally lacks. The profile, the level map, and the
+  // universes), overlaid with the spine-derived daily buckets where they cover — summed hourly
+  // volume, and true lows where dailyRaw lacks them (since -105 a live pull keeps the candle's own
+  // low; only a pre--105 warm file's bar is closes-only, tl false). The profile, the level map, and the
   // EMA200 study all read THIS — three consumers, one definition of what a day looked like.
+  // (build 2026.09.24-105) The market's session calendar for compute.sessionFold: crypto none
+  // (calendar days), a foreign-home listing its home exchange, every other xyz name the US —
+  // the same anchoring the gap/overnight engine applies (see compute.js "session-day daily view").
+  function sessCalOf(r) { return !r || r.uni === "main" ? null : (homeMkt(r.ticker, r.uni) || "US"); }
+  function sessOffOf(r) { return sessOffFn(sessCalOf(r)); }
+  // memoized per row on the series' identity + length (one slot: the callers pass r.dailyRaw or a
+  // filtered copy of it; the regime strip calls this on every snapshot)
+  function sessFoldOf(r, series) {
+    const off = sessOffOf(r);
+    if (!off || !Array.isArray(series)) return series;
+    const m = r._sfM;
+    if (m && m.src === series && m.n === series.length) return m.v;
+    const v = sessionFold(series, off);
+    r._sfM = { src: series, n: series.length, v };
+    return v;
+  }
+  // Session-day view of a row's merged daily bars (crypto: the calendar bars untouched).
+  function sessDailyBars(r, bars) { const off = sessOffOf(r); return off ? sessionFold(bars || mergedDailyBars(r), off) : (bars || mergedDailyBars(r)); }
+  // sessionTuples memoized on the source array's identity (dailyTuplesM hands back the same array
+  // while the data holds — the -102 memo contract), so an unchanged build folds nothing.
+  function sessTuplesM(r, src) {
+    const off = sessOffOf(r);
+    if (!off || !Array.isArray(src)) return src;
+    const m = r._stuM;
+    if (m && m.src === src && m.n === src.length) return m.v;
+    const v = sessionTuples(src, off);
+    r._stuM = { src, n: src.length, v };
+    return v;
+  }
+  // The Trend ladder's D1 rung (board, pair board, AI context, chart, closed alert lane): the raw
+  // daily series with the live-mark forming bar appended when the fetch predates midnight, then the
+  // SESSION view on a calendar market (-105) — EMA13/21 over sessions, a weekend folded into the
+  // next session's bar (which is what the ladder's live-mark replacement then moves).
+  // Memoized on the series' identity/length (the fold of the raw bars moves only when a daily pull
+  // lands); a live-mark bar appended by withFormingDaily re-folds just the raw tail after the last
+  // CLOSED session bar — the fold is sequential and resets at every session, so that is exact.
+  function trendD1(r, series, px, now) {
+    const off = sessOffOf(r);
+    if (!off || !Array.isArray(series)) return px == null ? series : withFormingDaily(series, px, now, DAY);
+    let m = r._td1M;
+    if (!m || m.src !== series || m.n !== series.length) m = r._td1M = { src: series, n: series.length, F: sessionFold(series, off) };
+    const g = px == null ? series : withFormingDaily(series, px, now, DAY);
+    if (g === series) return m.F;
+    const F = m.F;
+    let k = F.length; while (k > 0 && F[k - 1].f) k--;
+    const lastT = k ? F[k - 1].t : -Infinity;
+    let i = series.length; while (i > 0 && +series[i - 1].t > lastT) i--;
+    return F.slice(0, k).concat(sessionFold(g.slice(i), off));
+  }
   function mergedDailyBars(r) {
     const dr = r && r.dailyRaw;
     if (!Array.isArray(dr)) return [];
@@ -1404,8 +1470,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       const ov = byDay.get(Math.floor(+k.t / DAY));
       // tl (build 2026.09.24-96): this bar's h/l are the spine's TRUE extremes — additive, every
       // earlier consumer reads t/c/h/l/v; the D1 retest study discloses its true-low coverage off it
-      if (ov) bars.push({ t: +k.t, c: +ov.c, h: +ov.h, l: +ov.l, v: ov.v > 0 ? +ov.v : (+k.v > 0 ? +k.v : 0), tl: true });
-      else { const c = +k.c, h = +k.h; bars.push({ t: +k.t, c, h: isFinite(h) && h > 0 ? h : c, l: c, v: +k.v > 0 ? +k.v : 0 }); }
+      // (-105) the candle's own low where the feed kept it (live pulls, -105 warm files): tl true;
+      // a closes-only bar (older warm file) still falls back to c, tl false
+      if (ov) bars.push({ t: +k.t, c: +ov.c, h: +ov.h, l: +ov.l, v: ov.v > 0 ? +ov.v : (+k.v > 0 ? +k.v : 0), tl: true, o: +ov.o });
+      else { const c = +k.c, h = +k.h, l = +k.l, o = +k.o, tl = Number.isFinite(l) && l > 0;
+        bars.push({ t: +k.t, c, h: isFinite(h) && h > 0 ? h : c, l: tl ? l : c, v: +k.v > 0 ? +k.v : 0, tl, o: Number.isFinite(o) && o > 0 ? o : undefined }); }
     }
     return bars;
   }
@@ -1418,7 +1487,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     let out = null;
     try {
       const bars = mergedDailyBars(r);
-      const closes = bars.map((k) => [k.t, k.c]);
+      // σ and the EMA50/200 on SESSION bars (-105: "200" = 200 sessions, the σ unit per session);
+      // the profile and the structure detector keep every UTC bar's prints
+      const closes = sessDailyBars(r, bars).map((k) => [k.t, k.c]);
       const sd30 = retStd(dailyRets(closes).slice(-30), 15);
       if (bars.length >= 60 && sd30 > 0) {
         const vp = volumeProfile(bars, sd30);
@@ -1437,16 +1508,21 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     return out;
   }
   const sma200Memo = new Map();   // coin -> { n, last, v }
+  // 200 SESSIONS for a calendar market (build 2026.09.24-105): the fold of the raw bars, so "above
+  // its 200-day" means what the equity desk means (≈ 10 months), not 200 UTC days (≈ 6.5 months of
+  // sessions). The newest (possibly forming) session bar is in the average, as before.
   function sma200Of(r) {
-    const d = r && r.dailyRaw;
-    if (!Array.isArray(d) || d.length < 200) return null;
-    const lastC = d[d.length - 1] && d[d.length - 1].c;
+    const raw = r && r.dailyRaw;
+    if (!Array.isArray(raw) || raw.length < 200) return null;
+    const lastC = raw[raw.length - 1] && raw[raw.length - 1].c;
     const m = sma200Memo.get(r.coin);
-    if (m && m.n === d.length && m.last === lastC) return m.v;
+    if (m && m.n === raw.length && m.last === lastC && m.src === raw) return m.v;
+    const off = sessOffOf(r), d = off ? sessionFold(raw, off) : raw;
+    if (d.length < 200) { sma200Memo.set(r.coin, { n: raw.length, last: lastC, src: raw, v: null }); return null; }
     let t = 0, k = 0;
     for (let i = d.length - 200; i < d.length; i++) { const c = d[i] && +d[i].c; if (Number.isFinite(c)) { t += c; k++; } }
     const v = k === 200 && t > 0 ? sig(t / 200, 9) : null;
-    sma200Memo.set(r.coin, { n: d.length, last: lastC, v });
+    sma200Memo.set(r.coin, { n: raw.length, last: lastC, src: raw, v });
     return v;
   }
   function buildSnapshot() {
@@ -1654,20 +1730,24 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // client-side correlation that reads it — can populate from the hourly spine (available early, and what
   // the warm cache restores) instead of waiting on the separate rate-limited 370d daily backfill.
   function deriveDailyClose(hs) {
-    // [d, close, dayHigh, dayVol] per UTC day — close is the last hourly close, high the max hourly
-    // high, vol the summed hourly volume. Extra columns are additive: every [t,c]-shaped consumer
-    // (studies, correlation, old clients) keeps reading indices 0/1 untouched.
+    // [d, close, dayHigh, dayVol, dayLow, dayOpen] per UTC day — close is the last hourly close, high
+    // the max hourly high, vol the summed hourly volume, low the min hourly low and open the first
+    // hour's open (l/o since build 2026.09.24-105). Extra columns are additive: every [t,c]-shaped
+    // consumer (studies, correlation, old clients) keeps reading indices 0/1 untouched.
     const byDay = new Map();
     for (const k of hs) {
       const t = k[0], c = k[4]; if (!Number.isFinite(t) || !Number.isFinite(c)) continue;
       const d = Math.floor(t / DAY) * DAY; let cur = byDay.get(d);
-      if (!cur) { cur = [t, c, -Infinity, 0]; byDay.set(d, cur); }
+      if (!cur) { cur = [t, c, -Infinity, 0, Infinity, null, Infinity]; byDay.set(d, cur); }
       if (t >= cur[0]) { cur[0] = t; cur[1] = c; }
       if (Number.isFinite(k[2]) && k[2] > cur[2]) cur[2] = k[2];
       if (Number.isFinite(k[5]) && k[5] > 0) cur[3] += k[5];
+      if (Number.isFinite(k[3]) && k[3] > 0 && k[3] < cur[4]) cur[4] = k[3];
+      if (t < cur[6] && Number.isFinite(k[1]) && k[1] > 0) { cur[6] = t; cur[5] = k[1]; }
     }
     return [...byDay.entries()].sort((a, b) => a[0] - b[0])
-      .map(([d, v]) => [d, v[1], Number.isFinite(v[2]) && v[2] > 0 ? sig(v[2], 7) : null, v[3] > 0 ? sig(v[3], 6) : null]);
+      .map(([d, v]) => [d, v[1], Number.isFinite(v[2]) && v[2] > 0 ? sig(v[2], 7) : null, v[3] > 0 ? sig(v[3], 6) : null,
+        Number.isFinite(v[4]) ? sig(v[4], 7) : null, v[5] > 0 ? sig(v[5], 7) : null]);
   }
 
   // [t,c,h,v] tuples from a row's dailyRaw + hourly spine. Full-OHLC bars map directly. Closes-only
@@ -1677,16 +1757,22 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // null h/v until the real backfill lands (btScore's per-day px fallback handles the seam).
   function dailyTuples(r, hs) {
     if (r.dailyRaw && r.dailyRaw.length >= 5) {
-      if (!dailyLacksOHLC(r)) return r.dailyRaw.map((k) => [k.t, k.c, Number.isFinite(k.h) ? sigq(k.h, 7) : null, Number.isFinite(k.v) && k.v > 0 ? sigq(k.v, 6) : null]);
+      // (-105) [t,c,h,v,l]: the candle's low rides as column 4 (additive — a [t,c,h,v] reader is
+      // untouched); null where unknown, so the client falls back to c and flags the bar. The open is
+      // NOT shipped: on a 24/7 perp a UTC bar opens at the prior bar's close (the D-open convention),
+      // so it would be ~200×370 redundant numbers on the wire. The server keeps it (warm file).
+      if (!dailyLacksOHLC(r)) return r.dailyRaw.map((k) => [k.t, k.c, Number.isFinite(k.h) ? sigq(k.h, 7) : null, Number.isFinite(k.v) && k.v > 0 ? sigq(k.v, 6) : null,
+        Number.isFinite(k.l) && k.l > 0 ? sigq(k.l, 7) : null]);
       const dv = hs.length > 24 ? new Map(deriveDailyClose(hs).map((k) => [k[0], k])) : null;
       return r.dailyRaw.map((k) => {   // a -06 warm file round-trips h/v on the bar itself — prefer those, spine-overlay only the gaps
         const e = dv && dv.get(Math.floor(k.t / DAY) * DAY);
         const h = Number.isFinite(k.h) ? sigq(k.h, 7) : (e ? e[2] : null);
         const v = Number.isFinite(k.v) && k.v > 0 ? sigq(k.v, 6) : (e ? e[3] : null);
-        return [k.t, k.c, h, v];
+        const l = Number.isFinite(k.l) && k.l > 0 ? sigq(k.l, 7) : (e ? e[4] : null);   // the spine's true low for the days it covers
+        return [k.t, k.c, h, v, l];
       });
     }
-    return hs.length > 24 ? deriveDailyClose(hs) : null;   // UTC-floored by construction — correct for 24/7 markets
+    return hs.length > 24 ? deriveDailyClose(hs).map((k) => k.slice(0, 5)) : null;   // UTC-floored by construction — correct for 24/7 markets; [t,c,h,v,l] like the dailyRaw path
   }
   // ---- buildDaily memos (build 2026.09.24-102) ------------------------------------------------
   // buildDaily runs every 60s and used to rebuild every per-row series before comparing its
@@ -1802,7 +1888,14 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
     dailySig = sig; dailyVer = Math.max(Date.now(), dailyVer + 1);   // content changed -> new ETag + fresh object; monotonic: two content changes in one ms must not share an ETag
     if (crypto) buildDailyMain(daily, funding, oi);
-    dailyCache = { ts: Date.now(), dataTs: dailyVer, daily, funding, overnight, offHours, offHoursBy, liveClose, cashClose, oi };
+    // (build 2026.09.24-105) The session calendars the client's sessionFold twin folds on: per
+    // calendar (US + each home market), the UTC day indexes in the payload's span (+14d ahead, so
+    // a forming weekend fold can find its session) that are NOT trading days. ~110 ints/yr each.
+    let d0 = Math.floor(nowMs / DAY);
+    for (const c in daily) { const a = daily[c]; if (a && a.length && Number.isFinite(+a[0][0])) d0 = Math.min(d0, Math.floor(+a[0][0] / DAY)); }
+    const sessOff = {}, d1 = Math.floor(nowMs / DAY) + 14;
+    for (const cal of ["US"].concat(Object.keys(HOME_MKTS))) sessOff[cal] = sessOffDays(cal, d0, d1);
+    dailyCache = { ts: Date.now(), dataTs: dailyVer, daily, funding, overnight, offHours, offHoursBy, liveClose, cashClose, oi, sessOff };
   }
 
   // ---- signal engine (served at /api/signals) ---------------------------------------------
@@ -3068,7 +3161,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       // detectors below read the last element as a close — so "close-confirmed" setups fired at 00:10
       // UTC and every study's forward returns drifted on each rebuild (the -20 shadows already trim
       // theirs at `ccl`). One trim here covers studiesFor, compressionNow and every detector in this loop.
-      const closes = closedDailyCloses(deepDaily.get(r.coin) || dc.daily[r.coin] || null), dayFunding = dc.funding[r.coin] || null;   // -28: detectors read full depth; the wire's cap is the wire's business
+      // SESSION bars for a calendar market (build 2026.09.24-105): the studies' 30-bar σ (sdAt/sd30),
+      // their k-bar horizons, the 30-bar breakout range and every detector below count trading
+      // sessions, with each weekend/holiday folded into the next session (compute.sessionFold) —
+      // not UTC days, whose near-flat Saturdays deflated every σ. Crypto: calendar days as before.
+      // The forming fold (keyed at the next session) is trimmed by closedDailyCloses like today's bar.
+      const closes = closedDailyCloses(sessTuplesM(r, deepDaily.get(r.coin) || dc.daily[r.coin] || null)), dayFunding = dc.funding[r.coin] || null;   // -28: detectors read full depth; the wire's cap is the wire's business
       const st = studiesFor(r, closes, dayFunding);
       const ac = acOf(r);
       if (st.bigmove && st.bigmove.raw) { feed(ac, "bigmove", "d1", st.bigmove.raw.d1); }
@@ -3179,7 +3277,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           // an honest unknown, excluded from any future split. Recorded, never gated.
           if (st.coil && Number.isFinite(st.coil.pct)) r._vr = st.coil.pct; else delete r._vr;
           const lvlBars = r.dailyRaw && r.dailyRaw.length >= 60
-            ? r.dailyRaw.map((k) => { const c = +k.c, h = +k.h; return { c, h: Number.isFinite(h) && h > 0 ? h : c, l: c }; })
+            ? r.dailyRaw.map((k) => { const c = +k.c, h = +k.h, l = +k.l; return { c, h: Number.isFinite(h) && h > 0 ? h : c, l: Number.isFinite(l) && l > 0 ? l : c }; })   // (-105) true low where kept
             : null;
           if (lvlBars) {
             const sp = detectSwingPull(closes, r.px, sd30, lvlBars);
@@ -3216,7 +3314,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
                   mv: +(Math.abs(eb.target / r.px - 1) * 100).toFixed(2) }, 0);
             // the retest needs true daily lows for the touch — mergedDailyBars carries them
             // where the spine covers (which includes the firing bar by construction)
-            const er = detectEmaRetest(closedBars(mergedDailyBars(r), DAY, nowD), r.px, sd30, lvlBars);
+            // (-105) session bars — the D1 retest study's own series, so shadow and study agree
+            const er = detectEmaRetest(closedBars(sessDailyBars(r), DAY, nowD), r.px, sd30, lvlBars);
             if (er && stopGeometryOk("long", r.px, er.stop))
               openLedger(r, "emarts", { score: 0, reading: "" }, 1,
                 { sd0: +sd30.toFixed(3), psd: "long", pn: 1, stp: er.stop, tgt: er.target, tm: 1,
@@ -4426,8 +4525,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // only (out of sample by construction) and scores every level against a same-distance permutation
   // control, so the served excess is edge over matched noise, not over an analytic formula the
   // bar-sampled tape provably violates. Daily bars come from bucketsFor(r, 24) — the memoized
-  // full-OHLC aggregation of the hourly spine — NOT from dailyRaw: a warm-cache hydrate leaves
-  // dailyRaw closes-only (no lows), which would silently blind the study's down-side touch test.
+  // full-OHLC aggregation of the hourly spine — NOT from dailyRaw: a pre--105 warm-cache hydrate
+  // leaves dailyRaw closes-only (no lows), which would silently blind the study's down-side touch test.
   // One source, always OHLC, zero warm-boot seam; the cost is the spine's 180d window vs dailyRaw's
   // 365d tier, which is the right trade for a study whose whole claim is measurement integrity.
   const LVL_MIN_EQ = 5;                 // publish only when the class is broad enough (same posture as sessionDecomp)
@@ -4520,7 +4619,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (r._emSrc !== db) {
         r._emSrc = db;
         const out = { ev: {}, rt: {} };
-        const src = { "1d": closedBars(mergedDailyBars(r), DAY, now), "4h": closedBars(bucketsFor(r, 4), 4 * HOUR, now) };
+        const src = { "1d": closedBars(sessDailyBars(r), DAY, now), "4h": closedBars(bucketsFor(r, 4), 4 * HOUR, now) };   // D1 = session bars (-105): EMA200 = 200 sessions
         for (const tf of ["1d", "4h"]) {
           const cfg = EMA_TF[tf], bars = src[tf];
           if (!Array.isArray(bars) || bars.length < cfg.minBars + cfg.horizon + 2) continue;
@@ -4568,9 +4667,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // The Backtest tab's panel: the Trend board's D1 RETEST replayed over every name's closed daily
   // history, against the same names' stacked-but-not-retesting bars (compute.d1RetestEvents has
   // the definition and the reasoning). Bars are the one merged daily source (mergedDailyBars,
-  // forming day trimmed by closedBars) so a "day" here is the day the level map, the EMA200 study
-  // and the emarts shadow already agree on — and its `tl` flag is how the panel knows which
-  // probes read a true low. Roster = the whole universe the Trend board ranks (not the equity-
+  // forming day trimmed by closedBars) in its SESSION view (sessDailyBars, build 2026.09.24-105:
+  // weekends/holidays folded into the next session on a calendar market; crypto calendar days) so
+  // a "day" here is the day the Trend board's D1 rung, the EMA200 study and the emarts shadow
+  // already agree on — and its `tl` flag is how the panel knows which probes read a true low
+  // (since -105 the daily candle's own low counts: tl is false only on an older warm file's bar). Roster = the whole universe the Trend board ranks (not the equity-
   // only study set): the badge fires on commodities and indices too, so the study reads them.
   // Memo contract: each name walks BOTH definitions once per (dailyRaw object, daily-bucket
   // object, UTC day) — the day is in the key because midnight closes a bar with no new fetch.
@@ -4595,7 +4696,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       const db = Array.isArray(r.hourlyRaw) ? bucketsFor(r, 24) : null;
       if (r._rtDr !== dr || r._rtDb !== db || r._rtDay !== dayK || !r._rtW) {
         r._rtDr = dr; r._rtDb = db; r._rtDay = dayK;
-        const bars = closedBars(mergedDailyBars(r), DAY, now);
+        const bars = closedBars(sessDailyBars(r), DAY, now);   // (-105) session bars on a calendar market: EMA13/21 over sessions, weekends folded
         r._rtW = { board: d1RetestEvents(bars, { def: "board" }), touch: d1RetestEvents(bars, { def: "touch" }), last: bars.length ? +bars[bars.length - 1].t : 0 };
         r._rtV = ++d1rtVer;
       }
@@ -4681,7 +4782,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (typeof m.hourlyTs === "number") r.hourlyTs = m.hourlyTs;
       if (typeof m.dailyTs === "number") r.dailyTs = m.dailyTs;
       if (m.fb === 1) r.fundBackfilled = true;   // the 60d fundingHistory pull is one-time per market, not per deploy (see backfillFunding)
-      if (Array.isArray(m.daily) && m.daily.length) r.dailyRaw = m.daily.map(([t, c, h, v]) => ({ t, c, h: h == null ? undefined : h, v: v == null ? undefined : v }));   // pre--06 warm files are 2-tuples — h/v hydrate undefined and the spine overlay covers them
+      // pre--06 warm files are 2-tuples, pre--105 4-tuples — missing columns hydrate undefined (a bar
+      // without l is closes-only on the low side: every consumer falls back to c and flags it)
+      if (Array.isArray(m.daily) && m.daily.length) r.dailyRaw = m.daily.map(([t, c, h, v, l, o]) => ({ t, c, h: h == null ? undefined : h, v: v == null ? undefined : v, l: l == null ? undefined : l, o: o == null ? undefined : o }));
       if (Array.isArray(m.ph) && m.ph.length) { const cut = Date.now() - 7 * DAY; r.premH = m.ph.filter((x) => Array.isArray(x) && x[0] >= cut); }
       r.isNew = false;
       n++;
@@ -4770,7 +4873,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (!row || !Array.isArray(row.dailyRaw) || row.dailyRaw.length < 3) continue;
       // The hourly spine anchors AMC prints at 16:00 ET (the daily UTC bar's close is four hours
       // after the print); the curve adds the +1h/+4h/+24h medians for the prints it covers.
-      const st = earnReactionsFor(prints, row.dailyRaw, now, row.hourlyRaw);
+      const st = earnReactionsFor(prints, row.dailyRaw, now, row.hourlyRaw, { off: sessOffOf(row) });   // (-105) expansion baseline over 20 sessions
       if (!st) continue;
       const cv = Array.isArray(row.hourlyRaw) && row.hourlyRaw.length ? earnReactionCurve(prints, row.hourlyRaw, { now }) : null;
       if (cv) st.curve = { n: cv.n, agg: cv.agg, approx: cv.approx };
@@ -4825,7 +4928,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         fund: r.funding != null && isFinite(r.funding) ? r.funding : null, fundPct: setupFundPct(r),
         oiChg, oiWhy: oiChg == null ? (!(r.oiBase > 0) ? "no live open interest" : "OI history does not reach " + EARN_RUNUP_D + " days back yet") : null,
         premBp: prem, premZ: pb && prem != null ? (prem - pb.m) / pb.sd : null,
-        runup: earnRunup(byTicker.get(e.t) || [], r.dailyRaw, r.px, now),
+        runup: earnRunup(byTicker.get(e.t) || [], r.dailyRaw, r.px, now, sessOffOf(r)),
       }));
     }
     cards.sort((a, b) => a.d < b.d ? -1 : a.d > b.d ? 1 : (a.t < b.t ? -1 : 1));
@@ -8187,6 +8290,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
     return parts.join("|");
   }
+  // Warm-cache daily tuple (build 2026.09.24-105): [t, c, h, v, l, o], trailing nulls trimmed so a
+  // closes-only bar stays a short tuple — the file stays compact and older readers take [0..3].
+  function warmDailyTuple(k) {
+    const a = [k.t, k.c, Number.isFinite(k.h) ? k.h : null, Number.isFinite(k.v) ? k.v : null, Number.isFinite(k.l) ? k.l : null, Number.isFinite(k.o) ? k.o : null];
+    while (a.length > 2 && a[a.length - 1] == null) a.pop();
+    return a;
+  }
   function featuresBlob() {
     const markets = {};
     for (const r of rows.values()) {
@@ -8198,7 +8308,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         ref: r.ref || null, feat: r.feat || null,
         hourlyTs: r.hourlyTs || 0, dailyTs: r.dailyTs || 0,
         fb: r.fundBackfilled ? 1 : 0,   // funding-backfill stamp: memory-only before, so every redeploy re-pulled 60d of funding for the whole roster
-        daily: r.dailyRaw ? r.dailyRaw.map((k) => [k.t, k.c, Number.isFinite(k.h) ? k.h : null, Number.isFinite(k.v) ? k.v : null]) : null,   // h/v round-trip (-06) so a redeploy no longer strips the level columns; o/l stay unpersisted, so dailyLacksOHLC still queues the real backfill
+        daily: r.dailyRaw ? r.dailyRaw.map(warmDailyTuple) : null,   // [t,c,h,v,l,o]: h/v round-trip since -06, l/o since -105 (a full bar restores full — only pre--105 bodies still queue the OHLC backfill)
         ph,   // downsampled 7d premium baseline, so redeploys keep the dislocation z-scores warm
       };
     }
@@ -9107,7 +9217,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     let src = [];
     if (key === "1d") {
       const d1 = Array.isArray(r.dailyRaw) ? r.dailyRaw : [];
-      src = withFormingDaily(d1, r.px, Date.now(), DAY) || [];
+      src = withFormingDaily(d1, r.px, Date.now(), DAY) || [];   // folded to sessions below, after the OHLC upgrade (-105)
       // OHLC upgrade: warm-cache restores carry closes only, which renders as a bare close line.
       // The retained hourly spine holds the TRUE open/high/low of every recent day — aggregate it
       // (UTC-aligned, same bucketing the H12/H4 rungs use) and substitute into closes-only bars.
@@ -9125,6 +9235,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           return { t: k.t, o: +d.o, h: Math.max(+d.h, c), l: Math.min(+d.l, c), c };
         });
       }
+      // Session view (-105): the chart plots the bars the board's D1 EMAs walked — one code path.
+      { const off = sessOffOf(r); if (off) src = sessionFold(src, off); }
     } else if (key === "1h") {
       src = Array.isArray(r.hourlyRaw) ? hoursToObj(r.hourlyRaw.slice(-h1Bars)) : [];   // chart serializer reads the object shape
     } else {
@@ -9172,7 +9284,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         const rr = rows.get(e.coin);
         if (rr) {
           let ser = null;
-          if (e.retest === "D1") ser = withFormingDaily(Array.isArray(rr.dailyRaw) ? rr.dailyRaw : [], rr.px, now, DAY);
+          if (e.retest === "D1") ser = trendD1(rr, Array.isArray(rr.dailyRaw) ? rr.dailyRaw : [], rr.px, now);
           else if (e.retest === "H1") ser = Array.isArray(rr.hourlyRaw) ? hoursToObj(rr.hourlyRaw.slice(-96)) : null;
           else ser = Array.isArray(rr.hourlyRaw) ? bucketsFor(rr, e.retest === "H12" ? 12 : 4) : null;
           if (ser && ser.length >= 13) {
@@ -9202,7 +9314,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (r.px == null || !Array.isArray(r.hourlyRaw) || r.hourlyRaw.length < 26) { excluded++; continue; }
       const d1 = Array.isArray(r.dailyRaw) ? r.dailyRaw : null;
       if (!d1 || d1.length < 26) { excluded++; continue; }
-      const d1g = withFormingDaily(d1, r.px, now, DAY);
+      const d1g = trendD1(r, d1, r.px, now);
       const lad = trendLadder(r.px, {
         D1: d1g,
         H12: bucketsFor(r, 12),
@@ -9301,7 +9413,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (r.px == null || !Array.isArray(r.hourlyRaw) || r.hourlyRaw.length < 26) { excluded++; continue; }
       const d1 = Array.isArray(r.dailyRaw) ? r.dailyRaw : null;
       if (!d1 || d1.length < 26) { excluded++; continue; }
-      const d1g = withFormingDaily(d1, r.px, now, DAY);
+      const d1g = trendD1(r, d1, r.px, now);
       const lad = trendLadder(r.px, {
         D1: d1g,
         H12: bucketsFor(r, 12),
@@ -9690,7 +9802,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // -- trend structure (D1 · H12 · H4 — H1 deliberately excluded) ------------------------------
     try {
       if (px != null && Array.isArray(r.hourlyRaw) && r.hourlyRaw.length >= 26 && daily.length >= 26) {
-        const d1g = withFormingDaily(daily, px, now, DAY);
+        const d1g = trendD1(r, daily, px, now);
         const lad = trendLadder(px, { D1: d1g, H12: bucketsFor(r, 12),
           H4: bucketsFor(r, 4), H1: hoursToObj(r.hourlyRaw.slice(-96)) });
         if (lad) {
@@ -9735,7 +9847,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       // 90d log returns keyed by UTC day, forming bar dropped. The old block paired closes by array
       // index, so one missing bar in either series shifted every pair by a day, and read simple
       // returns over <= 60 bars — the brief's β disagreed with the β column beside it.
-      const bt = b && Array.isArray(b.dailyRaw) ? dailyBeta(daily, b.dailyRaw, { days: 90, now }) : null;
+      const bt = b && Array.isArray(b.dailyRaw) ? dailyBeta(sessFoldOf(r, daily), sessFoldOf(b, b.dailyRaw), { days: 90, now }) : null;   // session returns (-105), the board's computeBeta twin
       if (bt) {
         const beta = bt.beta;
         const own7 = pctOf(px, r.ref && r.ref.p7d);
@@ -14438,7 +14550,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     if (!r || !Array.isArray(r.dailyRaw) || !Array.isArray(r.hourlyRaw)) return null;
     try {
       return closedLadder({
-        D1: closedBars(r.dailyRaw, DAY, now),
+        D1: closedBars(trendD1(r, r.dailyRaw, null, now), DAY, now),   // session view (-105), forming fold trimmed
         H12: closedBars(bucketsFor(r, 12), 12 * HOUR, now),
         H4: closedBars(bucketsFor(r, 4), 4 * HOUR, now),
         H1: closedBars(hoursToObj(r.hourlyRaw.slice(-96)), HOUR, now),

@@ -5,14 +5,14 @@
 import { IS_ADMIN, featureOn } from "./admin.js";
 import { pushToast } from "./alerts.js";
 import { drawBacktest } from "./backtest.js";
-import { DAY, SCROLL_B, TF_MAP, activeRows, clamp, el, esc, lerp, mktGrp, state, stdev } from "./core.js";
+import { DAY, SCROLL_B, TF_MAP, activeRows, clamp, closedDaily, el, esc, lerp, mktGrp, sessCalOf, sessDaily, sessOffFor, sessionFold, state, stdev } from "./core.js";
 import { fetchJSON } from "./data.js";
 import { buildHead, groupRowsSorted, pctInner, render, shade, sortedRows, visibleCols } from "./markets.js";
 import { openAiReport } from "./report.js";
 
 
 // ===== correlation tab =====
-const CORR={ _rows:null, _C:null, _N:null, _ord:null, _intraday:false, _bars:null, _times:null, _win:null, _minOv:0, _readout:'Hover a cell to read a pair · click a ticker for its co-movers &amp; hedges' };
+const CORR={ _rows:null, _C:null, _N:null, _NS:null, _ord:null, _intraday:false, _bars:null, _times:null, _win:null, _minOv:0, _readout:'Hover a cell to read a pair · click a ticker for its co-movers &amp; hedges' };
 function corrScope(){
   let rows=activeRows().filter(r=>r.vol!=null);
   const s=state.corr.search.trim();
@@ -25,6 +25,25 @@ function dailyReturns(r){ if(r._dret) return r._dret; const c=r.daily; if(!c||c.
   const m=new Map(); let prev=null;
   for(const k of c){ const cl=parseFloat(k.c), day=Math.floor(k.t/DAY); if(isFinite(cl)){ if(prev!=null&&prev>0) m.set(day, Math.log(cl/prev)); prev=cl; } }
   r._dret=m; return m; }
+// Session-day log returns (build 2026.09.24-105): the row's daily bars in their SESSION view
+// (core.js sessionFold — a US name's weekend/holiday folded into the next session; crypto calendar
+// days), the forming bar dropped (t + DAY > now — the server's meanPairwiseCorr / dailyBeta rule:
+// a partial day's return is not a return), keyed by the UTC day of the later bar. `cal` overrides the
+// row's own calendar: a crypto row paired with sessions is folded onto the US calendar so both
+// returns span the same interval (Fri close -> Mon close), then the pair aligns on those days.
+// Memoized per row on (daily identity, calendar version, UTC day, cal). The correlation matrix, the
+// board's β, co-movers and the pair view read this; the backtest keeps its calendar dailyReturns.
+function sessReturns(r, cal){ const src=r&&r.daily; if(!src||src.length<2) return null;
+  const today=Math.floor(Date.now()/DAY), ck=cal===undefined?'':String(cal), m0=r._sret;
+  if(m0&&m0.src===src&&m0.v===state.sessOffV&&m0.day===today&&m0.cal===ck) return m0.m;
+  const bars=closedDaily(sessBarsFor(r, cal));
+  const m=new Map(); let prev=null;
+  for(const k of bars){ const cl=parseFloat(k.c), day=Math.floor(k.t/DAY); if(isFinite(cl)){ if(prev!=null&&prev>0) m.set(day, Math.log(cl/prev)); prev=cl; } }
+  r._sret={src, v:state.sessOffV, day:today, cal:ck, m}; return m; }
+// The row's bars on calendar `cal` (undefined = its own: the memoized sessDaily view).
+function sessBarsFor(r, cal){ if(cal===undefined) return sessDaily(r); const off=sessOffFor(r, cal); return off?sessionFold(r.daily, off):r.daily; }
+// A matrix mixing session rows with calendar (crypto) rows folds the crypto rows onto the US calendar.
+function corrCalFor(r, mixed){ return mixed&&!sessCalOf(r)?'US':undefined; }
 function dailyFunding(r){ if(r._dfund!==undefined && r._dfund!==null) return r._dfund; const c=r.dailyFund; if(!c||!c.length){ r._dfund=null; return null; }
   const m=new Map(); for(const k of c){ const f=parseFloat(k.f); if(isFinite(f)) m.set(Math.floor(k.t/DAY), f); } r._dfund=m; return m; }
 function overnightReturns(r){ if(r._dov!==undefined && r._dov!==null) return r._dov; const c=r.overnight; if(!c||!c.length){ r._dov=null; return null; }
@@ -63,19 +82,26 @@ function buildCorr(rows, Ldays){
   // roughly half the window's expected return-days, hard-floored at 4 so a correlation still rests
   // on enough points to mean something. (Was max(15, Ldays*0.5) — the 15 was the bug.)
   const today=Math.floor(Date.now()/DAY), cutoff=today-Ldays;
-  let key=Ldays+'|'+today; for(const r of rows) key+='|'+r.coin+':'+corrSerId(r.daily);
+  let key=Ldays+'|'+today+'|'+state.sessOffV; for(const r of rows) key+='|'+r.coin+':'+corrSerId(r.daily);
   const hit=_corrMemo.get(key);
   if(hit){ _corrMemo.delete(key); _corrMemo.set(key,hit); return hit; }   // LRU touch
   const res=buildCorrDense(rows, Ldays, cutoff);
   _corrMemo.set(key,res); if(_corrMemo.size>CORR_MEMO_MAX) _corrMemo.delete(_corrMemo.keys().next().value);
   return res;
 }
+// (build 2026.09.24-105) Session returns (sessReturns: weekends/holidays folded, forming bar
+// dropped), and a HARD overlap floor of CORR_MIN_OV returns: a correlation on fewer points is
+// noise wearing two decimals, so the cell stays empty and reads "n<10" (the old floor of 4 was a
+// fix for calendar-day 7d windows; in sessions a 7d window holds ~5 returns and honestly greys).
+const CORR_MIN_OV=10;
 function buildCorrDense(rows, Ldays, cutoff){
-  const minOv=Math.max(4, Math.floor(Math.min(Ldays,90)*0.4));
+  const minOv=Math.max(CORR_MIN_OV, Math.floor(Math.min(Ldays,90)*0.4));
   const N=rows.length, C=Array.from({length:N},()=>new Array(N).fill(null)), OV=Array.from({length:N},()=>new Array(N).fill(0));
   // Align: one pass per row over its (memoized) day->log-return map, days >= cutoff only.
   let dmax=cutoff; const maps=new Array(N);
-  for(let i=0;i<N;i++){ const m=dailyReturns(rows[i]); maps[i]=m; if(m) for(const d of m.keys()) if(d>dmax) dmax=d; }
+  let anyS=false, anyC=false; for(const r of rows){ if(sessCalOf(r)) anyS=true; else anyC=true; }
+  const mixed=anyS&&anyC;
+  for(let i=0;i<N;i++){ const m=sessReturns(rows[i], corrCalFor(rows[i], mixed)); maps[i]=m; if(m) for(const d of m.keys()) if(d>dmax) dmax=d; }
   // X holds the values, P marks presence (a separate mask, not a NaN sentinel: a non-finite return
   // is data to the old path — it poisoned the pair's r — so it must stay data here too).
   const W=dmax-cutoff+1, X=new Float64Array(N*W), P=new Uint8Array(N*W), has=new Uint8Array(N);
@@ -91,8 +117,31 @@ function buildCorrDense(rows, Ldays, cutoff){
         for(let k=0;k<W;k++){ if(P[oi+k]&P[oj+k]){ const da=X[oi+k]-ma, db=X[oj+k]-mb; cov+=da*db; va+=da*da; vb+=db*db; } }
         c=(va<=0||vb<=0)?null:cov/Math.sqrt(va*vb); }
       C[i][j]=c; C[j][i]=c; OV[i][j]=n; OV[j][i]=n; } }
-  return {C, N:OV};
+  return Object.assign({C, N:OV, minOv}, corrSig(C, OV));
 }
+// Significance + the clustering matrix (build 2026.09.24-105), from the raw C and its overlaps:
+//  NS[i][j] = 1 when the Fisher-z 95% CI of r contains 0 — |atanh r|·√(n−3) < 1.96 — the cell is
+//    painted faded: a real number, but not distinguishable from no correlation at this n.
+//  Cs = C shrunk toward the average off-diagonal correlation r̄ with a Ledoit-Wolf-style intensity
+//    δ = Σ var(r_ij) / (Σ var(r_ij) + Σ (r_ij − r̄)²), var(r) ≈ (1 − r²)² / (n − 1), clamped [0, 1]:
+//    thin, noisy pairs pull toward the tape instead of dragging a name into a spurious cluster.
+//    Cs ONLY orders the heatmap (corrOrder); every displayed value, hover and pair list is raw C.
+function corrSig(C, OV){ const N=C.length, NS=Array.from({length:N},()=>new Array(N).fill(0));
+  let sr=0, nr=0;
+  for(let i=0;i<N;i++) for(let j=i+1;j<N;j++){ const c=C[i][j], n=OV[i][j]; if(c==null||!isFinite(c)) continue;
+    sr+=c; nr++;
+    const z=Math.atanh(Math.max(-0.999999,Math.min(0.999999,c)));
+    if(!(n>3)||Math.abs(z)*Math.sqrt(n-3)<1.959964){ NS[i][j]=1; NS[j][i]=1; } }
+  if(!nr) return {NS, Cs:C, delta:0};
+  const rb=sr/nr; let sv=0, sd=0;
+  for(let i=0;i<N;i++) for(let j=i+1;j<N;j++){ const c=C[i][j], n=OV[i][j]; if(c==null||!isFinite(c)) continue;
+    sv+=(1-c*c)*(1-c*c)/Math.max(1,n-1); sd+=(c-rb)*(c-rb); }
+  const delta=sv+sd>0?Math.min(1,Math.max(0,sv/(sv+sd))):0;
+  const Cs=C.map((row,i)=>row.map((c,j)=>i===j?1:(c==null||!isFinite(c)?c:(1-delta)*c+delta*rb)));
+  return {NS, Cs, delta}; }
+// Fisher-z 95% CI of r at n pairs: [lo, hi], null under 4 pairs.
+function corrCI(r, n){ if(r==null||!isFinite(r)||!(n>3)) return null; const z=Math.atanh(Math.max(-0.999999,Math.min(0.999999,r))), h=1.959964/Math.sqrt(n-3);
+  return [Math.tanh(z-h), Math.tanh(z+h)]; }
 // Average-linkage agglomerative order over a distance matrix D (n×n). Same merge rule, same scan
 // order and the same strict-< tie-break as the string-keyed version it replaces — only the storage
 // changed: cluster ids (0..2n-2) index a Float64Array instead of "a,b" Map keys.
@@ -110,8 +159,10 @@ function clusterOrder(D){ const n=D.length; if(n<=2) return D.map((_,i)=>i);
     clusters=clusters.filter(c=>c!==A&&c!==B); clusters.push({id, size:A.size+B.size, order:A.order.concat(B.order)}); }
   return clusters[0].order; }
 // paintCorr's entry: the distance transform + clustering, memoized on the (memoized) C object.
-function corrOrder(C){ let o=_clusterMemo.get(C); if(o) return o;
-  o=clusterOrder(C.map(row=>row.map(v=>v==null?1:1-v))); _clusterMemo.set(C,o); return o; }
+// `Cs` (optional, build -105): the shrunk matrix to cluster on; the memo stays keyed on C (Cs is a
+// pure function of C and its overlaps, built alongside it).
+function corrOrder(C, Cs){ let o=_clusterMemo.get(C); if(o) return o;
+  o=clusterOrder((Cs||C).map(row=>row.map(v=>v==null?1:1-v))); _clusterMemo.set(C,o); return o; }
 function corrColor(c){ if(c==null||!isFinite(c)) return 'var(--panel2)';
   const t=clamp(Math.abs(c),0,1), mid=[20,26,33], tg=c>=0?[70,185,126]:[229,96,77];
   return `rgb(${lerp(mid[0],tg[0],t)},${lerp(mid[1],tg[1],t)},${lerp(mid[2],tg[2],t)})`; }
@@ -139,6 +190,10 @@ function corrTipHtml(ri,ci){ const rows=CORR._rows; if(!rows||!CORR._C) return '
   const v=CORR._C[ri][ci], n=CORR._N[ri][ci]||0, rb=corrRet(b);
   let s=`<div class="hd"><span class="tk">${esc(a.ticker)}</span> <span class="mut">×</span> <span class="tk">${esc(b.ticker)}</span></div>`;
   s+=`<div>r = ${v==null?'<span class="na">n/a</span>':`<span class="${v>=0?'pos':'neg'}">${v>=0?'+':''}${v.toFixed(2)}</span>`} <span class="mut">· ${n}${corrOvUnit()} overlap</span></div>`;
+  // (-105) the daily matrix: the 95% CI (Fisher z) and why a cell is empty or faded
+  if(!CORR._intraday){ const ci=v!=null?corrCI(v,n):null;
+    if(ci) s+=`<div class="mut">95% CI ${ci[0]>=0?'+':''}${ci[0].toFixed(2)} … ${ci[1]>=0?'+':''}${ci[1].toFixed(2)}${ci[0]<=0&&ci[1]>=0?' · spans 0: not significant at this n (faded)':''}</div>`;
+    else if(v==null&&n>0&&CORR._minOv&&n<CORR._minOv) s+=`<div class="mut">n&lt;${CORR._minOv}: too few overlapping session returns to report a correlation</div>`; }
   if(ra!=null&&rb!=null){ const d=ra-rb;
     s+=`<div class="mut" style="margin-top:3px">${tfLabel()} performance</div>`;
     s+=`<div>${esc(a.ticker)} ${sret(ra)} · ${esc(b.ticker)} ${sret(rb)}</div>`;
@@ -155,7 +210,7 @@ function syncCorrLookback(){ const seg=el('corrtf'); if(!seg) return;
   const opts = cr ? [['4h','4h'],['1d','1d'],['7d','7d']] : [['7','7d'],['30','30d'],['90','90d']];
   let cur = cr ? (state.corr.ctf||'1d') : state.corr.tf;
   if(!cr && !['7','30','90'].includes(cur)) cur=state.corr.tf='30';
-  const ttl = cr ? 'intraday corr on the 5m archive' : 'daily-return corr';
+  const ttl = cr ? 'intraday corr on the 5m archive' : 'session-day return correlation: US sessions (weekends and holidays fold into the next session), the still-open day dropped · a cell under 10 overlapping returns reads n<10 · faded = its 95% CI spans 0 · the order clusters a matrix shrunk toward the average correlation, the values shown are raw';
   seg.innerHTML='<span class="seglbl" title="'+ttl+'">lookback</span>'
     + opts.map(([d,l])=>`<button type="button" data-d="${d}"${d===cur?' class="active"':''}>${l}</button>`).join('');
   seg.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{
@@ -182,7 +237,7 @@ function renderCorr(){
   const rows=corrScope().concat(corrBasketRows());   // -09: baskets ride the same daily-return pearson path as every ticker
   if(rows.length<2){ el('corrwrap').innerHTML='<div class="msg"><span class="big">Not enough markets</span>Widen the focus search or pick a larger set.</div>'; el('corrpairs').innerHTML=''; el('corrpanel').hidden=true; return; }
   const L=+state.corr.tf, res=buildCorr(rows,L);
-  paintCorr(rows, res.C, res.N, {});
+  paintCorr(rows, res.C, res.N, { ns:res.NS, shr:res.Cs, minOv:res.minOv });
 }
 // Crypto scope: the matrix is built server-side over the 5m archive (equities keep ~31d of daily,
 // crypto keeps 370d of 5m), so we fetch the window's matrix + per-name close series and paint the
@@ -218,7 +273,7 @@ function corrReadoutAt(ri,ci){ const rows=CORR._rows, v=CORR._C[ri][ci];
   return readoutHtml(rows[ri].ticker, rows[ci].ticker, v==null?'na':String(v), CORR._N[ri][ci]||0); }
 function paintCorr(rows, C, OV, opts){
   opts=opts||{};
-  const ord=corrOrder(C);
+  const ord=corrOrder(C, opts.shr), NS=opts.ns||null, minOv=opts.minOv||0;
   const cell=rows.length<=20?30:rows.length<=40?20:15, showVal=rows.length<=20;
   let h=`<table class="cmx" style="--cell:${cell}px"><thead><tr><th class="corner"></th>`;
   ord.forEach(i=>{ const r0=rows[i];
@@ -232,14 +287,16 @@ function paintCorr(rows, C, OV, opts){
   ord.forEach((ri,dr)=>{ const rr=rows[ri];
     h+=`<tr data-dr="${dr}"><th class="rl${rr._basket?' bk':''}" data-i="${ri}" ${rr._basket?`data-tip="${esc(basketTip(rr._basket))}"`:`title="${esc(rr.coin)}"`}>${rr._basket?'<span class="bkg">⬒</span>':''}${esc(rr.ticker)}</th>`;
     ord.forEach((ci)=>{ const v=C[ri][ci], self=ri===ci;
-      const cls=self?'diag':(v==null?'nodata':'');
-      const txt=(showVal&&v!=null&&!self)?`${v<0?'−':''}${Math.abs(v).toFixed(1).replace(/^0/,'')}`:'';
+      // (-105) under the overlap floor: empty with "n<10"; CI spans 0: faded (the value still shows)
+      const low=!self&&v==null&&minOv>0&&(OV[ri][ci]||0)>0&&OV[ri][ci]<minOv, ns=!self&&v!=null&&NS&&NS[ri][ci];
+      const cls=self?'diag':(v==null?(low?'nodata lown':'nodata'):(ns?'ns':''));
+      const txt=(showVal&&v!=null&&!self)?`${v<0?'−':''}${Math.abs(v).toFixed(1).replace(/^0/,'')}`:(showVal&&low?`n&lt;${minOv}`:'');
       h+=`<td${cls?` class="${cls}"`:''}${self||v==null?'':` style="background:${corrColor(v)}"`}>${txt}</td>`; });
     h+='</tr>'; });
   h+='</tbody></table>';
   el('corrwrap').innerHTML=h;
   CORR._rows=rows; CORR._C=C; CORR._N=OV; CORR._ord=ord;
-  CORR._intraday=!!opts.intraday; CORR._bars=opts.bars||null; CORR._times=opts.times||null; CORR._win=opts.win||null; CORR._minOv=opts.minOv||0;
+  CORR._intraday=!!opts.intraday; CORR._bars=opts.bars||null; CORR._times=opts.times||null; CORR._win=opts.win||null; CORR._minOv=opts.minOv||0; CORR._NS=NS;
   const tbl=el('corrwrap').querySelector('table.cmx');
   const cols=[...tbl.querySelectorAll('thead th.cl')], rls=[...tbl.querySelectorAll('tbody th.rl')];
   // Hover state: the cell under the pointer as display coords. Header highlight, the readout and
@@ -305,7 +362,11 @@ function renderCorrPairs(){
   </div>`;
   box.querySelectorAll('tbody tr[data-i]').forEach(tr=>tr.addEventListener('click',()=>{ openPair(+tr.dataset.i, +tr.dataset.j); }));
 }
-function alignedDaily(a,b,Ldays){ const ca=a.daily, cb=b.daily; if(!ca||!cb) return null;
+// (-105) the pair view aligns the same bars the matrix correlated: the session view, forming bar
+// dropped, a crypto leg folded onto the US calendar when the other leg keeps sessions.
+function alignedDaily(a,b,Ldays){ if(!a.daily||!b.daily) return null;
+  const mixed=!!sessCalOf(a)!==!!sessCalOf(b), ca=closedDaily(sessBarsFor(a, corrCalFor(a,mixed))), cb=closedDaily(sessBarsFor(b, corrCalFor(b,mixed)));
+  if(!ca||!cb) return null;
   const cutoff=Math.floor(Date.now()/DAY)-Ldays, ma=new Map(), mb=new Map();
   for(const k of ca){ const cl=parseFloat(k.c), d=Math.floor(k.t/DAY); if(isFinite(cl)&&d>=cutoff) ma.set(d,cl); }
   for(const k of cb){ const cl=parseFloat(k.c), d=Math.floor(k.t/DAY); if(isFinite(cl)&&d>=cutoff) mb.set(d,cl); }
@@ -1233,4 +1294,4 @@ function exportCorr(){ const rows=CORR._rows, C=CORR._C, ord=CORR._ord; if(!rows
   const head=['',...ord.map(i=>rows[i].ticker)];
   const body=ord.map(ri=>[rows[ri].ticker, ...ord.map(ci=>{ const v=C[ri][ci]; return v==null?'':v.toFixed(4); })]);
   downloadCSV(`xyz-correlation-${tfLabel()}.csv`,[head,...body]); }
-export { BASKETS, COMPG, RATIO, basketByName, basketMutate, basketScopeList, basketVirtualRow, buildCorr, compgAuto, computeDvb, corrColor, dailyFunding, dailyLevels, dailyOI, dailyReturns, downloadCSV, dvbBasketDef, dvbCell, dvbPickOpts, exportCorr, exportMarkets, isBasketName, loadBaskets, openCompg, openCorr, openRatio, overnightReturns, pearson, ratioImageSvg, renderCompg, renderCorr, renderCorrPairs, sparkline, syncCorrLookback, tfLabel };
+export { BASKETS, COMPG, RATIO, basketByName, basketMutate, basketScopeList, basketVirtualRow, buildCorr, compgAuto, computeDvb, corrCI, corrColor, dailyFunding, dailyLevels, dailyOI, dailyReturns, downloadCSV, dvbBasketDef, dvbCell, dvbPickOpts, exportCorr, exportMarkets, isBasketName, loadBaskets, openCompg, openCorr, openRatio, overnightReturns, pearson, ratioImageSvg, renderCompg, renderCorr, renderCorrPairs, sessReturns, sparkline, syncCorrLookback, tfLabel };

@@ -1542,11 +1542,13 @@ test("-11 corr reorder + 7d floor: pairs sit above COMP/G, and the overlap floor
   assert.ok(iPairs > -1 && iCompg > iPairs, "strongest pairs sit above COMP/G");
   assert.ok(iRatio > iCompg && iBasket > iRatio, "COMP/G -> ratio -> baskets follow, in that order");
   const app = require("./_client").clientSource();
-  const m = app.match(/minOv=Math\.max\((\d+),\s*Math\.floor\(Math\.min\(Ldays,\s*90\)\s*\*\s*([\d.]+)\)\)/);
-  assert.ok(m, "the overlap floor scales with the window (not a flat 15)");
-  // simulate: for every offered window, the floor must be achievable (< the window's day count)
-  const floor = (L) => Math.max(+m[1], Math.floor(Math.min(L, 90) * (+m[2])));
-  for (const L of [7, 30, 90, 180, 365]) assert.ok(floor(L) < L, L + "d window: floor " + floor(L) + " is achievable (was the 7d grey-out bug)");
+  const m = app.match(/minOv=Math\.max\(CORR_MIN_OV,\s*Math\.floor\(Math\.min\(Ldays,\s*90\)\s*\*\s*([\d.]+)\)\)/);
+  assert.ok(m && app.includes("const CORR_MIN_OV=10;"), "the overlap floor scales with the window over a hard 10-return minimum (build -105)");
+  // (-105) returns are SESSION returns (~5 per 7 calendar days): the 30d/90d windows clear their floor;
+  // the 7d window (~5 returns) honestly greys to "n<10" rather than printing a 5-point correlation
+  const floor = (L) => Math.max(10, Math.floor(Math.min(L, 90) * (+m[1])));
+  for (const L of [30, 90, 180, 365]) assert.ok(floor(L) < Math.floor(Math.min(L, 370) * 5 / 7) - 3, L + "d window: floor " + floor(L) + " is achievable in sessions");
+  assert.ok(floor(7) >= 7, "7d: below the floor by design — cells read n<10");
   assert.ok(!/minOv=Math\.max\(15,/.test(app), "the flat-15 floor that greyed the 7d matrix is gone");
 });
 

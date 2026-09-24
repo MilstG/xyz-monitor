@@ -720,7 +720,7 @@ test("client + server integrity: the Report tab ships end to end (markers, style
   // shadows at 216) for eight builds while the 370d retention sat unread. The loop must read the
   // deep map, and the deep map must be written before the wire slice.
   assert.ok(pol.includes("deepDaily.set(r.coin, dr);"), "full crypto tuples stashed for the signal loop");
-  assert.ok(pol.includes("const closes = closedDailyCloses(deepDaily.get(r.coin) || dc.daily[r.coin] || null)"), "the signal loop prefers full depth (closed bars only, -67)");
+  assert.ok(pol.includes("const closes = closedDailyCloses(sessTuplesM(r, deepDaily.get(r.coin) || dc.daily[r.coin] || null))"), "the signal loop prefers full depth (closed bars only, -67; session-folded on a calendar market, -105)");
 });
 
 test("mobile suite -100: touch parity, mobile preset and PWA shell are fully wired", () => {
@@ -1408,7 +1408,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract â€
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.24-104"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.24-105"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);

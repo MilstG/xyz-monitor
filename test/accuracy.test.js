@@ -12,6 +12,19 @@ const grab = (src, name) => {
   let d = 0; for (let k = src.indexOf("{", i); k < src.length; k++) { if (src[k] === "{") d++; if (src[k] === "}") { d--; if (!d) return src.slice(i, k + 1); } }
 };
 
+// The client's session machinery (build -105) in a sandbox: core.js's session view + yzVol, corr.js's
+// session returns, data.js's computeBeta; `sessOff` = the /api/daily calendar shape ({US: [days]}).
+function clientSessApi(sessOff) {
+  const src = clientSrc();
+  const END = "return s2>0?Math.sqrt(s2*252)*100:null; }", a = src.indexOf("function sessionFold("), b = src.indexOf(END, a);
+  assert.ok(a > 0 && b > a, "core.js session block");
+  const core = src.slice(a, b + END.length);
+  const state = { sessOff: null, sessOffV: 1 };
+  if (sessOff) { state.sessOff = {}; for (const k in sessOff) state.sessOff[k] = new Set(sessOff[k]); }
+  return new Function("DAY", "state", core + "\n" + grab(src, "sessReturns") + "\n" + grab(src, "sessBarsFor") + "\n" + grab(src, "computeBeta")
+    + "; return { sessionFold, sessDaily, sessOffFor, closedDaily, yzVol, sessReturns, computeBeta };")(DAY, state);
+}
+
 // ---- 1. AMC reaction: the client scores the print day's own bar, exactly as the server does ----
 test("-104 earnings reaction: client earnReactPct == server earnPrintReaction (daily) on BMO, AMC, Friday AMC, forming, missing bar", () => {
   const src = clientSrc();
@@ -77,7 +90,7 @@ test("-104 beta: compute.dailyBeta == the board's computeBeta on closed bars; ke
     const t = nowD - (N - i) * DAY, rb = rnd() * 0.02, ra = 1.5 * rb + rnd() * 0.002;
     pb *= Math.exp(rb); pa *= Math.exp(ra); bRows.push({ t, c: pb }); aRows.push({ t, c: pa });
   }
-  const clientBeta = (A, B) => new Function("DAY", grab(src, "dailyReturns") + "\n" + grab(src, "computeBeta") + "; return computeBeta;")(DAY)(
+  const clientBeta = (A, B) => clientSessApi().computeBeta(
     { daily: A.map((k) => ({ t: k.t, c: String(k.c) })) }, { daily: B.map((k) => ({ t: k.t, c: String(k.c) })) }, 90);
   const RealNow = Date.now; Date.now = () => now;
   let cli; try { cli = clientBeta(aRows, bRows); } finally { Date.now = RealNow; }
@@ -99,7 +112,7 @@ test("-104 beta: compute.dailyBeta == the board's computeBeta on closed bars; ke
   assert.deepEqual(C.dailyBeta(form, formB, { days: 90, now }), srv, "the open day's partial return is dropped");
   assert.equal(C.dailyBeta(aRows.slice(-10), bRows.slice(-10), { now }), null, "< 20 pairs: null");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  assert.ok(pol.includes("dailyBeta(daily, b.dailyRaw, { days: 90, now })") && !pol.includes("closes[closes.length - n + i - 1]"), "the AI context uses the shared beta");
+  assert.ok(pol.includes("dailyBeta(sessFoldOf(r, daily), sessFoldOf(b, b.dailyRaw), { days: 90, now })") && !pol.includes("closes[closes.length - n + i - 1]"), "the AI context uses the shared beta");
 });
 
 // ---- 4. Holidays and early closes in the earnings session machinery ----
@@ -202,5 +215,214 @@ test("-104 vs cash close: the column reads the mark vs the last US cash close; R
   assert.ok(src.includes("r.rscc=(r.vcc==null||!state.benchCoin||r.uni==='main')?undefined:(r.coin===state.benchCoin?0:(bXcc!=null?r.vcc-bXcc:undefined));"), "RS twin vs the S&P's own vs-close move");
   assert.ok(/\{key:'d1', label:'24h', type:'num', tip:'Rolling 24-hour change: live mark vs Hyperliquid\\u2019s prevDayPx/.test(src), "24h keeps its meaning");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  assert.ok(pol.includes("cashClose[r.coin] = [lastCash.close, +pc.toFixed(8)]") && pol.includes("liveClose, cashClose, oi };"), "the server ships the last US cash close on /api/daily");
+  assert.ok(pol.includes("cashClose[r.coin] = [lastCash.close, +pc.toFixed(8)]") && pol.includes("liveClose, cashClose, oi, sessOff };"), "the server ships the last US cash close on /api/daily");
+});
+
+// ===== build 2026.09.24-105: the US-session daily series ==========================================
+// One definition (compute.sessionFold, client twin core.js sessionFold): the UTC bar for trading day
+// D is D's session bar; weekend / exchange-holiday bars fold into the next session bar; a fold still
+// waiting for its session is a forming bar keyed at that session's date.
+const US = () => C.sessOffFn("US");
+const dIdx = (y, mo, d) => Math.floor(Date.UTC(y, mo - 1, d) / DAY);
+const bar = (y, mo, d, c, extra) => Object.assign({ t: Date.UTC(y, mo - 1, d), c }, extra || {});
+
+test("-105 session fold: a weekend folds into Monday (h max, l min, o first, c Monday's, v summed, tl all-true); crypto is untouched", () => {
+  // Thu 2026-09-17 .. Tue 2026-09-22
+  const bars = [
+    bar(2026, 9, 17, 100, { o: 99, h: 101, l: 98, v: 10, tl: true }),
+    bar(2026, 9, 18, 102, { o: 100, h: 103, l: 99, v: 11, tl: true }),   // Fri
+    bar(2026, 9, 19, 97, { o: 102, h: 104, l: 95, v: 3, tl: true }),     // Sat: the weekend's high AND low
+    bar(2026, 9, 20, 99, { o: 97, h: 100, l: 96, v: 2, tl: true }),      // Sun
+    bar(2026, 9, 21, 101, { o: 99, h: 102, l: 98, v: 12, tl: true }),    // Mon
+    bar(2026, 9, 22, 103, { o: 101, h: 103.5, l: 100, v: 9, tl: true }), // Tue
+  ];
+  const s = C.sessionFold(bars, US());
+  assert.deepEqual(s.map((b) => new Date(b.t).toISOString().slice(0, 10)), ["2026-09-17", "2026-09-18", "2026-09-21", "2026-09-22"], "sessions only, keyed by their own UTC day");
+  const mon = s[2];
+  assert.deepEqual({ o: mon.o, h: mon.h, l: mon.l, c: mon.c, v: mon.v, tl: mon.tl, n: mon.n }, { o: 102, h: 104, l: 95, c: 101, v: 17, tl: true, n: 3 }, "Monday's bar carries the weekend's extremes and volume");
+  // the Friday -> Monday session return is the whole weekend + Monday move, nothing lost
+  assert.ok(Math.abs(Math.log(mon.c / s[1].c) - (Math.log(97 / 102) + Math.log(99 / 97) + Math.log(101 / 99))) < 1e-12);
+  // a bar without a true low taints the fold's tl
+  const noL = bars.map((b, i) => (i === 3 ? { t: b.t, c: b.c, h: b.h } : b));
+  assert.equal(C.sessionFold(noL, US())[2].tl, false);
+  assert.equal(C.sessionFold(bars, null), bars, "no calendar (crypto): the input array itself");
+  // forming: it is Sunday — the Sat/Sun fold is Monday's forming bar, keyed at Monday, trimmed by the closed-bar rules
+  const f = C.sessionFold(bars.slice(0, 4), US()), last = f[f.length - 1];
+  assert.equal(last.f, 1); assert.equal(last.t, Date.UTC(2026, 8, 21)); assert.equal(last.c, 99);
+  assert.equal(C.closedBars(f, DAY, Date.UTC(2026, 8, 20, 15)).length, 2, "the forming fold never reaches a closed-bar consumer");
+  // tuples: the signal loop's shape round-trips
+  const tup = C.sessionTuples(bars.map((b) => [b.t, b.c, b.h, b.v, b.l]), US());
+  assert.deepEqual(tup[2].slice(0, 5), [Date.UTC(2026, 8, 21), 101, 104, 17, 95]);
+});
+
+test("-105 session fold: exchange holidays fold like weekends (Good Friday, Thanksgiving); half days stay sessions; a foreign-home calendar is its own", () => {
+  // Good Friday 2026-04-03: Thu 04-02 | Fri(closed) Sat Sun -> Mon 04-06
+  const gf = [bar(2026, 4, 2, 100), bar(2026, 4, 3, 90), bar(2026, 4, 4, 91), bar(2026, 4, 5, 92), bar(2026, 4, 6, 95)];
+  const s = C.sessionFold(gf, US());
+  assert.equal(s.length, 2); assert.equal(s[1].t, Date.UTC(2026, 3, 6)); assert.equal(s[1].n, 4); assert.equal(s[1].l, 90, "the holiday's close is inside Monday's range");
+  // Thanksgiving 2026-11-26 folds into the Friday half day (a session)
+  const tg = [bar(2026, 11, 25, 100), bar(2026, 11, 26, 101), bar(2026, 11, 27, 102)];
+  assert.deepEqual(C.sessionFold(tg, US()).map((b) => [new Date(b.t).getUTCDate(), b.n]), [[25, 1], [27, 2]]);
+  // KRX Chuseok 2026-09-24/25 is closed in Seoul but a US session
+  const ch = [bar(2026, 9, 23, 1), bar(2026, 9, 24, 2), bar(2026, 9, 25, 3), bar(2026, 9, 28, 4)];
+  assert.equal(C.sessionFold(ch, C.sessOffFn("KR")).length, 2, "KR folds Chuseok");
+  assert.equal(C.sessionFold(ch, US()).length, 4, "the US trades it");
+  // the wire calendar: ~104 weekend days + ~10 holidays a year
+  const off = C.sessOffDays("US", dIdx(2026, 1, 1), dIdx(2026, 12, 31));
+  assert.ok(off.length >= 110 && off.length <= 116, "2026 US off-days: " + off.length);
+  assert.ok(off.includes(dIdx(2026, 4, 3)) && off.includes(dIdx(2026, 7, 3)) && !off.includes(dIdx(2026, 11, 27)));
+});
+
+test("-105 session fold parity: the client twin folds identically on the server's shipped calendar (weekends, holidays, forming tail, strings, gaps)", () => {
+  const api = clientSessApi();
+  const cal = C.sessOffDays("US", dIdx(2026, 3, 20), dIdx(2026, 4, 30));
+  const S = new Set(cal), off = (d) => S.has(d);
+  let seed = 3; const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+  const bars = []; let p = 100;
+  for (let d = dIdx(2026, 3, 20); d <= dIdx(2026, 4, 11); d++) {
+    if (d === dIdx(2026, 3, 31)) continue;   // a hole in the feed
+    p *= Math.exp((rnd() - 0.5) * 0.04);
+    const b = { t: d * DAY, c: String(p), h: p * (1 + rnd() * 0.02), l: p * (1 - rnd() * 0.02), v: rnd() * 100 };
+    if (d % 5 === 0) delete b.l;   // some closes-only bars
+    bars.push(b);
+  }
+  const srv = C.sessionFold(bars, C.sessOffFn("US")), cli = api.sessionFold(bars, off);
+  assert.deepEqual(JSON.parse(JSON.stringify(cli)), JSON.parse(JSON.stringify(srv)), "byte-identical fold");
+  assert.equal(srv[srv.length - 1].f, 1, "the fixture ends on a Saturday: a forming fold");
+});
+
+test("-105 correlation: session returns (forming dropped), the n<10 floor, Fisher-z CI shading, shrinkage for the order only; β parity on sessions", () => {
+  const src = clientSrc();
+  const api = new Function("DAY", grab(src, "corrSig") + "\n" + grab(src, "corrCI") + "; return { corrSig, corrCI };")(DAY);
+  // |atanh r|·√(n−3) vs 1.96: r = .5 is noise at n = 10 and real at n = 20
+  const C2 = [[1, 0.5, 0.5], [0.5, 1, 0.2], [0.5, 0.2, 1]], N2 = [[0, 10, 20], [10, 0, 200], [20, 200, 0]];
+  const sg = api.corrSig(C2, N2);
+  assert.equal(sg.NS[0][1], 1, "r=.5, n=10: CI spans 0 -> faded");
+  assert.equal(sg.NS[0][2], 0, "r=.5, n=20: significant");
+  assert.equal(sg.NS[1][2], 0, "r=.2, n=200: significant");
+  const ci = api.corrCI(0.5, 10); assert.ok(ci[0] < 0 && ci[1] > 0.8, JSON.stringify(ci));
+  const ci2 = api.corrCI(0.5, 20); assert.ok(ci2[0] > 0, JSON.stringify(ci2));
+  assert.ok(sg.delta > 0 && sg.delta < 1, "a Ledoit-Wolf-style intensity: " + sg.delta);
+  const rb = (0.5 + 0.5 + 0.2) / 3;
+  assert.ok(Math.abs(sg.Cs[0][1] - ((1 - sg.delta) * 0.5 + sg.delta * rb)) < 1e-12, "shrunk toward the average correlation");
+  assert.equal(C2[0][1], 0.5, "the displayed matrix is untouched");
+  assert.ok(src.includes("const ord=corrOrder(C, opts.shr)") && src.includes("paintCorr(rows, res.C, res.N, { ns:res.NS, shr:res.Cs, minOv:res.minOv });"), "the order clusters Cs; the cells paint raw C");
+  assert.ok(src.includes("const CORR_MIN_OV=10;") && src.includes("table.cmx td.ns{opacity:.38}") === false, "floor constant in corr.js (styles live in styles.css)");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(css.includes("table.cmx td.ns{opacity:.38}") && css.includes("table.cmx td.lown"), "faded + n<10 cell styles");
+  // β parity on a weekend-bearing tape, calendar shipped: server fold + dailyBeta == client sessReturns + computeBeta
+  const nowD = Date.UTC(2026, 8, 24), now = nowD + 10 * HOUR;
+  let seed = 11; const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647 - 0.5; };
+  const aR = [], bR = []; let pa = 50, pb = 100;
+  for (let i = 160; i >= 0; i--) { const t = nowD - i * DAY, rb2 = rnd() * 0.02; pb *= Math.exp(rb2); pa *= Math.exp(1.3 * rb2 + rnd() * 0.003); aR.push({ t, c: pa }); bR.push({ t, c: pb }); }
+  const cal = { US: C.sessOffDays("US", Math.floor(aR[0].t / DAY), Math.floor(nowD / DAY) + 14) };
+  const cApi = clientSessApi(cal);
+  const RealNow = Date.now; Date.now = () => now;
+  let cli; try { cli = cApi.computeBeta({ uni: "xyz", daily: aR }, { uni: "xyz", daily: bR }, 90); } finally { Date.now = RealNow; }
+  const srv = C.dailyBeta(C.sessionFold(aR, US()), C.sessionFold(bR, US()), { days: 90, now });
+  assert.ok(Math.abs(cli.beta - srv.beta) < 1e-12 && Math.abs(cli.r2 - srv.r2) < 1e-12, JSON.stringify({ cli, srv }));
+  assert.ok(srv.n >= 58 && srv.n <= 66, "90 calendar days hold ~63 session returns, not 90: " + srv.n);
+});
+
+test("-105 Yang-Zhang: closed form on a constant-range series, the missing-low refusal, and the open = prior close convention", () => {
+  const api = clientSessApi();
+  // every session: prior close 100, open 100, high 101, low 99, close 100 -> o = c = 0, rs = ln²(1.01) + ln²(0.99)
+  const bars = Array.from({ length: 21 }, (_, i) => ({ t: i * DAY, o: 100, h: 101, l: 99, c: 100, tl: true }));
+  const n = 20, k = 0.34 / (1.34 + (n + 1) / (n - 1)), rs = Math.log(1.01) ** 2 + Math.log(0.99) ** 2;
+  const want = Math.sqrt((1 - k) * rs * 252) * 100;
+  assert.ok(Math.abs(api.yzVol(bars, 20) - want) < 1e-9, api.yzVol(bars, 20) + " vs " + want);
+  // no opens: the prior close stands in — identical here, since the perp opens where it closed
+  assert.ok(Math.abs(api.yzVol(bars.map(({ o, ...b }) => b), 20) - want) < 1e-9);
+  // a close-to-close move lands in the k·var(c) term: alternate ±1% closes, zero range beyond them
+  const alt = [{ t: 0, c: 100, h: 100, l: 100, tl: true }];
+  for (let i = 1; i <= 20; i++) { const pc = alt[i - 1].c, c = i % 2 ? pc * 1.01 : pc / 1.01; alt.push({ t: i * DAY, c, h: Math.max(pc, c), l: Math.min(pc, c), tl: true }); }
+  const cs = alt.slice(1).map((b, i) => Math.log(b.c / alt[i].c)), m = cs.reduce((a, x) => a + x, 0) / 20, vc = cs.reduce((a, x) => a + (x - m) ** 2, 0) / 19;
+  const rsA = alt.slice(1).reduce((a, b, i) => { const o = alt[i].c, h = b.h, l = b.l, c = b.c; return a + Math.log(h / c) * Math.log(h / o) + Math.log(l / c) * Math.log(l / o); }, 0) / 20;
+  assert.ok(Math.abs(api.yzVol(alt, 20) - Math.sqrt((k * vc + (1 - k) * rsA) * 252) * 100) < 1e-9);
+  // one bar without a true low: refused (the board falls back to close-to-close, labelled)
+  const holed = bars.map((b, i) => (i === 7 ? Object.assign({}, b, { tl: false }) : b));
+  assert.equal(api.yzVol(holed, 20), null);
+  assert.equal(api.yzVol(bars.slice(0, 20), 20), null, "needs n+1 bars");
+  const src = clientSrc();
+  assert.ok(src.includes("const cl=closedDaily(ses); if(cl.length>=21){ v=yzVol(cl,20); est='YZ';"), "the Vol column runs YZ over 20 CLOSED session bars");
+  assert.ok(src.includes("v=stdev(rt)*Math.sqrt(252)*100; est='c2c';"), "labelled close-to-close fallback");
+  assert.ok(src.includes("r.carry=(r._carryF!=null&&r.vol30!=null&&isFinite(r.vol30)&&r.vol30>5)?r._carryF/r.vol30:undefined;"), "carry divides by whichever vol the column shows");
+});
+
+test("-105 MA200 = 200 sessions (server sma200Of, client MAs), daily σ/ADR per session, forming hour out of volH", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: true });
+  const d0 = dIdx(2025, 6, 2), raw = [];
+  for (let i = 0; i < 330; i++) raw.push({ t: (d0 + i) * DAY, c: 100 + i });   // close = 100 + day offset
+  p.seedRowNow("xyz:MA", { ticker: "MA", px: 400, uni: "xyz", ref: { p1h: 1, p4h: 1, p7d: 1, p30d: 1 }, dailyRaw: raw });
+  p.seedRowNow("ETH", { ticker: "ETH", px: 400, uni: "main", ref: { p1h: 1, p4h: 1, p7d: 1, p30d: 1 }, dailyRaw: raw });
+  p.buildSnapshotNow();
+  const row = (c) => p.getSnapshot().markets.concat(p.getSnapshot().mainMarkets || []).find((r) => r.coin === c);
+  const off = US(), sess = C.sessionFold(raw, off);
+  const want = sess.slice(-200).reduce((a, b) => a + b.c, 0) / 200;
+  assert.ok(Math.abs(row("xyz:MA").ma200 - want) < 1e-6, "the last 200 SESSION closes: " + row("xyz:MA").ma200 + " vs " + want);
+  const cal200 = raw.slice(-200).reduce((a, b) => a + b.c, 0) / 200;
+  assert.ok(row("xyz:MA").ma200 < cal200 - 20, "200 sessions reach ~90 calendar days further back than 200 UTC bars");
+  assert.ok(Math.abs(row("ETH").ma200 - cal200) < 1e-6, "crypto keeps 200 calendar days");
+  const src = clientSrc();
+  assert.ok(src.includes("{ const cl=sessDaily(r); let m=null;"), "the board's MA20/50/100/200 read the session view");
+  // featuresFromHourly: a flat weekend no longer dilutes the per-session σ or range
+  const now = Date.UTC(2026, 8, 24, 12), H = [];
+  let px = 100;
+  for (let t = now - 30 * DAY; t < now; t += HOUR) {
+    const wd = new Date(t).getUTCDay(), flat = wd === 0 || wd === 6;
+    const c = flat ? px : px * (1 + (Math.floor(t / DAY) % 2 ? 0.0012 : -0.001));
+    H.push({ t, o: px, h: Math.max(px, c) * (flat ? 1 : 1.001), l: Math.min(px, c) * (flat ? 1 : 0.999), c, v: 1 }); px = c;
+  }
+  const cal = C.featuresFromHourly(H, now, HOUR, DAY).feat, ses = C.featuresFromHourly(H, now, HOUR, DAY, off).feat;
+  assert.ok(ses.dr.length < cal.dr.length && ses.dr.length >= 19, "one range per completed session: " + ses.dr.length);
+  const mean = (a) => a.reduce((x, y) => x + y, 0) / a.length;
+  assert.ok(mean(ses.dr) > mean(cal.dr), "no near-zero weekend ranges in the average");
+  assert.ok(ses.volD > cal.volD, "no near-zero weekend returns deflating the daily σ");
+  // the forming hour: an absurd last print moves nothing
+  const spiked = H.concat([{ t: now - HOUR / 2, o: px, h: px * 2, l: px, c: px * 2, v: 1 }]);
+  assert.equal(C.featuresFromHourly(spiked, now, HOUR, DAY).feat.volH, C.featuresFromHourly(H, now, HOUR, DAY).feat.volH, "volH excludes the still-open hour");
+});
+
+test("-105 true lows: the candle's low is kept (numeric), shipped as tuple column 4, persisted, and a pre--105 warm file falls back flagged", () => {
+  const { createPoller } = require("../src/poller");
+  const mkStore = (loadFeatures) => ({ loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, loadFeatures: loadFeatures || (() => null) });
+  const now = Date.now(), D0 = Math.floor(now / DAY) * DAY;
+  const full = []; for (let i = 60; i >= 1; i--) full.push({ t: D0 - i * DAY, o: 100, h: 106, l: 94 + (i % 3), c: 100 + (i % 5), v: 1e5 });
+  const p = createPoller({ dex: "xyz", store: mkStore(), log: () => {}, version: "test", crypto: false });
+  p.seedRowNow("xyz:LO", { px: 101, ticker: "LO", uni: "xyz", vol: 1e7, dailyRaw: full, dailyTs: now });
+  p.buildDailyNow();
+  const dc = p.getDaily(), a = dc.daily["xyz:LO"];
+  assert.equal(a[a.length - 1][4], full[full.length - 1].l, "the low ships");
+  assert.ok(dc.sessOff && Array.isArray(dc.sessOff.US) && dc.sessOff.US.length > 20 && Array.isArray(dc.sessOff.KR), "the session calendars ship with the payload");
+  // warm files: -105 6-tuples restore l and o; a pre--105 4-tuple hydrates without l -> null on the wire
+  for (const [tuple, wantL] of [[(k) => [k.t, k.c, k.h, k.v, k.l, k.o], true], [(k) => [k.t, k.c, k.h, k.v], false]]) {
+    const q = createPoller({ dex: "xyz", store: mkStore(() => ({ markets: { "xyz:W": { dailyTs: now, daily: full.map(tuple) } } })), log: () => {}, version: "test", crypto: false });
+    q.seedRowNow("xyz:W", { px: 100, ticker: "W", uni: "xyz", vol: 1e6 });
+    q.hydrateFeaturesNow(); q.buildDailyNow();
+    const w = q.getDaily().daily["xyz:W"];
+    assert.equal(w[10][4] != null, wantL, wantL ? "a -105 warm file restores the low" : "a 4-tuple file ships a null low (the client falls back to c, tl false)");
+  }
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes("r.dailyRaw = normDailyCandles(c);") && pol.includes("out.push({ t, o: f(k.o), h: f(k.h), l: f(k.l), c: cl, v: f(k.v) });"), "candleSnapshot strings parse once at the source, low and open kept");
+  const src = clientSrc();
+  assert.ok(src.includes("r.daily=Array.isArray(arr)?arr.map(p=>{ const l=p[4]; return {t:p[0], c:p[1], h:p[2], v:p[3], l:l>0?l:undefined, tl:l>0}; }):r.daily;"), "the client reads column 4 and flags true lows");
+  assert.ok(!/the daily feed carries no low/.test(fs.readFileSync(path.join(__dirname, "..", "README.md"), "utf8")), "the README no longer says the feed has no low");
+});
+
+test("-105 earnings expansion baseline: 20 SESSION moves before the print, not 20 UTC bars with ~6 flat weekend days", () => {
+  // a name that moves 1% every session and not at all on weekends; a +5% print on a Wednesday
+  const bars = []; let c = 100; const d0 = dIdx(2026, 6, 1), off = US();
+  for (let d = d0; d < d0 + 60; d++) { if (!off(d)) c *= d % 2 ? 1.01 : 1 / 1.01; bars.push({ t: d * DAY, c }); }
+  const pd = d0 + 44; while (off(pd)) throw new Error("fixture: print day must be a session");
+  bars[44] = { t: pd * DAY, c: bars[43].c * 1.05 };
+  for (let i = 45; i < bars.length; i++) bars[i] = { t: bars[i].t, c: bars[44].c };
+  const pr = [{ t: "X", d: new Date(pd * DAY).toISOString().slice(0, 10), s: "BMO" }];
+  const now = (d0 + 59) * DAY + 12 * HOUR;
+  const cal = C.earnReactionsFor(pr, bars, now), ses = C.earnReactionsFor(pr, bars, now, null, { off });
+  assert.ok(Math.abs(ses.xMed - 5) < 0.3, "5% over a 1%-per-session baseline reads ~5×: " + ses.xMed);
+  assert.ok(cal.xMed > ses.xMed + 1, "the UTC-bar baseline (weekend zeros) inflated it: " + cal.xMed);
+  const ru = C.earnRunup([], bars.slice(0, 44), 100, (d0 + 44) * DAY, off);
+  assert.ok(Math.abs(ru.day - 1) < 0.02, "the usual daily move is per session: " + ru.day);
 });

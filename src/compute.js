@@ -50,7 +50,12 @@ function priceAt(c, target, tol, now, width) {
 }
 
 // Reference prices (1h/4h/7d/30d) + momentum/vol features from ~30d of hourly candles.
-function featuresFromHourly(c, now, HOUR, DAY) {
+// `off` (build 2026.09.24-105, optional): sessOffFn of the market's calendar. With it the per-day
+// buckets behind `dr` (average daily range) and `volD` (daily σ) are SESSION days — weekend and
+// holiday buckets folded into the next session (sessionFold's rule) — so a US name's range and σ
+// are per session, not diluted by near-flat Saturdays. Absent (crypto): calendar days, as before.
+// volH skips the still-forming hour (its partial return is not an hourly return).
+function featuresFromHourly(c, now, HOUR, DAY, off) {
   // Each reference is the close of the last bar that ended at or before now - horizon (see priceAt).
   const ref = {
     p1h: priceAt(c, now - 1 * HOUR, 95 * 60 * 1000, now, HOUR),
@@ -71,7 +76,7 @@ function featuresFromHourly(c, now, HOUR, DAY) {
       const typ = (isFinite(h) && isFinite(l) && isFinite(cl)) ? (h + l + cl) / 3 : (isFinite(cl) ? cl : null);
       if (typ != null && typ > 0) { vwNum += typ * v; vwDen += v; }
     }
-    if (isFinite(cl)) { if (prev != null && prev > 0) rets.push(Math.log(cl / prev)); prev = cl; }
+    if (isFinite(cl) && !(now != null && +k.t + HOUR > now)) { if (prev != null && prev > 0) rets.push(Math.log(cl / prev)); prev = cl; }
     const day = Math.floor(k.t / DAY), ntl = (isFinite(v) && isFinite(cl)) ? v * cl : 0;
     dayMap.set(day, (dayMap.get(day) || 0) + ntl);
     // per-day high / low / last-close for the average daily range series
@@ -86,7 +91,19 @@ function featuresFromHourly(c, now, HOUR, DAY) {
   // average-daily-range series: (high − low) / close per COMPLETED day, oldest→newest
   const today = Math.floor(now / DAY);
   const dayEntries = [...dayHLC.entries()].sort((a, b) => a[0] - b[0]);
-  const dr = dayEntries
+  // Session view for dr/volD only (px30, the sparkline path, stays calendar). A trailing fold with
+  // no session bar yet is forming and dropped, like today's bucket.
+  let sessEntries = dayEntries;
+  if (typeof off === "function") {
+    sessEntries = [];
+    let p = null;
+    for (const [day, d] of dayEntries) {
+      if (!p) p = { hi: d.hi, lo: d.lo, c: d.c };
+      else { if (d.hi > p.hi) p.hi = d.hi; if (d.lo < p.lo) p.lo = d.lo; if (d.c != null) p.c = d.c; }
+      if (!off(day)) { sessEntries.push([day, p]); p = null; }
+    }
+  }
+  const dr = sessEntries
     .filter(([day, d]) => day < today && d.hi > -Infinity && d.lo < Infinity && d.c > 0)
     .map(([, d]) => (d.hi - d.lo) / d.c * 100);
   // daily-close path (last ~31 days) so the 30d-trend sparkline needs no daily candles
@@ -95,7 +112,7 @@ function featuresFromHourly(c, now, HOUR, DAY) {
   // day-plus horizons rather than extrapolating hourly vol by sqrt(t): the sqrt(t) rule assumes
   // iid returns, which fits poorly for perps on closed-hours underlyings (session structure,
   // overnight gaps), so a directly measured daily vol is the more trustworthy yardstick over 1d+.
-  const dCloses = dayEntries.filter(([day, d]) => day < today && d.c > 0).map(([, d]) => d.c);
+  const dCloses = sessEntries.filter(([day, d]) => day < today && d.c > 0).map(([, d]) => d.c);
   const dRets = [];
   for (let i = 1; i < dCloses.length; i++) if (dCloses[i - 1] > 0) dRets.push(Math.log(dCloses[i] / dCloses[i - 1]));
   const volD = dRets.length >= 5 ? stdev(dRets) : null;
@@ -626,6 +643,96 @@ function homeClosedWindows(mk, startMs, endMs) {
 }
 function homeOvernightAnchors(mk, startMs, endMs) { return homeClosedWindows(mk, startMs, endMs).filter((a) => a.tag === "overnight"); }
 function homeWeekendAnchors(mk, startMs, endMs) { return homeClosedWindows(mk, startMs, endMs).filter((a) => a.tag === "weekend"); }
+
+// ---- session-day daily view (build 2026.09.24-105) -------------------------------------------
+// Hyperliquid's 1d candles are UTC days, weekends and holidays included, but an equity/index/
+// commodity perp's underlying only trades its exchange's sessions: 200 UTC bars are ~140
+// sessions, a Saturday bar is a near-zero "return" that deflates every σ, and a Monday return
+// against Sunday's close is not the equity desk's Monday. The ONE definition every session-aware
+// consumer reads (server here; public/js/core.js sessionFold is the client twin, held to it by a
+// parity test):
+//   The UTC bar for date D spans 00:00Z D -> 00:00Z D+1 = 20:00 ET D-1 -> 20:00 ET D (19:00 in
+//   winter), so it CONTAINS the whole 09:30-16:00 ET cash session of D — and, for the KRX/TSE/
+//   HKEX/SSE home markets, the whole local session of D too (their day ends before 09:00Z).
+//   So: session bar for trading day D = UTC bar D. A UTC bar whose date is NOT a trading day
+//   (weekend, full-day exchange holiday — the gap engine's own calendar: usDayStatus, or
+//   homeDayStatus for a foreign-home listing) is FOLDED into the next session bar: h = max,
+//   l = min, o = the first folded bar's open, c = the session bar's close, v summed — no move is
+//   lost, it simply belongs to the next session's return. A fold still waiting for its session
+//   (it is Saturday now) is emitted as a FORMING bar keyed at that next session's date (f: 1,
+//   t + DAY > now by construction, so every closed-bar trim drops it).
+//   `tl` (true low) survives only when every folded bar carried a real low; `n` = UTC bars folded.
+// Calendar per market: crypto (main dex) = calendar days, no fold; xyz foreign-home listings =
+// their home exchange's calendar; everything else on xyz (US equities, ADRs, indices, commodities,
+// FX) = the US calendar — exactly the anchoring the gap/overnight engine already applies.
+// sessOffFn(cal) -> (utcDayIndex) => true when that UTC date is not a trading day; null for crypto.
+const _sessOffFns = new Map();
+function sessOffFn(cal) {
+  if (!cal) return null;
+  let f = _sessOffFns.get(cal);
+  if (f) return f;
+  const memo = new Map();
+  f = (d) => {
+    let v = memo.get(d);
+    if (v === undefined) {
+      const x = new Date(d * DAY), y = x.getUTCFullYear(), mo = x.getUTCMonth() + 1, dd = x.getUTCDate();
+      v = (HOME_MKTS[cal] ? homeDayStatus(cal, y, mo, dd) : usDayStatus(y, mo, dd)) === 2;
+      memo.set(d, v);
+    }
+    return v;
+  };
+  _sessOffFns.set(cal, f);
+  return f;
+}
+// The off-days of `cal` in [d0, d1] (UTC day indexes) — what /api/daily ships so the client twin
+// folds on the server's calendar instead of re-deriving it.
+function sessOffDays(cal, d0, d1) {
+  const f = sessOffFn(cal), out = [];
+  if (f) for (let d = d0; d <= d1; d++) if (f(d)) out.push(d);
+  return out;
+}
+// bars: [{t, o?, h?, l?, c, v?, tl?}] ascending UTC-day bars (strings tolerated). off: sessOffFn
+// output (null/undefined = no fold, the input array is returned as-is). Output bars are fresh
+// objects {t, o, h, l, c, v, tl, n} (+ f: 1 on a forming fold). A bar without a usable close is
+// skipped, as every daily consumer already does. Keep in lock-step with core.js sessionFold.
+function sessionFold(bars, off) {
+  if (!Array.isArray(bars) || typeof off !== "function") return bars;
+  const num = (x) => (x == null || x === "" ? NaN : +x);
+  const out = [];
+  let p = null;
+  for (const k of bars) {
+    if (!k) continue;
+    const t = +k.t, c = num(k.c);
+    if (!Number.isFinite(t) || !(c > 0)) continue;
+    const h0 = num(k.h), l0 = num(k.l), o0 = num(k.o), v0 = num(k.v);
+    const hasL = k.tl != null ? !!k.tl : l0 > 0;
+    const h = h0 > 0 ? h0 : c, l = l0 > 0 ? l0 : c;
+    if (!p) p = { t, o: o0 > 0 ? o0 : null, h, l, c, v: v0 > 0 ? v0 : null, tl: hasL, n: 0 };
+    else {
+      if (h > p.h) p.h = h;
+      if (l < p.l) p.l = l;
+      p.c = c; p.t = t;
+      if (v0 > 0) p.v = (p.v || 0) + v0;
+      if (!hasL) p.tl = false;
+    }
+    p.n++;
+    if (!off(Math.floor(t / DAY))) { out.push(p); p = null; }
+  }
+  if (p) {   // a fold with no session bar yet: the next session's forming bar
+    let d = Math.floor(p.t / DAY) + 1;
+    for (let g = 0; g < 30 && off(d); g++) d++;
+    p.t = d * DAY; p.f = 1;
+    out.push(p);
+  }
+  return out;
+}
+// The same fold over the /api/daily tuple shape [t, c, h, v, l, o] (the signal loop's deep series);
+// returns tuples of the same shape. Absent `off` (crypto) returns the input untouched.
+function sessionTuples(tuples, off) {
+  if (!Array.isArray(tuples) || typeof off !== "function") return tuples;
+  const bars = sessionFold(tuples.map((k) => ({ t: k[0], c: k[1], h: k[2], v: k[3], l: k[4], o: k[5] })), off);
+  return bars.map((b) => [b.t, b.c, b.h, b.v, b.tl ? b.l : null, b.o]);
+}
 
 // ---- 24/7 (crypto) anchor generators -------------------------------------------------------
 // A perp book never closes, so cash/overnight/weekend are meaningless. The two holds that DO carry
@@ -4206,6 +4313,7 @@ module.exports = {
   homeCashAnchors, homeClosedWindows, homeOvernightAnchors, homeWeekendAnchors,
   utcDayAnchors, cryptoWeekendAnchors,
   usDayStatus, marketSessions, closedWindows, dailyBeta, dailyLogReturnsByDay, premSessionBaseline,
+  sessOffFn, sessOffDays, sessionFold, sessionTuples,
   summarizeEvents, retStd, dailyRets, intrabarCross, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
   EV_META, playbook, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, LVL_MAP_W, emaCrossOutcomes, emaCrossStudy, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, dipReclaim, detectLevels, nextLevelAbove, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
   // EMA trend ladder (Trend tab)
@@ -4791,6 +4899,7 @@ function earnReactionsFor(prints, daily, now, hourly, opts) {
   const h24 = new Map();
   if (curve) for (const r of curve.rows) if (Number.isFinite(r.mv.h24)) h24.set(r.t + "|" + r.d, r.mv.h24);
   const moves = [], exps = [], gaps = [];
+  const sessOff = opts && opts.off;   // sessOffFn of the market's calendar (build 2026.09.24-105); absent = UTC bars
   let hN = 0;
   for (const p of prints) {
     const pi = idxByDay.get(p.d);
@@ -4805,7 +4914,13 @@ function earnReactionsFor(prints, daily, now, hourly, opts) {
     if (fromH != null) hN++;
     moves.push(mv);
     let base = 0, bn = 0;
-    for (let k = Math.max(1, ri - 20); k < ri; k++) {
+    if (typeof sessOff === "function") {
+      // (build 2026.09.24-105) the baseline is 20 SESSION moves: the pre-print UTC bars folded on
+      // the market's calendar (a pending weekend fold before a Monday print is forming, dropped).
+      // Twenty UTC bars carried ~6 near-flat weekend days that deflated it and inflated xMed.
+      const sb = sessionFold(daily.slice(0, ri), sessOff).filter((b) => !b.f), s0 = Math.max(1, sb.length - 20);
+      for (let k = s0; k < sb.length; k++) { const a = sb[k].c, b = sb[k - 1].c; if (b > 0) { base += Math.abs((a - b) / b * 100); bn++; } }
+    } else for (let k = Math.max(1, ri - 20); k < ri; k++) {
       const a = daily[k].c, b = daily[k - 1].c;
       if (Number.isFinite(a) && Number.isFinite(b) && b > 0) { base += Math.abs((a - b) / b * 100); bn++; }
     }
@@ -4867,9 +4982,9 @@ function earnSessionsAhead(dateStr, nowMs) {
 //   usual : per past print, the close before the print day (daily[pi-1], the reaction study's own
 //           reference) vs the close 7 bars earlier — only where those 7 bars really span 7 days
 //           (a hole in the spine is not a run-up). >= 3 prints before it is called "usual".
-//   day   : mean |close-to-close| over the last 20 completed bars (>= 8) — the SAME baseline the
+//   day   : mean |close-to-close| over the last 20 completed (session) bars (>= 8) — the SAME baseline the
 //           study's expansion ratio (xMed) divides by, so typ/day and xMed are like for like.
-function earnRunup(prints, daily, px, nowMs) {
+function earnRunup(prints, daily, px, nowMs, off) {
   const now = nowMs == null ? Date.now() : nowMs;
   const out = { now: null, nowWhy: null, usual: null, usualWhy: null, day: null, dayN: 0, dayWhy: null };
   if (!Array.isArray(daily) || daily.length < 3) {
@@ -4877,8 +4992,9 @@ function earnRunup(prints, daily, px, nowMs) {
     return out;
   }
   const done = daily.filter((b) => b && Number.isFinite(+b.t) && Number.isFinite(b.c) && b.c > 0 && +b.t + DAY <= now);
-  // usual daily move
-  const last = done.slice(-21);
+  // usual daily move — over SESSION bars when the market has a calendar (build 2026.09.24-105),
+  // the same 20-session baseline the reaction study's xMed now divides by
+  const last = (typeof off === "function" ? sessionFold(done, off).filter((b) => !b.f) : done).slice(-21);
   let s = 0, n = 0;
   for (let k = 1; k < last.length; k++) { s += Math.abs(last[k].c / last[k - 1].c - 1) * 100; n++; }
   if (n >= 8 && s > 0) { out.day = +(s / n).toFixed(2); out.dayN = n; }

@@ -71,10 +71,11 @@ instant, and the per-IP rate limit stops being a per-user problem.
 - **Sectors tab** — sector classification, a rotation flow map, a Relative Rotation Graph (RS-Ratio / RS-Momentum vs the S&P), per-sector detail, and a sector×sector correlation matrix.
 - **Drawdown tab** — return since an anchor date against the max drawdown taken in the same
   window, one dot per market, zero drawdown at the right edge so up-and-right is better (more
-  return for less pain). The return axis reads *now* (the live mark over the first daily close on
-  or after the anchor) or *best* (the highest close since it); drawdown is the deepest
-  close-to-close fall from any running peak (the daily feed carries no low, so wicks are not
-  counted). The benchmarks are dashed horizontal lines at their own return — BTC and ETH in crypto
+  return for less pain). The return axis reads *now* (the live mark over the prior close — the last close before
+  the anchor, so the anchor day's own move counts) or *best* (the highest close since it);
+  drawdown is by default *intraday* — the deepest fall from the running peak of daily highs to a
+  later daily low (the daily feed carries the candle's low since build 2026.09.24-105) — with a
+  *close-to-close* toggle. US names read US session bars (see Accuracy -105). The benchmarks are dashed horizontal lines at their own return — BTC and ETH in crypto
   scope, the S&P and the XYZ100 index in stocks scope. The chart draws the top 10/20/30/50 by the
   return axis or everyone (references always stay); the table underneath has the whole universe,
   25 rows a page. Presets or any date in the last year; a name listed after the anchor is drawn
@@ -110,9 +111,11 @@ instant, and the per-IP rate limit stops being a per-user problem.
   and σ-mean (the name's trailing 60-bar daily σ, walk-forward), the void rate (the event bar's own
   EMA21 — the tretest void — touched inside the horizon), the control's n/hit/mean and the excess;
   cells under 30 events publish n only. Bars are `mergedDailyBars` (370d both universes, forming
-  day trimmed) — true lows exist only where the hourly spine overlays the daily history (now
-  flagged `tl`), a close stands in for the low before that, which can only under-count probes and
-  voids, and the panel prints the true-extreme share (*first touch* needs true lows to fire at
+  day trimmed) in their **session view** since build -105 (a US name's weekends/holidays fold into
+  the next session's bar, so EMA13/21 and the horizons count sessions; crypto calendar days) —
+  true lows are the daily candle's own since -105, or the hourly spine's where it overlays
+  (flagged `tl`); only a bar restored from an older warm file lacks one, a close stands in for the
+  low there, which can only under-count probes and voids, and the panel prints the true-extreme share (*first touch* needs true lows to fire at
   all). D1 rung only — the board's other three rungs are not replayed. Walked once per name per
   (daily history, spine buckets, UTC day), pooled per (scope, definition, cooldown) and served
   through `sendCachedBody` under a walk-signature ETag; gated with the Backtest tab. The panel lists
@@ -307,7 +310,7 @@ instant, and the per-IP rate limit stops being a per-user problem.
   (3) the run-up — the live mark vs the close 7 days back, against this name's median drift over
   the same window before its past prints (≥ 3 prints with a hole-free 7-day spine); (4) implied
   vs typical — the typical print move over the CURRENT usual daily move (mean |close-to-close|,
-  last 20 completed bars — the same baseline the study's expansion ratio uses), beside that ratio
+  last 20 completed SESSION bars since build -105 — the same baseline the study's expansion ratio uses), beside that ratio
   at past prints: ≥ 1.3× the historical ratio reads "vol compressed", ≤ 1/1.3 "vol already
   elevated". A verdict line is composed from fixed rules, no AI: *crowded long* = funding ≥ p90
   with OI up ≥ 5% over the run-up (*crowded short* = ≤ p10 with the same build), the funding
@@ -337,7 +340,7 @@ instant, and the per-IP rate limit stops being a per-user problem.
   same line works at the Telegram bot: bound to the conversation the chat syncs, or a plain
   personal rule when none is. New metric for the question people actually ask: `vsma200`, the
   mark's distance to the **200-day SMA** (the snapshot row now carries `ma200`, the same
-  arithmetic as the markets column), so "above the 200-day" and "crosses the 200-day" are rules,
+  arithmetic as the markets column — 200 US sessions on an equity since build -105), so "above the 200-day" and "crosses the 200-day" are rules,
   with half a percent of hysteresis so a mark sitting on the line does not fire on every wobble.
   Also fixed here: a persisted rule stored its universe as `""`, and the validator rejected that on
   the way back in — every coin-scoped and roster-wide rule was silently dropped on every restart.
@@ -826,6 +829,59 @@ definitions:
   close (16:00 ET, 13:00 on a half day, holidays skipped), shipped on `/api/daily` as
   `cashClose`, and a **vs S&P (close)** twin — the row's vs-close move minus the S&P's. The 24h
   column keeps its meaning (Hyperliquid's rolling `prevDayPx`, which on a Monday is Sunday's).
+
+**Accuracy (build 2026.09.24-105): the US-session daily series, with true lows.** Nearly every
+daily metric ran on Hyperliquid's UTC-day candles — Saturdays, Sundays and exchange holidays
+included — for names whose underlying only trades US (or home-exchange) sessions: "200-day" was
+~140 sessions, near-flat weekend bars deflated every σ, a Monday return was measured against
+Sunday. One shared definition now, `compute.sessionFold` (client twin `core.js sessionFold`, held
+to it by a parity test):
+- **The session bar.** The UTC bar for date D runs 00:00Z D → 00:00Z D+1 = 20:00 ET D−1 → 20:00 ET
+  D (19:00 in winter), so it *contains* D's whole 09:30–16:00 cash session (and a KRX/TSE/HKEX/SSE
+  name's whole local session). So the session bar for trading day D **is** UTC bar D; a weekend or
+  full-day holiday bar is **folded into the next session bar** — high = max, low = min, open = the
+  first folded bar's, close = the session's, volume summed — so no move is lost, it lands in the
+  next session's return. A fold still waiting for its session (it is Saturday) is that session's
+  *forming* bar, keyed at its date and trimmed by every closed-bar rule. Calendars: crypto none
+  (calendar days, unchanged); a foreign-home listing its home exchange's (`homeDayStatus`); every
+  other xyz name — US equities, ADRs, indices, commodities, FX — the US exchange calendar
+  (`usDayStatus`), exactly the anchoring the gap engine already applies. `/api/daily` ships the
+  calendars as `sessOff` (per calendar, the non-trading UTC day indexes) so the client folds on
+  the server's holidays.
+- **True lows (and opens).** `refreshDaily` parses the candle once (candleSnapshot answers strings;
+  every `Number.isFinite(k.h)` downstream had been reading them as absent — the live payload
+  shipped no highs) and keeps o/h/l/c/v; the warm cache persists `[t,c,h,v,l,o]` (trailing nulls
+  trimmed; an older 2/4-tuple file hydrates with no low, which every reader falls back to the
+  close on and flags `tl: false`); `/api/daily` tuples gain the low as column 4 (`[t,c,h,v,l]` —
+  the open is not shipped: a 24/7 perp's bar opens at the prior close). `mergedDailyBars` marks a
+  candle's own low `tl` like a spine overlay.
+- **Session consumers.** MA20/50/100/200 on the board and the snapshot's `ma200` (so the rules'
+  "200-day" is 200 sessions); the Trend board's D1 rung (board, pair board, closed alert lane, AI
+  context, chart modal), the D1 retest study, the EMA200 study and the `emarts` shadow; the
+  signal loop's closes — so the 30-bar σ unit (`sd30`/`sdAt`), the studies' horizons, the 30-bar
+  breakout range and every detector count sessions; `volD` and the average-range series
+  (`featuresFromHourly`, per-session (h−l)/c off the spine's true extremes: 5 / 21 sessions on
+  the board, crypto 7 / 30 days); the earnings expansion baseline and the setup card's usual daily
+  move (20 sessions); the regime strip's mean correlation, the AI context's β, the board's β
+  (parity-tested), co-movers and the correlation matrix.
+- **Correlation.** Session returns with the still-open bar dropped (as the server already did); a
+  cell under **10** overlapping returns stays empty and reads *n<10* (a 7d window, ~5 sessions,
+  greys by design); a cell whose Fisher-z 95% CI spans 0 is faded, with the CI in the hover; the
+  heatmap's ORDER clusters a matrix shrunk toward the average correlation (Ledoit-Wolf-style
+  intensity from each r's sampling variance) while every displayed value stays raw. A crypto row
+  beside session rows is folded onto the US calendar so both returns span the same interval.
+- **Drawdown tab.** Base = the prior close (the anchor day's own move now counts); drawdown
+  *intraday* by default (running peak of highs → a later low; a bar's own high never counts
+  against its own low), *close-to-close* on the toggle; US names on session bars. **vs YTD hi**
+  measures from the year's highest daily high.
+- **Vol (ann).** Session names: Yang-Zhang over the last 20 closed session bars ×√252 (the open
+  is the prior close on a 24/7 perp, so the overnight term is zero and YZ is k·σ²(close-to-close)
+  + (1−k)·Rogers-Satchell); a window with a bar lacking a true low falls back to the
+  close-to-close σ of the 20 session returns, labelled; crypto keeps the hourly read ×√(24·365)
+  with the still-forming hour excluded (`volH`). Carry divides by whichever the column shows.
+Not moved: the backtest keeps its calendar-day return series (its annualization already observes
+periods/yr), and the level map's structure and volume profile keep every UTC bar's prints (its
+σ and EMA50/200 are session-based).
 
 ## Optional: earnings calendar (Finnhub)
 

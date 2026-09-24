@@ -105,8 +105,8 @@ test("perf -103 markets: render() derives and evaluates alerts on every call but
 // The builder this pass replaced, verbatim from build 2026.09.24-102 (public/js/corr.js).
 const OLD_CORR = `
 function buildCorrOld(rows, Ldays){
-  const cutoff=Math.floor(Date.now()/DAY)-Ldays, minOv=Math.max(4, Math.floor(Math.min(Ldays,90)*0.4));
-  const series=rows.map(r=>{ const m=dailyReturns(r); if(!m) return null; const f=new Map(); for(const [d,v] of m) if(d>=cutoff) f.set(d,v); return f; });
+  const cutoff=Math.floor(Date.now()/DAY)-Ldays, minOv=Math.max(10, Math.floor(Math.min(Ldays,90)*0.4));   // (-105) session returns + the 10-return floor, same inputs as the dense engine
+  const series=rows.map(r=>{ const m=sessReturns(r); if(!m) return null; const f=new Map(); for(const [d,v] of m) if(d>=cutoff) f.set(d,v); return f; });
   const N=rows.length, C=Array.from({length:N},()=>new Array(N).fill(null)), OV=Array.from({length:N},()=>new Array(N).fill(0));
   for(let i=0;i<N;i++){ C[i][i]=1; const si=series[i]; if(!si) continue;
     for(let j=i+1;j<N;j++){ const sj=series[j]; if(!sj) continue;
@@ -127,8 +127,11 @@ function clusterOrderOld(D){ const n=D.length; if(n<=2) return D.map((_,i)=>i);
     clusters=clusters.filter(c=>c!==A&&c!==B); clusters.push({id, size:A.size+B.size, order:A.order.concat(B.order)}); }
   return clusters[0].order; }`;
 function corrApi() {
+  // (-105) the engine reads session returns: core.js's session view + a stub state (no calendar
+  // shipped -> calendar days, the fixture's rows carry no uni)
+  const core = "const state={sessOff:null,sessOffV:0};\n" + between(src("public/js/core.js"), "function sessionFold(", "// Yang-Zhang");
   const body = between(src("public/js/corr.js"), "function dailyReturns(", "function corrColor(");
-  return new Function("DAY", body + OLD_CORR + "; return { buildCorr, buildCorrOld, clusterOrder, clusterOrderOld, corrOrder, dailyReturns };")(DAY);
+  return new Function("DAY", core + body + OLD_CORR + "; return { buildCorr, buildCorrOld, clusterOrder, clusterOrderOld, corrOrder, dailyReturns };")(DAY);
 }
 function corrRows(N, days, seed0) {
   let seed = seed0 || 7; const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };

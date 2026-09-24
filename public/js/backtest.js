@@ -123,8 +123,9 @@ function btMatrix(rowsIn){
 // shipped blend (risk-adjusted 1/7/30d returns at .40/.40/.20, cross-horizon coherence, range tilt;
 // the intraday h1/h4 terms are untestable at daily granularity and carry over unchanged regardless).
 // V1–V4 are M0 plus exactly ONE candidate term each, so an OOS delta vs M0 measures that term and
-// nothing else. Honest limits, stated not hidden: the range tilt runs on closes for BOTH rails (the
-// daily tuple ships no low, and one high-only rail would skew the tilt); names missing a modulation
+// nothing else. Honest limits, stated not hidden: the range tilt runs on closes for BOTH rails (it
+// was built when the daily tuple shipped no low — lows ride it since build 2026.09.24-105 but older
+// history can lack them, and one high-only rail would skew the tilt); names missing a modulation
 // column (OI / funding / volume) fall back to the unmodulated core so the ranked universe stays
 // identical to the control and the comparison measures the term, not universe drift.
 function btMomVariant(sig, a, bench, di, ex){
@@ -696,7 +697,7 @@ function renderBacktest(){
   const wtTxt = p.weighting==='sig'?'signal-weighted':p.weighting==='vol'?'inverse-vol weighted':'equal-weight';
   const mvarCol={moi:'OI',mfund:'funding',mpart:'volume'}[p.signal];
   const mvarNote = BT_MVAR[p.signal]
-    ? ` <b>Live-score variant:</b> fixed 1/7/30d risk-adjusted horizons mirroring the Markets-tab momentum blend — the lookback control does not apply. Judge it against <i>Blend M0 — live-score analogue</i> on out-of-sample net: only a term that beats the control there earns promotion into the live column. Daily granularity can only mirror the ≥1d structure of the live score (weights renormalized to .40/.40/.20; the intraday terms carry over untested either way), and the range tilt runs on closes — the daily tuple ships no low${mvarCol?`. Names missing the ${mvarCol} column fall back to the unmodulated core, so the ranked universe matches the control and the OOS gap measures the term itself`:''}.`
+    ? ` <b>Live-score variant:</b> fixed 1/7/30d risk-adjusted horizons mirroring the Markets-tab momentum blend — the lookback control does not apply. Judge it against <i>Blend M0 — live-score analogue</i> on out-of-sample net: only a term that beats the control there earns promotion into the live column. Daily granularity can only mirror the ≥1d structure of the live score (weights renormalized to .40/.40/.20; the intraday terms carry over untested either way), and the range tilt runs on closes on both rails (older daily history carries no low)${mvarCol?`. Names missing the ${mvarCol} column fall back to the unmodulated core, so the ranked universe matches the control and the OOS gap measures the term itself`:''}.`
     : '';
   // ---- single-asset caption: what the rule did, and the two things that make a one-name result
   // easier to fool yourself with than a cross-sectional one (no diversification, few decisions).
