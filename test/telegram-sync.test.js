@@ -428,6 +428,26 @@ test("tg sync -99 server: edits, deletes, reactions and files cross in both dire
     assert.equal((await post("/api/dm", { thread: T, body: "still flowing" }, gus)).statusCode, 200);
     await drainAll(P);
     assert.equal(since().filter((x) => x.method === "sendMessage").length, 2, "the next line still reaches both chats");
+
+    // ---- (build 2026.09.24-107) an edit or a delete made BEFORE Telegram confirmed the send ----
+    // The map row is written only in onSent, so the repaint found nothing and the queued send went
+    // out with the words captured at enqueue. The queued part now carries its row ids and is rebuilt
+    // from the current rows when the drain reaches it.
+    const e1 = JSON.parse((await post("/api/dm", { thread: T, body: "typo'd line" }, gus)).body).message;
+    assert.equal((await post("/api/dm", { id: e1.id, body: "fixed line" }, gus)).statusCode, 200);   // still queued
+    await drainAll(P);
+    c = since();
+    assert.deepEqual(c.map((x) => x.method), ["sendMessage", "sendMessage"], "one send per chat, no repaint needed");
+    assert.ok(c.every((x) => /fixed line/.test(x.body.text) && !/typo'd/.test(x.body.text) && /edited/.test(x.body.text)), "the current wording goes out");
+    const d1 = JSON.parse((await post("/api/dm", { thread: T, body: "regretted line" }, gus)).body).message;
+    assert.equal((await post("/api/dm", { drop: true, id: d1.id }, gus)).statusCode, 200);
+    await drainAll(P);
+    assert.deepEqual(since(), [], "a line deleted before its send never reaches the phone");
+    const up2 = JSON.parse((await post("/api/dm/upload", { thread: T, name: "gone.txt", data: Buffer.from("secret levels\n").toString("base64") }, gus)).body);
+    const f1 = JSON.parse((await post("/api/dm", { thread: T, body: "file then regret", fileId: up2.file.id }, gus)).body).message;
+    assert.equal((await post("/api/dm", { drop: true, id: f1.id }, gus)).statusCode, 200);
+    await drainAll(P);
+    assert.deepEqual(since(), [], "a deleted attachment is neither uploaded nor replaced by its (deleted) words");
   } finally {
     await app.close();
     globalThis.fetch = realFetch;

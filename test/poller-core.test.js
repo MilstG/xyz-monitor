@@ -1578,7 +1578,7 @@ test("the drain picks the first ELIGIBLE item, so a deferred message cannot head
     "a message held until 07:00 sitting at the head would block every urgent one behind it for hours");
   const drain = pol.slice(pol.indexOf("async function pushDrain()"), pol.indexOf("function pushLogAdd"));
   assert.ok(!/pushQueue\.shift\(\)/.test(drain), "every removal in the drain must target the chosen index, not the head");
-  assert.equal((drain.match(/pushQueue\.splice\(idx, 1\)/g) || []).length, 3, "success, 4xx drop and give-up all remove by index");
+  assert.equal((drain.match(/pushQueue\.splice\(idx, 1\)/g) || []).length, 4, "success, 4xx drop, give-up and a rebuilt-away sync (build 2026.09.24-107) all remove by index");
 });
 
 test("recipients are per-browser: two people link independently and cannot see each other", () => {

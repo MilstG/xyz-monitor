@@ -932,7 +932,8 @@ test("retest study -96: /api/retest-study rides the Backtest tab's gate, answers
   assert.equal(d.pending, true, "no markets in this suite: the study says what it needs");
   assert.equal(d.scope, "stocks"); assert.equal(d.params.def, "touch"); assert.equal(d.params.cd, 10);
   assert.deepEqual(d.params.horizons, [1, 3, 5, 10, 20]);
-  assert.match(r.headers.etag, /^W\/"rt-stocks-touch-10-0-[0-9a-z]+"$/);
+  // (-107) the build and a per-boot nonce ride the tag: a restart never 304s onto another body
+  assert.match(r.headers.etag, /^W\/"rt-2026\.09\.24-107-[0-9a-z]+-stocks-touch-10-0-[0-9a-z]+-[^"]+"$/);
   assert.equal(r.headers["cache-control"], "no-cache");
   assert.equal((await get("/api/retest-study?u=stocks&def=touch&cd=10", gus, { "if-none-match": r.headers.etag })).statusCode, 304);
   const bad = JSON.parse((await get("/api/retest-study?u=moon&def=%3Cx%3E&cd=999", gus)).body);

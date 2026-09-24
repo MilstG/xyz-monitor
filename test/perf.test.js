@@ -256,7 +256,7 @@ test("perf -101: sync-heavy periodic jobs are phase-staggered, cadences unchange
   const jobs = [
     ['setInterval(safeTick(buildSnapshot, "buildSnapshot"), 15 * 1000);', 15, 0],
     ['staggered(() => store.flush(), 30 * 1000, 3 * 1000);', 30, 3],
-    ['staggered(safeTick(buildSignals, "buildSignals"), 10 * 60 * 1000, 5 * 1000);', 600, 5],
+    ['staggered(signalsThenActionable, 10 * 60 * 1000, 5 * 1000);', 600, 5],
     ['staggered(safeTick(buildDaily, "buildDaily"), 60 * 1000, 8 * 1000);', 60, 8],
     ['staggered(() => { persistFeaturesAsync()', 120, 11],
   ];

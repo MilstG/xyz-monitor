@@ -921,6 +921,26 @@ periods/yr), and the level map's structure and volume profile keep every UTC bar
   "n · Ndt") and the mean's **standard error clustered by event date** (CR1), shown as ±1.96·SE.
   Horizons on stock scope are session bars since -105 and are labelled "+5 sess" (crypto "+5d").
 
+**Fixes (build 2026.09.24-107).**
+- **Call targets.** A miss waits until the 5m archive holds the bar ending at the deadline (or 20
+  min past it) and prices at that bell bar; the sweep pages through every open target. A date
+  whose close already passed at send ("eom" after the last close) is refused, not a silent one-day
+  horizon; a relative deadline ("in 3w") and an extension on a session name end at a cash close.
+  The composer preview runs the same calendar.
+- **Telegram sync.** `getUpdates` ticks are single-flight (a slow download no longer lets the
+  next tick replay updates); a disabled account cannot edit or react from a linked chat; an edit or
+  delete made before Telegram confirms a send is carried into the send (a deleted line or file is
+  never sent); deleting a group removes its sync-map rows; a chart card needs its real picture.
+- **Numbers.** An earnings reaction is final only off an exact close (not an hourly close up to 3h
+  early); a daily-tier AMC reaction spans two sessions, so it is labelled and kept out of the
+  pooled study. "vs cash close" re-reads once the bell bar lands. The retest SE is two-way
+  clustered (name × date). The backtest panel shows the pending next-close fill apart from the
+  position held.
+- **Plumbing.** Downloads stream through `stream/promises` pipeline (no hang on a write error);
+  signals then actionable run chained each cycle; the retest ETag carries the build and a boot
+  nonce; stale backup/`.atmp` temps are swept; a crash save cannot be overwritten by an in-flight
+  async rename.
+
 ## Optional: earnings calendar (Finnhub)
 
 The Earnings tab and the markets-table E badges need a free Finnhub API key: sign up at

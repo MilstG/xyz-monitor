@@ -868,7 +868,53 @@ const TG_NUM="\\$?(\\d+(?:\\.\\d+)?)\\s*(k)?(?![\\w%/]|\\.\\d)";
 const TG_PX=new RegExp("^[\\s,:;\u2014-]*((?:(?:goes|going|heading|headed|runs?|back)\\s+)?(?:to|\u2192|->|target(?:ing)?|tgt)\\s*)?"+TG_NUM,"i");
 const TG_STOP=new RegExp("(?:^|\\W)(?:unless|stop(?:\\s+at)?|(?:wrong|invalid(?:ated)?)\\s+(?:under|over|above|below|at|if))\\s+"+TG_NUM,"i");
 const TG_DATED=/^(?:by\b|eo[wmy]\b|end of|year[ -]?end)/i;   // callRead's DATE words (vs relative horizons)
-function dmCallTarget(text,sym,markPx,nowMs,sideOverride){
+// (build 2026.09.24-107) The server's deadline calendar, ported for the preview (compute.js
+// callTargetDeadline / callSessionClose / usDayStatus): a date ends at its US cash close for a
+// session name (16:00 ET, 13:00 on an early close, the last close before a shut day), 24:00 UTC
+// otherwise; a relative deadline on a session name ends at its day's close. The suite holds it in step.
+const DM_ET_FMT=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false,weekday:'short'});
+const DM_WD={Sun:0,Mon:1,Tue:2,Wed:3,Thu:4,Fri:5,Sat:6};
+function dmEtParts(ms){ const p=DM_ET_FMT.formatToParts(new Date(ms)); const g=(t)=>p.find((x)=>x.type===t).value; let h=+g('hour'); if(h===24) h=0; return {y:+g('year'),mo:+g('month'),d:+g('day'),h,mi:+g('minute'),wd:DM_WD[g('weekday')]}; }
+function dmEtWallToUtc(y,mo,d,h,mi){ const base=Date.UTC(y,mo-1,d,h,mi), probe=base+5*3600e3, et=dmEtParts(probe); const off=Math.round((Date.UTC(et.y,et.mo-1,et.d,et.h,et.mi)-probe)/3600e3); return base-off*3600e3; }
+function dmWallWd(y,mo,d){ return new Date(Date.UTC(y,mo-1,d)).getUTCDay(); }
+function dmShiftWall(y,mo,d,days){ const x=new Date(Date.UTC(y,mo-1,d)+days*86400e3); return {y:x.getUTCFullYear(),mo:x.getUTCMonth()+1,d:x.getUTCDate()}; }
+function dmNthWd(y,mo,wd,n){ const first=dmWallWd(y,mo,1); return {y,mo,d:1+((wd-first+7)%7)+(n-1)*7}; }
+function dmLastWd(y,mo,wd){ const dim=new Date(Date.UTC(y,mo,0)).getUTCDate(); return {y,mo,d:dim-((dmWallWd(y,mo,dim)-wd+7)%7)}; }
+function dmEaster(y){ const a=y%19,b=Math.floor(y/100),c=y%100,dd=Math.floor(b/4),e=b%4,f=Math.floor((b+8)/25),g=Math.floor((b-f+1)/3),h=(19*a+b-dd-g+15)%30,i=Math.floor(c/4),k=c%4,l=(32+2*e+2*i-h-k)%7,m=Math.floor((a+11*h+22*l)/451),mo=Math.floor((h+l-7*m+114)/31),d=((h+l-7*m+114)%31)+1; return {y,mo,d}; }
+function dmObservedHol(y,mo,d){ const wd=dmWallWd(y,mo,d); if(wd===6) return dmShiftWall(y,mo,d,-1); if(wd===0) return dmShiftWall(y,mo,d,1); return {y,mo,d}; }
+function dmUsDayStatus(y,mo,d){
+  const wd=dmWallWd(y,mo,d); if(wd===0||wd===6) return 2;
+  const K=(w)=>w.y+'-'+w.mo+'-'+w.d, key=y+'-'+mo+'-'+d, es=dmEaster(y);
+  const closed=[dmObservedHol(y,1,1),dmNthWd(y,1,1,3),dmNthWd(y,2,1,3),dmShiftWall(es.y,es.mo,es.d,-2),dmLastWd(y,5,1),dmObservedHol(y,6,19),dmObservedHol(y,7,4),dmNthWd(y,9,1,1),dmNthWd(y,11,4,4),dmObservedHol(y,12,25)];
+  if(closed.some((w)=>w.y===y&&K(w)===key)) return 2;
+  const early=[]; const j4=dmWallWd(y,7,4);
+  if(j4>=2&&j4<=5) early.push({y,mo:7,d:3});
+  early.push(dmShiftWall(y,11,dmNthWd(y,11,4,4).d,1));
+  if(dmWallWd(y,12,24)>=1&&dmWallWd(y,12,24)<=5) early.push({y,mo:12,d:24});
+  return early.some((w)=>K(w)===key)?1:0;
+}
+function dmCallTargetDeadline(byDay,sessionRule,nowMs){
+  if(typeof byDay!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(byDay)) return null;
+  const now=Number.isFinite(+nowMs)?+nowMs:Date.now();
+  let y=+byDay.slice(0,4), mo=+byDay.slice(5,7), d=+byDay.slice(8,10), end;
+  if(!sessionRule) end=Date.UTC(y,mo-1,d+1);
+  else {
+    let st=dmUsDayStatus(y,mo,d), k=0;
+    while(st===2&&k++<10){ ({y,mo,d}=dmShiftWall(y,mo,d,-1)); st=dmUsDayStatus(y,mo,d); }
+    if(st===2) return null;
+    end=dmEtWallToUtc(y,mo,d,st===1?13:16,0);
+  }
+  return end>now?end:null;
+}
+function dmCallSessionClose(ts,nowMs){
+  const now=Number.isFinite(+nowMs)?+nowMs:-Infinity;
+  let {y,mo,d}=dmEtParts(ts), st=dmUsDayStatus(y,mo,d), k=0;
+  while(st===2&&k++<10){ ({y,mo,d}=dmShiftWall(y,mo,d,-1)); st=dmUsDayStatus(y,mo,d); }
+  let end=dmEtWallToUtc(y,mo,d,st===1?13:16,0);
+  for(k=0;!(end>now)&&k<15;k++){ ({y,mo,d}=dmShiftWall(y,mo,d,1)); st=dmUsDayStatus(y,mo,d); if(st!==2) end=dmEtWallToUtc(y,mo,d,st===1?13:16,0); }
+  return end;
+}
+function dmCallTarget(text,sym,markPx,nowMs,sideOverride,sessionRule){
   const t=String(text||''), S=String(sym||'').toUpperCase();
   const i=S?t.toUpperCase().indexOf('$'+S):-1;
   if(i<0) return null;
@@ -901,7 +947,10 @@ function dmCallTarget(text,sym,markPx,nowMs,sideOverride){
   if(stop!=null&&(side==='long'?stop>=markPx:stop<=markPx)) return {ok:false,px,error:'the stop ('+stop+') sits on the wrong side of the mark'};
   const word=(p[0]+rest.slice(0,Math.max(0,rest.indexOf(byWord))+byWord.length)).replace(/^[\s,:;—-]+/,'').replace(/[\s,.;:]+$/,'');
   const byDay=dated?new Date(now+horizonMs-DAY+1).toISOString().slice(0,10):null;   // (-104) the date a dated deadline names; null for "in 3w"
-  return {ok:true,px,stop,side,horizonMs,word,byDay};
+  if(sessionRule!==true&&sessionRule!==false) return {ok:true,px,stop,side,horizonMs,word,byDay};
+  const by=byDay?dmCallTargetDeadline(byDay,sessionRule,now):sessionRule?dmCallSessionClose(now+horizonMs,now):now+horizonMs;   // (-107)
+  if(!(by>now)) return {ok:false,px,error:'the '+byDay+' close has already passed \u2014 pick a later date'};
+  return {ok:true,px,stop,side,horizonMs,word,byDay,by};
 }
 // How a target resolves for this name (build 2026.09.24-104) — the server's rule (accounts.targetSweep,
 // compute.callTargetDeadline / callBarReaches), stated where the call is written and where it runs.
@@ -923,9 +972,9 @@ function dmStampPreview(text){
   const read=dmCallRead(text,m[1]);
   // A target (build 2026.09.24-95) decides the side and the horizon when the words carry one — the
   // same reader the server runs at send, against the same mark this line shows.
-  const tg=dmCallTarget(text,m[1],r.px,undefined,ov&&ov.side?ov.side:null);
+  const tg=dmCallTarget(text,m[1],r.px,undefined,ov&&ov.side?ov.side:null,dmTgSessionRule(r));
   const tgOk=tg&&tg.ok?tg:null;
-  const side=tgOk?tgOk.side:ov&&ov.side?ov.side:read.side, days=tgOk?Math.round(tgOk.horizonMs/86400e3):ov&&ov.days?ov.days:(read.horizonMs?Math.round(read.horizonMs/86400e3):7);
+  const side=tgOk?tgOk.side:ov&&ov.side?ov.side:read.side, days=tgOk?Math.max(1,Math.round(((tgOk.by||0)>0?tgOk.by-Date.now():tgOk.horizonMs)/86400e3)):ov&&ov.days?ov.days:(read.horizonMs?Math.round(read.horizonMs/86400e3):7);
   const words=String(text).replace(/\$[A-Za-z][A-Za-z0-9.\-]{0,9}/,'').trim().split(/\s+/).filter(Boolean).length;
   // Vague = no direction word in a message long enough to have meant one. The horizon has an
   // honest default; the direction is the claim, and a defaulted direction is the wrong claim.

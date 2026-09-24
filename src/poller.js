@@ -194,26 +194,12 @@ function sig(x, n) { return Number.isFinite(x) ? (x === 0 ? 0 : +x.toPrecision(n
 // full buffer awaits 'drain' before the next read, a write error aborts the read loop (and cancels
 // the body) instead of being an unhandled 'error' event, and the returned promise settles only when
 // the file is flushed and closed.
+// (build 2026.09.24-107) stream/promises pipeline: an error on EITHER side (the file cannot be
+// opened, the disk fills, the body aborts) rejects and destroys both — the hand-rolled read/write
+// loop could await a read() or a 'drain' that never came once the write stream had errored.
 async function webBodyToFile(body, file) {
-  const fsm = require("fs"), { once } = require("events"), { finished } = require("stream/promises");
-  const w = fsm.createWriteStream(file);
-  let werr = null; w.on("error", (e) => { werr = werr || e; });
-  const reader = body.getReader();
-  try {
-    for (;;) {
-      if (werr) throw werr;
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!w.write(Buffer.from(value))) await once(w, "drain");
-    }
-    if (werr) throw werr;
-    w.end();
-    await finished(w);
-  } catch (e) {
-    try { await reader.cancel(); } catch (_) {}
-    w.destroy();
-    throw e;
-  }
+  const fsm = require("fs"), { Readable } = require("stream"), { pipeline } = require("stream/promises");
+  await pipeline(Readable.fromWeb(body), fsm.createWriteStream(file));
 }
 const sigq = sig;   // alias for scopes that shadow `sig` locally (buildDaily declares its content-signature as `sig`)
 
@@ -1825,6 +1811,25 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (fh.length) funding[r.coin] = fundByDayM(r, fh);
     }
   }
+  // (build 2026.09.24-107) Is the close at `t` resolved for this row: the spine was fetched after it,
+  // or the 5m archive holds the bar ending on it? Memoized per (row, anchor) once true, so the
+  // archive is probed only in the minutes between a close and its bar landing.
+  function bellResolved(r, t) {
+    if (r._bellT === t && r._bellOk) return true;
+    if (r._bellT !== t) { r._bellT = t; r._bellOk = false; r._bellPx = null; }
+    if (r.hourlyTs > t) { r._bellOk = true; return true; }
+    const f = fineAround(r, [{ enter: t, exit: t }]);
+    if (f && f.some((k) => +k[0] + FIVE_MIN === t)) r._bellOk = true;
+    return r._bellOk;
+  }
+  // The price AT a close anchor: the 5m bar closing on it when the archive has it, else the hourly
+  // spine's close at or before it. Memoized once the anchor is resolved (the answer is final).
+  function closeAnchorPx(r, hs, t) {
+    if (r._bellT === t && r._bellOk && r._bellPx > 0) return r._bellPx;
+    const px = priceAsOf(hs, t, 3 * HOUR, HOUR, fineAround(r, [{ enter: t, exit: t }]));
+    if (r._bellT === t && r._bellOk && px > 0) r._bellPx = px;
+    return px;
+  }
   function buildDaily() {
     const daily = {}, funding = {}, overnight = {}, liveClose = {}, oi = {}, cashClose = {};
     let ohlcN = 0, oiN = 0;   // sig terms: names whose latest tuple carries a high, and total OI points — so OHLC upgrades and OI growth bust the cache despite unchanged bar counts
@@ -1836,8 +1841,21 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // summed, read off the memoized per-row series, so an unchanged minute returns before any
     // funding aggregation, overnight run or payload assembly.
     const act = activeMarkets(), drs = new Array(act.length), ovs = new Array(act.length);
+    let lastCash = null;   // the most recent US cash session that has closed (-104)
+    for (const ses of marketSessions(nowMs - 8 * DAY, nowMs)) if (ses.close <= nowMs) lastCash = ses;
+    // (build 2026.09.24-107) Bell term: how many names have their close anchor RESOLVED — the spine
+    // refreshed after the close, or the 5m archive holds the bar ending on it. At the bell the
+    // session flip rebuilt the payload off a spine still missing the 15:00-16:00 bar (a ~1h-old
+    // price), and nothing else moved the signature afterwards, so "vs cash close" (and liveClose)
+    // stayed frozen at the pre-close price until the next daily bar. This term flips once the data
+    // catches up, and the anchor then reads the 5m archive first.
+    let bellN = 0;
+    const usAnchor = offHours.closed ? offHours.closeT : lastCash ? lastCash.close : 0;
     for (let i = 0; i < act.length; i++) {
       const r = act[i];
+      const hk = homeMkt(r.ticker, r.uni), ohk = hk ? offHoursBy[hk] : null;
+      const anc = hk ? (ohk && ohk.closed ? ohk.closeT : 0) : usAnchor;
+      if (anc > 0 && bellResolved(r, anc)) bellN++;
       // daily closes: prefer the real 370d backfill; otherwise bootstrap from the hourly spine
       const dr = drs[i] = dailyTuplesM(r, getHourly(r.coin));
       if (dr && dr.length) { coins++; lens += dr.length; if (!r.dailyRaw || !dailyLacksOHLC(r)) ohlcN++; }   // count natively-full names: each in-place OHLC upgrade moves this and busts the cache
@@ -1856,10 +1874,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         r._ovTs = r.hourlyTs;
       }
     }
-    const sig = coins + ":" + lens + ":" + (offHours.closed ? 1 : 0) + ":" + Object.keys(HOME_MKTS).map((k) => (offHoursBy[k].closed ? 1 : 0)).join("") + ":" + ohlcN + ":" + oiN;   // session flips bust it — the US one AND each home market's (a KRX close must refresh SMSN's liveClose even while NYSE is open)
+    const sig = coins + ":" + lens + ":" + (offHours.closed ? 1 : 0) + ":" + Object.keys(HOME_MKTS).map((k) => (offHoursBy[k].closed ? 1 : 0)).join("") + ":" + ohlcN + ":" + oiN + ":" + bellN;   // session flips bust it — the US one AND each home market's (a KRX close must refresh SMSN's liveClose even while NYSE is open)
     if (dailyCache && sig === dailySig) return;   // unchanged — keep the OBJECT so serialize/gzip caches stay warm + 304s flow
-    let lastCash = null;   // the most recent US cash session that has closed (-104)
-    for (const ses of marketSessions(nowMs - 8 * DAY, nowMs)) if (ses.close <= nowMs) lastCash = ses;
     for (let i = 0; i < act.length; i++) {
       const r = act[i];
       const hs = getHourly(r.coin);   // normalized array spine [[t,o,h,l,c,v], ...]; the boundary engine + priceAsOf are array-indexed
@@ -1878,12 +1894,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         const hmk = homeMkt(r.ticker, r.uni);
         if (r._ovClose && r._ovClose.length) overnight[r.coin] = r._ovClose;
         const oh = hmk ? offHoursBy[hmk] : offHours;
-        if (oh.closed) { const pc = priceAsOf(hs, oh.closeT, 3 * HOUR); if (pc > 0) liveClose[r.coin] = +pc.toFixed(8); }  // price at the last close, for the live in-progress gap
+        if (oh.closed) { const pc = closeAnchorPx(r, hs, oh.closeT); if (pc > 0) liveClose[r.coin] = +pc.toFixed(8); }  // price at the last close, for the live in-progress gap (5m archive first, -107)
         // (build 2026.09.24-104) The LAST US cash close (16:00 ET, 13:00 on a half day; holidays
         // skipped) whatever the session state — liveClose exists only while closed. The board's
         // "vs cash close" column reads the mark against it; 24h keeps Hyperliquid's rolling
         // prevDayPx, which on a Monday is Sunday's price. US session names only.
-        if (!hmk && lastCash) { const pc = priceAsOf(hs, lastCash.close, 3 * HOUR); if (pc > 0) cashClose[r.coin] = [lastCash.close, +pc.toFixed(8)]; }
+        if (!hmk && lastCash) { const pc = closeAnchorPx(r, hs, lastCash.close); if (pc > 0) cashClose[r.coin] = [lastCash.close, +pc.toFixed(8)]; }
       }
     }
     dailySig = sig; dailyVer = Math.max(Date.now(), dailyVer + 1);   // content changed -> new ETag + fresh object; monotonic: two content changes in one ms must not share an ETag
@@ -4680,6 +4696,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // walk versions; the ETag is that signature, so a poll is a 304 until a walk actually changed.
   const D1RT_MIN_NAMES = 5, D1RT_EVENTS_CAP = 500;
   let d1rtVer = 0;
+  // (build 2026.09.24-107) The walk versions count from 0 in every process, so the same key could
+  // name different bodies across a restart or a deploy (a stale 304). The key carries the build
+  // and a per-boot nonce.
+  const D1RT_BOOT = String(version || "") + "." + Date.now().toString(36) + require("crypto").randomBytes(3).toString("hex");
   const d1rtCache = new Map();   // "scope|def|cd" -> { sig, body }
   function getD1Retest(scope, def, cd) {
     scope = scope === "crypto" ? "crypto" : "stocks";
@@ -4707,7 +4727,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     for (const r of walked) sig += r.coin + ":" + r._rtV + ",";
     let hsh = 2166136261;
     for (let i = 0; i < sig.length; i++) { hsh ^= sig.charCodeAt(i); hsh = Math.imul(hsh, 16777619); }
-    const key = scope + "-" + def + "-" + cd + "-" + walked.length + "-" + (hsh >>> 0).toString(36);
+    const key = scope + "-" + def + "-" + cd + "-" + walked.length + "-" + (hsh >>> 0).toString(36) + "-" + D1RT_BOOT;
     const ck = scope + "|" + def + "|" + cd, hit = d1rtCache.get(ck);
     if (hit && hit.key === key) return hit.body;
     const params = { def, cd, defs: D1_RT_DEFS, cooldowns: D1_RT_COOLDOWNS, horizons: D1_RT_HORIZONS,
@@ -6686,7 +6706,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     } catch (e) {
       pushOps("13F data set " + q, "ingest FAILED: " + String(e && e.message).slice(0, 140), "warn", true);
       return done({ ok: false, error: String(e && e.message).slice(0, 200) });
-    }
+    } finally { t13fBusy = false; t13fProgress = null; }   // (build 2026.09.24-107) released on every path
   }
   // Weekly check: from deadline+4d until the set lands, then quiet until next season. The season
   // quarter is the last CLOSED one — during "upcoming" that is windowInfo.cur only after roll,
@@ -6911,7 +6931,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         entries: entries.length, index: idx.name, bytes: zipBuf.length, unknownTypes: unknown });
     } catch (e) {
       return fail({ ok: false, error: String(e && e.message).slice(0, 200) });
-    }
+    } finally { congressBusy = false; congressProgress = null; }   // (build 2026.09.24-107) released on every path, a throwing fail() included
   }
   // Daily-ish. The Clerk republishes the annual ZIP as filings land, so this is a refresh, not a
   // one-shot: there is no "already ingested, stop" short-circuit the way the quarterly 13F set has.
@@ -8945,10 +8965,14 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const staggered = (fn, ms, phaseMs) => setTimeout(() => setInterval(fn, ms), phaseMs);
     setInterval(safeTick(buildSnapshot, "buildSnapshot"), 15 * 1000);
     staggered(safeTick(buildDaily, "buildDaily"), 60 * 1000, 8 * 1000);
-    staggered(safeTick(buildSignals, "buildSignals"), 10 * 60 * 1000, 5 * 1000);
-    // Trigger detection follows the signals build on the same cadence, offset so it reads a
-    // settled ledger. Isolated: a board error must never take the signal engine down with it.
-    setInterval(safeTick(buildActionable, "buildActionable"), 10 * 60 * 1000);
+    // Trigger detection follows the signals build on the same cadence so it reads a settled
+    // ledger. Isolated: a board error must never take the signal engine down with it.
+    // (build 2026.09.24-107) Chained, not merely offset: the -101 stagger moved signals to +5s
+    // while actionable stayed on the bare 10-min interval, so every cycle actionable ran 5s BEFORE
+    // the signals pass it is meant to follow. Both are yielding builds, so enqueueing them back to
+    // back on chainBuild fixes the order (signals, then actionable) whatever the timers do.
+    const signalsThenActionable = () => { safeTick(buildSignals, "buildSignals")(); safeTick(buildActionable, "buildActionable")(); };
+    staggered(signalsThenActionable, 10 * 60 * 1000, 5 * 1000);
     setTimeout(safeTick(buildActionable, "buildActionable"), 75 * 1000);
     // Warm-boot cadence: spines aren't persisted raw, so every deploy re-warms ~150 markets
     // through the rate-limited workers (~3-5 min). On the steady 10-min cadence each market
@@ -12445,8 +12469,17 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     return { ok: true, classes: r.classes };
   }
 
+  // (build 2026.09.24-107) Single-flight: a tick that awaits a slow file download used to overlap
+  // the next 20s tick, which re-read the same updates from the not-yet-advanced cursor and applied
+  // them twice, out of order. A tick that finds one in flight is skipped (the next one picks up
+  // whatever arrived), so each update is handled at most once per process.
+  let pushUpdatesBusy = false;
   async function pushUpdatesTick() {
-    if (!pushOn()) return;
+    if (!pushOn() || pushUpdatesBusy) return;
+    pushUpdatesBusy = true;
+    try { return await pushUpdatesPass(); } finally { pushUpdatesBusy = false; }
+  }
+  async function pushUpdatesPass() {
     const offsetBefore = pushOffset;
     // edited_message and message_reaction (build 2026.09.24-99) feed the sync's way back. Telegram
     // only sends message_reaction when it is named here explicitly (and, in a group, only to a bot
@@ -12484,7 +12517,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       const m = u.message;
       if (m && m.chat && typeof m.text !== "string" && dmBridge && pushRecipients.has(String(m.chat.id)) && (m.chat.type == null || m.chat.type === "private")) {
         const f = tgInboundFile(m);
-        if (f) { await pushInboundFile(m, f); continue; }
+        // The cursor is persisted before the slow download so a restart mid-download does not
+        // replay the updates already handled (build 2026.09.24-107).
+        if (f) { if (pushOffset !== offsetBefore) persistPush(); await pushInboundFile(m, f); continue; }
       }
       if (!m || !m.chat || typeof m.text !== "string") continue;
       const chat = m.chat.id, name = (m.from && (m.from.first_name || m.from.username)) || String(chat);
@@ -12656,6 +12691,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       if (sync.file && typeof sync.file.load === "function") item.file = sync.file;
       if (typeof sync.onSent === "function") item.onSent = sync.onSent;
       if (sync.fallback) item.fallback = String(sync.fallback);
+      // (build 2026.09.24-107) rebuild() -> null (drop) | { text } | { caption, fallback }: the
+      // sync's content re-read from the current rows at drain time.
+      if (typeof sync.rebuild === "function") item.rebuild = sync.rebuild;
     }
     pushQueue.push(item);
   }
@@ -12710,6 +12748,14 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       return;
     }
     const item = pushQueue[idx];
+    if (item.rebuild) {
+      let nb;
+      try { nb = item.rebuild(); } catch (e) { nb = item.file ? { caption: item.payload && item.payload.caption, fallback: item.fallback } : { text: item.text }; }
+      if (!nb) { pushQueue.splice(idx, 1); return; }        // every row it carried was deleted meanwhile
+      if (item.file) { item.payload = Object.assign({}, item.payload, { caption: nb.caption }); item.fallback = nb.fallback; item.text = nb.fallback; }
+      else if (item.asFallback) item.text = nb.fallback || item.text;
+      else if (nb.text) item.text = nb.text;
+    }
     pushSending = true;
     try {
       // The overflow disclosure rides a plain send only: an edit or a reaction has no text to carry it.
@@ -12745,8 +12791,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         // An upload Telegram refused (too big for a photo, a type it will not take) degrades to
         // the words and the file's name — the line still reaches the phone.
         log(`push: upload to ${pushMask(item.chat)} refused (${r.error}) — sending the line instead`);
+        // The rebuild rides along (build 2026.09.24-107): the line is re-read again when it goes, so
+        // an attachment deleted in between never falls back to sending its deleted words.
         pushQueue[idx] = { chat: item.chat, text: item.fallback, tries: 0, at: item.at, force: item.force, after: 0, reply: false,
-          onSent: item.onSent ? (res, it) => item.onSent(res, it) : undefined };
+          onSent: item.onSent ? (res, it) => item.onSent(res, it) : undefined, rebuild: item.rebuild, asFallback: !!item.rebuild };
       } else if (r.status >= 400 && r.status < 500) {
         // A malformed message must never wedge the queue behind itself.
         pushQueue.splice(idx, 1);

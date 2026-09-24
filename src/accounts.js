@@ -143,7 +143,7 @@ function firstTickerRef(body) {
   return m ? m[1].toUpperCase() : "";
 }
 
-const { callRead, callTarget, callTargetDeadline, callBarReaches, inCashSession, marketSessions } = require("./compute");
+const { callRead, callTarget, callBarReaches, inCashSession, marketSessions, callSessionClose } = require("./compute");
 const { homeMkt } = require("./sectors");
 
 function openAccounts(dataDir, opts) {
@@ -481,7 +481,9 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     callClose: db.prepare("UPDATE dm_msg SET closedAt = ?, closePx = ?, tgRes = CASE WHEN tgPx IS NULL THEN NULL ELSE 'early' END, tgAt = CASE WHEN tgPx IS NULL THEN NULL ELSE ? END WHERE id = ? AND sender = ? AND closedAt IS NULL AND tgRes IS NULL"),
     // The target resolver (build 2026.09.24-95): the open targets, oldest first, and one guarded
     // write per resolution — written once, never revised, exactly like the stamp.
-    tgOpen: db.prepare("SELECT * FROM dm_msg WHERE tgPx IS NOT NULL AND tgRes IS NULL AND closedAt IS NULL AND ref IS NOT NULL AND refPx IS NOT NULL ORDER BY id LIMIT 500"),
+    // (build 2026.09.24-107) Keyset-paged (id > ?) so a sweep reaches every open target, not the
+    // oldest 500 forever.
+    tgOpen: db.prepare("SELECT * FROM dm_msg WHERE tgPx IS NOT NULL AND tgRes IS NULL AND closedAt IS NULL AND ref IS NOT NULL AND refPx IS NOT NULL AND id > ? ORDER BY id LIMIT 500"),
     tgResolve: db.prepare("UPDATE dm_msg SET tgRes = ?, tgAt = ?, closePx = ? WHERE id = ? AND tgRes IS NULL AND closedAt IS NULL"),
     tgSeenSet: db.prepare("UPDATE dm_msg SET tgSeen = ? WHERE id = ?"),
     msgById: db.prepare("SELECT * FROM dm_msg WHERE id = ?"),
@@ -1204,6 +1206,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     db.exec("BEGIN IMMEDIATE");
     try {
       db.prepare("DELETE FROM dm_reaction WHERE msg IN (SELECT id FROM dm_msg WHERE thread = ?)").run(t.id);
+      db.prepare("DELETE FROM dm_tg WHERE msg IN (SELECT id FROM dm_msg WHERE thread = ?)").run(t.id);   // (build 2026.09.24-107) the sync map too
       db.prepare("DELETE FROM dm_msg WHERE thread = ?").run(t.id);
       db.prepare("DELETE FROM dm_member WHERE thread = ?").run(t.id);
       db.prepare("DELETE FROM dm_read WHERE thread = ?").run(t.id);
@@ -1477,10 +1480,24 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   // archive makes a restart lose nothing: bars printed while the server was down are scanned on
   // the next pass. Returns what resolved, with the line to post; the server posts it (the /alert
   // road: a command result under the author's name, in the conversation the call was made in).
+  // (build 2026.09.24-107) The 5m lane stores CLOSED bars only and visits a coin every 5 minutes
+  // at best (15 on backoff), so for a while after the deadline the archive can still lack the bars
+  // that close at it. A miss (and the scan's "nothing touched") holds until the archive holds a bar
+  // ending at or past the deadline, or TG_BELL_GRACE (two lane stale windows) has passed.
+  const TG_BELL_GRACE = 20 * 60e3;
+  function tgOpenAll() {
+    const rows = [];
+    for (let after = 0; ;) {
+      const page = S.tgOpen.all(after);
+      rows.push(...page);
+      if (page.length < 500) return rows;
+      after = page[page.length - 1].id;
+    }
+  }
   function targetSweep(nowMs) {
     const now = Number.isFinite(+nowMs) ? +nowMs : Date.now();
     const out = [];
-    for (const m of S.tgOpen.all()) {
+    for (const m of tgOpenAll()) {
       const long = m.side !== "short", by = m.ts + callHorizonOf(m), upTo = Math.min(now, by);
       const stop = m.tgStop > 0 ? m.tgStop : null, sr = tgSessionRule(m.ref);
       let res = null, at = null, px = null, seen = m.tgSeen || 0;
@@ -1525,13 +1542,22 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
         }
       }
       if (!res && caughtUp && now > by) {
-        // A session name's deadline IS a cash close: the miss prices at the last 5m close at or
-        // before it (the tape at the bell), else the first daily close past it as before.
-        let p = null;
-        if (sr) { let bs; try { bs = bars5m(m.ref, by - 6 * 3600e3, by) || []; } catch (_) { bs = []; }
-          for (const b of bs) if (+b[0] + TG_BAR_MS <= by && +b[4] > 0) p = +b[4]; }
-        if (!(p > 0)) p = pxHistory(m.ref, by);
-        if (p != null && isFinite(p) && p > 0) { res = "miss"; at = by; px = p; }
+        // (build 2026.09.24-107) The bell bar must be in the archive before the scan counts as
+        // complete — else hold (bounded by TG_BELL_GRACE).
+        let bell = now > by + TG_BELL_GRACE;
+        if (!bell) { let bs; try { bs = bars5m(m.ref, by - TG_BAR_MS, now) || []; } catch (_) { bs = []; }
+          for (const b of bs) if (+b[0] + TG_BAR_MS >= by) { bell = true; break; } }
+        // A session name's deadline IS a cash close: the miss prices at the close of the 5m bar
+        // ending at it (the tape at the bell; the last one before it only across an archive gap),
+        // else the first daily close past it as before.
+        if (bell) {
+          let p = null;
+          if (sr) { let bs; try { bs = bars5m(m.ref, by - 6 * 3600e3, by) || []; } catch (_) { bs = []; }
+            let bt = -Infinity;
+            for (const b of bs) if (+b[0] + TG_BAR_MS <= by && +b[0] > bt && +b[4] > 0) { bt = +b[0]; p = +b[4]; } }
+          if (!(p > 0)) p = pxHistory(m.ref, by);
+          if (p != null && isFinite(p) && p > 0) { res = "miss"; at = by; px = p; }
+        }
       }
       if (res) {
         if (S.tgResolve.run(res, at, px, m.id).changes)
@@ -1564,11 +1590,14 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     if (st.closed) return { ok: false, error: st.early ? "already closed" : "that call closed at its horizon" };
     // Extend means extend: a shorter horizon would re-score the call against a close it has
     // already lived past. Shortening is what "close early" is for.
+    // (build 2026.09.24-107) A session name's TARGET ends at a cash close, extended or not: the
+    // new deadline is the close of the day d days after the send (not the send's minute of day).
     if (d * CALL_DAY <= st.horizonMs) return { ok: false, error: "that is not longer than the current " + Math.round(st.horizonMs / CALL_DAY) + "-day horizon" };
-    const hzTs = m.ts + d * CALL_DAY;
+    const hzTs = m.tgPx > 0 && tgSessionRule(m.ref) ? callSessionClose(m.ts + d * CALL_DAY) : m.ts + d * CALL_DAY;
+    if (hzTs - m.ts <= st.horizonMs) return { ok: false, error: "that is not longer than the current " + Math.round(st.horizonMs / CALL_DAY) + "-day horizon" };
     const p = pxHistory(m.ref, hzTs);
     if (p != null && isFinite(p) && p > 0) return { ok: false, error: "a " + d + "-day horizon has already passed for this call" };
-    S.callSetH.run(d * CALL_DAY, +id, uid);
+    S.callSetH.run(hzTs - m.ts, +id, uid);
     return { ok: true, thread: m.thread, message: wire(S.msgById.get(+id), uid) };
   }
   const modName = (uid) => (uid ? ((users.get(uid) || {}).display || uid) : null);
@@ -1634,8 +1663,13 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     // reply) but MAY carry an attachment: /ratio posts its chart as a PNG. replyTo is dropped
     // rather than erred — the client never sends it.
     const file = o.fileId ? S.fileById.get(o.fileId) : null;
+    // (build 2026.09.24-107) A named attachment that does not exist is refused, not dropped: a chart
+    // card with a bogus fileId used to post as a caption with no picture under it.
+    if (o.fileId && !file) return { ok: false, error: "that attachment is no longer stored" };
     if (!text && !file) return { ok: false, error: "write something first" };
     if (file && (file.thread !== t.id || file.uid !== fromUid)) return { ok: false, error: "that attachment is not yours" };
+    if (o.card && o.card.kind === "chart" && !(file && file.inline && /^image\//.test(String(file.mime || ""))))
+      return { ok: false, error: "a chart card needs its picture (an image uploaded into this conversation)" };
     if (S.msgBurst.get(fromUid, Date.now() - DM_BURST_MS).n >= DM_BURST_N)
       return { ok: false, error: "slow down — too many messages at once", retry: true };
 
@@ -1670,14 +1704,15 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     // horizon and its side the call's side (an applied reading still decides the side, and a
     // target that disagrees with it is dropped). Anything the grammar cannot read, or reads and
     // refuses, stays a plain call: never a wrong target.
-    const tg = ref && sym && refPx > 0 && !cardJson ? callTarget(text, sym, refPx, now, o.callSide === "short" || o.callSide === "long" ? o.callSide : null) : null;
+    // (build 2026.09.24-104) A DATE deadline ends at that date's US cash close for a session name
+    // (24:00 UTC for crypto) — exact, not rounded up to whole days from the send.
+    // (build 2026.09.24-107) callTarget decides it (`by`): a date whose close already passed is
+    // refused (the send stays a plain call) instead of becoming a silent one-day horizon, and a
+    // relative "in 3w" on a session name ends at that day's cash close.
+    const tg = ref && sym && refPx > 0 && !cardJson ? callTarget(text, sym, refPx, now, o.callSide === "short" || o.callSide === "long" ? o.callSide : null, tgSessionRule(ref)) : null;
     const tgOk = tg && tg.ok ? tg : null;
     if (tgOk) side = tgOk.side;
-    // (build 2026.09.24-104) A DATE deadline ends at that date's US cash close for a session name
-    // (24:00 UTC for crypto) — exact, not rounded up to whole days from the send; the rounded
-    // horizon stays the fallback (a relative "in 3w", or a close that already passed).
-    const tgBy = tgOk ? callTargetDeadline(tgOk.byDay, tgSessionRule(ref), now) : null;
-    const callH = ref && sym ? (tgOk ? (tgBy ? tgBy - now : tgOk.horizonMs) : oDays >= 1 && oDays <= CALL_MAX_D ? oDays * CALL_DAY : callHorizonFromText(text, sym)) : null;
+    const callH = ref && sym ? (tgOk ? tgOk.by - now : oDays >= 1 && oDays <= CALL_MAX_D ? oDays * CALL_DAY : callHorizonFromText(text, sym)) : null;
     const id = Number(S.msgIns.run(t.id, fromUid, now, text, ref, refPx, side, null, file ? file.id : null, o.via || null, replyTo, cmd, cmdAi, cardJson, callH,
       tgOk ? tgOk.px : null, tgOk ? tgOk.stop : null).lastInsertRowid);
     S.thrTouch.run(id, now, t.id);
@@ -2032,6 +2067,9 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   // command result, not a card, not deleted" rules and the same editedAt the composer sets. An
   // edit to anything else in that chat (a /command, a line from before sync) is silently inert.
   function bridgeEdit(uid, chat, tgId, text) {
+    // (build 2026.09.24-107) A disabled account acts through no door, the phone included.
+    const who = users.get(uid);
+    if (!who || who.disabledAt) return { ok: false, error: "that chat is not linked to an account" };
     const hit = tgMapPack(chat, tgId).find((x) => x.dir === "in" && x.uid === uid);
     if (!hit) return { ok: false, error: "not-mapped", silent: true };
     return edit(uid, hit.msg, text, false);
@@ -2040,6 +2078,8 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   // member added and the ones they took away. Explicit add/drop rather than "set to exactly this",
   // because Telegram only knows the reactions made THERE — a set would wipe the ones made here.
   function reactApply(uid, msgId, add, dropList) {
+    const who = users.get(uid);
+    if (!who || who.disabledAt) return { ok: false, error: "that chat is not linked to an account" };   // (build 2026.09.24-107)
     const m = S.msgById.get(+msgId);
     if (!m || !isMember(m.thread, uid)) return { ok: false, error: "no such message" };
     if (m.deletedAt || m.sys) return { ok: false, error: "that message was deleted" };
@@ -2440,7 +2480,10 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
     const file = path.join(out, `accounts-${stamp}-${Date.now() % 100000}.db`);
     const tmp = file + ".tmp";
-    try { fs.unlinkSync(tmp); } catch (_) {}
+    // (build 2026.09.24-107) A copy a kill interrupted (SIGTERM mid-VACUUM) left its .tmp behind
+    // and nothing ever removed it. Backups are serialized, so at the start of one no other copy of
+    // this process is writing — every accounts-*.db.tmp here is litter.
+    try { for (const f of fs.readdirSync(out)) if (/^accounts-\d{8}-\d{6}-\d+\.db\.tmp$/.test(f)) { try { fs.unlinkSync(path.join(out, f)); } catch (_) {} } } catch (_) {}
     return { out, n, file, tmp };
   }
   const backupCopySync = (tmp) => { try { fs.unlinkSync(tmp); } catch (_) {} db.exec("VACUUM INTO '" + tmp.replace(/'/g, "''") + "'"); };
@@ -2469,24 +2512,35 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   // connection to accounts.db (WAL: a concurrent reader is fine), so the copy of every message and
   // attachment no longer stalls the server. A worker that cannot start runs backupCopySync instead.
   // Serialized: an overlapping call (boot timer racing the daily one) waits for the running copy.
-  let backupChain = Promise.resolve();
+  let backupChain = Promise.resolve(), backupTmpLive = null;
   function backupAsync(dir, keep, opts) {
     const run = async () => {
       let plan = null;
       try {
         plan = backupPlan(dir, keep);
+        backupTmpLive = plan.tmp;
         await vacuumIntoAsync(file, plan.tmp, () => backupCopySync(plan.tmp), opts);
         return backupLand(plan);
       } catch (e) {
         if (plan) { try { fs.unlinkSync(plan.tmp); } catch (_) {} }
         return { ok: false, error: (e && e.message) || String(e) };
-      }
+      } finally { backupTmpLive = null; }
     };
     const p = backupChain.then(run, run);
     backupChain = p.catch(() => {});
     return p;
   }
+  // (build 2026.09.24-107) Shutdown: give a running backup a moment to land (bounded — never holds
+  // the exit). true = idle, false = still copying at the deadline (close() then removes its .tmp).
+  function backupDrain(timeoutMs) {
+    let t;
+    const to = new Promise((r) => { t = setTimeout(() => r(false), timeoutMs > 0 ? timeoutMs : 0); });
+    return Promise.race([backupChain.then(() => true, () => true), to]).finally(() => clearTimeout(t));
+  }
   function close() {
+    // A copy still running is abandoned with the process: its partial file goes now (the worker
+    // may still hold it open — unlinking an open file is fine), not at the next boot's backup.
+    if (backupTmpLive) { try { fs.unlinkSync(backupTmpLive); } catch (_) {} }
     try { db.exec("PRAGMA wal_checkpoint(TRUNCATE);"); } catch (_) {}
     try { db.close(); } catch (_) {}
   }
@@ -2494,7 +2548,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   return {
     // identity
     signSession, sessionUser, tokenFor, countUsers, getUser, getUserByHandle, listUsers, pub, deriveKey,
-    backup, backupAsync, close, lastBackup: () => lastBackup, msgSeq,
+    backup, backupAsync, backupDrain, close, lastBackup: () => lastBackup, msgSeq,
     login, setPassword, signOutEverywhere, setDisabled, setAdmin, renameUser, touch, hydrate,
     // invites
     mintInvite, readInvite, revokeInvite, listInvites, redeem, bootstrap, claim, inviteState,

@@ -14,7 +14,10 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.24-106";
+const VERSION = "2026.09.24-107";
+// (build 2026.09.24-107) Distinguishes this process from the last one in ETags built on
+// per-process counters (a restart must never 304 a client onto a different body).
+const BOOT_NONCE = Date.now().toString(36) + crypto.randomBytes(3).toString("hex");
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1862,7 +1865,8 @@ async function buildServer() {
     const o = opts || {};
     const owner = poller.pushOwnerOf ? poller.pushOwnerOf(String(chat)) : "";
     const me = owner && ACCOUNTS.getUser(owner);
-    if (!me) return { ok: false, error: "This chat is not linked to an account." };
+    // (build 2026.09.24-107) A disabled account is not linked: no post, edit, reaction or /alert.
+    if (!me || me.disabledAt) return { ok: false, error: "This chat is not linked to an account." };
     // /alert from the phone: bound to the conversation this chat mirrors, if any; otherwise a
     // plain personal rule that reaches the phone through the rule class like one set in the panel.
     // Everything returned from here rides pushReply with parse_mode HTML: the help text has
@@ -1967,19 +1971,34 @@ async function buildServer() {
     for (const p of parts) if (p.lines) p.text = p.lines.join("\n\n");
     if (skipped) {
       const head = "<i>+" + skipped + " earlier message" + (skipped === 1 ? "" : "s") + " not mirrored \u2014 open Messages</i>";
-      if (parts[0] && parts[0].lines) parts[0].text = head + "\n\n" + parts[0].text; else parts.unshift({ text: head, ids: [] });
+      if (parts[0] && parts[0].lines) { parts[0].head = head; parts[0].text = head + "\n\n" + parts[0].text; } else parts.unshift({ text: head, ids: [] });
     }
     return parts;
   }
   // One part onto the outbox for one chat. A file goes as sendPhoto (the four raster types the
   // store verified, minus gif, which Telegram would flatten to a still) or sendDocument; if
   // Telegram refuses the upload the wire falls back to the plain line with the file's name.
+  // (build 2026.09.24-107) The map row exists only once Telegram answers, so an edit or a delete
+  // made here while the part still sat in the outbox found nothing to repaint and the phone got
+  // the words as they were at enqueue. The part now carries its row ids and is rebuilt from the
+  // CURRENT rows when the drain reaches it: every row deleted -> the send is dropped; edited ->
+  // it goes out in its current wording. null = drop.
+  function dmMirrorRebuild(uid, part) {
+    let rows;
+    try { rows = ACCOUNTS.mirrorRowsById(uid, part.ids); } catch (_) { return null; }
+    const live = rows.filter((r) => !r.deleted && !(r.mine && r.via === "telegram"));
+    if (!live.length) return null;
+    if (part.file) return { caption: dmMirrorLine(live[0], true), fallback: dmMirrorLine(live[0]) };
+    const text = live.map((r) => dmMirrorLine(r)).join("\n\n");
+    return { text: part.head ? part.head + "\n\n" + text : text };
+  }
   function dmMirrorSend(chat, uid, part) {
     const onSent = part.ids.length ? (res, it) => ACCOUNTS.tgMapAdd(chat, res && res.message_id, part.ids, uid, "out", it && it.file ? 1 : 0) : null;
-    if (!part.file) { poller.pushSyncNow(chat, part.text, { onSent }); return; }
+    const rebuild = part.ids.length ? () => dmMirrorRebuild(uid, part) : null;
+    if (!part.file) { poller.pushSyncNow(chat, part.text, { onSent, rebuild }); return; }
     const f = part.file, photo = f.fileInline && f.fileMime !== "image/gif";
     poller.pushSyncNow(chat, part.fallback, {
-      method: photo ? "sendPhoto" : "sendDocument", payload: { caption: part.text, parse_mode: "HTML" }, onSent, fallback: part.fallback,
+      method: photo ? "sendPhoto" : "sendDocument", payload: { caption: part.text, parse_mode: "HTML" }, onSent, fallback: part.fallback, rebuild,
       file: { field: photo ? "photo" : "document", name: f.file, mime: f.fileMime,
         load: () => { const rf = ACCOUNTS.readFile(uid, f.fileId); return rf.ok ? fs.readFileSync(rf.path) : null; } } });
   }
@@ -2494,7 +2513,8 @@ async function buildServer() {
   fastify.get("/api/retest-study", (req, reply) => {
     const q = req.query || {};
     const body = poller.getD1Retest(q.u === "crypto" ? "crypto" : "stocks", String(q.def || ""), q.cd);
-    return sendCachedBody(req, reply, body, 'W/"rt-' + body.key + '"');
+    // (build 2026.09.24-107) the build and this boot are in the tag, never only a per-process counter
+    return sendCachedBody(req, reply, body, 'W/"rt-' + VERSION + "-" + BOOT_NONCE + "-" + body.key + '"');
   });
   // EMA 13/21 trend ladder (D1 · H12 · H4 · H1) — ranked long/short leaderboards per universe.
   fastify.get("/api/trend", (req, reply) => {
@@ -3475,6 +3495,8 @@ async function shutdown() {
   const sseClients = SSE_REGISTRY || new Set();   // buildServer's registry; block-scoped there, so it has to be handed out
   try { for (const e of sseClients) { try { e.res.end(); } catch (_) {} } sseClients.clear(); } catch (_) {}   // entries are {res, uid}: res.end() on the entry was a swallowed TypeError
   try { store.close(); } catch (_) {}
+  // (build 2026.09.24-107) a backup mid-VACUUM gets a moment to land; past it, close() drops its .tmp
+  try { if (ACCOUNTS.backupDrain) await ACCOUNTS.backupDrain(3000); } catch (_) {}
   try { ACCOUNTS.close(); } catch (_) {}   // checkpoints the WAL so a redeploy never leaves -wal/-shm behind
   process.exit(0);
 }

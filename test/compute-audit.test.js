@@ -36,8 +36,12 @@ test("audit 2/A: earnReactionCurve anchors at the ET print time; earnReactionsFo
   const daily = [{ t: T0 - DAY, c: 100 }, { t: T0, c: 100 }, { t: T0 + DAY, c: 120 }, { t: T0 + 2 * DAY, c: 125 }, { t: T0 + 3 * DAY, c: 125 }];
   const st = C.earnReactionsFor(prints.slice(0, 1), daily, now, hs);
   assert.equal(st.n, 1); assert.equal(st.avgAbs, 25); assert.equal(st.hN, 1);
-  const stD = C.earnReactionsFor(prints.slice(0, 1), daily, now);
-  assert.equal(stD.avgAbs, 25, "daily-only: 09-01's session bar -> 09-03's (the reaction session), not 09-02's post-print 20:00 ET close"); assert.equal(stD.hN, 0); assert.equal(stD.dailyN, 1);
+  // (re-pinned -107) daily-only, an AMC print's session-bar window is 09-01's bar -> 09-03's: TWO
+  // sessions (09-02's bar closes after the print), so the study excludes it rather than pool it
+  // with one-session reactions; the single-print path still reads it, labelled `wide`.
+  assert.equal(C.earnReactionsFor(prints.slice(0, 1), daily, now), null, "daily-only AMC: excluded from the pooled study");
+  const one = C.earnPrintReaction(prints[0], daily, 125, null, now);
+  assert.deepEqual(one, { pct: 25, state: "final", src: "daily", wide: true }, "09-01's session bar -> 09-03's, labelled as the two-session window it is");
   // anchors: AMC 16:00 ET, BMO 06:00 ET (before essentially every pre-market print), others none
   assert.equal(C.earnPrintUtc({ d: "2026-09-02", s: "AMC" }), t16);
   assert.equal(C.earnPrintUtc({ d: "2026-09-02", s: "BMO" }), C.etWallToUtc(2026, 9, 2, 6, 0));

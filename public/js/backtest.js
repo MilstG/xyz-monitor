@@ -368,10 +368,11 @@ function btRunOne(p){
   const on=p.holdWindow==='on' && !cr;
   const start=warmN;
   const eq=[1], eqg=[1], eqb=[1], eqbh=[1], curveDays=[days[start]], portR=[], pos=[], trades=[];
-  let w=0, feeCum=0, fundCum=0, slipCum=0, inMkt=0, open=null, flips=0, pend=null;
+  let w=0, feeCum=0, fundCum=0, slipCum=0, inMkt=0, open=null, flips=0, pend=null, held=null;   // held (-107): the decision the filled position came from
   // (-106) the fill: at the decision bar's close ('same') or the next bar's ('next', default — the
   // trade log's "in"/"out" dates are the FILL bars, so they move one bar later with the lag)
   const fill=(nw, fi, meta)=>{
+    held=meta;
     if(nw===w) return;
     const to=Math.abs(nw-w);
     if(!on){ feeCum+=to*costR; slipCum+=to*slipR; eq[eq.length-1]*=(1-to*(costR+slipR)); }   // overnight charges its nightly round-trip below instead
@@ -427,7 +428,11 @@ function btRunOne(p){
   return { ok:true, single:true, avgTrade, row:tgt, days:curveDays, eq, eqg, eqb, eqew:eqbh, eqbh, portR, pos, trades,
     turnover:0, avgPos:inMkt?1:0, universeN:1, book:null, peers:peers.length,
     fundCov, fundCum, feeCum, slipCum, ovCov, on, lag, flips, exposure:pos.length?inMkt/pos.length:0,
-    curW:w, curScore:raw[N-2], curZ:(Number.isFinite(scale[N-2])&&scale[N-2]>0)?raw[N-2]/scale[N-2]:null };
+    // (build 2026.09.24-107) curW/curScore/curZ describe the SAME decision — the one the held
+    // position filled from; under next-bar fills the last decision has not filled yet and rides
+    // apart as `pending` (the panel says "fills at next close") instead of labelling curW with its score.
+    curW:w, curScore:held?held.score:null, curZ:held?held.z:null,
+    pending:pend?{ w:pend.nw, score:pend.score, z:pend.z }:null };
 }
 function btVol(a, di, L){ const lo=di-L+1; if(lo<0) return 0; let s=0,sq=0,n=0;
   for(let i=lo;i<=di;i++){ const x=a[i]; if(Number.isFinite(x)){ s+=x; sq+=x*x; n++; } }
@@ -543,8 +548,11 @@ function btPositionPanel(res){
       `<span class="r ${t.ret>=0?'pos':'neg'}">${(t.ret>0?'+':'')+(t.ret*100).toFixed(2)}%</span></div>`).join('')
     : `<div class="bt-trow"><span class="sec" style="grid-column:1/-1">No position ever cleared the entry threshold — loosen it, shorten the lookback, or pick a longer history.</span></div>`;
   const wins=res.trades.filter(t=>t.ret>0).length;
+  // (-107) next-bar fills: the latest decision fills at the next close — said, not silently folded into "now"
+  const pd=res.pending, pw=pd?pd.w||0:0;
+  const pendTxt=pd&&pw!==w?` <span class="bt-now ${pw>0?'pos':pw<0?'neg':'flat'}" title="decided at the last close (score ${pd.score!=null&&isFinite(pd.score)?(pd.score>0?'+':'')+pd.score.toFixed(3):'—'}); under next-bar fills it trades at the next close">→ ${pw>0?'LONG '+pw.toFixed(2)+'×':pw<0?'SHORT '+Math.abs(pw).toFixed(2)+'×':'FLAT'} · fills at next close</span>`:'';
   return sCard(`<div class="s-cap" style="margin:0 0 9px">Where the rule stands on ${esc(tk)} right now, and every round trip that got it here</div>`+
-    `<div class="bt-nowrow">${tag}<span class="sec">score ${res.curScore!=null&&isFinite(res.curScore)?(res.curScore>0?'+':'')+res.curScore.toFixed(3):'—'}`+
+    `<div class="bt-nowrow">${tag}${pendTxt}<span class="sec">score ${res.curScore!=null&&isFinite(res.curScore)?(res.curScore>0?'+':'')+res.curScore.toFixed(3):'—'}`+
       `${res.curZ!=null&&isFinite(res.curZ)?` · ${(res.curZ>0?'+':'')+res.curZ.toFixed(2)}σ`:''} · entry ${state.backtest.entry>0?'±'+state.backtest.entry+'σ':'sign only'}`+
       ` · ${res.trades.length} round trip${res.trades.length===1?'':'s'}${res.trades.length?`, ${Math.round(wins/res.trades.length*100)}% green`:''}</span></div>`+
     `<div class="bt-ttbl"><div class="bt-trow bt-thd"><span>side</span><span>in</span><span>out</span><span class="r">size</span><span class="r">return</span></div>${rows}</div>`+

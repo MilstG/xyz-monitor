@@ -4657,6 +4657,7 @@ function earnReactDaily(print, daily, off) {
 // the daily fallback. opts.off = the market's sessOffFn (default: the US calendar). `src` says
 // which: "cash" (intraday anchors) or "daily" (session-bar closes, the labelled fallback).
 // Returns { pct, state, src } or null (TBD print, no reference close, not printed yet).
+const EARN_BELL_WAIT = 3 * HOUR;
 function earnPrintReaction(print, daily, px, hourly, now, opts) {
   const w = earnReactWindow(print);
   if (!w) return null;
@@ -4666,19 +4667,28 @@ function earnPrintReaction(print, daily, px, hourly, now, opts) {
   const pct = (a, b) => +(((a - b) / b) * 100).toFixed(1);
   const hs = hourly ? packedRows(hourly) : [], fine = Array.isArray(o.fine) && o.fine.length ? packedRows(o.fine) : null;
   if ((hs.length || fine) && w.pre < nowMs) {
+    // (build 2026.09.24-107) "cash" means the exact anchors: a 5m bar within 15 min or an hourly bar
+    // closing ON the close — never an hourly close up to 3h early (a spine still missing the
+    // 15:00-16:00 bar marked the print final off the 15:00 price). Until the bell bar lands the
+    // reaction is forming (for EARN_BELL_WAIT after the close), then the labelled daily path.
     const a0 = anchorPrice(hs, fine, w.pre, 3 * HOUR);
-    if (a0.px > 0) {
+    if (a0.px > 0 && !a0.approx) {
       if (w.post <= nowMs) {
         const a1 = anchorPrice(hs, fine, w.post, 3 * HOUR);
-        if (a1.px > 0) return { pct: pct(a1.px, a0.px), state: "final", src: "cash" };
+        if (a1.px > 0 && !a1.approx) return { pct: pct(a1.px, a0.px), state: "final", src: "cash" };
+        if (nowMs - w.post < EARN_BELL_WAIT && live != null) return { pct: pct(live, a0.px), state: "forming", src: "cash" };
       } else if (live != null) return { pct: pct(live, a0.px), state: "forming", src: "cash" };
     }
   }
   const dd = earnReactDaily(print, daily, o.off);
   if (!dd) return null;
   if (w.pD * DAY > nowMs) return null;   // not printed yet
-  if (dd.post && dd.post.t + DAY <= nowMs) return { pct: pct(dd.post.c, dd.ref.c), state: "final", src: "daily" };
-  if (live != null) return { pct: pct(live, dd.ref.c), state: "forming", src: "daily" };
+  // (build 2026.09.24-107) An AMC print on session bars cannot be read as ONE session: the print
+  // day's bar closes 20:00 ET, after the print, so the reference is the day before's bar and the
+  // window is two sessions (D-1 -> D+1). It is labelled `wide` (and kept out of the pooled study).
+  const wide = w.s === "AMC" ? { wide: true } : null;
+  if (dd.post && dd.post.t + DAY <= nowMs) return Object.assign({ pct: pct(dd.post.c, dd.ref.c), state: "final", src: "daily" }, wide);
+  if (live != null) return Object.assign({ pct: pct(live, dd.ref.c), state: "forming", src: "daily" }, wide);
   return null;
 }
 // One print, fully dressed: what was expected, what printed, whether that beat, by how much, and
@@ -4953,7 +4963,7 @@ function earnReactionsFor(prints, daily, now, hourly, opts) {
   const intra = hs.length > 0 || !!fine;
   const moves = [], exps = [], gaps = [];
   const sessOff = o.off;   // sessOffFn of the market's calendar (build 2026.09.24-105); absent = UTC bars for the baseline
-  let cashN = 0, dailyN = 0, tbdN = 0, gapOf = 0, gapApprox = 0;
+  let cashN = 0, dailyN = 0, tbdN = 0, gapOf = 0, gapApprox = 0, amcWideN = 0;
   for (const p of prints) {
     const w = earnReactWindow(p);
     if (!w) { if (p && typeof p.d === "string") tbdN++; continue; }
@@ -4961,9 +4971,14 @@ function earnReactionsFor(prints, daily, now, hourly, opts) {
     let mv = null, a0 = null, a1 = null;
     if (intra) {
       a0 = anchorPrice(hs, fine, w.pre, 3 * HOUR); a1 = anchorPrice(hs, fine, w.post, 3 * HOUR);
-      if (a0.px > 0 && a1.px > 0) { mv = (a1.px / a0.px - 1) * 100; cashN++; }
+      // (build 2026.09.24-107) exact anchors only — an approx (stale hourly) leg is not a cash move
+      if (a0.px > 0 && a1.px > 0 && !a0.approx && !a1.approx) { mv = (a1.px / a0.px - 1) * 100; cashN++; }
+      else { a0 = null; a1 = null; }
     }
     if (mv == null) {
+      // (build 2026.09.24-107) the daily tier of an AMC print spans two sessions (see
+      // earnPrintReaction): not the study's one-session reaction, so it is excluded and counted.
+      if (w.s === "AMC") { amcWideN++; continue; }
       const dd = earnReactDaily(p, daily, sessOff);
       if (!dd || !dd.post || !(dd.ref.c > 0) || !Number.isFinite(dd.post.c) || dd.post.t + DAY > nowMs) continue;
       mv = (dd.post.c - dd.ref.c) / dd.ref.c * 100; dailyN++;
@@ -5002,7 +5017,7 @@ function earnReactionsFor(prints, daily, now, hourly, opts) {
     up: moves.filter((m) => m > 0).length,
     xMed: exps.length ? +median(exps).toFixed(1) : null, xN: exps.length,
     gapN: gaps.length, gapOf, gapUp: gaps.filter((g) => g.up).length, gapHeld: gaps.filter((g) => g.held).length, gapApprox,
-    cashN, dailyN, tbdN, hN: cashN,
+    cashN, dailyN, tbdN, hN: cashN, amcWideN,
   };
 }
 // Bootstrap 90% CI of the median of `xs` (build 2026.09.24-106): 1000 resamples with replacement
@@ -6380,7 +6395,13 @@ const TG_NUM = "\\$?(\\d+(?:\\.\\d+)?)\\s*(k)?(?![\\w%/]|\\.\\d)";
 const TG_PX = new RegExp("^[\\s,:;\\u2014-]*((?:(?:goes|going|heading|headed|runs?|back)\\s+)?(?:to|\\u2192|->|target(?:ing)?|tgt)\\s*)?" + TG_NUM, "i");
 const TG_STOP = new RegExp("(?:^|\\W)(?:unless|stop(?:\\s+at)?|(?:wrong|invalid(?:ated)?)\\s+(?:under|over|above|below|at|if))\\s+" + TG_NUM, "i");
 const TG_DATED = /^(?:by\b|eo[wmy]\b|end of|year[ -]?end)/i;   // callRead's DATE words (vs relative horizons like "30d", "next week")
-function callTarget(text, sym, markPx, nowMs, sideOverride) {
+// (build 2026.09.24-107) `sessionRule` (optional; boolean when the caller knows the name): the
+// deadline is then decided here and returned as `by` — a dated one at that date's close
+// (callTargetDeadline), REFUSED when that close has already passed ("eom" sent after the last
+// day's close) rather than silently becoming a one-day horizon; a relative one ("in 3w") on a
+// session name snapped to the cash close of the day it lands on (callSessionClose). Undefined
+// keeps the old shape (no `by`).
+function callTarget(text, sym, markPx, nowMs, sideOverride, sessionRule) {
   const t = String(text || ""), S = String(sym || "").toUpperCase();
   const i = S ? t.toUpperCase().indexOf("$" + S) : -1;
   if (i < 0) return null;
@@ -6420,7 +6441,10 @@ function callTarget(text, sym, markPx, nowMs, sideOverride) {
   // horizon ("in 3w"). The server ends a dated deadline at that date's US cash close for session
   // names (callTargetDeadline); the horizon stays the fallback.
   const byDay = dated ? new Date(now + horizonMs - DAY + 1).toISOString().slice(0, 10) : null;
-  return { ok: true, px, stop, side, horizonMs, word, byDay };
+  if (sessionRule !== true && sessionRule !== false) return { ok: true, px, stop, side, horizonMs, word, byDay };
+  const by = byDay ? callTargetDeadline(byDay, sessionRule, now) : sessionRule ? callSessionClose(now + horizonMs, now) : now + horizonMs;
+  if (!(by > now)) return { ok: false, px, error: "the " + byDay + " close has already passed \u2014 pick a later date" };
+  return { ok: true, px, stop, side, horizonMs, word, byDay, by };
 }
 module.exports.callTarget = callTarget;
 // ---- session-true call targets (build 2026.09.24-104) ------------------------------------------------
@@ -6444,6 +6468,21 @@ function callTargetDeadline(byDay, sessionRule, nowMs) {
   }
   return end > now ? end : null;
 }
+// (build 2026.09.24-107) The US cash close of the ET day `ts` falls on (16:00 ET, 13:00 on an early
+// close; the last close before it when the exchange is shut) — the same calendar callTargetDeadline
+// reads. A relative deadline or an extended horizon on a session name lands here rather than at an
+// off-hours minute. When that close is not after `nowMs`, the next close after it.
+function callSessionClose(ts, nowMs) {
+  const now = Number.isFinite(+nowMs) ? +nowMs : -Infinity;
+  let { y, mo, d } = etParts(ts), st = usDayStatus(y, mo, d), k = 0;
+  while (st === 2 && k++ < 10) { ({ y, mo, d } = shiftWall(y, mo, d, -1)); st = usDayStatus(y, mo, d); }
+  let end = etWallToUtc(y, mo, d, st === 1 ? 13 : 16, 0);
+  for (k = 0; !(end > now) && k < 15; k++) {
+    ({ y, mo, d } = shiftWall(y, mo, d, 1)); st = usDayStatus(y, mo, d);
+    if (st !== 2) end = etWallToUtc(y, mo, d, st === 1 ? 13 : 16, 0);
+  }
+  return end;
+}
 // Does one 5-minute bar [ts, o, h, l, c] reach `level` for a session name? During the US cash session
 // a TOUCH counts (h/l); off-hours — the thin overnight/weekend book, where a one-print wick is not
 // the market agreeing — only a bar that CLOSES through the level counts. `up` = the level sits above
@@ -6460,6 +6499,7 @@ function inCashSession(ts, sessions) {
   return false;
 }
 module.exports.callTargetDeadline = callTargetDeadline;
+module.exports.callSessionClose = callSessionClose;
 module.exports.callBarReaches = callBarReaches;
 module.exports.inCashSession = inCashSession;
 
@@ -10156,6 +10196,33 @@ function clusterMeanSE(xs, keys) {
   let q = 0; for (const v of S.values()) q += v * v;
   return { mean: m, se: Math.sqrt((G / (G - 1)) * q) / n, G };
 }
+// Two-way cluster-robust SE of a mean (build 2026.09.24-107), Cameron-Gelbach-Miller (2011):
+// V = V_A + V_B − V_{A∩B}, each a CR1 cluster variance (G/(G−1) · Σ_g S_g² / n²) — here A = name
+// and B = event date, so a name that retests again and again (its own serially correlated tape)
+// counts as one cluster on that axis just as one market-wide day does on the other. A negative V
+// (possible in small samples) falls back to the larger one-way variance, the usual fix. With under
+// two clusters on one axis it reduces to the other axis's one-way SE; null under two on both.
+// Returns { mean, se, G (distinct B = dates), GA (distinct A = names) }.
+function twoWayClusterMeanSE(xs, keysA, keysB) {
+  const n = Array.isArray(xs) ? xs.length : 0;
+  if (!n) return { mean: null, se: null, G: 0, GA: 0 };
+  let m = 0; for (const x of xs) m += x; m /= n;
+  const cv = (keyOf) => {
+    const S = new Map();
+    for (let i = 0; i < n; i++) { const k = keyOf(i); S.set(k, (S.get(k) || 0) + (xs[i] - m)); }
+    const G = S.size;
+    if (G < 2) return { G, v: null };
+    let q = 0; for (const v of S.values()) q += v * v;
+    return { G, v: (G / (G - 1)) * q / (n * n) };
+  };
+  const A = cv((i) => keysA[i]), B = cv((i) => keysB[i]), AB = cv((i) => keysA[i] + "\u0000" + keysB[i]);
+  let v;
+  if (A.v == null && B.v == null) v = null;
+  else if (A.v == null) v = B.v;
+  else if (B.v == null) v = A.v;
+  else { v = A.v + B.v - (AB.v || 0); if (!(v > 0)) v = Math.max(A.v, B.v); }
+  return { mean: m, se: v == null ? null : Math.sqrt(v), G: B.G, GA: A.G };
+}
 // Pool the per-name walks into the published study. names: [{coin, ticker, cand, ctl}] (from
 // d1RetestEvents). Per side and horizon: event n / distinct event dates / hit / mean (+ its
 // date-clustered SE, -106) / median / σ-mean / void rate, the
@@ -10194,7 +10261,9 @@ function d1RetestStudy(names, opts) {
     H.forEach((h, k) => {
       const evK = ev.filter((e) => e.f[k] != null), f = evK.map((e) => e.f[k]);
       // (-106) clustered by event date: the mean's SE and the number of distinct dates behind it
-      const cl = clusterMeanSE(f, evK.map((e) => Math.floor(e.t / DAY)));
+      // (-107) two-way: name × date (Cameron-Gelbach-Miller) — a name's own repeated retests share
+      // its tape the way one day's events share the market's
+      const cl = twoWayClusterMeanSE(f, evK.map((e) => e.coin), evK.map((e) => Math.floor(e.t / DAY)));
       const fs = ev.filter((e) => e.f[k] != null && e.sd > 0).map((e) => e.f[k] / e.sd);
       const vd = ev.map((e) => e.v[k]).filter((v) => v != null);
       const c = ctl[sd][k], on = f.length >= floor, con = c.n >= floor;
@@ -10227,3 +10296,4 @@ module.exports.d1RetestEvents = d1RetestEvents;
 module.exports.d1RetestCooldown = d1RetestCooldown;
 module.exports.d1RetestStudy = d1RetestStudy;
 module.exports.clusterMeanSE = clusterMeanSE;
+module.exports.twoWayClusterMeanSE = twoWayClusterMeanSE;

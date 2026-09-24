@@ -2713,7 +2713,7 @@ test("targets -95: the stamp grows a target row — progress, time used, stop ti
   assert.equal(row(Object.assign({}, base, { call: { closed: false, tg: null } })), "", "a plain call grows nothing");
   // Wired: the stamp appends the row; the composer previews the target; the board has the column and the binary record.
   assert.ok(app.includes("+(finalTxt||right)+'</div>'+dmTargetRow(m);"), "the stamp appends the target row");
-  assert.ok(app.includes("const tg=dmCallTarget(text,m[1],r.px,undefined,ov&&ov.side?ov.side:null);"), "the preview runs the server's reader against the mark it shows");
+  assert.ok(app.includes("const tg=dmCallTarget(text,m[1],r.px,undefined,ov&&ov.side?ov.side:null,dmTgSessionRule(r));"), "the preview runs the server's reader against the mark it shows");
   assert.ok(/no target: '\+esc\(tg\.error\)\+' \\u2014 sends as a plain call/.test(app), "a refused target says so, and says the send stays a plain call");
   const board = app.slice(app.indexOf("function dmCallsHtml(){"), app.indexOf("async function dmFetchCalls(){"));
   assert.ok(board.includes("'<span class=\"dm-calltg\">'+dmCallTgCell(c)+'</span></div>'") && board.includes(">target</span></div>'"), "the board gained a target column");

@@ -93,6 +93,9 @@ function insidersWhere(opt) {
 
 function openStore(dataDir) {
   fs.mkdirSync(dataDir, { recursive: true });
+  // (build 2026.09.24-107) Async-write temps (`*.atmp`, and the old numbered `*.atmp<N>`) a kill left
+  // behind: nothing is in flight at open, so any that exist are litter.
+  try { for (const f of fs.readdirSync(dataDir)) if (/\.atmp\d*$/.test(f)) { try { fs.unlinkSync(path.join(dataDir, f)); } catch (_) {} } } catch (_) {}
   const file = path.join(dataDir, "oi.log");
   const featFile = path.join(dataDir, "features.json");
   const navGrpFile = path.join(dataDir, "navgroups.json");   // renameable ribbon menu labels
@@ -124,7 +127,7 @@ function openStore(dataDir) {
   const whaleFile = path.join(dataDir, "whale.json");        // 13F watchlist + cached quarterly books + unseen state + season builds
   let dbuf = [];
   let dPruning = false;   // hold deriv appends in dbuf during the streaming rewrite, same as the OI prune
-  let featGen = 0, featSeq = 0, featChain = Promise.resolve(true);   // saveFeaturesAsync serialization (build 2026.09.24-101)
+  let featGen = 0, featChain = Promise.resolve(true);   // saveFeaturesAsync serialization (build 2026.09.24-101)
   let cfgChain = Promise.resolve(), cfgGen = new Map();              // saveConfigAsync serialization, per-file generation (same build)
   // Rename-window guard (build 2026.09.24-102). The generation check before an async rename
   // closes every window but one: the rename itself is queued on the threadpool, so a synchronous
@@ -133,20 +136,26 @@ function openStore(dataDir) {
   // its writer here; when the rename settles, the async path re-lands that newer write (sync) and
   // reports itself superseded. Graceful shutdown also awaits drainWrites() before its final saves,
   // so on that path the window is empty; the stash covers anything that still overlaps.
-  const renaming = new Map();     // file -> outstanding async renames
-  const relandAfter = new Map();  // file -> () => void, the newest sync save made during that window
+  // (build 2026.09.24-107) The re-land ran in the async continuation — which never runs on the
+  // crash path (crashFlush exits synchronously), so a rename still queued on the threadpool could
+  // land the older copy over the crash save after all. Now the sync save takes the in-flight tmp
+  // AWAY first (unlinkSync): if that succeeds the queued rename fails ENOENT and lands nothing; if
+  // the tmp is already gone the rename has completed (rename and unlink are atomic on the same
+  // directory), so the sync write below lands after it. Either way the newest write wins, with no
+  // continuation needed.
+  const renaming = new Map();     // file -> Set of async tmp paths whose rename onto it is outstanding
   async function guardedRename(tmp, file, isStale) {
     if (isStale()) { await fs.promises.unlink(tmp).catch(() => {}); return false; }
-    renaming.set(file, (renaming.get(file) || 0) + 1);
+    let set = renaming.get(file); if (!set) { set = new Set(); renaming.set(file, set); }
+    set.add(tmp);
     try { await fs.promises.rename(tmp, file); }
-    finally { const n = (renaming.get(file) || 1) - 1; if (n) renaming.set(file, n); else renaming.delete(file); }
-    const reland = relandAfter.get(file);
-    if (reland) { relandAfter.delete(file); try { reland(); } catch (_) {} return false; }
+    finally { set.delete(tmp); if (!set.size && renaming.get(file) === set) renaming.delete(file); }
     return !isStale();
   }
-  // A sync save: run it now, and if an async rename of the same file is outstanding, arm the re-land.
+  // A sync save: pull any outstanding async tmp of the same file out from under its rename, then write.
   function syncSave(file, write) {
-    if (renaming.get(file)) relandAfter.set(file, write);
+    const set = renaming.get(file);
+    if (set) for (const tmp of set) { try { fs.unlinkSync(tmp); } catch (_) {} }
     write();
   }
   let oiPreloaded = null; // set by preloadOI(); consumed once by the next loadAll()
@@ -471,7 +480,9 @@ function openStore(dataDir) {
     saveFeaturesAsync(data) {
       let body;
       try { body = JSON.stringify(data); } catch (_) { return Promise.resolve(false); }
-      const gen = featGen, tmp = featFile + ".atmp" + (++featSeq);
+      // (build 2026.09.24-107) one fixed tmp name: the chain serializes these writes, so a numbered
+      // name only left `.atmp<N>` litter behind a kill; startup sweeps any that remain.
+      const gen = featGen, tmp = featFile + ".atmp";
       const run = async () => {
         try {
           await fs.promises.writeFile(tmp, body);

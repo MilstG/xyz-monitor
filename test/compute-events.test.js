@@ -188,20 +188,23 @@ test("earnings: reaction study — print day's own bar for BMO and AMC, expansio
     { t: "NVDA", d: "2019-01-01", s: "BMO" },   // predates the window -> skipped, not fabricated
   ];
   const st = earnReactionsFor(prints, daily);
-  assert.equal(st.n, 2, "only prints matched to retained candles count");
-  assert.equal(st.up, 1, "one up reaction, one down");
-  assert.ok(st.avgAbs > 6 && st.avgAbs < 7, `avg |move| ~6.5, got ${st.avgAbs}`);
-  assert.ok(st.xMed > 4, `both reactions are multiples of the ~1% base tape, got ${st.xMed}x`);
+  // (re-pinned -107) the AMC print has no intraday anchors, and its session-bar window spans two
+  // sessions (the print day's bar closes after the print) — excluded from the pool and counted.
+  assert.equal(st.n, 1, "only prints matched to retained candles count; the daily-tier AMC is excluded");
+  assert.equal(st.amcWideN, 1, "…and counted as excluded");
+  assert.equal(st.up, 1, "the BMO reaction is up");
+  assert.ok(st.avgAbs > 7.5 && st.avgAbs < 8.5, `avg |move| ~8, got ${st.avgAbs}`);
+  assert.ok(st.xMed > 4, `the reaction is a multiple of the ~1% base tape, got ${st.xMed}x`);
   // (re-pinned -106) the daily open is NOT a gap: a 24/7 perp's 00:00Z open is the prior 00:00Z
   // close. Gaps are cash-session gaps read intraday only; with no intraday data both timed prints
   // are excluded and counted (gap n=0 of 2), never approximated from these opens.
   assert.equal(st.gapN, 0, "no intraday anchors -> no gap claims");
-  assert.equal(st.gapOf, 2, "…but the excluded timed prints are counted");
-  assert.equal(st.dailyN, 2, "both reactions came off session-bar closes (the labelled fallback)");
+  assert.equal(st.gapOf, 1, "…but the excluded timed print is counted");
+  assert.equal(st.dailyN, 1, "the reaction came off session-bar closes (the labelled fallback)");
   // closes-only candles (warm cache shape): move stats compute, gap stats honestly absent
   const co = daily.map((k) => ({ t: k.t, c: k.c }));
   const st2 = earnReactionsFor(prints, co);
-  assert.equal(st2.n, 2);
+  assert.equal(st2.n, 1);
   assert.equal(st2.gapN, 0, "no opens -> no gap claims");
   assert.equal(earnReactionsFor([], daily), null, "no prints -> null, not zeros");
 });

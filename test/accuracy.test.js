@@ -63,7 +63,7 @@ test("-106 earnings reaction: client earnReactPct == server earnPrintReaction (d
   const fe = { t: "F", s: "AMC", d: dstr(d0 + 11 * DAY) };
   const f = C.earnPrintReaction(fe, daily, 135, null, now, { off });
   assert.deepEqual(clientRx(fe, daily, 135, now, off), f);
-  assert.deepEqual(f, { pct: 3.8, state: "forming", src: "daily" });
+  assert.deepEqual(f, { pct: 3.8, state: "forming", src: "daily", wide: true });   // (-107) AMC on session bars spans two sessions, labelled
   // Client daily rows carry string closes on the wire; the port parses them.
   const strRows = daily.map((k) => ({ t: k.t, c: String(k.c) }));
   assert.deepEqual(clientRx(cases[1], strRows, 131.5, now, off), C.earnPrintReaction(cases[1], daily, 131.5, null, now, { off }));
@@ -601,9 +601,10 @@ test("-106 retest: the mean's standard error is clustered by event date and the 
   const st = C.d1RetestStudy(names, { cd: 5, cellFloor: 30 });
   const cell = st.side.long.cells[5];
   assert.equal(cell.n, 48); assert.equal(cell.dates, 12, "48 events on 12 dates");
-  const ev = []; const keys = [];
-  for (const nm of names) for (const e of nm.cand) { ev.push(e.f[2]); keys.push(Math.floor(e.t / DAY)); }
-  assert.equal(cell.se, +C.clusterMeanSE(ev, keys).se.toFixed(3));
+  const ev = []; const keys = [], nk = [];
+  for (const nm of names) for (const e of nm.cand) { ev.push(e.f[2]); keys.push(Math.floor(e.t / DAY)); nk.push(nm.coin); }
+  // (re-pinned -107) two-way clustered: name × date
+  assert.equal(cell.se, +C.twoWayClusterMeanSE(ev, nk, keys).se.toFixed(3));
   const src = clientSrc();
   assert.ok(src.includes("function rtN(c)") && src.includes("function rtMeanCi(c)") && src.includes("function rtUnit(p)"), "the panel shows dates, ±1.96·SE and the horizon unit");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
