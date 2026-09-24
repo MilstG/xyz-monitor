@@ -9,6 +9,7 @@ import { DAY, SCROLL_B, TF_MAP, activeRows, clamp, closedDaily, el, esc, lerp, m
 import { fetchJSON } from "./data.js";
 import { buildHead, groupRowsSorted, pctInner, render, shade, sortedRows, visibleCols } from "./markets.js";
 import { openAiReport } from "./report.js";
+import { usageAct } from "./usage.js";
 
 
 // ===== correlation tab =====
@@ -1263,6 +1264,7 @@ function downloadCSV(name, matrix){
   const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}), url=URL.createObjectURL(blob);
   const a=document.createElement('a'); a.href=url; a.download=name; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(()=>URL.revokeObjectURL(url),1500);
+  usageAct('csv');   // (build 2026.09.24-110) the usage counter: that an export happened, never what it held
 }
 function csvCell(k,r){ switch(k){
   case 'ticker': return r.ticker; case 'px': return r.px;

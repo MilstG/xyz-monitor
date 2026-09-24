@@ -143,7 +143,7 @@ function firstTickerRef(body) {
   return m ? m[1].toUpperCase() : "";
 }
 
-const { callRead, callTarget, callBarReaches, inCashSession, marketSessions, callSessionClose, etDayStr } = require("./compute");
+const { callRead, callTarget, callBarReaches, inCashSession, marketSessions, callSessionClose, etDayStr, etParts } = require("./compute");
 const { homeMkt } = require("./sectors");
 
 function openAccounts(dataDir, opts) {
@@ -392,6 +392,26 @@ CREATE TABLE IF NOT EXISTS usage_day (
   ms INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (day, uid, kind, key)
 ) STRICT, WITHOUT ROWID;
+-- (build 2026.09.24-110) More kinds in the same table, same fold:
+--   'act'  key = one word of a fixed allowlist (call, target, alert, share, csv, ask, ai-report,
+--          drawer-open, telegram-link, push-enable); n = times. Never a ticker, never text.
+--   'hr'   key = '<dow>-<hh>' in ET (dow 0 = Sunday), ms = screen time received in that hour.
+--   'perf' key = '<build>|<bucket ms>' (first markets-table paint, bucketed); n = samples.
+--   'err'  key = '<build>|<file:line>|<message hash>'; n = hits. The text lives in usage_err.
+--   'wk'   day = key = the Monday (YYYY-MM-DD) of an ET week the member was active in (any day
+--          with a minute on screen); n = 1, ms = 0. A yes/no bit, and the ONE per-member kind
+--          EXEMPT from the 30-day fold, so join-week retention can reach past the window.
+-- usage_err: one row per distinct error key, at most 200 per build; its message is truncated to
+-- 200 characters by the server and is browser-supplied, so every reader escapes it. Rows no hit
+-- has touched for the retention window go with the daily fold.
+CREATE TABLE IF NOT EXISTS usage_err (
+  key TEXT PRIMARY KEY,
+  build TEXT NOT NULL,
+  loc TEXT NOT NULL,
+  msg TEXT NOT NULL,
+  firstAt INTEGER NOT NULL,
+  lastAt INTEGER NOT NULL
+) STRICT;
 `);
 
   // ---- migration from the pair-columns schema --------------------------------------------------
@@ -1735,6 +1755,9 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       tgOk ? tgOk.px : null, tgOk ? tgOk.stop : null).lastInsertRowid);
     S.thrTouch.run(id, now, t.id);
     S.readUp.run(t.id, fromUid, id);            // your own message is read by definition
+    // (build 2026.09.24-110) Usage counters: a stamped call (any road — typed, card, applied reading),
+    // and a target on top of it. Only the count; the ticker never reaches usage_day.
+    if (ref && refPx > 0) { usageAct(fromUid, "call", now); if (tgOk) usageAct(fromUid, "target", now); }
     return { ok: true, id, thread: t.id, message: wire(S.msgById.get(id), fromUid) };
   }
 
@@ -2488,65 +2511,166 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   // rows fold into uid '0' (sitewide) and the per-member rows go.
   const USAGE_KEEP_DAYS = 30;
   const USAGE_SITE = "0";   // no real uid is one character (adoptableUid wants 12+), so it can never collide
+  // (build 2026.09.24-110) The action counters: a FIXED allowlist, counted where each feature
+  // already lives. Most are server-side (the authenticated call the action already is); csv and
+  // drawer-open happen only in the browser and ride the beacon (the server's usageClamp accepts
+  // exactly those two from it). A counter is a number per ET day — never a ticker, never text.
+  const USAGE_ACTS = ["call", "target", "alert", "share", "csv", "ask", "ai-report", "drawer-open", "telegram-link", "push-enable"];
+  const USAGE_ACT_SET = new Set(USAGE_ACTS);
+  const USAGE_ERR_CAP = 200;         // distinct error rows kept per build; the 201st new one is dropped
+  const USAGE_WK_KEEP_DAYS = 182;    // the weekly-active bits (kind 'wk'): about six months, then gone
   const US = {
     up: db.prepare(`INSERT INTO usage_day (day, uid, kind, key, n, ms) VALUES (?,?,?,?,?,?)
       ON CONFLICT(day, uid, kind, key) DO UPDATE SET n = n + excluded.n, ms = ms + excluded.ms`),
-    range: db.prepare("SELECT * FROM usage_day WHERE day >= ? AND day <= ?"),
-    rangeOf: db.prepare("SELECT * FROM usage_day WHERE uid = ? AND day >= ? AND day <= ?"),
-    // WHERE ... GROUP BY: the SELECT needs its WHERE for SQLite to parse the upsert's ON CONFLICT
+    range: db.prepare("SELECT * FROM usage_day WHERE day >= ? AND day <= ? AND kind <> 'wk'"),
+    rangeOf: db.prepare("SELECT * FROM usage_day WHERE uid = ? AND day >= ? AND day <= ? AND kind <> 'wk'"),
+    // WHERE ... GROUP BY: the SELECT needs its WHERE for SQLite to parse the upsert's ON CONFLICT.
+    // (-110) 'wk' rows are the one per-member kind the fold never touches (see the schema note).
     fold: db.prepare(`INSERT INTO usage_day (day, uid, kind, key, n, ms)
-      SELECT day, '${USAGE_SITE}', kind, key, SUM(n), SUM(ms) FROM usage_day WHERE day < ? AND uid <> '${USAGE_SITE}' GROUP BY day, kind, key
+      SELECT day, '${USAGE_SITE}', kind, key, SUM(n), SUM(ms) FROM usage_day WHERE day < ? AND uid <> '${USAGE_SITE}' AND kind <> 'wk' GROUP BY day, kind, key
       ON CONFLICT(day, uid, kind, key) DO UPDATE SET n = n + excluded.n, ms = ms + excluded.ms`),
-    drop: db.prepare(`DELETE FROM usage_day WHERE day < ? AND uid <> '${USAGE_SITE}'`),
+    drop: db.prepare(`DELETE FROM usage_day WHERE day < ? AND uid <> '${USAGE_SITE}' AND kind <> 'wk'`),
     pause: db.prepare("UPDATE user SET usagePaused = ? WHERE uid = ?"),
+    // (-110) The weekly-active bit, derived from the daily tab rows: a member is active in an ET
+    // week (Monday..Sunday) when any ONE day of it had a minute on screen — the daily rule, weekly.
+    // date(d, '-6 days', 'weekday 1') is the Monday on or before d. INSERT OR IGNORE: a bit, set once.
+    wkFill: db.prepare(`INSERT OR IGNORE INTO usage_day (day, uid, kind, key, n, ms)
+      SELECT wk, uid, 'wk', wk, 1, 0 FROM (SELECT date(day, '-6 days', 'weekday 1') AS wk, uid, SUM(ms) AS s
+        FROM usage_day WHERE kind = 'tab' AND uid <> '${USAGE_SITE}' AND day >= ? GROUP BY day, uid) WHERE s >= 60000 GROUP BY wk, uid`),
+    wkAll: db.prepare("SELECT uid, day FROM usage_day WHERE kind = 'wk'"),
+    wkMin: db.prepare("SELECT MIN(day) AS d FROM usage_day WHERE kind = 'wk'"),
+    wkDrop: db.prepare("DELETE FROM usage_day WHERE kind = 'wk' AND day < ?"),
+    errUp: db.prepare(`INSERT INTO usage_err (key, build, loc, msg, firstAt, lastAt) VALUES (?,?,?,?,?,?)
+      ON CONFLICT(key) DO UPDATE SET lastAt = MAX(lastAt, excluded.lastAt)`),
+    errAll: db.prepare("SELECT key, build, loc, msg FROM usage_err"),
+    errPrune: db.prepare("DELETE FROM usage_err WHERE lastAt < ?"),
   };
-  let usagePend = new Map(), usageGeneration = 0;
+  let usagePend = new Map(), usageErrPend = new Map(), usageGeneration = 0;
+  // build -> Set(error key): what the per-build cap counts against, pending rows included.
+  let usageErrKnown = new Map();
+  function usageErrReload() {
+    usageErrKnown = new Map();
+    const add = (b, k) => { if (!usageErrKnown.has(b)) usageErrKnown.set(b, new Set()); usageErrKnown.get(b).add(k); };
+    for (const r of US.errAll.all()) add(r.build, r.key);
+    for (const r of usageErrPend.values()) add(r.build, r.key);
+  }
+  usageErrReload();
   // Calendar arithmetic on the ET day STRING (UTC-anchored, so DST can never skip or repeat a day).
   const usageDayShift = (d, n) => new Date(Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)) + n * 864e5).toISOString().slice(0, 10);
+  // The Monday of the ET week holding day d (weeks run Monday..Sunday).
+  const usageWeekOf = (d) => usageDayShift(d, -((new Date(Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10))).getUTCDay() + 6) % 7));
   const usageToday = (now) => etDayStr(now != null ? now : Date.now());
   const usagePaused = (uid) => !!((users.get(uid) || {}).usagePaused);
+  // Stage-A data (and anything flushed before a crash) gets its weekly bits once, at open.
+  try { US.wkFill.run("0000-00-00"); } catch (_) {}
+  // (-110) The heatmap's bucket: the ET weekday (0 = Sunday) and hour the beacon ARRIVED in. A beacon
+  // carries at most two minutes, so a minute can land one hour late at an hour's edge — fine for
+  // "when are people here", and it needs no clock from the browser.
+  function usageHourKey(now) { const p = etParts(now); return p.wd + "-" + String(p.h).padStart(2, "0"); }
+  // First-paint samples are bucketed (100ms under 2s, 250ms under 5s, 1s under 30s, then one bin):
+  // percentiles come back out of the histogram at the bucket's midpoint.
+  function usagePerfBucket(ms) { const v = Math.max(0, +ms || 0); return v < 2000 ? Math.floor(v / 100) * 100 : v < 5000 ? Math.floor(v / 250) * 250 : v < 30000 ? Math.floor(v / 1000) * 1000 : 30000; }
+  const usagePerfWidth = (b) => (b < 2000 ? 100 : b < 5000 ? 250 : b < 30000 ? 1000 : 0);
+  function usagePct(hist, q) {   // hist: Map(bucket -> n)
+    const bins = [...hist].sort((a, b) => a[0] - b[0]);
+    const N = bins.reduce((s, x) => s + x[1], 0);
+    if (!N) return null;
+    let cum = 0;
+    for (const [b, n] of bins) { cum += n; if (cum >= q * N) return b + usagePerfWidth(b) / 2; }
+    return null;
+  }
   function usageAdd(uid, day, kind, key, n, ms) {
     const k = day + "\u0001" + uid + "\u0001" + kind + "\u0001" + key;
     const cur = usagePend.get(k);
     if (cur) { cur.n += n; cur.ms += ms; } else usagePend.set(k, { day, uid, kind, key, n, ms });
   }
+  // One error sighting: its key, or null when this build already holds USAGE_ERR_CAP distinct ones.
+  // e = {msg, loc} already truncated and cleaned by the server; the text is never trusted anywhere.
+  function usageErrNote(build, e, now) {
+    const key = build + "|" + e.loc + "|" + crypto.createHash("sha1").update(e.msg).digest("hex").slice(0, 12);
+    let set = usageErrKnown.get(build);
+    if (!set) { set = new Set(); usageErrKnown.set(build, set); }
+    if (!set.has(key)) { if (set.size >= USAGE_ERR_CAP) return null; set.add(key); }
+    const p = usageErrPend.get(key);
+    if (p) p.lastAt = Math.max(p.lastAt, now);
+    else usageErrPend.set(key, { key, build, loc: e.loc, msg: e.msg, firstAt: now, lastAt: now });
+    return key;
+  }
   // One accepted beacon: {tab -> ms} already validated and clamped by the server, plus the device.
-  function usageRecord(uid, tabs, dev, now) {
+  // (-110) `extra` = {acts: {csv|drawer-open -> n}, build, perf: ms|null, errs: [{msg, loc, c}]} —
+  // validated and clamped by the server too.
+  function usageRecord(uid, tabs, dev, now, extra) {
     const u = users.get(uid);
     if (!u || u.disabledAt || u.usagePaused) return { ok: true, stored: false };
-    const day = usageToday(now);
+    const t = now != null ? now : Date.now();
+    const day = usageToday(t);
     let tot = 0;
-    for (const [k, ms] of Object.entries(tabs)) { if (ms > 0) { usageAdd(uid, day, "tab", k, 1, ms); tot += ms; } }
+    for (const [k, ms] of Object.entries(tabs || {})) { if (ms > 0) { usageAdd(uid, day, "tab", k, 1, ms); tot += ms; } }
     if (tot > 0 && dev) usageAdd(uid, day, "dev", dev, 1, tot);
-    return { ok: true, stored: tot > 0, ms: tot };
+    if (tot > 0) usageAdd(uid, day, "hr", usageHourKey(t), 1, tot);
+    const x = extra || {};
+    let acts = 0, perf = 0, errs = 0, errDropped = 0;
+    for (const [k, n] of Object.entries(x.acts || {})) if (USAGE_ACT_SET.has(k) && n > 0) { usageAdd(uid, day, "act", k, n, 0); acts += n; }
+    const build = typeof x.build === "string" && x.build ? x.build : "?";
+    if (x.perf > 0) { usageAdd(uid, day, "perf", build + "|" + usagePerfBucket(x.perf), 1, Math.round(x.perf)); perf = 1; }
+    for (const e of x.errs || []) {
+      const key = usageErrNote(build, e, t);
+      if (key) { usageAdd(uid, day, "err", key, e.c, 0); errs += e.c; } else errDropped++;
+    }
+    return { ok: true, stored: tot > 0 || acts > 0 || perf > 0 || errs > 0, ms: tot, acts, perf, errs, errDropped };
+  }
+  // (-110) A server-side action counter: the call that IS the action already reached the server
+  // authenticated, so it counts here — more reliable than a beacon, and it cannot be forged by one.
+  // Paused, disabled or unknown member, or a word outside the allowlist: nothing.
+  function usageAct(uid, key, now) {
+    const u = users.get(uid);
+    if (!u || u.disabledAt || u.usagePaused || !USAGE_ACT_SET.has(key)) return false;
+    usageAdd(uid, usageToday(now), "act", key, 1, 0);
+    return true;
   }
   function usageFlush() {
-    if (!usagePend.size) return 0;
-    const rows = [...usagePend.values()];
-    usagePend = new Map();
+    if (!usagePend.size && !usageErrPend.size) return 0;
+    const rows = [...usagePend.values()], errs = [...usageErrPend.values()];
+    usagePend = new Map(); usageErrPend = new Map();
     db.exec("BEGIN IMMEDIATE");
     try {
       for (const r of rows) US.up.run(r.day, r.uid, r.kind, r.key, r.n, Math.round(r.ms));
+      for (const e of errs) US.errUp.run(e.key, e.build, e.loc, e.msg, e.firstAt, e.lastAt);
+      // (-110) the weekly bits for every week this flush touched (from the Monday of its oldest day)
+      let wkFrom = null;
+      for (const r of rows) if (r.kind === "tab" && (!wkFrom || r.day < wkFrom)) wkFrom = r.day;
+      if (wkFrom) US.wkFill.run(usageWeekOf(wkFrom));
       db.exec("COMMIT");
     } catch (e) {
       try { db.exec("ROLLBACK"); } catch (_) {}
       // put them back: a failed flush must not lose the minute it was carrying
       for (const r of rows) usageAdd(r.uid, r.day, r.kind, r.key, r.n, r.ms);
+      for (const x of errs) if (!usageErrPend.has(x.key)) usageErrPend.set(x.key, x);
       throw e;
     }
     usageGeneration++;
     return rows.length;
   }
   // Fold everything older than the window into the sitewide bucket, then drop the per-member rows.
+  // (-110) The weekly bits are filled first and survive the fold (they age out at USAGE_WK_KEEP_DAYS);
+  // error texts no hit has touched inside the window go too.
   function usageRetain(now) {
     usageFlush();
-    const cut = usageDayShift(usageToday(now), -(USAGE_KEEP_DAYS - 1));   // oldest day still kept per member
+    const t = now != null ? now : Date.now();
+    const cut = usageDayShift(usageToday(t), -(USAGE_KEEP_DAYS - 1));   // oldest day still kept per member
     db.exec("BEGIN IMMEDIATE");
-    let dropped;
-    try { US.fold.run(cut); dropped = Number(US.drop.run(cut).changes || 0); db.exec("COMMIT"); }
+    let dropped, errs;
+    try {
+      US.wkFill.run("0000-00-00");
+      US.wkDrop.run(usageDayShift(usageToday(t), -USAGE_WK_KEEP_DAYS));
+      US.fold.run(cut); dropped = Number(US.drop.run(cut).changes || 0);
+      errs = Number(US.errPrune.run(t - USAGE_KEEP_DAYS * 864e5).changes || 0);
+      db.exec("COMMIT");
+    }
     catch (e) { try { db.exec("ROLLBACK"); } catch (_) {} throw e; }
-    if (dropped) usageGeneration++;
-    return { ok: true, cut, dropped };
+    if (errs) usageErrReload();
+    if (dropped || errs) usageGeneration++;
+    return { ok: true, cut, dropped, errs };
   }
   function setUsagePaused(uid, on) {
     const u = users.get(uid);
@@ -2561,6 +2685,31 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   const usageMed = (a) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
   const USAGE_ACTIVE_MS = 60000;   // "active" = at least a minute on screen that ET day
   function usageDays(today, r) { const out = []; for (let i = r - 1; i >= 0; i--) out.push(usageDayShift(today, -i)); return out; }
+  // (-110) Retention by join week. Cohorts are the ET weeks members joined in (user.createdAt), the
+  // last `weeks` of them; cell N is the share of that week's joiners active in week N after joining
+  // (N = 0 is the join week itself), read off the 'wk' bits. A cell is null when the week has not
+  // happened yet, or ends before the first bit on record (the beacon did not exist then: "not
+  // measured", never a zero). Paused members are left out — nothing is recorded for them, and
+  // counting them as absent would be a lie about the others.
+  function usageCohorts(today, members, weeks) {
+    const thisMon = usageWeekOf(today);
+    const bits = new Map();
+    for (const r of US.wkAll.all()) { if (!bits.has(r.uid)) bits.set(r.uid, new Set()); bits.get(r.uid).add(r.day); }
+    const first = (US.wkMin.get() || {}).d || null;
+    const out = [];
+    for (let i = weeks - 1; i >= 0; i--) {
+      const mon = usageDayShift(thisMon, -7 * i);
+      const who = members.filter((u) => !u.usagePaused && usageWeekOf(etDayStr(u.createdAt || 0)) === mon);
+      const cells = [];
+      for (let n = 0; n < weeks; n++) {
+        const w = usageDayShift(mon, 7 * n);
+        if (w > thisMon || !who.length || !first || usageDayShift(w, 6) < first) { cells.push(null); continue; }
+        cells.push(who.filter((u) => (bits.get(u.uid) || new Set()).has(w)).length / who.length);
+      }
+      out.push({ mon, n: who.length, cells, cur: i });   // cells[cur] is the week in progress
+    }
+    return { weeks, since: first, keepDays: USAGE_WK_KEEP_DAYS, rows: out };
+  }
   function usageSummary(opts) {
     usageFlush();
     const o = opts || {}, now = o.now != null ? o.now : Date.now();
@@ -2574,7 +2723,12 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     const tabs = o.tabs || [];
     // per (uid, day) screen ms; per (uid, tab) ms; per tab totals; per (uid, dev) ms — current and prior
     const dayMs = new Map(), uTab = new Map(), tabMs = new Map(), tabPrev = new Map(), uDev = new Map(), uPrev = new Map();
+    // (-110) actions per key: the members who did it (in range) and the hits; the ET heat grid;
+    // first-paint histograms per build (+ the last day each build was seen); errors per key.
+    const actWho = new Map(), actHits = new Map(), heat = Array.from({ length: 7 }, () => new Array(24).fill(0));
+    const perfHist = new Map(), perfLast = new Map(), errHits = new Map(), errWho = new Map();
     const bump = (m, k, v) => m.set(k, (m.get(k) || 0) + v);
+    const addTo = (m, k, v) => { if (!m.has(k)) m.set(k, new Set()); m.get(k).add(v); };
     for (const row of US.range.all(pFrom, today)) {
       const cur = inRange.has(row.day);
       if (row.kind === "tab") {
@@ -2582,7 +2736,18 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
         if (row.uid === USAGE_SITE) continue;
         if (cur) { bump(dayMs, row.uid + "|" + row.day, row.ms); bump(uTab, row.uid + "|" + row.key, row.ms); }
         else bump(uPrev, row.uid, row.ms);
-      } else if (row.kind === "dev" && cur && row.uid !== USAGE_SITE) bump(uDev, row.uid + "|" + row.key, row.ms);
+      } else if (!cur) continue;
+      else if (row.kind === "dev" && row.uid !== USAGE_SITE) bump(uDev, row.uid + "|" + row.key, row.ms);
+      else if (row.kind === "act") { bump(actHits, row.key, row.n); if (row.uid !== USAGE_SITE) addTo(actWho, row.key, row.uid); }
+      else if (row.kind === "hr") {
+        const m = /^([0-6])-(\d\d)$/.exec(row.key);
+        if (m && +m[2] < 24) heat[+m[1]][+m[2]] += row.ms;
+      } else if (row.kind === "perf") {
+        const i = row.key.lastIndexOf("|"), b = row.key.slice(0, i), bin = +row.key.slice(i + 1);
+        if (!perfHist.has(b)) perfHist.set(b, new Map());
+        bump(perfHist.get(b), bin, row.n);
+        if (!perfLast.has(b) || perfLast.get(b) < row.day) perfLast.set(b, row.day);
+      } else if (row.kind === "err") { bump(errHits, row.key, row.n); if (row.uid !== USAGE_SITE) addTo(errWho, row.key, row.uid); }
     }
     const activeOn = new Map();   // day -> Set(uid)
     const uActive = new Map();    // uid -> {days, ms}
@@ -2625,6 +2790,26 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       return Object.assign(base, { days: a.days, minPerDay: a.days ? a.ms / a.days / 60000 : 0, top, dev,
         trend: priorKept && prev > 0 ? (curMs - prev) / prev : null });
     });
+    // (-110) Adoption: of the members ACTIVE in the range, how many did each thing at least once.
+    // Hits count everyone's (a member who acted without a minute on screen still did it).
+    const funnel = USAGE_ACTS.map((k) => ({ key: k, users: [...(actWho.get(k) || [])].filter((uid) => uActive.has(uid)).length, hits: actHits.get(k) || 0 }));
+    let heatTot = 0, core = 0, peak = null;
+    for (let d = 0; d < 7; d++) for (let h = 0; h < 24; h++) {
+      const v = heat[d][h]; heatTot += v; if (h >= 8 && h < 16) core += v;
+      if (v > 0 && (!peak || v > peak.ms)) peak = { dow: d, h, ms: v };
+    }
+    // (-110) Client health. First paint: this build against the most recently seen other one.
+    const build = o.build || null;
+    let prev = null;
+    for (const [b, last] of perfLast) if (b !== build && (!prev || last > perfLast.get(prev) || (last === perfLast.get(prev) && b > prev))) prev = b;
+    const perfOf = (b) => { const h = b && perfHist.get(b); if (!h) return null; let n = 0; for (const v of h.values()) n += v; return { build: b, n, p50: usagePct(h, 0.5), p75: usagePct(h, 0.75) }; };
+    const errText = new Map(US.errAll.all().map((e) => [e.key, e]));
+    for (const e of usageErrPend.values()) if (!errText.has(e.key)) errText.set(e.key, e);
+    const errs = [...errHits].map(([k, hits]) => {
+      const t = errText.get(k) || {};
+      const parts = k.split("|");
+      return { build: t.build || parts[0], loc: t.loc || parts[1] || "?", msg: t.msg != null ? t.msg : "(message not kept)", hits, members: (errWho.get(k) || new Set()).size };
+    }).sort((a, b) => b.hits - a.hits || b.members - a.members);
     return { ok: true, r, today, days, keepDays: USAGE_KEEP_DAYS, priorKept, gen: usageGeneration,
       kpi: { online: members.filter((u) => online.has(u.uid)).length,
         activeToday: activeOn.has(today) ? activeOn.get(today).size : 0,
@@ -2632,18 +2817,24 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
         stickiness: activeRange ? meanDaily / activeRange : null,
         medMinPerDay: usageMed(memberDayMin),
         newMembers: newMembers.length, newActive: newMembers.filter((u) => uActive.has(u.uid)).length },
-      series, tabs: tabRows, members: memberRows };
+      series, tabs: tabRows, members: memberRows,
+      funnel, heat: { ms: heat, total: heatTot, peak, coreShare: heatTot ? core / heatTot : null },
+      cohorts: usageCohorts(today, members, 8),
+      health: { build, perf: { cur: perfOf(build), prev: perfOf(prev) },
+        errors: { distinct: errs.length, hits: errs.reduce((s, e) => s + e.hits, 0), top: errs.slice(0, 5) },
+        stale: o.stale != null ? o.stale : null, errCap: USAGE_ERR_CAP } };
   }
   // One member's last USAGE_KEEP_DAYS days: minutes per day, tab mix, device mix. Shared by the
   // member's own card (usageMine) and the operator's drill-in (usageMember, which AUDITS).
   function usageDetail(u, tabs, now) {
     const today = usageToday(now), days = usageDays(today, USAGE_KEEP_DAYS);
     const label = new Map((tabs || []).map((t) => [t.key, t.label]));
-    const perDay = new Map(), tab = new Map(), dev = new Map();
-    const pend = [...usagePend.values()].filter((r) => r.uid === u.uid);
+    const perDay = new Map(), tab = new Map(), dev = new Map(), act = new Map();
+    const pend = [...usagePend.values()].filter((r) => r.uid === u.uid && r.day >= days[0]);
     for (const r of US.rangeOf.all(u.uid, days[0], today).concat(pend)) {
       if (r.kind === "tab") { perDay.set(r.day, (perDay.get(r.day) || 0) + r.ms); tab.set(r.key, (tab.get(r.key) || 0) + r.ms); }
       else if (r.kind === "dev") dev.set(r.key, (dev.get(r.key) || 0) + r.ms);
+      else if (r.kind === "act") act.set(r.key, (act.get(r.key) || 0) + r.n);   // (-110) the features row
     }
     const total = [...tab.values()].reduce((s, v) => s + v, 0);
     return { handle: u.handle, display: u.display, createdAt: u.createdAt,
@@ -2653,7 +2844,8 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       activeDays: days.filter((d) => (perDay.get(d) || 0) >= USAGE_ACTIVE_MS).length,
       ms: total,
       tabs: [...tab].sort((a, b) => b[1] - a[1]).map(([k, ms]) => ({ key: k, label: label.get(k) || k, ms, share: total ? ms / total : 0 })),
-      devices: [...dev].sort((a, b) => b[1] - a[1]).map(([k, ms]) => ({ key: k, ms })) };
+      devices: [...dev].sort((a, b) => b[1] - a[1]).map(([k, ms]) => ({ key: k, ms })),
+      acts: USAGE_ACTS.map((k) => ({ key: k, n: act.get(k) || 0 })) };
   }
   function usageMine(uid, tabs, now) {
     const u = users.get(uid);
@@ -2780,6 +2972,8 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     // usage (build 2026.09.24-109)
     usageRecord, usageFlush, usageRetain, usageSummary, usageMine, usageMember, usagePaused, setUsagePaused,
     usageGen: () => usageGeneration, usagePending: () => usagePend.size, USAGE_KEEP_DAYS,
+    // (build 2026.09.24-110) action counters, the allowlist, and the perf bucket (exported for the tests)
+    usageAct, USAGE_ACTS, USAGE_ERR_CAP, usagePerfBucket, usageHourKey,
     pendingEscalations, markEscalated,
     setPxHistory,
     // browser push subscriptions — stored here, delivered by the server (which holds the keys)

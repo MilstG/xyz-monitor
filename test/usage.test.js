@@ -45,8 +45,8 @@ test("-109 usage store: beacons roll up per (ET day, member, kind, key) in one f
   A.usageRecord(ANN, { markets: 40000 }, "desktop", now);
   A.usageRecord(BOB, { trend: 30000 }, "mobile-pwa", now);
   assert.equal(A._db.prepare("SELECT COUNT(*) AS n FROM usage_day").get().n, 0, "nothing touches SQLite on the request path");
-  assert.equal(A.usagePending(), 5, "ann: markets, trend, device; bob: trend, device");
-  assert.equal(A.usageFlush(), 5, "one row per (day, uid, kind, key)");
+  assert.equal(A.usagePending(), 7, "ann: markets, trend, device, hour; bob: trend, device, hour (the -110 heatmap row)");
+  assert.equal(A.usageFlush(), 7, "one row per (day, uid, kind, key)");
   assert.equal(A.usageGen(), g0 + 1);
   const row = A._db.prepare("SELECT * FROM usage_day WHERE uid = ? AND kind = 'tab' AND key = 'markets'").get(ANN);
   assert.equal(row.ms, 90000); assert.equal(row.n, 2); assert.equal(row.day, require("../src/compute").etDayStr(now), "day = the ET calendar day");
@@ -71,7 +71,7 @@ test("-109 usage store: rows past 30 days fold into uid '0' and the per-member r
   const site = A._db.prepare("SELECT * FROM usage_day WHERE day = ? AND uid = '0' AND kind = 'tab' AND key = 'markets'").get(old);
   assert.equal(site.ms, 90000, "summed across members"); assert.equal(site.n, 2);
   assert.equal(A._db.prepare("SELECT COUNT(*) AS n FROM usage_day WHERE day = ? AND uid <> '0'").get(old).n, 0, "per-member history past the window is gone");
-  assert.equal(A._db.prepare("SELECT COUNT(*) AS n FROM usage_day WHERE uid = ?").get(ANN).n, 4, "29 days ago and today stay per member (tab + dev each)");
+  assert.equal(A._db.prepare("SELECT COUNT(*) AS n FROM usage_day WHERE uid = ? AND kind IN ('tab','dev')").get(ANN).n, 4, "29 days ago and today stay per member (tab + dev each)");
   // idempotent: a second run folds nothing twice
   A.usageRetain(now);
   assert.equal(A._db.prepare("SELECT ms FROM usage_day WHERE day = ? AND uid = '0' AND kind = 'tab' AND key = 'markets'").get(old).ms, 90000);
@@ -88,7 +88,7 @@ test("-109 usage store: pausing stops recording from the click on, and blanks th
   const now = Date.now();
   A.usageRecord(ANN, { markets: 90000 }, "desktop", now);
   assert.equal(A.setUsagePaused(ANN, true).paused, true);
-  assert.equal(A.usagePending(), 2, "what was recorded before the click stays");
+  assert.equal(A.usagePending(), 3, "what was recorded before the click stays (tab, device, hour)");
   assert.deepEqual(A.usageRecord(ANN, { markets: 90000 }, "desktop", now), { ok: true, stored: false });
   assert.equal(A.usagePaused(ANN), true);
   const s = A.usageSummary({ r: 7, tabs: TABS, now });

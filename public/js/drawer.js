@@ -17,6 +17,7 @@ import { renderDrawerPos, savePrefs } from "./prefs.js";
 import { aiPick, openAiReport } from "./report.js";
 import { shChartCard, shSvgPng, shSvgResolve, shThemeVar } from "./share.js";
 import { EV_LABELS, fillDrawerNews, fmtAge } from "./trend.js";
+import { usageAct } from "./usage.js";
 
 
 // ===== per-ticker detail drawer =====
@@ -27,6 +28,7 @@ function comoversFor(coin, L){ const me=state.rows.get(coin); if(!me||!me.daily)
     if(a.length<20) continue; const c=pearson(a,b); if(c!=null&&isFinite(c)) res.push([r.ticker,c]); }
   res.sort((x,y)=>y[1]-x[1]); return res; }
 function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.detail=coin;
+  usageAct('drawer-open');   // (build 2026.09.24-110) counted, never which ticker — the owner decided: no ticker tracking
   // Remember the opener EVERY open (it was recorded once and never used). A re-open from inside the
   // drawer keeps the original opener: the element under the caret is about to be rebuilt.
   { const ae=document.activeElement, dr=el('drawer');

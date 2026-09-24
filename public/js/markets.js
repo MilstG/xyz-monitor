@@ -14,6 +14,7 @@ import { applyKsel } from "./nav.js";
 import { _notesLoading, loadNotes, notesStale, renderDrawerNotes, renderNotes } from "./notes.js";
 import { posDecorate, savePrefs } from "./prefs.js";
 import { sectorShort } from "./sectors.js";
+import { usageFirstPaint } from "./usage.js";
 
 
 // ===== rendering =====
@@ -799,6 +800,7 @@ function render(){
   rowRefocus(body, had);
   applyKsel();   // rebuild wipes the j/k highlight; a patch may have replaced the selected row — re-pin either way
   renderActionLists();   // the rate-of-change lists under the table describe exactly what it just rendered
+  usageFirstPaint();   // (build 2026.09.24-110) the first real table paint of this page load: the usage beacon's one perf sample
 }
 function updateMovers(){ const rows=activeRows().filter(r=>r.d1!=null&&isFinite(r.d1));
   if(rows.length<3){ el('movers').hidden=true; return; } el('movers').hidden=false;

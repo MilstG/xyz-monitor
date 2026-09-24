@@ -12378,8 +12378,13 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       muted: false, lastOk: null, lastErr: null });
     persistPush();
     log(`push: linked recipient ${name || key} (${pushMask(key)})`);
+    // (build 2026.09.24-110) The server counts it for the usage funnel ("linked Telegram") when the
+    // owner is an account; this module does not know what an account is, so it only reports.
+    if (pushLinkHook && rec.owner) { try { pushLinkHook(rec.owner); } catch (_) {} }
     return { ok: true, chat: key };
   }
+  let pushLinkHook = null;
+  function setPushLinkHook(fn) { pushLinkHook = typeof fn === "function" ? fn : null; }
   // ---- adopting an already-linked chat ---------------------------------------------------------
   // A member signs in on a terminal whose bot already messages their Telegram (linked before
   // accounts existed, or from another browser's cookie). Ownership transfers ONLY on proof of
@@ -15505,7 +15510,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     getActionable,
     getTriggers,
     getPush,
-    pushMintCode,
+    pushMintCode, setPushLinkHook,
     pushUnlink,
     pushSetClasses,
     pushTest,

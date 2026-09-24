@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.24-109";
+const VERSION = "2026.09.24-110";
 // (build 2026.09.24-107) Distinguishes this process from the last one in ETags built on
 // per-process counters (a restart must never 304 a client onto a different body).
 const BOOT_NONCE = Date.now().toString(36) + crypto.randomBytes(3).toString("hex");
@@ -808,6 +808,8 @@ async function buildServer() {
   // archive the level scanner and the sweep detector read — injected, so accounts.js never opens it.
   ACCOUNTS.setBarSource((coin, from, to) => (store.readCandles ? store.readCandles(coin, from, to) : []));
   // The digest's record is the last 30 days of CLOSED calls; the board reads the lifetime.
+  // (build 2026.09.24-110) A Telegram linked through /start CODE counts once for its account (usage funnel).
+  if (poller.setPushLinkHook) poller.setPushLinkHook((owner) => ACCOUNTS.usageAct(owner, "telegram-link"));
   if (poller.setDeskSource) poller.setDeskSource((uid) => ACCOUNTS.calls(uid, { limit: 100, windowMs: 30 * 86400e3 }));
 
   // ---- tweet preview cards ---------------------------------------------------------------------
@@ -1006,7 +1008,12 @@ async function buildServer() {
   fastify.get("/api/features", (req, reply) => {
     reply.header("cache-control", "no-store");
     if (!isAdmin(req)) return reply.code(403).send({ error: "forbidden" });
-    return poller.getFeatures(true);
+    // (build 2026.09.24-110) Each tab's 30-day reach from the Usage aggregates, for the "quiet" flag
+    // on these rows: the same numbers the Usage fold's tab table shows at 30d. Best-effort — a
+    // failure here must never cost the operator the switchboard.
+    let usage;
+    try { usage = usageReach(); } catch (_) { usage = null; }
+    return Object.assign({}, poller.getFeatures(true), { usage });
   });
   // 8 KB cap — the payload is { key, state }; anything larger is malformed or hostile (413).
   fastify.post("/api/features", { bodyLimit: 8 * 1024 }, async (req, reply) => {
@@ -1515,7 +1522,8 @@ async function buildServer() {
   // nothing else — no tickers, no search text, no filters, and the device class is derived HERE
   // from the User-Agent and stored as one of three words; the UA itself is never kept.
   // Public (signed-out) tracking is a server flag, OFF by default, and even on it only acknowledges:
-  // the anonymous-visitor bucket is not built (stage C, if ever).
+  // the anonymous-visitor bucket is deliberately NOT built (the owner decided: off; build -110 kept
+  // it that way rather than ship an id path nobody switched on).
   const USAGE_PUBLIC = process.env.USAGE_PUBLIC === "1";
   const USAGE_MIN_GAP_MS = 30000;          // one accepted beacon per member per 30s
   const USAGE_MAX_FLUSH_MS = 120000;       // a beacon never claims more than 2 min of screen time
@@ -1530,15 +1538,41 @@ async function buildServer() {
     const cls = /iPad|Tablet|PlayBook|Silk|Android(?!.*Mobile)/i.test(s) ? "tablet" : /Mobi|iPhone|iPod|Android/i.test(s) ? "mobile" : "desktop";
     return cls + (pwa === true ? "-pwa" : "");
   }
+  // (build 2026.09.24-110) The beacon's other fields, all optional, all validated here:
+  //   acts  {csv|drawer-open -> n}: the two actions that happen only in the browser. Every other
+  //         counter is incremented server-side at its own authenticated call, so the beacon may
+  //         not claim them; each count is clamped to USAGE_MAX_ACTS.
+  //   b     the build this tab runs (its first snapshot's stamp) — the stale-build count reads it.
+  //   perf  ms from navigation start to the first markets-table paint, once per page load.
+  //   errs  [{m, f, l, c}]: deduped client-side by message + file:line; the message is cut to 200
+  //         characters, the file to a same-site path (never a query string), c = hits (clamped).
+  //         Browser-supplied text: stored as data, escaped by every reader, never interpreted.
+  const USAGE_BEACON_ACTS = new Set(["csv", "drawer-open"]);
+  const USAGE_MAX_ACTS = 50, USAGE_MAX_ERRS = 5, USAGE_ERR_MSG = 200, USAGE_ERR_LOC = 120;
+  const usageBuild = new Map();            // uid -> {build, at}: the last beacon's build (in memory: an hour is the window)
+  const USAGE_STALE_MS = 3600 * 1000;
+  // Strip control characters (and the bidi/zero-width ones a hostile message would use to lie about
+  // what it says) — the text still goes through esc() everywhere it is shown.
+  // Cut by code point, not UTF-16 unit, so an emoji at the boundary is never left half a pair.
+  const usageClean = (x, n) => Array.from(String(x == null ? "" : x).slice(0, n * 2).replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, " ").replace(/\s+/g, " ").trim()).slice(0, n).join("");
+  function usageLoc(f, l) {
+    let s = String(f == null ? "" : f);
+    s = s.replace(/[?#].*$/, "").replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*/i, "");   // no query, no hash, no origin
+    s = s.replace(/[^\w\-./@~+]/g, "_").slice(-USAGE_ERR_LOC + 8) || "?";
+    const line = Math.trunc(Number(l));
+    return s + ":" + (Number.isFinite(line) && line > 0 && line < 1e7 ? line : 0);
+  }
   // Validate + clamp one beacon body against the member's last accepted beacon. Returns
-  // {tabs, pwa} (tabs possibly empty) or {error}. text/plain is what sendBeacon sends a string as.
+  // {tabs, pwa, acts, build, perf, errs} (any possibly empty) or {error}. text/plain is what
+  // sendBeacon sends a string as.
   function usageClamp(body, lastTs, now) {
     let b = body;
     if (typeof b === "string") { try { b = JSON.parse(b); } catch (_) { return { error: "bad json" }; } }
-    if (!b || typeof b !== "object" || Array.isArray(b) || !b.tabs || typeof b.tabs !== "object" || Array.isArray(b.tabs)) return { error: "bad body" };
+    if (!b || typeof b !== "object" || Array.isArray(b)) return { error: "bad body" };
+    if (b.tabs != null && (typeof b.tabs !== "object" || Array.isArray(b.tabs))) return { error: "bad body" };
     const tabs = {};
     let tot = 0;
-    for (const [k, v] of Object.entries(b.tabs)) {
+    for (const [k, v] of Object.entries(b.tabs || {})) {
       if (!USAGE_TAB_KEYS.has(k)) continue;                 // unknown view names are dropped, never stored
       const ms = Math.round(Number(v));
       if (!Number.isFinite(ms) || ms <= 0) continue;
@@ -1548,21 +1582,70 @@ async function buildServer() {
     // this member got accepted (first beacon after a boot: the 2-minute ceiling alone).
     const cap = Math.min(USAGE_MAX_FLUSH_MS, lastTs ? Math.max(0, now - lastTs) : USAGE_MAX_FLUSH_MS);
     if (tot > cap) { const f = cap / tot; for (const k of Object.keys(tabs)) tabs[k] = Math.floor(tabs[k] * f); }
-    return { tabs, pwa: b.pwa === true };
+    const acts = {};
+    if (b.acts && typeof b.acts === "object" && !Array.isArray(b.acts)) {
+      for (const [k, v] of Object.entries(b.acts)) {
+        if (!USAGE_BEACON_ACTS.has(k)) continue;            // server-side counters cannot be claimed by a beacon
+        const n = Math.trunc(Number(v));
+        if (Number.isFinite(n) && n > 0) acts[k] = Math.min(USAGE_MAX_ACTS, n);
+      }
+    }
+    const build = typeof b.b === "string" && /^[0-9A-Za-z.\-]{1,32}$/.test(b.b) ? b.b : null;
+    const pv = Math.round(Number(b.perf));
+    const perf = build && Number.isFinite(pv) && pv > 0 && pv <= 120000 ? pv : null;
+    const errs = [];
+    if (Array.isArray(b.errs)) {
+      const seen = new Set();
+      for (const e of b.errs.slice(0, USAGE_MAX_ERRS * 4)) {   // dedupe first, then keep the first five
+        if (errs.length >= USAGE_MAX_ERRS) break;
+        if (!e || typeof e !== "object") continue;
+        const msg = usageClean(e.m, USAGE_ERR_MSG) || "(no message)";
+        const loc = usageLoc(e.f, e.l);
+        const c = Math.trunc(Number(e.c));
+        const k = loc + "\u0001" + msg;
+        if (seen.has(k)) continue; seen.add(k);
+        errs.push({ msg, loc, c: Number.isFinite(c) && c > 0 ? Math.min(USAGE_MAX_ACTS, c) : 1 });
+      }
+    }
+    return { tabs, pwa: b.pwa === true, acts, build, perf, errs: build ? errs : [] };
   }
   fastify.post("/api/usage", { bodyLimit: 4 * 1024 }, (req, reply) => {
     reply.header("cache-control", "no-store");
     const me = meOf(req);
-    if (!me) return reply.code(204).send();                 // signed out: nothing is collected (USAGE_PUBLIC builds no visitor id yet)
+    if (!me) return reply.code(204).send();                 // signed out: nothing is collected (public tracking is OFF; the visitor id is deliberately not built)
     if (ACCOUNTS.usagePaused(me.uid)) return reply.code(204).send();
     const now = Date.now(), last = usageLast.get(me.uid) || 0;
     if (last && now - last < USAGE_MIN_GAP_MS) return reply.code(429).header("retry-after", String(Math.ceil((USAGE_MIN_GAP_MS - (now - last)) / 1000))).send();
     const c = usageClamp(req.body, last, now);
     if (c.error) return reply.code(400).send({ ok: false, error: c.error });
-    const r = ACCOUNTS.usageRecord(me.uid, c.tabs, usageDevice(req.headers["user-agent"], c.pwa), now);
+    if (c.build) usageBuild.set(me.uid, { build: c.build, at: now });
+    const r = ACCOUNTS.usageRecord(me.uid, c.tabs, usageDevice(req.headers["user-agent"], c.pwa), now,
+      { acts: c.acts, build: c.build, perf: c.perf, errs: c.errs });
     if (r.stored) { usageLast.set(me.uid, now); ACCOUNTS.touch(me.uid); }
     return reply.code(204).send();
   });
+  // Members whose last beacon inside the hour came from a build other than this one: tabs still
+  // running an old bundle after a deploy (the reload toast is what fixes them).
+  function usageStale(now) {
+    const t = now != null ? now : Date.now();
+    let n = 0;
+    for (const [uid, x] of usageBuild) {
+      if (t - x.at > USAGE_STALE_MS) { usageBuild.delete(uid); continue; }
+      if (x.build !== VERSION && !ACCOUNTS.usagePaused(uid)) n++;
+    }
+    return n;
+  }
+  // Reach per tab over the full 30-day window, for Admin → Feature visibility (build 2026.09.24-110).
+  // quiet = under 10% of the members active in the window opened it at all.
+  function usageReach() {
+    const s = ACCOUNTS.usageSummary({ r: ACCOUNTS.USAGE_KEEP_DAYS, tabs: USAGE_TABS() });
+    const tabs = {};
+    for (const t of s.tabs) tabs[t.key] = { users: t.users, reach: t.reach, quiet: t.reach != null && t.reach < 0.1 && s.kpi.activeRange > 0 };
+    return { r: s.r, active: s.kpi.activeRange, tabs };
+  }
+  // Server-side action counters (build 2026.09.24-110): one call per authenticated action, a no-op
+  // for a signed-out caller, a paused member or a word outside the allowlist (accounts.js decides).
+  const usageActFor = (uid, key) => { try { if (uid) ACCOUNTS.usageAct(uid, key); } catch (_) {} };
   fastify.get("/api/usage/me", (req, reply) => {
     reply.header("cache-control", "no-store");
     const me = dmMe(req, reply); if (!me) return;
@@ -1622,6 +1705,7 @@ async function buildServer() {
     const r = ACCOUNTS.webPushAdd(me.uid, b.sub, String(req.headers["user-agent"] || ""));
     if (!r.ok) return reply.code(400).send(r);
     log("browser push subscription registered for " + me.handle);
+    usageActFor(me.uid, "push-enable");   // (build 2026.09.24-110)
     return r;
   });
   // One digest to every live subscription of a member; endpoints the push service has declared
@@ -1808,6 +1892,7 @@ async function buildServer() {
       r = ACCOUNTS.send(me.uid, String(b.to || ""), cardText(v.card), coinForSymbol,
         { thread: b.thread || null, card: v.card, stampSym: b.call && v.card.t ? v.card.t : null,
           fileId: v.card.kind === "chart" ? String(b.fileId) : null });
+      if (r.ok) usageActFor(me.uid, "share");   // (build 2026.09.24-110) the count, never the card
       if (r.ok && typeof b.body === "string" && b.body.trim()) {
         const note = ACCOUNTS.send(me.uid, null, b.body, coinForSymbol, { thread: r.thread });
         r.note = note.ok ? note.message : null;
@@ -2206,10 +2291,11 @@ async function buildServer() {
     const r = Math.max(1, Math.min(ACCOUNTS.USAGE_KEEP_DAYS, Math.trunc(+one((req.query || {}).r) || 7)));
     if (ACCOUNTS.usagePending()) ACCOUNTS.usageFlush();
     const online = dmOnline();
-    const key = [BOOT_NONCE, ACCOUNTS.usageGen(), r, ACCOUNTS.countUsers(), [...online].sort().join(","), Math.floor(Date.now() / 60000)].join(".");
+    const stale = usageStale();   // (build 2026.09.24-110) in memory, so it joins the cache key
+    const key = [BOOT_NONCE, ACCOUNTS.usageGen(), r, ACCOUNTS.countUsers(), [...online].sort().join(","), stale, Math.floor(Date.now() / 60000)].join(".");
     let hit = usageBodies.get(r);
     if (!hit || hit.key !== key) {
-      const body = ACCOUNTS.usageSummary({ r, online, tabs: USAGE_TABS() });
+      const body = ACCOUNTS.usageSummary({ r, online, tabs: USAGE_TABS(), build: VERSION, stale });
       body.publicOn = USAGE_PUBLIC; body.beacon = true;
       hit = { key, body, tag: 'W/"u' + crypto.createHash("sha1").update(key).digest("base64url").slice(0, 16) + '"' };
       usageBodies.set(r, hit);
@@ -2263,6 +2349,7 @@ async function buildServer() {
     rule.thread = thread;
     const r = poller.addRule(rule, me.uid);
     if (!r.ok) return { ok: false, error: r.error === "cap" ? "you already have the maximum number of alerts \u2014 /alert off one first" : "could not set that alert (" + r.error + ")" };
+    usageActFor(me.uid, "alert");   // (build 2026.09.24-110) a rule created — from a chat, the bot or the panel below
     const line = "\ud83d\udd14 alert #" + r.rule.id + " \u00b7 " + r.rule.text + (r.rule.note ? " \u2014 " + r.rule.note : "") + " \u2192 fires " + where(thread);
     const out = { ok: true, text: line, rule: r.rule };
     if (thread) {
@@ -2727,7 +2814,7 @@ async function buildServer() {
       return reply.code(400).send({ ok: false, error: "that chat cannot be claimed" });
     if (b.code != null) {
       const r = poller.pushAdoptVerify(chat, me.uid, String(b.code || ""));
-      if (r.ok) log(`push: ${me.handle} adopted a linked Telegram (code-verified)`);
+      if (r.ok) { log(`push: ${me.handle} adopted a linked Telegram (code-verified)`); usageActFor(me.uid, "telegram-link"); }   // (build 2026.09.24-110)
       return reply.code(r.ok ? 200 : 400).send(r);
     }
     const r = poller.pushAdoptRequest(chat, me.uid);
@@ -2800,6 +2887,7 @@ async function buildServer() {
       if (!me || !ACCOUNTS.isMember(b.thread, me.uid)) return reply.code(400).send({ ok: false, error: "no such conversation" });
     }
     const r = b.del != null ? poller.deleteRule(b.del, own, isAdmin(req)) : poller.addRule(b, own);
+    if (r.ok && b.del == null) { const me = meOf(req); if (me) usageActFor(me.uid, "alert"); }   // (build 2026.09.24-110)
     return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : 400)).send(r);
   });
 
@@ -3244,6 +3332,7 @@ async function buildServer() {
     // b.coin may be a single name OR a group key (grp:sec:<sector> / grp:bkt:<T1+T2+...>) —
     // the poller routes on the prefix; caps and cooldown apply identically.
     const r = await poller.generateAiReport(String(b.coin || ""), aiWho(req, reply));
+    if (r && r.ok) { const me = meOf(req); if (me) usageActFor(me.uid, "ai-report"); }   // (build 2026.09.24-110)
     const capped = r.error === "cooldown" || r.error === "daily-cap" || r.error === "user-day-cap" || r.error === "user-month-cap";
     return reply.code(r.ok ? 200 : (capped ? 429 : 400)).send(r);
   });
@@ -3329,7 +3418,9 @@ async function buildServer() {
     // spend, that one refuses the post; an honest client is stopped here before either costs.
     if (b.ctx && b.ctx.via === "dm" && !featureVisible(poller.getFlags(), "dm.ask", isAdmin(req)))
       return reply.code(403).send({ ok: false, error: "feature-gated", feature: "dm.ask" });
-    return poller.askBoard(b.q || "", b.ctx || {}, aiWho(req, reply));
+    const r = await poller.askBoard(b.q || "", b.ctx || {}, aiWho(req, reply));
+    if (r && r.ok) { const me = meOf(req); if (me) usageActFor(me.uid, "ask"); }   // (build 2026.09.24-110) answered asks only
+    return r;
   });
   // On-demand external fundamentals for the ask terminal. Both endpoints are pull-through
   // caches over SEC EDGAR (24h TTL, 5-min error TTL) — the first ask for a name does the

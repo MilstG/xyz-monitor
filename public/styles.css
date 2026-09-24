@@ -2891,3 +2891,27 @@ tr[data-wlsep] td:first-child{position:relative} tr[data-wlsep] td:first-child::
 .dm-usage .us-kpi .v{font-size:var(--fs-lg)}
 .dm-usage .us-row{margin:0}
 .us-disc{font-family:var(--mono);font-size:var(--fs-2xs);color:var(--dim);line-height:1.5}
+/* (build 2026.09.24-110) stage B+C: heatmap, adoption funnel, join-week cohorts, features row, client health */
+.us-heatc{fill:var(--accent)}
+.us-heat{max-width:420px}
+.us-flag{font-size:var(--fs-xs);color:var(--muted);margin-top:6px;line-height:1.45}
+.us-flag b{color:var(--accent);font-weight:500}
+.us-fr{display:grid;grid-template-columns:150px minmax(0,1fr) 70px;gap:var(--sp-2);align-items:center;margin:0 0 6px;font-size:var(--fs-sm)}
+.us-fr .v{font-family:var(--mono);text-align:right;color:var(--muted)}
+.us-track{background:var(--bg);border-radius:var(--r-1);height:8px;overflow:hidden}
+.us-track span{display:block;height:100%;background:var(--up);opacity:.8}
+@media (max-width:560px){.us-fr{grid-template-columns:110px minmax(0,1fr) 56px}}
+.us-cohort{border-collapse:collapse;width:100%}
+.us-cohort th{font-family:var(--mono);font-size:var(--fs-2xs);letter-spacing:.08em;text-transform:uppercase;color:var(--dim);font-weight:500;padding:4px 6px;text-align:center}
+.us-cohort th:first-child{text-align:left}
+.us-cohort td{text-align:center;font-family:var(--mono);font-size:var(--fs-xs);padding:5px 6px}
+.us-cohort td:first-child{text-align:left;color:var(--muted);white-space:nowrap}
+.us-cohort td.na{color:var(--dim)}
+.us-cohort td.cur{outline:1px dashed var(--accent-dim);outline-offset:-2px}
+.us-acts{display:flex;flex-wrap:wrap;gap:var(--sp-1)}
+.dm-usage .us-acts{margin:0 0 var(--sp-2)}
+.us-health{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:var(--sp-2)}
+.us-hv{font-family:var(--mono);font-size:var(--fs-xl);font-weight:500}
+.us-hv .acc-mu{font-size:var(--fs-md)}
+.us-hs{font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted);overflow-wrap:anywhere}
+.us-errs td.us-emsg{white-space:normal;overflow-wrap:anywhere;min-width:220px}

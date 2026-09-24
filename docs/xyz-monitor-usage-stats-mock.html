@@ -130,10 +130,10 @@ tbody tr.sel{background:rgba(227,165,60,.07)}
 </style>
 
 <div class="mockhd">
-  <p class="eyebrow">xyz-monitor · admin · usage · proposal after build 2026.09.24-108</p>
+  <p class="eyebrow">xyz-monitor · admin · usage · built in builds 2026.09.24-109 (A) and 2026.09.24-110 (B + C)</p>
   <h1>Usage: who uses the site, and how</h1>
-  <p class="lede">A new <b>Usage</b> fold in the Admin tab. Today the only usage signal is <b><code style="font-family:var(--mono);color:var(--blue)">user.lastSeen</code></b>, and it only moves on DM, alert, push and AI calls, so someone who reads the Markets table all day looks inactive. This proposal adds a <b>small first-party beacon</b> that records <b>which tab is on screen and for how long</b>, plus counts of a short, fixed list of actions. It rolls that up into <b>daily aggregates</b> and shows the operator reach, time spent, adoption and retention. Following the site's existing rule for operator power, <b>members are told, can see their own numbers, and every per-member drill-in is audited</b>.</p>
-  <span class="mockchip">◆ mock · the prototype below runs on synthetic data, nothing is wired</span>
+  <p class="lede">A new <b>Usage</b> fold in the Admin tab. Today the only usage signal is <b><code style="font-family:var(--mono);color:var(--blue)">user.lastSeen</code></b>, and it only moves on DM, alert, push and AI calls, so someone who reads the Markets table all day looks inactive. The fold adds a <b>small first-party beacon</b> that records <b>which tab is on screen and for how long</b>, plus counts of a short, fixed list of actions. It rolls that up into <b>daily aggregates</b> and shows the operator reach, time spent, adoption and retention. Following the site's existing rule for operator power, <b>members are told, can see their own numbers, and every per-member drill-in is audited</b>.</p>
+  <span class="mockchip">◆ mock · the prototype below runs on synthetic data; the real fold lives in Admin → Usage (public/js/usageadm.js)</span>
 </div>
 
 <div class="s-sec"><span class="t">1 · The Usage fold</span> <span class="d">— sits between "Access" and "All messages". Click a member row to open their drill-in. Range and audience toggles are live.</span></div>
@@ -204,7 +204,7 @@ tbody tr.sel{background:rgba(227,165,60,.07)}
 <div class="frame member">
   <div class="card" style="max-width:640px">
     <h4>Your usage</h4>
-    <p class="sub">The operator can see this summary for every member: which tabs you open and for how long, and how many times you use a few features (calls, alerts, shares, exports). It never records what you search, which filters you set, or which tickers you look at. Viewing it is logged in the admin audit.</p>
+    <p class="sub">The operator can see this summary for every member: which tabs you open and for how long, and how many times you use a few features (calls, alerts, shares, exports), and how fast the page first loads and any JavaScript errors it hits (message and file:line). It never records what you search, which filters you set, or which tickers you look at. Viewing it is logged in the admin audit.</p>
     <div class="kpis" style="margin-top:var(--sp-2)">
       <div class="kpi"><div class="k">active days · 30d</div><div class="v">19</div></div>
       <div class="kpi"><div class="k">time on screen</div><div class="v">11.4h</div></div>
@@ -218,13 +218,13 @@ tbody tr.sel{background:rgba(227,165,60,.07)}
 <div class="notegrid">
   <div class="notecard"><h3>The beacon: visible time per tab, nothing else</h3>
     <p>The client keeps an accumulator <code>{tab → visible ms}</code>. It ticks only while <code>document.visibilityState==='visible'</code> and there was input in the last 5 minutes, so an idle wall monitor doesn't count as 8 hours. It flushes with <code>navigator.sendBeacon('/api/usage')</code> every 60s and on <code>pagehide</code>. The hook point is <code>showView</code> (<code>public/js/backtest.js</code>), which every tab switch already goes through.</p>
-    <p>Actions are a <em>fixed allowlist</em> of counters, <code>call · target · alert · share · csv · ask · ai-report · drawer-open</code>, incremented where each feature already lives. No free text, no tickers, no filter state.</p></div>
+    <p>Actions are a <em>fixed allowlist</em> of counters, <code>call · target · alert · share · csv · ask · ai-report · drawer-open · telegram-link · push-enable</code>, incremented where each feature already lives: server-side at the authenticated call wherever there is one, and on the beacon only for the two browser-only actions (CSV export, drawer open), clamped to 50 per beacon. No free text, no tickers, no filter state.</p></div>
   <div class="notecard"><h3>Storage: daily aggregates, not an event log</h3>
     <p>One table in <code>src/accounts.js</code>:</p>
-    <p><code>usage_day(day, uid, kind, key, n, ms)</code>, primary key <code>(day, uid, kind, key)</code>, where <code>kind</code> is <code>tab | act | dev | perf</code>. The server upserts in memory and flushes every 60s. At about 30 members × 25 tabs × 30 days that is roughly 23k rows, which is trivial for SQLite.</p>
+    <p><code>usage_day(day, uid, kind, key, n, ms)</code>, primary key <code>(day, uid, kind, key)</code>, where <code>kind</code> is <code>tab | dev | act | hr | perf | err | wk</code>. <code>hr</code> is the weekday × hour (ET) bucket for the heatmap; <code>wk</code> is a yes/no weekly-active bit per member, the one kind exempt from the 30-day fold (kept 26 weeks) so join-week retention can reach past the window. Error text lives in a small <code>usage_err</code> table, capped at 200 distinct errors per build. The server upserts in memory and flushes every 60s. At about 30 members × 25 tabs × 30 days that is roughly 23k rows, which is trivial for SQLite.</p>
     <p>After the retention window (<em>30 days</em>, the owner's decision) rows fold into <code>uid=0</code> sitewide totals, so the long-run tab trend survives and the per-person history does not.</p></div>
   <div class="notecard"><h3>Public visitors</h3>
-    <p>Signed-out viewers get a random id in <code>localStorage</code> (<code>uid=-1</code> bucket, id hashed server-side with a daily salt). That is enough for "distinct visitors per day" without IPs, fingerprinting or cookies that follow anyone off-site. It is off by default behind the <em>+ public</em> toggle's server flag. <em>Decided: off.</em> Build A ships the flag (<code>USAGE_PUBLIC</code>) but not the visitor id; signed-out beacons are acknowledged and dropped.</p></div>
+    <p>Signed-out viewers get a random id in <code>localStorage</code> (<code>uid=-1</code> bucket, id hashed server-side with a daily salt). That is enough for "distinct visitors per day" without IPs, fingerprinting or cookies that follow anyone off-site. It is off by default behind the <em>+ public</em> toggle's server flag. <em>Decided: off.</em> Build A ships the flag (<code>USAGE_PUBLIC</code>) but not the visitor id; signed-out beacons are acknowledged and dropped. Build C kept it that way: the id path is <em>deliberately not built</em>.</p></div>
   <div class="notecard"><h3>What the numbers mean</h3>
     <ul>
       <li><em>Active</em>: at least 60s of visible time that day (ET day, to match the rest of the site).</li>
@@ -234,7 +234,7 @@ tbody tr.sel{background:rgba(227,165,60,.07)}
       <li><em>Online now</em>: already known server-side (<code>dmOnline()</code> / SSE), so it's free.</li>
     </ul></div>
   <div class="notecard"><h3>Client health rides the same pipe</h3>
-    <p>The beacon also carries <code>perf</code> (time from navigation to the first table paint) and deduped <code>onerror</code>/<code>unhandledrejection</code> messages with file:line, keyed by build. That turns "works on my machine" into a panel. The lazy-module and 409 stale-build work from builds -103 and -108 becomes measurable instead of assumed.</p></div>
+    <p>The beacon also carries <code>perf</code> (time from navigation to the first table paint, once per page load) and deduped <code>onerror</code>/<code>unhandledrejection</code> messages (cut to 200 characters) with file:line, keyed by build, plus the build the tab runs, for the stale-build count. That turns "works on my machine" into a panel. The lazy-module and 409 stale-build work from builds -103 and -108 becomes measurable instead of assumed.</p></div>
   <div class="notecard"><h3>Cost and the event loop</h3>
     <p>With about 20 concurrent members at one beacon a minute, that's one small POST per 3s. Handling is an in-memory map increment, and the flush is one prepared-statement upsert batch inside a transaction every 60s. Reads are served through <code>sendCachedBody</code> keyed on the flush generation, like every other admin payload. No new dependencies.</p></div>
 </div>
@@ -246,7 +246,7 @@ tbody tr.sel{background:rgba(227,165,60,.07)}
   <div class="notecard"><h3>Not collected, by design</h3><p>Search text, filters, column layouts, which tickers someone looks at, and anything typed. Per-ticker interest is useful, but it is also what a member would least expect the operator to watch. If wanted, it goes in only as <em>sitewide</em> counts with no uid (see open questions).</p></div>
 </div>
 
-<div class="s-sec"><span class="t">5 · Decisions</span> <span class="d">— the owner's answers (after build -108), built into stage A (build 2026.09.24-109).</span></div>
+<div class="s-sec"><span class="t">5 · Decisions</span> <span class="d">— the owner's answers (after build -108), built into stage A (build 2026.09.24-109) and kept through B + C (build 2026.09.24-110).</span></div>
 <div class="notegrid">
   <div class="notecard q"><h3>Per-member detail, or aggregates only?</h3><p><em>Decided: per-member, audited.</em> The alternative is aggregates only, with no member table. That's more private, but you lose "who stopped coming", which is most of the value in a small invite-only group.</p></div>
   <div class="notecard q"><h3>Can members pause it?</h3><p><em>Decided: yes, visible as "paused".</em> This costs some completeness but keeps trust, and it matches the Messages disclosure tone. The alternative is disclosure only, with no opt-out.</p></div>
@@ -255,11 +255,11 @@ tbody tr.sel{background:rgba(227,165,60,.07)}
   <div class="notecard q"><h3>Retention window</h3><p><em>Decided: 30 days per member</em>, then only anonymous sitewide totals remain. 30 days is enough for "who's active"; the range toggle stops at 30d, and per-member "vs prior" is blank at 30d (the prior month is already folded). Longer cohorts run on the sitewide totals only.</p></div>
 </div>
 
-<div class="s-sec"><span class="t">6 · Build plan</span> <span class="d">— three builds, each shippable.</span></div>
+<div class="s-sec"><span class="t">6 · Build plan</span> <span class="d">— three builds, each shippable. All three are built.</span></div>
 <div class="notegrid">
-  <div class="notecard"><h3>Build A · beacon + core panel</h3><p><code>usage_day</code> table and migration, <code>POST /api/usage</code> (sendBeacon, same-origin, size-capped, one per 30s per uid), in-memory accumulate plus a 60s flush, <code>GET /api/admin/usage?r=</code>, the KPI strip, the daily active chart, the tabs table, the members table, the Account "Your usage" card (in the Messages rail: the terminal has no separate Account page), the pause toggle, the 30-day retention fold, and the disclosure. Tests: accumulator visibility and idle rules, the upsert rollup, admin-only route, and the audit write on drill-in.</p></div>
-  <div class="notecard"><h3>Build B · adoption, cohorts, heatmap</h3><p>Action counters at the existing call sites (<code>callTarget</code>, alert create, share, CSV, ask, AI report), the funnel, join-week cohorts (from <code>user.createdAt</code>, which already exists), the weekday × hour heatmap in ET. (The retention fold and the pause toggle moved into A.)</p></div>
-  <div class="notecard"><h3>Build C · client health</h3><p>Perf and error fields on the beacon, deduped by message and build, the health cards, and a "quiet tab" flag feeding Feature visibility. Optionally: public visitors and sitewide ticker interest, depending on the decisions above.</p></div>
+  <div class="notecard"><h3>Build A · beacon + core panel</h3><p><em>Built in build 2026.09.24-109.</em> <code>usage_day</code> table and migration, <code>POST /api/usage</code> (sendBeacon, same-origin, size-capped, one per 30s per uid), in-memory accumulate plus a 60s flush, <code>GET /api/admin/usage?r=</code>, the KPI strip, the daily active chart, the tabs table, the members table, the Account "Your usage" card (in the Messages rail: the terminal has no separate Account page), the pause toggle, the 30-day retention fold, and the disclosure. Tests: accumulator visibility and idle rules, the upsert rollup, admin-only route, and the audit write on drill-in.</p></div>
+  <div class="notecard"><h3>Build B · adoption, cohorts, heatmap</h3><p><em>Built in build 2026.09.24-110.</em> Action counters at the existing call sites (a stamped call or target in <code>accounts.send</code>, alert create from a chat or the panel, share, ask, AI report, Telegram link, push), CSV and drawer-open on the beacon; the adoption funnel; join-week cohorts (from <code>user.createdAt</code>, read off the weekly <code>wk</code> bit so they reach past the 30-day window); the weekday × hour heatmap in ET; the drill-in's features row.</p></div>
+  <div class="notecard"><h3>Build C · client health</h3><p><em>Built in build 2026.09.24-110.</em> Perf and error fields on the beacon, deduped by message + file:line and keyed by build; the health cards (first paint p50/p75 against the previous build, distinct errors and hits with the top error's member count, stale builds); and a "quiet tab" flag in Feature visibility. Public visitors and sitewide ticker interest were decided <em>off</em> and are not built.</p></div>
 </div>
 
 <script>

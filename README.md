@@ -542,6 +542,44 @@ instant, and the per-IP rate limit stops being a per-user problem.
   Signed-out tracking is a server flag (`USAGE_PUBLIC=1`), off, and in this build collects nothing
   even when set. Routes: `POST /api/usage`, `GET /api/usage/me`, `POST /api/usage/pause`,
   `GET /api/admin/usage?r=7|30`, `GET /api/admin/usage/member?h=`.
+- **Usage, stages B + C** (build 2026.09.24-110) — the same fold gains adoption, retention, a
+  heatmap and client health, all from the same `usage_day` aggregates:
+  - **Action counters** (`kind='act'`), a fixed allowlist: `call · target · alert · share · csv · ask ·
+    ai-report · drawer-open · telegram-link · push-enable`. Counted **server-side** wherever the action
+    already is an authenticated call (a stamped call / target in `accounts.send`, `/alert` and the
+    rules panel, a shared card, an answered ask, a generated AI report, a Telegram `/start` link or
+    adopt, a push subscription); only the two browser-only ones (a CSV export, a ticker drawer
+    opening) ride the beacon, and the server accepts exactly those two from it, clamped to 50 each.
+    A counter is a number — **never the ticker** (owner's decision: no ticker tracking). Paused
+    members count nothing on either path.
+  - **Feature adoption**: of the members active in the range, how many did each at least once.
+  - **Retention by join week**: cohorts from `user.createdAt` (ET weeks, Monday first), the share
+    of each week's joiners active in week N after joining. Because per-member daily rows fold away
+    after 30 days, activity is also kept as a **weekly-active bit** (`kind='wk'`, `day = key =` that
+    week's Monday, `n = 1`, no time): a member is active in a week when any one day had a minute on
+    screen. It is the one per-member kind **exempt from the 30-day fold**, and it is kept **26
+    weeks**, then deleted. Weeks before the first bit on record read "not measured", never 0.
+  - **When people are here**: screen time by weekday × hour in ET (`kind='hr'`, key
+    `<dow>-<hh>`, dow 0 = Sunday), bucketed by the hour the beacon arrived (DST-correct via
+    `Intl`); it folds after 30 days like the tab rows.
+  - **Client health** on the same beacon: `perf` = ms from navigation start to the first
+    markets-table paint (once per page load, only if the page was never hidden), stored as a
+    histogram per build (`kind='perf'`, key `build|bucket`) for p50/p75 against the previous
+    build; `errs` = `window.onerror` + `unhandledrejection`, deduped in the browser by message +
+    file:line, the message cut to 200 characters and control/bidi characters stripped, the file
+    reduced to this site's path (another origin reads `external`, query strings never kept), no
+    stack beyond the first frame's file:line. Stored as `kind='err'`, key `build|file:line|hash`,
+    with the text in a small `usage_err` table capped at **200 distinct errors per build** and
+    pruned when nothing hit it for 30 days. Error text is browser-supplied, so every reader
+    escapes it. **Stale builds**: members whose last beacon inside the hour came from a build
+    other than the server's `VERSION` (in memory).
+  - **"Quiet" tabs**: Admin → Feature visibility marks a tab that reached under 10% of the members
+    active in the last 30 days (same numbers as the fold's reach column; `GET /api/features` now
+    carries `usage`).
+  - The drill-in (still audited as `view-usage`) gains the member's **features row**; the member's
+    own card shows the same counters and says plainly that perf and errors are collected.
+  - **Public (signed-out) visitors stay off**, and the anonymous-visitor id path is
+    **deliberately not built** — the flag still acknowledges and drops.
 - **Admin panel folds** — the panel had grown to eight full-height boxes, so reaching the one you
   wanted meant scrolling past the seven you did not. Every segment is now a collapsed row naming
   what is inside it, with an expand-all/collapse-all control. Each fold wraps its box from

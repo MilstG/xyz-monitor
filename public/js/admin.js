@@ -20,6 +20,9 @@ import { loadPush, pushAct, pushState } from "./triggers.js";
 // rolls back on failure — a batch write would make a partial failure ambiguous, and there is no save
 // button because a draft state is another way for the panel and the server to disagree.
 let _adm=null, _admVap=false, _admBusy='';
+// (build 2026.09.24-110) Each tab's 30-day reach from the Usage aggregates (GET /api/features
+// carries it; a flag write's response does not, so it is kept apart from _adm).
+let _admReach=null;
 async function openAdmin(){ if(!IS_ADMIN) return;
   admFoldWire();
   renderAdmLoop(_lastHealth); updateFreshTray(); renderAdmin(); renderAudit(); loadAudit();
@@ -30,7 +33,7 @@ async function openAdmin(){ if(!IS_ADMIN) return;
   await loadAdmin();
   admFoldApply(); }
 async function loadAdmin(){
-  try{ _adm=await fetchJSON('/api/features'); }
+  try{ _adm=await fetchJSON('/api/features'); _admReach=_adm&&_adm.usage||null; }
   catch(e){ _adm={error:String(e&&e.message||e)}; }
   renderAdmin(); }
 // ===== admin panel: weekly classification audit =================================================
@@ -512,8 +515,12 @@ function renderAdmin(){
       ? '<span class="adm-lock" title="'+(m.pin?'Always public — this is the fallback every gated view falls through to':'Always admin — this is the panel that controls every other flag')+'">'+esc(admLabel(m.state))+' · locked</span>'
       : ['public','admin','off'].map(v=>'<button type="button" class="adm-b'+(m.state===v?' on '+v:'')+'" data-k="'+esc(m.key)+'" data-v="'+v+'"'+(_admBusy===m.key?' disabled':'')+'>'+v+'</button>').join('');
     const dim=_admVap && m.state!=='public';
+    // (build 2026.09.24-110) "quiet": fewer than 10% of the members active in the last 30 days opened
+    // this tab at all — the Usage fold's reach column, here where the gate decision is made.
+    const ru=!scope&&m.kind==='tab'&&_admReach&&_admReach.tabs?_admReach.tabs[m.key]:null;
+    const quiet=ru&&ru.quiet?' <span class="acc-chip warn adm-quiet" title="reached '+Math.round((ru.reach||0)*100)+'% of the '+(+_admReach.active||0)+' members active in the last 30 days (Usage fold)">quiet · '+Math.round((ru.reach||0)*100)+'%</span>':'';
     return '<div class="adm-row'+(scope?' adm-scope':'')+(dim?' dim':'')+'">'
-      +'<div class="adm-meta"><div class="adm-lab">'+esc(m.label)+'</div>'
+      +'<div class="adm-meta"><div class="adm-lab">'+esc(m.label)+quiet+'</div>'
       +'<div class="adm-key">'+esc(m.key)+(scope?' · filters payload rows · no route of its own':(m.routes&&m.routes.length?' · '+esc(m.routes.join(', ')):' · no route'))+'</div></div>'
       +'<div class="adm-seg">'+seg+'</div></div>';
   };

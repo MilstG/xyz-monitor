@@ -3,6 +3,10 @@
 // sitewide aggregates — not logged) and, on a member row click, GET /api/admin/usage/member?h=
 // (one member's detail — WRITTEN TO THE AUDIT LOG, shown in All messages → Read log).
 // Every handle, display name and label goes through esc(): member text is member-controlled.
+// (build 2026.09.24-110) Stage B+C sections: the ET heatmap, the adoption funnel, join-week
+// retention, the drill-in's features row, and client health. Error messages come from BROWSERS —
+// any member (or anything injected into their page) can make one say anything — so the message,
+// the file:line and the build all go through esc() like every other string here, never raw.
 import { el, esc } from "./core.js";
 
 const UA={r:7,data:null,err:null,loading:false,loadedAt:0,msort:{k:'days',d:-1},tsort:{k:'ms',d:-1},sel:null,detail:null,wired:false};
@@ -48,6 +52,83 @@ function uaSeen(m){
 }
 function uaDay(d){ try{ return new Date(d+'T12:00:00Z').toLocaleDateString('en-US',{month:'short',day:'numeric',timeZone:'UTC'}); }catch(_){ return d; } }
 
+// ---- (build 2026.09.24-110) stage B: heatmap, funnel, cohorts ---------------------------------------
+const UA_ACT_LBL={call:'made a call',target:'set a target',alert:'created an alert',share:'shared a card',csv:'exported CSV',ask:'asked the AI',
+  'ai-report':'ran an AI report','drawer-open':'opened a ticker drawer','telegram-link':'linked Telegram','push-enable':'turned on push'};
+const UA_ACT_CHIP={call:'calls',target:'targets',alert:'alerts',share:'shares',csv:'CSV exports',ask:'asks','ai-report':'AI reports',
+  'drawer-open':'drawer opens','telegram-link':'Telegram links','push-enable':'push turned on'};
+const UA_DOW=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'], UA_DOW_ORDER=[1,2,3,4,5,6,0];   // rows Monday first; the key's 0 is Sunday
+const uaHH=(h)=>String(h).padStart(2,'0');
+// Minutes on screen by ET weekday × hour over the range. Numbers only reach the markup.
+function uaHeatSvg(H){
+  const grid=(H&&H.ms)||[], cw=12, ch=19, x0=30, y0=6;
+  let mx=0; for(const r of grid) for(const v of (r||[])) if(v>mx) mx=v;
+  let g='';
+  UA_DOW_ORDER.forEach((d,row)=>{
+    g+='<text class="us-axis" x="'+(x0-5)+'" y="'+(y0+row*ch+13)+'" text-anchor="end">'+UA_DOW[d]+'</text>';
+    for(let h=0;h<24;h++){ const v=+((grid[d]||[])[h])||0, op=v>0&&mx>0?(0.12+v/mx*0.83):0.05;
+      g+='<rect class="us-heatc" x="'+(x0+h*cw)+'" y="'+(y0+row*ch)+'" width="'+(cw-1.5)+'" height="'+(ch-2)+'" rx="2" fill-opacity="'+op.toFixed(2)+'"><title>'+UA_DOW[d]+' '+uaHH(h)+':00 ET · '+Math.round(v/60000)+' min</title></rect>'; }
+  });
+  for(const h of [0,6,12,18]) g+='<text class="us-axis" x="'+(x0+h*cw)+'" y="'+(y0+7*ch+10)+'">'+uaHH(h)+'</text>';
+  return '<svg class="us-svg us-heat" viewBox="0 0 330 150" role="img" aria-label="screen time by weekday and hour, ET">'+g+'</svg>';
+}
+function uaHeatNote(H){
+  if(!H||!H.total||!H.peak) return '<div class="us-flag">nothing on screen in this range yet</div>';
+  const p=H.peak;
+  return '<div class="us-flag">peak <b>'+UA_DOW[p.dow]+' '+uaHH(p.h)+':00–'+uaHH((p.h+1)%24)+':00 ET</b> · <b>'+uaPct(H.coreShare)+'</b> of screen time is 08:00–16:00 ET</div>';
+}
+// Adoption: of the members active in the range, how many did each at least once.
+function uaFunnelHtml(D){
+  const act=(D.kpi&&D.kpi.activeRange)||0;
+  const mk=(D.tabs||[]).find(t=>t.key==='markets');
+  const rows=(mk?[{lbl:'opened Markets',users:mk.users,hits:null}]:[]).concat((D.funnel||[]).map(f=>({lbl:UA_ACT_LBL[f.key]||f.key,users:+f.users||0,hits:+f.hits||0})));
+  return rows.map(r=>{ const w=act?Math.min(100,r.users/act*100):0;
+    return '<div class="us-fr"><span>'+esc(r.lbl)+'</span><span class="us-track"><span style="width:'+w.toFixed(1)+'%"></span></span>'
+      +'<span class="v" title="'+(r.hits!=null?r.hits+' times in range, everyone counted':'members who opened it')+'">'+r.users+' · '+(act?Math.round(w)+'%':'—')+'</span></div>'; }).join('');
+}
+// Retention by join week: rows = the ET weeks members joined in, cells = share active N weeks later.
+function uaCohortHtml(C){
+  const rows=(C&&C.rows)||[], W=(C&&C.weeks)||8;
+  let h='<thead><tr><th>joined (week of)</th><th class="n">n</th>';
+  for(let w=0;w<W;w++) h+='<th class="n">w'+w+'</th>';
+  h+='</tr></thead><tbody>';
+  for(const r of rows){
+    h+='<tr><td>'+esc(uaDay(r.mon))+'</td><td class="n">'+(+r.n||0)+'</td>';
+    (r.cells||[]).forEach((v,i)=>{
+      if(v==null){ h+='<td class="na">'+(r.n&&i<=r.cur?'·':'')+'</td>'; return; }
+      const pct=Math.round(v*100);
+      h+='<td class="n'+(i===r.cur?' cur':'')+'" style="background:rgba(70,185,126,'+(v*0.55).toFixed(2)+')"'+(i===r.cur?' title="week in progress"':'')+'>'+pct+'</td>'; });
+    h+='</tr>';
+  }
+  return '<table class="us-cohort">'+h+'</tbody></table>';
+}
+// ---- (build 2026.09.24-110) stage C: client health ------------------------------------------------
+const uaSec=(ms)=>ms==null?'—':(ms/1000).toFixed(ms<10000?1:0)+'s';
+function uaHealthHtml(H){
+  if(!H) return '';
+  const P=H.perf||{}, cur=P.cur, prev=P.prev, E=H.errors||{};
+  const kc=(h4,sub,v,s)=>'<div class="us-card"><h4>'+h4+'</h4><div class="sub">'+sub+'</div><div class="us-hv">'+v+'</div><div class="us-hs">'+s+'</div></div>';
+  let perfS='no samples on this build yet';
+  if(cur){ perfS=cur.n+' page load'+(cur.n===1?'':'s');
+    if(prev&&prev.p50!=null&&cur.p50!=null){ const d=cur.p50-prev.p50;
+      perfS+=' · <span class="'+(d<=0?'pos':'neg')+'">'+(d<=0?'−':'+')+uaSec(Math.abs(d))+'</span> vs build '+esc(prev.build)+' (p50)'; }
+    else if(prev) perfS+=' · build '+esc(prev.build)+': '+uaSec(prev.p50)+' / '+uaSec(prev.p75); }
+  else if(prev) perfS='build '+esc(prev.build)+': '+uaSec(prev.p50)+' / '+uaSec(prev.p75)+' ('+prev.n+')';
+  const perf=kc('First paint → table','p50 / p75 across members, build '+esc(H.build||'?'),
+    cur?uaSec(cur.p50)+' <span class="acc-mu">/ '+uaSec(cur.p75)+'</span>':'—', perfS);
+  const top=(E.top||[])[0];
+  const errs=kc('JS errors','window.onerror + unhandledrejection, deduped by message and file:line',
+    (E.distinct||0)+' <span class="acc-mu">distinct · '+(E.hits||0)+' hits</span>',
+    top?'top: <span class="neg">'+esc(top.loc)+' · '+esc(top.msg)+'</span> · '+(+top.members||0)+' member'+(top.members===1?'':'s'):'none in range');
+  const stale=kc('Stale builds','members whose open tab runs an older build (last beacon inside the hour)',
+    H.stale==null?'—':String(H.stale), H.stale?'the new-version toast offers them the reload':'everyone online is on '+esc(H.build||'this build'));
+  const list=(E.top||[]).length?'<div class="us-tw" style="margin-top:var(--sp-2)"><table class="us-tbl us-errs"><thead><tr><th>build</th><th>file:line</th><th>message</th><th class="n">hits</th><th class="n">members</th></tr></thead><tbody>'
+    +(E.top||[]).map(e=>'<tr><td class="mono">'+esc(e.build)+'</td><td class="mono">'+esc(e.loc)+'</td><td class="us-emsg">'+esc(e.msg)+'</td><td class="n">'+(+e.hits||0)+'</td><td class="n">'+(+e.members||0)+'</td></tr>').join('')
+    +'</tbody></table></div>':'';
+  return '<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Client health</div><div class="us-health">'+perf+errs+stale+'</div>'+list
+    +'<div class="acc-note">Error text is whatever the browser reported, cut to 200 characters; at most '+(+H.errCap||200)+' distinct errors are kept per build. Public (signed-out) visitors are not tracked: the flag is off and the anonymous-visitor path is deliberately not built.</div>';
+}
+
 // ---- the daily-active chart: bars per ET day + the trailing 7-day mean ---------------------------
 function uaDauSvg(series){
   const W=640,H=150,P={l:26,r:6,t:8,b:20}, n=series.length||1;
@@ -91,7 +172,11 @@ function uaDetailHtml(){
       +(mix.length?'<div class="us-mix">'+mix.map((x,i)=>'<span class="c'+i+'" style="width:'+(x.share*100).toFixed(1)+'%"></span>').join('')+'</div>'
         +'<div class="us-mixleg">'+mix.map((x,i)=>'<span><i class="c'+i+'"></i>'+esc(x.label)+' '+Math.round(x.share*100)+'%</span>').join('')+'</div>'
         :'<div class="acc-note" style="margin:0">nothing recorded in the window</div>')
-    +'</div></div></div>';
+    +'</div></div>'
+    // (build 2026.09.24-110) the features row: this member's action counts over the window
+    +'<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-2)">features · '+(d.keepDays||30)+'d</div>'
+    +'<div class="us-acts">'+(d.acts||[]).map(a=>'<span class="acc-chip'+(a.n>0?' on':'')+'">'+esc(UA_ACT_CHIP[a.key]||a.key)+' '+(+a.n||0)+'</span>').join('')+'</div>'
+    +'</div>';
 }
 
 function uaRender(){
@@ -114,9 +199,19 @@ function uaRender(){
     +kp('stickiness',uaPct(K.stickiness),'mean daily ÷ '+D.r+'d active')
     +kp('median / day',K.medMinPerDay==null?'—':uaMin(K.medMinPerDay)+' min','per active member-day')
     +kp('new members',String(K.newMembers||0),'in range · '+(K.newActive||0)+' active')+'</div>';
-  const dau='<div class="us-card"><h4>Active people per day</h4><div class="sub">distinct members with ≥1 minute on screen that ET day</div>'
+  const dau='<div class="us-grid2"><div class="us-card"><h4>Active people per day</h4><div class="sub">distinct members with ≥1 minute on screen that ET day</div>'
     +uaDauSvg(D.series||[])
-    +'<div class="us-legend"><span><i class="c0"></i>members</span><span><i class="us-legmean"></i>7-day mean</span></div></div>';
+    +'<div class="us-legend"><span><i class="c0"></i>members</span><span><i class="us-legmean"></i>7-day mean</span></div></div>'
+    // (build 2026.09.24-110) when people are here
+    +'<div class="us-card"><h4>When people are here</h4><div class="sub">minutes on screen by weekday × hour (ET), whole range</div>'
+    +uaHeatSvg(D.heat)+uaHeatNote(D.heat)+'</div></div>';
+  const C=D.cohorts||{};
+  const adopt='<div class="us-grid2" style="margin-top:var(--sp-3)"><div class="us-card"><h4>Feature adoption</h4><div class="sub">members who did it at least once in range (of '+(K.activeRange||0)+' active)</div>'
+    +uaFunnelHtml(D)+'</div>'
+    +'<div class="us-card"><h4>Retention by join week</h4><div class="sub">% of each ET week’s new members active (a minute on screen on any day) in week N after joining; w0 is the join week</div>'
+    +'<div class="us-tw" style="border:0">'+uaCohortHtml(C)+'</div>'
+    +'<div class="us-flag">Per-member daily rows fold away after '+(D.keepDays||30)+' days; these cells read a separate yes/no-per-week bit kept '+Math.round((C.keepDays||182)/7)+' weeks'
+    +(C.since?', on record since the week of '+esc(uaDay(C.since)):'')+'. “·” = not measured (before the beacon, or a week still to come).</div></div></div>';
   const tval=(t,k)=>k==='label'?t.label.toLowerCase():k==='gate'?t.gate:t[k];
   const tRows=uaSorted(D.tabs||[],UA.tsort,tval), maxMs=Math.max(1,...(D.tabs||[]).map(t=>t.ms));
   const tabs='<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Tabs · reach and time</div>'
@@ -131,7 +226,7 @@ function uaRender(){
         +'<td class="n">'+uaMin(t.medMin)+'</td><td class="n">'+uaDelta(t.delta)+'</td>'
         +'<td><span class="acc-chip'+(t.gate==='admin'?' on':t.gate==='off'?' warn':'')+'">'+esc(t.gate)+'</span></td></tr>'; }).join('')
     +'</tbody></table></div>'
-    +'<div class="acc-note">Reach is the share of members active in the range who opened the tab at all. Under 10% gets a “quiet” flag — evidence for the gate and menu decisions in Features.'
+    +'<div class="acc-note">Reach is the share of members active in the range who opened the tab at all. Under 10% gets a “quiet” flag — evidence for the gate and menu decisions in Features (Feature visibility shows the same flag at 30 days).'
     +(D.priorKept?'':' “vs prior” compares sitewide hours with the '+D.r+' days before; per-member history older than '+(D.keepDays||30)+' days is folded away, so member trends are blank at this range.')+'</div>';
   const me=(window.__ME&&window.__ME.handle)||'';
   const mval=(m,k)=>m.paused&&k!=='handle'&&k!=='lastSeen'?null:k==='handle'?m.handle:k==='top'?null:m[k];
@@ -152,7 +247,7 @@ function uaRender(){
       +'<td class="n">'+(m.paused?'':uaDelta(m.trend))+'</td></tr>').join('')
     +'</tbody></table></div>'+uaDetailHtml()
     +'<div class="acc-note">“Lapsed” = no activity for more than 10 days. Opening a member’s detail is logged (All messages → Read log); these sitewide numbers are not. Members see their own summary, and can pause it, in Messages.</div>';
-  box.innerHTML='<div class="us-row">'+seg+chips+'</div>'+kpis+dau+tabs+members;
+  box.innerHTML='<div class="us-row">'+seg+chips+'</div>'+kpis+dau+tabs+adopt+members+uaHealthHtml(D.health);
 }
 
 function uaWire(){
@@ -170,4 +265,4 @@ function uaWire(){
   });
   box.addEventListener('keydown',(e)=>{ const row=e.target.closest&&e.target.closest('[data-uah]'); if(row&&e.key==='Enter') uaOpenMember(row.dataset.uah); });
 }
-export { UA, openUsageAdm, uaDauSvg, uaRender };
+export { UA, openUsageAdm, uaCohortHtml, uaDauSvg, uaFunnelHtml, uaHealthHtml, uaHeatSvg, uaRender };
