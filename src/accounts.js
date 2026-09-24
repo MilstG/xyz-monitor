@@ -470,6 +470,21 @@ CREATE TABLE IF NOT EXISTS usage_last (
   build TEXT NOT NULL,
   at INTEGER NOT NULL
 ) STRICT;
+-- (build 2026.09.24-113) The operator's Usage settings: the weekly digest (on/off, ET weekday) and
+-- its persisted per-ISO-week dedupe, and the opt-in lapsed-member nudge (on/off, the lead text, who
+-- turned it on — the audit rows name them). One JSON value per key; operator config, no member data.
+CREATE TABLE IF NOT EXISTS usage_cfg (
+  k TEXT PRIMARY KEY,
+  v TEXT NOT NULL
+) STRICT;
+-- (build 2026.09.24-113) The last lapsed-member nudge per member (the once-per-30-days rule). Kept 30
+-- days — the per-member retention — then deleted by the daily fold. Every nudge is ALSO a dm_audit row
+-- ('usage-nudge'), which is the log the operator reads.
+CREATE TABLE IF NOT EXISTS usage_nudge (
+  uid TEXT PRIMARY KEY,
+  at INTEGER NOT NULL,
+  via TEXT NOT NULL
+) STRICT;
 `);
 
   // ---- migration from the pair-columns schema --------------------------------------------------
@@ -2651,6 +2666,14 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     tabMin: db.prepare(`SELECT MIN(day) AS d FROM usage_day WHERE kind = 'tab' AND uid <> '${USAGE_SITE}'`),
     // (build 2026.09.24-112) the sitewide-only kinds age out at USAGE_SITE_KEEP_DAYS
     siteDrop: db.prepare(`DELETE FROM usage_day WHERE uid = '${USAGE_SITE}' AND kind IN ('tr','en','ctl','tdev') AND day < ?`),
+    // (build 2026.09.24-113) digest & nudges
+    cfgAll: db.prepare("SELECT k, v FROM usage_cfg"),
+    cfgUp: db.prepare("INSERT INTO usage_cfg (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v"),
+    actDays: db.prepare(`SELECT uid, day, SUM(ms) AS s FROM usage_day WHERE kind = 'tab' AND uid <> '${USAGE_SITE}' AND day >= ? GROUP BY uid, day`),
+    nudgeAll: db.prepare("SELECT uid, at, via FROM usage_nudge"),
+    nudgeUp: db.prepare("INSERT INTO usage_nudge (uid, at, via) VALUES (?,?,?) ON CONFLICT(uid) DO UPDATE SET at = excluded.at, via = excluded.via"),
+    nudgePrune: db.prepare("DELETE FROM usage_nudge WHERE at < ?"),
+    nudgeLog: db.prepare("SELECT uid, detail, at FROM dm_audit WHERE action = 'usage-nudge' ORDER BY id DESC LIMIT ?"),
   };
   let usagePend = new Map(), usageErrPend = new Map(), usageGeneration = 0;
   // (build 2026.09.24-110 follow-up) Every error row there is (stored or pending): key -> {build,
@@ -2961,7 +2984,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     const cut = usageDayShift(usageToday(t), -(USAGE_KEEP_DAYS - 1));   // oldest day still kept per member
     db.exec("BEGIN IMMEDIATE");
     let dropped, errs;
-    const extra = { mo: 0, marks: 0, triage: 0, site: 0 };
+    const extra = { mo: 0, marks: 0, triage: 0, site: 0, nudges: 0 };
     try {
       US.wkFill.run("0000-00-00");
       // (-110 follow-up) whole weeks: the Monday USAGE_WK_KEEP_DAYS before this week's is the oldest kept
@@ -2976,6 +2999,9 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       US.lastPrune.run(t - 864e5);
       // (-112) the sitewide paths / controls / device-per-tab rows keep 90 days
       extra.site = Number(US.siteDrop.run(usageDayShift(usageToday(t), -(USAGE_SITE_KEEP_DAYS - 1))).changes || 0);
+      // (build 2026.09.24-113) the last-nudge rows keep the per-member window (30 days), which is all
+      // the once-per-30-days rule needs; the audit rows are the log and stay like every other one
+      extra.nudges = Number(US.nudgePrune.run(t - USAGE_KEEP_DAYS * 864e5).changes || 0);
       const sigs = new Set(US.errAll.all().map((e) => usageSig(e.key)));
       for (const r of US.triAll.all()) if (!sigs.has(r.sig)) { US.triDel.run(r.sig); extra.triage++; }
       db.exec("COMMIT");
@@ -3453,7 +3479,8 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   function usageMine(uid, tabs, now) {
     const u = users.get(uid);
     if (!u) return { ok: false, error: "no such account" };
-    return Object.assign({ ok: true }, usageDetail(u, tabs, now));
+    // (build 2026.09.24-113) whether the operator has lapsed-member reminders switched on, for the card
+    return Object.assign({ ok: true }, usageDetail(u, tabs, now), { nudgeOn: !!usageCfg().nudgeOn });
   }
   function usageMember(adminUid, handle, tabs, now) {
     const u = getUserByHandle(handle);
@@ -3464,6 +3491,134 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     if (u.usagePaused) return { ok: true, handle: d.handle, display: d.display, createdAt: d.createdAt, invitedBy: d.invitedBy, paused: true, keepDays: USAGE_KEEP_DAYS };
     return Object.assign({ ok: true }, d);
   }
+
+  // ---- (build 2026.09.24-113) the weekly operator digest and the opt-in lapsed-member nudge ----------
+  // Settings live in usage_cfg (one JSON value per key). Defaults: digest ON, Monday (ET weekday 1);
+  // nudges OFF. digestWeek/digestAt are the digest's persisted dedupe — a restart never re-sends a week.
+  const USAGE_CFG_DEFAULT = Object.freeze({ digestOn: true, digestDay: 1, digestWeek: null, digestAt: null,
+    nudgeOn: false, nudgeText: null, nudgeBy: null, nudgeSetAt: null });
+  let _usageDigestMod = null;
+  const usageDigestMod = () => (_usageDigestMod = _usageDigestMod || require("./usage-digest"));
+  function usageCfg() {
+    const out = Object.assign({}, USAGE_CFG_DEFAULT);
+    for (const r of US.cfgAll.all()) {
+      if (!Object.prototype.hasOwnProperty.call(USAGE_CFG_DEFAULT, r.k)) continue;
+      try { out[r.k] = JSON.parse(r.v); } catch (_) {}
+    }
+    return out;
+  }
+  // The operator's write: validated field by field, all-or-nothing. `byUid` is the admin making it —
+  // switching nudges on records who did, and that uid is the actor on every 'usage-nudge' audit row.
+  function usageCfgSet(patch, byUid, now) {
+    const p = patch && typeof patch === "object" ? patch : {}, w = {}, M = usageDigestMod();
+    if ("digestOn" in p) { if (typeof p.digestOn !== "boolean") return { ok: false, error: "digestOn must be true or false" }; w.digestOn = p.digestOn; }
+    if ("digestDay" in p) { if (!Number.isInteger(p.digestDay) || p.digestDay < 0 || p.digestDay > 6) return { ok: false, error: "digestDay must be 0 (Sunday) to 6 (Saturday)" }; w.digestDay = p.digestDay; }
+    if ("nudgeOn" in p) { if (typeof p.nudgeOn !== "boolean") return { ok: false, error: "nudgeOn must be true or false" }; w.nudgeOn = p.nudgeOn; }
+    if ("nudgeText" in p) {
+      if (p.nudgeText != null && typeof p.nudgeText !== "string") return { ok: false, error: "nudgeText must be text" };
+      const blank = p.nudgeText == null || !p.nudgeText.trim();
+      const t = blank ? null : M.nudgeTextClean(p.nudgeText);
+      if (!blank && t == null) return { ok: false, error: "reminder text is at most " + M.NUDGE_TEXT_MAX + " characters" };
+      w.nudgeText = t === M.NUDGE_DEFAULT_TEXT ? null : t;
+    }
+    if (w.nudgeOn === true && !usageCfg().nudgeOn) { w.nudgeBy = byUid || null; w.nudgeSetAt = now != null ? now : Date.now(); }
+    db.exec("BEGIN IMMEDIATE");
+    try { for (const [k, v] of Object.entries(w)) US.cfgUp.run(k, JSON.stringify(v)); db.exec("COMMIT"); }
+    catch (e) { try { db.exec("ROLLBACK"); } catch (_) {} throw e; }
+    return Object.assign({ ok: true }, usageCfg());
+  }
+  // The dedupe write, kept apart from the operator's settings path (it is not a setting).
+  function usageDigestSent(week, at) { US.cfgUp.run("digestWeek", JSON.stringify(String(week))); US.cfgUp.run("digestAt", JSON.stringify(+at)); return usageCfg(); }
+  // The digest's numbers for scheduled ET day D (o.day): this week = D-7..D-1 against last week =
+  // D-14..D-8, both inside the 30-day per-member window. Paused members are left out of every set and
+  // only counted ("N paused") — never named, as lapsed or anything else. Disabled accounts are not
+  // members here at all. o.tabs = the manifest's tabs [{key, label, gate}]; o.build = this build.
+  function usageDigestData(o) {
+    usageFlush();
+    const opt = o || {}, now = opt.now != null ? opt.now : Date.now();
+    const D = opt.day || usageToday(now);
+    const { a, b } = usageDigestMod().digestWindows(D);
+    const members = [...users.values()].filter((u) => !u.disabledAt);
+    const paused = members.filter((u) => u.usagePaused).length;
+    const live = new Map(members.filter((u) => !u.usagePaused).map((u) => [u.uid, u]));
+    const perDay = new Map(), tabA = new Map(), tabB = new Map(), uTabA = new Map();
+    const bump = (m, k, v) => m.set(k, (m.get(k) || 0) + v);
+    for (const r of US.range.all(b.from, D)) {
+      if (r.kind !== "tab") continue;
+      if (r.day <= b.to) bump(tabB, r.key, r.ms); else if (r.day <= a.to) bump(tabA, r.key, r.ms);
+      if (r.uid === USAGE_SITE) continue;
+      bump(perDay, r.uid + "|" + r.day, r.ms);
+      if (r.day >= a.from && r.day <= a.to) bump(uTabA, r.uid + "|" + r.key, r.ms);
+    }
+    const activeA = new Set(), activeB = new Set(), activeD = new Set(), daily = new Map();
+    for (const [k, ms] of perDay) {
+      if (ms < USAGE_ACTIVE_MS) continue;
+      const i = k.indexOf("|"), uid = k.slice(0, i), day = k.slice(i + 1);
+      if (!live.has(uid)) continue;
+      if (day > a.to) activeD.add(uid);
+      else if (day >= a.from) { activeA.add(uid); bump(daily, day, 1); }
+      else activeB.add(uid);
+    }
+    let sumDaily = 0;
+    for (const n of daily.values()) sumDaily += n;
+    const person = (uid) => { const u = live.get(uid); return { handle: u.handle, display: u.display || u.handle }; };
+    const low = (x) => String(x.display).toLowerCase();
+    const byName = (x, y) => (low(x) < low(y) ? -1 : low(x) > low(y) ? 1 : 0);
+    // newly lapsed: active last week, not one active day this week (≥ 7 days) — and not back today either
+    const lapsed = [...activeB].filter((uid) => !activeA.has(uid) && !activeD.has(uid)).map(person).sort(byName);
+    // returning: active this week, not last week, and a member since before last week began
+    const returning = [...activeA].filter((uid) => !activeB.has(uid) && etDayStr(live.get(uid).createdAt || 0) < b.from).map(person).sort(byName);
+    const joined = members.filter((u) => { const c = etDayStr(u.createdAt || 0); return c >= a.from && c <= a.to; });
+    const tabs = (opt.tabs || []).map((t) => {
+      let n = 0;
+      for (const uid of activeA) if ((uTabA.get(uid + "|" + t.key) || 0) > 0) n++;
+      return { key: t.key, label: t.label, gate: t.gate, ms: tabA.get(t.key) || 0, prevMs: tabB.get(t.key) || 0, reach: activeA.size ? n / activeA.size : null };
+    });
+    const top = tabs.filter((t) => t.ms > 0).sort((x, y) => y.ms - x.ms).slice(0, 3);
+    // biggest mover: the largest change in screen time among tabs with ≥ 10 minutes in either week
+    const movers = tabs.filter((t) => Math.max(t.ms, t.prevMs) >= 10 * 60000).sort((x, y) => Math.abs(y.ms - y.prevMs) - Math.abs(x.ms - x.prevMs));
+    const mover = movers.length && movers[0].ms !== movers[0].prevMs ? movers[0] : null;
+    // quiet: member-visible tabs (not switched off, not admin-only) opened by < 10% of this week's actives
+    const quiet = activeA.size ? tabs.filter((t) => t.gate !== "off" && t.gate !== "admin" && t.reach < 0.1).sort((x, y) => x.reach - y.reach || y.ms - x.ms) : [];
+    // errors, from the triage list: new = first seen this week (or since) and still open; regressed = reopened and open
+    const tri = usageTriage(now);
+    const pick = (e) => ({ loc: e.loc, msg: e.msg, members: e.members, hits: e.hits, build: e.lastBuild });
+    const fresh = tri.rows.filter((e) => !e.resolved && !e.regressed && etDayStr(e.firstAt) >= a.from).map(pick);
+    const regressed = tri.rows.filter((e) => e.regressed && !e.resolved).map(pick);
+    return { day: D, week: usageDigestMod().digestWeekKey(D), a, b,
+      members: { total: members.length, paused, active: activeA.size, activePrev: activeB.size,
+        stickiness: activeA.size ? sumDaily / 7 / activeA.size : null, newJoined: joined.length,
+        newActive: joined.filter((u) => activeA.has(u.uid)).length },
+      lapsed, returning, tabs: { top, mover, quiet: quiet.map((t) => ({ key: t.key, label: t.label, reach: t.reach })) },
+      errors: { fresh, regressed, open: tri.open }, verdict: opt.build ? usageRegress(opt.build, now) : null };
+  }
+  // Per member, the inputs of the nudge rules (usage-digest.js nudgeCheck) minus the channels (the
+  // server knows those): the last active ET day inside the window, last seen, the last nudge.
+  function usageNudgeInputs(now) {
+    usageFlush();
+    const t = now != null ? now : Date.now();
+    const act = new Map();
+    for (const r of US.actDays.all(usageDayShift(usageToday(t), -(USAGE_KEEP_DAYS - 1)))) {
+      if (r.s < USAGE_ACTIVE_MS) continue;
+      if (!act.has(r.uid) || r.day > act.get(r.uid)) act.set(r.uid, r.day);
+    }
+    const last = new Map(US.nudgeAll.all().map((r) => [r.uid, r.at]));
+    return [...users.values()].map((u) => ({ uid: u.uid, handle: u.handle, display: u.display || u.handle,
+      disabled: !!u.disabledAt, paused: !!u.usagePaused, admin: !!u.isAdmin, lastActive: act.get(u.uid) || null,
+      lastSeen: u.lastSeen || 0, lastNudgeAt: last.has(u.uid) ? last.get(u.uid) : null }));
+  }
+  // A nudge that went out: the 30-day row, and the audit row (actor = the admin who switched nudges
+  // on, or 'system'; detail = '<handle> · <telegram|push>') — the log the fold shows.
+  function usageNudgeMark(uid, via, byUid, now) {
+    const u = users.get(uid);
+    if (!u) return { ok: false, error: "no such account" };
+    const t = now != null ? now : Date.now();
+    US.nudgeUp.run(uid, t, String(via));
+    try { S.auditAdd.run(byUid || "system", "usage-nudge", null, u.handle + " · " + via, t); } catch (_) {}
+    return { ok: true };
+  }
+  const usageNudgeLog = (limit) => US.nudgeLog.all(Math.trunc(Math.min(Math.max(+limit || 50, 1), 200)))
+    .map((r) => ({ at: r.at, by: (users.get(r.uid) || {}).display || r.uid, detail: r.detail }));
 
   // ---- backup + close --------------------------------------------------------------------------
   // accounts.db is the one file on the volume with no other copy anywhere: users, password hashes,
@@ -3582,6 +3737,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     USAGE_ERR_TOTAL, USAGE_ERR_NEW_PER_DAY, USAGE_WK_KEEP_DAYS, USAGE_PREV_MIN_N,
     // (build 2026.09.24-111) markers, the regression check, error triage, stale builds, monthly rows
     usageMark, usageAlertOnce, usageBuildInfo, usageRegress, usageTriage, usageTriageSet, usageTriageSweep,
+    usageCfg, usageCfgSet, usageDigestSent, usageDigestData, usageNudgeInputs, usageNudgeMark, usageNudgeLog,   // (build 2026.09.24-113)
     usageLastBuild, usageStale, usageSig, USAGE_REG, USAGE_MARK_KEEP_DAYS, USAGE_MO_KEEP, USAGE_LOADS_PER_DAY,
     // (build 2026.09.24-112) the sitewide-only kinds' bounds
     USAGE_SITE_KEEP_DAYS, USAGE_SITE_PER_DAY, usageDevClass,

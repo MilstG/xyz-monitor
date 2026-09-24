@@ -15559,6 +15559,10 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     // why an account reuses its xyzown handle as its id.
     pushRecipientsFor: (owner) => [...pushRecipients.values()]
       .filter((r) => r.owner === owner && !r.muted).map((r) => r.chat),
+    // (build 2026.09.24-113) The DESIGNATED operator chats (rec.admin, not muted) — the same set the
+    // brief's operator test fire targets — for the weekly usage digest. Empty while push is off.
+    pushOperatorChatsNow: () => (pushOn() ? testTargets(null, "", true, true) : []),
+    pushOnNow: () => pushOn(),
     // Adopt flow: offer chats the bot already serves to the signed-in member they belong to,
     // transfer only on a code typed back from inside that chat.
     pushAdoptRequest, pushAdoptVerify, pushAdoptRoster,

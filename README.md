@@ -679,6 +679,47 @@ instant, and the per-IP rate limit stops being a per-user problem.
   - Disclosed on the member's card, in the member guide and here: sitewide (not linked to you)
     navigation paths and control-usage counts; never text, tickers or filter values beyond the
     allowlisted preset ids.
+- **Usage: weekly operator digest and opt-in lapsed-member nudges** (build 2026.09.24-113) —
+  roadmap item 3. Pure composition and rules in `src/usage-digest.js`; data in `accounts.js`
+  (`usageDigestData`, `usageNudgeInputs`); delivery in `server.js` (`usageDigestTick`, on main()'s
+  60s usage flush).
+  - **Weekly digest to the operator**: on the configured **ET weekday** (default **Monday**), once
+    the morning brief's default send moment (`BRIEF_DEFAULT_HOUR`:00 UTC on that date) has passed,
+    one compact Telegram message goes to the **designated operator chats** (the Telegram roster's
+    operator flag — the brief's operator-test targets), force-sent like the brief, plus a quiet
+    ops-ring entry. It covers the **7 complete ET days before the scheduled day vs the 7 before
+    those**: active members this week vs last, stickiness (mean daily active ÷ weekly active),
+    **newly lapsed** (active last week, no active day this week — ≥ 7 days), **returning** (active
+    this week, not last week, a member since before last week), new joiners, **"N paused"** (paused
+    members are left out of every set and never named), the top 3 tabs by screen time with the
+    week-over-week change, the **biggest mover** (largest change among tabs with ≥ 10 min in either
+    week), **quiet** member-visible tabs (< 10% reach), **new / regressed errors** from the triage
+    list (open only; file:line and message clipped and escaped) and the **current build's
+    post-deploy verdict**. Every dynamic string is HTML-escaped for Telegram's `parse_mode=HTML`; a
+    ladder (names 10 → 5 → 2 → counts only, error lines 2 → 1 → 0, quiet tabs 6 → 3 → a count, then
+    whole lines from the end) keeps it under **3,900 visible characters** (Telegram's hard limit is
+    4,096). The **dedupe is per ISO week** (`usage_cfg.digestWeek`, persisted — a restart never
+    re-sends); a missed day catches up later in the same week, never the next; with no operator
+    chat designated nothing is marked. Settings (on/off, weekday) are persisted in `usage_cfg`.
+  - **Lapsed-member nudge — OFF by default**: when the operator turns it on, once an hour between
+    10:00 and 18:00 ET, a member whose last active ET day (≥ a minute on screen) is **8–14 days
+    ago** — active in the prior 14 days, then 7 full days with none — and whom the server has not
+    seen for 7 days gets **one** friendly reminder: the operator's lead line (default "Haven't seen
+    you in a week — here's what moved:", ≤ 300 characters, plain text) plus 2–3 market lines from
+    the brief's own context (the benchmarks' day and the top stock mover each way — no personal
+    data). **At most once per 30 days** per member (`usage_nudge`, one row per member, pruned at 30
+    days); **never** to paused, disabled or operator accounts; only over the channel the member
+    already has — their own linked Telegram (queued normally, so their quiet hours and hourly cap
+    apply), else browser push; **never email or SMS; nothing if neither**. Each reminder is a
+    `dm_audit` row `usage-nudge` (actor = the admin who switched reminders on; detail =
+    `<handle> · telegram|push`), shown in All messages → Read log and in the fold's log.
+  - **Admin · Usage · Digest & nudges**: the settings, last sent, this week's schedule, a preview of
+    this week's digest (plain text, escaped), **send test now** (`POST /api/admin/usage/digest/test`
+    — admin-only; operator chats only; does not count as the week's send), the reminder toggle and
+    text, and the reminder log. `GET/POST /api/admin/usage/digest` are admin-only.
+  - Disclosed on the member's **Your usage** card (which says whether reminders are on), in the
+    member guide and here: an inactive member may get one reminder if the operator turns it on;
+    pausing usage opts out.
 - **Admin panel folds** — the panel had grown to eight full-height boxes, so reaching the one you
   wanted meant scrolling past the seven you did not. Every segment is now a collapsed row naming
   what is inside it, with an expand-all/collapse-all control. Each fold wraps its box from

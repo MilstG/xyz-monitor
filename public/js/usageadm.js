@@ -15,11 +15,17 @@
 // "where people go from X", entry tabs) with a READ-ONLY suggested nav order; control usage per tab
 // with "never used in range" highlighted and the quiet-controls list; time per tab by device class.
 // Tab labels, control keys and values all come from the payload and still go through esc().
+// (build 2026.09.24-113) "Digest & nudges": the weekly operator digest's settings (on/off, ET weekday),
+// last sent, this week's schedule and a PREVIEW of its text (plain text from the server — member display
+// names and browser-supplied error messages in it, so it goes through esc() like everything else), the
+// "send test now" button, the opt-in lapsed-member nudge (toggle + the lead text) and the nudge log (the
+// dm_audit 'usage-nudge' rows). Reads GET /api/admin/usage/digest; writes POST …/digest and …/digest/test.
 import { el, esc } from "./core.js";
 
 const UA={r:7,data:null,err:null,loading:false,loadedAt:0,msort:{k:'days',d:-1},tsort:{k:'ms',d:-1},sel:null,detail:null,wired:false,
   triBusy:null,triErr:null,   // (-111) the triage toggle in flight, and its last error
-  pathTab:null,ctlTab:null};   // (-112) the tab picked for "where people go from X", and for its controls
+  pathTab:null,ctlTab:null,   // (-112) the tab picked for "where people go from X", and for its controls
+  dg:{data:null,err:null,busy:null,msg:null,draft:null}};   // (-113) digest & nudges: payload, error, action in flight, last result, unsaved reminder text
 const UA_STALE_MS=60000;
 
 async function uaLoad(){
@@ -30,6 +36,30 @@ async function uaLoad(){
     UA.data=await r.json(); UA.err=null; UA.loadedAt=Date.now();
   }catch(e){ UA.err=String(e&&e.message||e); }
   UA.loading=false; uaRender();
+  uaDgLoad();   // (-113) the digest & nudges sub-section rides every refresh
+}
+// ---- (build 2026.09.24-113) digest & nudges ------------------------------------------------------------
+async function uaDgLoad(){
+  try{
+    const r=await fetch('/api/admin/usage/digest',{headers:{accept:'application/json'}});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(d.error||('HTTP '+r.status));
+    UA.dg.data=d; UA.dg.err=null;
+  }catch(e){ UA.dg.err=String(e&&e.message||e); }
+  uaRender();
+}
+async function uaDgPost(url,body,what){
+  if(UA.dg.busy) return;
+  UA.dg.busy=what; UA.dg.msg=null; uaRender();
+  try{
+    const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify(body||{})});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok||d.ok===false) UA.dg.msg={bad:true,text:d.error||('HTTP '+r.status)};
+    else if(what==='test') UA.dg.msg={bad:false,text:'sent to '+(+d.sent||0)+' operator chat'+(d.sent===1?'':'s')+' · '+(+d.chars||0)+' chars'};
+    else { UA.dg.data=d; UA.dg.msg={bad:false,text:'saved'}; if(what==='text') UA.dg.draft=null; }
+  }catch(e){ UA.dg.msg={bad:true,text:String(e&&e.message||e)}; }
+  UA.dg.busy=null;
+  if(what==='test') await uaDgLoad(); else uaRender();
 }
 async function uaOpenMember(h){
   if(UA.sel===h){ UA.sel=null; UA.detail=null; uaRender(); return; }
@@ -345,6 +375,41 @@ function uaDetailHtml(){
     +'</div>';
 }
 
+const UA_DAYS=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+const uaAgo=(ms)=>{ if(!ms) return 'never'; const h=(Date.now()-ms)/3600000; return h<1?Math.max(1,Math.round(h*60))+'m ago':h<48?Math.round(h)+'h ago':Math.round(h/24)+'d ago'; };
+function uaDigestHtml(){
+  const G=UA.dg, d=G.data;
+  const head='<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Digest &amp; nudges</div>';
+  if(!d) return head+'<div class="acc-note" style="margin:0">'+(G.err?'could not load — '+esc(G.err):'loading…')+'</div>';
+  const S=d.schedule||{}, P=d.preview||{}, busy=!!G.busy;
+  const chan=!d.pushOn?'<span class="neg">Telegram is not configured — nothing can be sent</span>'
+    :(+d.operators||0)?(+d.operators)+' operator chat'+(d.operators===1?'':'s')+' (the Telegram roster’s operator designation)':'<span class="neg">no operator chat designated — mark one on the Telegram roster</span>';
+  const dig='<div class="us-card"><h4>Weekly usage digest</h4><div class="sub">to the operator, once per ISO week, after the morning brief’s default hour ('+String(+S.briefHourUtc||0).padStart(2,'0')+':00 UTC) on the chosen ET weekday</div>'
+    +'<div class="us-row" style="flex-wrap:wrap;gap:var(--sp-2)"><label><input type="checkbox" data-uadg="digestOn"'+(d.digestOn?' checked':'')+(busy?' disabled':'')+'> send the weekly digest</label>'
+    +'<label>on <select data-uadg="digestDay"'+(busy?' disabled':'')+'>'+UA_DAYS.map((n,i)=>'<option value="'+i+'"'+(i===d.digestDay?' selected':'')+'>'+n+'</option>').join('')+'</select></label>'
+    +'<button type="button" class="btn" data-uadgtest="1"'+(busy||!d.pushOn||!d.operators?' disabled':'')+'>'+(G.busy==='test'?'…':'send test now')+'</button></div>'
+    +'<div class="acc-note" style="margin:var(--sp-1) 0 0">last sent: <b>'+esc(d.lastAt?uaWhen(d.lastAt)+' ('+uaAgo(d.lastAt)+') · '+(d.lastWeek||''):'never')+'</b>'
+    +' · this week ('+esc(S.week||'')+'): '+(!d.digestOn?'off':S.sentThisWeek?'sent':S.due?'due now':'due '+esc(uaDay(S.day||'')))+' · to '+chan+'</div>'
+    +'<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-2)">Preview · '+esc(P.week||'')+' · '+(+P.chars||0)+' of '+(+P.limit||4096)+' chars</div>'
+    +'<pre class="us-dgpre" style="white-space:pre-wrap;margin:0;max-height:22em;overflow:auto">'+esc(P.text||'')+'</pre>'
+    +'<div class="acc-note">Names are members’ display names; paused members are only counted, never named. The test goes to the same operator chats now and does not count as this week’s send.</div></div>';
+  const R=d.rules||{}, text=G.draft!=null?G.draft:(d.nudgeText||'');
+  const log=(d.nudgeLog||[]);
+  const nud='<div class="us-card"><h4>Lapsed-member reminder</h4><div class="sub">optional, off by default: one friendly reminder to a member active in the prior '+(+R.recentDays||14)+' days who then goes '+(+R.quietDays||7)+' days without activity — at most once per '+(+R.everyDays||30)+' days, never to paused, disabled or operator accounts, only over the channel they already have (their linked Telegram, else browser push; none → skipped). Sent 10:00–18:00 ET.</div>'
+    +'<div class="us-row" style="flex-wrap:wrap;gap:var(--sp-2)"><label><input type="checkbox" data-uadg="nudgeOn"'+(d.nudgeOn?' checked':'')+(busy?' disabled':'')+'> send reminders</label>'
+    +(d.nudgeOn&&d.nudgeSince?'<span class="acc-chip on">on since '+esc(uaWhen(d.nudgeSince))+'</span>':'<span class="acc-chip">off</span>')+'</div>'
+    +'<label class="acc-note" style="display:block;margin:var(--sp-1) 0 0">reminder text (then 2–3 market lines — benchmarks and the day’s top movers; nothing personal)</label>'
+    +'<textarea data-uadgtext="1" rows="2" maxlength="'+(+d.nudgeMax||300)+'" style="width:100%;box-sizing:border-box"'+(busy?' disabled':'')+'>'+esc(text)+'</textarea>'
+    +'<div class="us-row" style="gap:var(--sp-2)"><button type="button" class="btn" data-uadgsave="1"'+(busy?' disabled':'')+'>'+(G.busy==='text'?'…':'save text')+'</button>'
+    +'<button type="button" class="btn" data-uadgreset="1"'+(busy?' disabled':'')+'>default</button></div>'
+    +'<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-2)">Reminders sent · '+log.length+'</div>'
+    +(log.length?'<div class="us-tw"><table class="us-tbl us-nudges"><thead><tr><th>when</th><th>member · channel</th><th>switched on by</th></tr></thead><tbody>'
+      +log.map(x=>'<tr><td class="mono">'+esc(uaWhen(x.at))+'</td><td>'+esc(x.detail)+'</td><td class="acc-mu">'+esc(x.by)+'</td></tr>').join('')+'</tbody></table></div>'
+      :'<div class="acc-note" style="margin:0">none yet</div>')
+    +'<div class="acc-note">Every reminder is written to the audit log as “usage-nudge” (All messages → Read log). Members are told in their Your usage card that the operator may turn this on, and that pausing usage opts them out.</div></div>';
+  return head+(G.msg?'<div class="acc-note '+(G.msg.bad?'neg':'pos')+'" style="margin:0 0 var(--sp-1)">'+esc(G.msg.text)+'</div>':'')+'<div class="us-grid2">'+dig+nud+'</div>';
+}
+
 function uaRender(){
   const box=el('admUsageBox'); if(!box) return;
   const sub=el('admUsageSub');
@@ -414,7 +479,7 @@ function uaRender(){
       +'<td class="n">'+(m.paused?'':uaDelta(m.trend))+'</td></tr>').join('')
     +'</tbody></table></div>'+uaDetailHtml()
     +'<div class="acc-note">“Lapsed” = no activity for more than 10 days. Opening a member’s detail is logged (All messages → Read log); these sitewide numbers are not. Members see their own summary, and can pause it, in Messages.</div>';
-  box.innerHTML='<div class="us-row">'+seg+chips+'</div>'+kpis+dau+uaMarksHtml(D)+tabs+uaSiteHtml(D)+adopt+members+uaHealthHtml(D.health);   // (-112) the sitewide sections after the tab table
+  box.innerHTML='<div class="us-row">'+seg+chips+'</div>'+kpis+dau+uaMarksHtml(D)+tabs+uaSiteHtml(D)+adopt+members+uaHealthHtml(D.health)+uaDigestHtml();   // (-113) digest & nudges last   // (-112) the sitewide sections after the tab table
 }
 
 function uaWire(){
@@ -430,10 +495,18 @@ function uaWire(){
     const th=e.target.closest('[data-uat]'); if(th){ sortBy(UA.tsort,th.dataset.uat); uaRender(); return; }
     const mh=e.target.closest('[data-uam]'); if(mh){ sortBy(UA.msort,mh.dataset.uam); uaRender(); return; }
     const row=e.target.closest('[data-uah]'); if(row){ uaOpenMember(row.dataset.uah); return; }
+    // (-113) digest & nudges
+    if(e.target.closest('[data-uadgtest]')){ uaDgPost('/api/admin/usage/digest/test',{},'test'); return; }
+    if(e.target.closest('[data-uadgsave]')){ const t=box.querySelector('[data-uadgtext]'); uaDgPost('/api/admin/usage/digest',{nudgeText:t?t.value:''},'text'); return; }
+    if(e.target.closest('[data-uadgreset]')){ UA.dg.draft=null; uaDgPost('/api/admin/usage/digest',{nudgeText:''},'text'); return; }
   });
+  box.addEventListener('input',(e)=>{ if(e.target.closest&&e.target.closest('[data-uadgtext]')) UA.dg.draft=e.target.value; });
   box.addEventListener('keydown',(e)=>{ const row=e.target.closest&&e.target.closest('[data-uah]'); if(row&&e.key==='Enter') uaOpenMember(row.dataset.uah); });
   // (-112) the two tab pickers (a view choice only — nothing is fetched or written)
-  box.addEventListener('change',(e)=>{ const s=e.target.closest&&e.target.closest('[data-uasel]'); if(!s) return;
+  box.addEventListener('change',(e)=>{
+    const g=e.target.closest&&e.target.closest('[data-uadg]');   // (-113) the digest & nudge settings
+    if(g){ const k=g.dataset.uadg; uaDgPost('/api/admin/usage/digest',{[k]:k==='digestDay'?+g.value:!!g.checked},'cfg'); return; }
+    const s=e.target.closest&&e.target.closest('[data-uasel]'); if(!s) return;
     if(s.dataset.uasel==='path') UA.pathTab=s.value; else if(s.dataset.uasel==='ctl') UA.ctlTab=s.value; uaRender(); });
 }
-export { UA, openUsageAdm, uaCohortHtml, uaControlsHtml, uaDauSvg, uaDevicesHtml, uaFunnelHtml, uaHealthHtml, uaHeatSvg, uaMarksHtml, uaNavHtml, uaPathsHtml, uaRegressCard, uaRender, uaSiteHtml, uaTriage, uaTriageHtml };
+export { UA, openUsageAdm, uaDigestHtml, uaDgLoad, uaDgPost, uaCohortHtml, uaControlsHtml, uaDauSvg, uaDevicesHtml, uaFunnelHtml, uaHealthHtml, uaHeatSvg, uaMarksHtml, uaNavHtml, uaPathsHtml, uaRegressCard, uaRender, uaSiteHtml, uaTriage, uaTriageHtml };

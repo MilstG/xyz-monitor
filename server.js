@@ -15,7 +15,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.24-112";
+const VERSION = "2026.09.24-113";
 // (build 2026.09.24-107) Distinguishes this process from the last one in ETags built on
 // per-process counters (a restart must never 304 a client onto a different body).
 const BOOT_NONCE = Date.now().toString(36) + crypto.randomBytes(3).toString("hex");
@@ -215,6 +215,7 @@ let poller = null;
 let SSE_REGISTRY = null;
 let USAGE_SWEEP = null;   // (build 2026.09.24-110 follow-up) buildServer's usage sweep, for main() and shutdown
 let USAGE_REGRESS = null;   // (build 2026.09.24-111) buildServer's post-deploy regression check, for main()'s 60s flush
+let USAGE_DIGEST = null;    // (build 2026.09.24-113) buildServer's weekly digest + nudge tick, for main()'s 60s flush
 
 // Weak ETag from the payload's data version so an unchanged snapshot revalidates to 304
 // (browsers polling every 30s get a tiny empty response instead of the full table).
@@ -2470,6 +2471,129 @@ async function buildServer() {
   }
   USAGE_REGRESS = usageRegressTick;
   fastify.decorate("usageRegressTick", usageRegressTick);
+  // ===== (build 2026.09.24-113) weekly usage digest for the operator + opt-in lapsed-member nudges =====
+  // The digest: once per ISO week, on the configured ET weekday (default Monday) once the morning
+  // brief's default send moment has passed, one compact Telegram message to the DESIGNATED operator
+  // chats — the brief's operator-test targets, force-sent like the brief — plus a quiet ops-ring entry
+  // (poller.pushOps with quiet: the bell log shows it, Telegram does not get it twice). The dedupe is
+  // usage_cfg.digestWeek, so a restart never re-sends a week; with no operator chat linked nothing is
+  // marked and it goes out once one is (the same week only). Composition: src/usage-digest.js.
+  // The nudge: OFF unless the operator turns it on. Once an hour in ET daytime (10:00–18:00), every
+  // member the rules in usage-digest.js nudgeCheck allow gets ONE reminder over the channel they
+  // already have — their own linked Telegram (queued normally, so their quiet hours and hourly cap
+  // hold) or else browser push; never email or SMS, nothing when neither exists. Each one is a
+  // dm_audit 'usage-nudge' row naming the admin who switched nudges on.
+  const UDG = require("./src/usage-digest");
+  const usageBriefHour = () => { try { const s = poller.briefStateNow && poller.briefStateNow(); return s && Number.isFinite(s.defaultHour) ? s.defaultHour : 10; } catch (_) { return 10; } };
+  const usageOperatorChats = () => { try { return poller.pushOperatorChatsNow ? poller.pushOperatorChatsNow() : []; } catch (_) { return []; } };
+  // The digest for scheduled ET day `day` (the preview uses today when this week's day is still ahead).
+  function usageDigestCompose(day, now, html) {
+    const data = ACCOUNTS.usageDigestData({ now, day, tabs: USAGE_TABS(), build: VERSION });
+    return { data, text: UDG.digestText(data, { html }) };
+  }
+  function usageDigestSend(text) {
+    const targets = usageOperatorChats();
+    for (const c of targets) poller.pushEnqueueNow(c, text, true);
+    return targets.length;
+  }
+  let usageNudgeHour = "";
+  async function usageNudgeTick(now, force) {
+    const t = now != null ? now : Date.now();
+    const cfg = ACCOUNTS.usageCfg();
+    if (!cfg.nudgeOn) return { off: true, sent: 0 };
+    const C = require("./src/compute"), et = C.etParts(t), hk = C.etDayStr(t) + "|" + et.h;
+    if (!force) { if (et.h < 10 || et.h >= 18 || usageNudgeHour === hk) return { sent: 0, waiting: true }; }
+    usageNudgeHour = hk;
+    // the market lines, assembled once and only when someone is actually due one
+    let lines = null;
+    const market = () => { if (lines) return lines; try { lines = UDG.nudgeLines(poller.briefCtxNow ? poller.briefCtxNow(t, 0) : null); } catch (_) { lines = []; } return lines; };
+    const lead = cfg.nudgeText || UDG.NUDGE_DEFAULT_TEXT;
+    const pushOn = !!(poller.pushOnNow && poller.pushOnNow());
+    const out = [];
+    for (const m of ACCOUNTS.usageNudgeInputs(t)) {
+      const tg = pushOn && poller.pushRecipientsFor ? poller.pushRecipientsFor(m.uid) : [];
+      const hasPush = !!WEBPUSH && ACCOUNTS.webPushFor(m.uid).length > 0;
+      const v = UDG.nudgeCheck(Object.assign({}, m, { hasTg: tg.length > 0, hasPush }), t);
+      if (!v.ok) continue;
+      let sent;
+      if (v.via === "telegram") { const msg = UDG.nudgeMessage(lead, market(), true); for (const c of tg) poller.pushEnqueueNow(c, msg, false); sent = true; }
+      else { try { sent = await webPushSend(m.uid, UDG.nudgeMessage(lead, market(), false)); } catch (_) { sent = false; } }
+      if (!sent) continue;
+      ACCOUNTS.usageNudgeMark(m.uid, v.via, cfg.nudgeBy, t);
+      out.push({ handle: m.handle, via: v.via });
+      log("usage nudge: " + m.handle + " via " + v.via);
+    }
+    return { sent: out.length, to: out };
+  }
+  async function usageDigestTick(now) {
+    const t = now != null ? now : Date.now();
+    const cfg = ACCOUNTS.usageCfg();
+    const res = { digest: null, nudge: null };
+    if (cfg.digestOn) {
+      const s = UDG.digestSchedule(t, cfg.digestDay, usageBriefHour());
+      if (!s.due) res.digest = { due: false, week: s.week };
+      else if (cfg.digestWeek === s.week) res.digest = { due: true, already: true, week: s.week };
+      else if (!usageOperatorChats().length) res.digest = { due: true, sent: 0, week: s.week, error: "no-operator-designated" };
+      else {
+        const { text } = usageDigestCompose(s.day, t, true);
+        const n = usageDigestSend(text);
+        ACCOUNTS.usageDigestSent(s.week, t);
+        if (poller.pushOpsNow) poller.pushOpsNow("usage digest", "week " + s.week + " sent to " + n + " operator chat" + (n === 1 ? "" : "s"), "info", true);
+        log("usage digest " + s.week + " sent to " + n + " operator chat(s)");
+        res.digest = { due: true, sent: n, week: s.week, chars: briefVisibleLenOf(text) };
+      }
+    }
+    try { res.nudge = await usageNudgeTick(t); } catch (e) { log("usage nudge FAILED (isolated): " + (e && e.message)); }
+    return res;
+  }
+  const briefVisibleLenOf = (x) => require("./src/compute").briefVisibleLen(x);
+  USAGE_DIGEST = usageDigestTick;
+  fastify.decorate("usageDigestTick", usageDigestTick);
+  fastify.decorate("usageNudgeTick", usageNudgeTick);
+  // The fold's sub-section: settings, last sent, this week's schedule, the digest preview (PLAIN text —
+  // the fold escapes it), the nudge log. Admin-only; nothing here names anyone the member table
+  // does not already show, and the nudge log is the dm_audit rows.
+  function usageDigestView(now) {
+    const t = now != null ? now : Date.now();
+    const cfg = ACCOUNTS.usageCfg();
+    const s = UDG.digestSchedule(t, cfg.digestDay, usageBriefHour());
+    const day = s.day <= s.today ? s.day : s.today;
+    const { data, text } = usageDigestCompose(day, t, false);
+    return { ok: true, digestOn: !!cfg.digestOn, digestDay: cfg.digestDay, lastWeek: cfg.digestWeek, lastAt: cfg.digestAt,
+      schedule: { day: s.day, week: s.week, at: s.at, due: s.due, sentThisWeek: cfg.digestWeek === s.week, briefHourUtc: usageBriefHour() },
+      preview: { day, week: data.week, text, chars: briefVisibleLenOf(UDG.digestText(data, { html: true })), limit: 4096 },
+      operators: usageOperatorChats().length, pushOn: !!(poller.pushOnNow && poller.pushOnNow()), webPush: !!WEBPUSH,
+      nudgeOn: !!cfg.nudgeOn, nudgeText: cfg.nudgeText || UDG.NUDGE_DEFAULT_TEXT, nudgeDefault: UDG.NUDGE_DEFAULT_TEXT, nudgeMax: UDG.NUDGE_TEXT_MAX,
+      nudgeSince: cfg.nudgeSetAt, nudgeLog: ACCOUNTS.usageNudgeLog(50),
+      rules: { quietDays: UDG.NUDGE_QUIET_DAYS, recentDays: UDG.NUDGE_RECENT_DAYS, everyDays: UDG.NUDGE_EVERY_DAYS } };
+  }
+  fastify.get("/api/admin/usage/digest", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    if (!adminOnly(req, reply)) return;
+    return usageDigestView();
+  });
+  fastify.post("/api/admin/usage/digest", { bodyLimit: 4 * 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    if (!adminOnly(req, reply)) return;
+    const b = req.body || {}, patch = {};
+    for (const k of ["digestOn", "digestDay", "nudgeOn", "nudgeText"]) if (k in b) patch[k] = b[k];
+    const r = ACCOUNTS.usageCfgSet(patch, adminUid(req));
+    if (!r.ok) return reply.code(400).send(r);
+    if ("nudgeOn" in patch) log("usage nudges switched " + (r.nudgeOn ? "ON" : "off") + " by an admin");
+    return usageDigestView();
+  });
+  // "Send test now": this week's digest (as the preview shows it) to the operator chats, now. It does
+  // NOT mark the week — the scheduled send still goes out on its day.
+  fastify.post("/api/admin/usage/digest/test", { bodyLimit: 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    if (!adminOnly(req, reply)) return;
+    if (!(poller.pushOnNow && poller.pushOnNow())) return { ok: false, error: "telegram is not configured (TG_BOT_TOKEN)" };
+    if (!usageOperatorChats().length) return { ok: false, error: "no operator chat designated — mark one on the Telegram roster" };
+    const t = Date.now(), cfg = ACCOUNTS.usageCfg(), s = UDG.digestSchedule(t, cfg.digestDay, usageBriefHour());
+    const { text } = usageDigestCompose(s.day <= s.today ? s.day : s.today, t, true);
+    const n = usageDigestSend(text);
+    return { ok: true, sent: n, chars: briefVisibleLenOf(text) };
+  });
   // ===== /alert: threshold rules written in a conversation (build 2026.09.21-83) ==================
   // The same line works in a chat's composer and at the Telegram bot. A rule written IN a
   // conversation is bound to it: when it fires, the fire posts there under its author's name
@@ -3855,7 +3979,9 @@ async function main() {
   // (and once more from ACCOUNTS.close() at shutdown); once a day, rows past the 30-day window
   // fold into the sitewide bucket and the per-member rows go.
   setInterval(() => { try { if (USAGE_SWEEP) USAGE_SWEEP(); } catch (e) { log("usage sweep FAILED: " + (e && e.message)); } try { ACCOUNTS.usageFlush(); } catch (e) { log("usage flush FAILED: " + (e && e.message)); }
-    try { if (USAGE_REGRESS) USAGE_REGRESS(); } catch (e) { log("usage regression check FAILED: " + (e && e.message)); } }, 60 * 1000).unref();   // (build 2026.09.24-111)
+    try { if (USAGE_REGRESS) USAGE_REGRESS(); } catch (e) { log("usage regression check FAILED: " + (e && e.message)); }
+    // (build 2026.09.24-113) the weekly operator digest and the opt-in nudges; async, isolated
+    if (USAGE_DIGEST) USAGE_DIGEST().catch((e) => log("usage digest tick FAILED (isolated): " + (e && e.message))); }, 60 * 1000).unref();   // (build 2026.09.24-111)
   const usageRetain = () => { try { const r = ACCOUNTS.usageRetain(); if (r.dropped) log(`usage retention: ${r.dropped} per-member row(s) before ${r.cut} folded into sitewide totals`); } catch (e) { log("usage retention FAILED: " + (e && e.message)); } };
   setTimeout(usageRetain, 2 * 60 * 1000).unref();
   setInterval(usageRetain, 24 * 3600 * 1000).unref();

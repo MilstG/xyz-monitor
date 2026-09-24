@@ -260,7 +260,9 @@ function usageCardHtml(){
       +((d.acts||[]).some(a=>a.n>0)?'<div class="us-acts">'+(d.acts||[]).filter(a=>a.n>0).map(a=>'<span class="acc-chip on">'+esc(US_ACT_CHIP[a.key]||a.key)+' '+(+a.n||0)+'</span>').join('')+'</div>':''):'')
     +'<div class="us-row"><span class="acc-chip'+(paused?'':' on')+'">'+(paused?'paused':'sharing usage')+'</span>'
     +'<button type="button" class="dm-tool" data-uspause="'+(paused?'0':'1')+'"'+(US.busy?' disabled':'')+'>'+(paused?'Resume':'Pause for me')+'</button></div>'
-    +'<div class="us-disc" style="margin-top:6px">'+(paused?'Paused: nothing is recorded for this account, and the operator sees “paused”.':'Pausing stops the beacon for this account; the operator sees “paused”.')+'</div>';
+    +'<div class="us-disc" style="margin-top:6px">'+(paused?'Paused: nothing is recorded for this account, and the operator sees “paused”.':'Pausing stops the beacon for this account; the operator sees “paused”.')+'</div>'
+    // (build 2026.09.24-113) the opt-in lapsed-member reminder, and how to avoid it
+    +'<div class="us-disc" style="margin-top:6px">Reminders: if the operator turns them on, a member who was active and then goes a week without using the terminal may get one friendly reminder (at most once every 30 days) with a few market lines — on the Telegram or browser push you already linked, never email or SMS, and nothing if you have neither. To never get one, pause usage here (paused accounts are never reminded). '+(d&&d.ok?'Reminders are currently <b>'+(d.nudgeOn?'on':'off')+'</b>.':'')+'</div>';
 }
 function usagePaint(){ const box=el('dm-usage'); if(box) box.innerHTML=usageCardHtml(); }
 async function usageMeLoad(){
