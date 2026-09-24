@@ -810,7 +810,7 @@ function _btHarness(){
   global.window = { addEventListener() {}, location: { reload() {}, href: "/", hash: "" }, matchMedia: () => ({ matches: false, addEventListener() {} }), __FLAGS: {}, __ADMIN: true };
   global.localStorage = { _d: {}, getItem(k) { return this._d[k] ?? null; }, setItem(k, v) { this._d[k] = String(v); }, removeItem(k) { delete this._d[k]; } };
   global.fetch = () => new Promise(() => {});
-  const api = new Function(app + "\n;return {state, btRun, btMode, btPickRows, btUniverse, btPickerHtml, renderBacktest, dailyReturns};")();
+  const api = new Function(app + "\n;return {state, btRun, btMode, btPickRows, btUniverse, btPickerHtml, btWatchPicks, renderBacktest, dailyReturns};")();
   const restore = () => { global.setInterval = saved.si; global.setTimeout = saved.st; global.requestAnimationFrame = saved.raf;
     global.clearTimeout = saved.ct; global.clearInterval = saved.ci;
     global.document = saved.doc; global.window = saved.win; global.localStorage = saved.ls; global.fetch = saved.f; };

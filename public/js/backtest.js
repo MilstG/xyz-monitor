@@ -58,6 +58,20 @@ function btPickRows(){     // picked rows that exist, carry daily history and be
     out.push(r); }
   return out;
 }
+// ★ watchlist → target (build 2026.09.24-97): the mock's third pill, the one that shipped last. The
+// stars are ONE Set across both universes, so the load is filtered to the live scope and to names
+// that clear the history floor — the same resolve btAddPick applies one name at a time, so a star
+// can never smuggle in a row the typeahead would have refused. It REPLACES the picks rather than
+// appending: "test my watchlist" is its own question, not an addendum to whatever was typed. One
+// star lands in single-asset mode, several in a custom universe — the count decides, as always.
+function btWatchPicks(){
+  const out=[];
+  for(const c of state.watch){ if(out.includes(c)) continue;
+    const r=state.rows.get(c); if(!r||r.delisted||!inScope(r)||!r.daily) continue;
+    const m=dailyReturns(r); if(!m||m.size<BT_MIN_DAYS) continue;
+    out.push(c); }
+  return out;
+}
 function btMode(){ const n=btPickRows().length; return n===0?'universe':(n===1?'single':'set'); }
 function btUniverse(){
   const u=state.backtest.universe, cr=state.scope==='crypto';
@@ -384,7 +398,12 @@ function btRunOne(p){
     pos.push(w); curveDays.push(days[fd]);
   }
   if(open){ open.exit=days[N-1]; open.ret=eq[eq.length-1]/open.eq0-1; open.live=true; trades.push(open); }
-  return { ok:true, single:true, row:tgt, days:curveDays, eq, eqg, eqb, eqew:eqbh, eqbh, portR, pos, trades,
+  // -97: the mean round trip — the mock's "avg trade" row. Read off the same net curve the trade
+  // log is, so the entry fee sits in the previous leg and the exit fee in this one; the open
+  // position counts at its mark, exactly as the log prints it. null (not 0) when nothing traded.
+  let tSum=0; for(const t of trades) tSum+=t.ret;
+  const avgTrade=trades.length? tSum/trades.length : null;
+  return { ok:true, single:true, avgTrade, row:tgt, days:curveDays, eq, eqg, eqb, eqew:eqbh, eqbh, portR, pos, trades,
     turnover:0, avgPos:inMkt?1:0, universeN:1, book:null, peers:peers.length,
     fundCov, fundCum, feeCum, ovCov, on, flips, exposure:pos.length?inMkt/pos.length:0,
     curW:w, curScore:raw[N-2], curZ:(Number.isFinite(scale[N-2])&&scale[N-2]>0)?raw[N-2]/scale[N-2]:null };
@@ -513,6 +532,11 @@ function btPickerHtml(){
     return `<span class="cg-chip bt-tgt${off?' off':''}" title="${esc(off?tk+' — no daily history in this scope, so it sits out of the run':(tk+' · '+((r&&(r.sector||r.assetClass))||'—')))}">${esc(tk)}<span class="cg-x" data-btx="${esc(c)}" title="remove">×</span></span>`; }).join('');
   return `<span class="lbl">target</span>`+
     `<span class="bt-pick"><input id="btFind" autocomplete="off" spellcheck="false" placeholder="${cr?'search a coin — e.g. BTC, HYPE':'search a name — e.g. NVDA, OPENAI'}" title="type a name from the live ${cr?'crypto':'xyz'} universe to test the rule on it alone; pick several to rank only those"><div id="btSugg" class="cg-sugg" hidden></div></span>`+
+    // -97: ★ watchlist pill — dead (not hidden) when no star resolves in this scope, with the reason on hover
+    (()=>{ const wn=btWatchPicks().length;
+      return `<button class="cg-pill" id="btWatchPick"${wn?'':' disabled'} title="${wn
+        ?`test your ★ watchlist: the ${wn} starred ${cr?'coin':'name'}${wn===1?'':'s'} in this scope with enough daily history replace the picks — one star runs single-asset, several a custom universe`
+        :`no ★ starred ${cr?'coin':'name'} in this scope has the ${BT_MIN_DAYS}d of daily history a test needs — star names on Markets first`}">★ watchlist</button>`; })()+
     (picks.length?`<span class="bt-chips">${chips}<button class="cg-pill" id="btClearPick" title="back to the whole universe">clear</button></span>`:'');
 }
 function btSuggest(){
@@ -578,7 +602,10 @@ function renderBacktest(){
     : mode==='set'
       ? `<div class="bt-mode"><b>Custom universe</b> · ${picked.length} names — cross-sectional as usual, ranked only among what you picked. `+
         `<span class="sec">Thin book: at ${(p.quantile*100).toFixed(0)}% that's ${Math.max(1,Math.floor(picked.length*p.quantile))} name per side, so treat the stats as a sketch. Remove all but one to run a single-asset timing test instead.</span></div>`
-      : '';
+      // -97: universe mode says what the picker is for, so the one control that changes the tab's
+      // shape isn't discovered by accident — the mode is always named, in all three states.
+      : `<div class="bt-mode"><b>Universe mode</b> — ranks the whole ${cr?'crypto':'xyz'} universe, as the tab always has. `+
+        `<span class="sec">Pick a name in <b>target</b> to test the signal on it alone; pick several (or load the ★ watchlist) to rank only those.</span></div>`;
   const controls=
     `<div class="s-ctrls">${btPickerHtml()}</div>`+
     `<div class="s-ctrls"><span class="lbl">signal</span>${sigSel}<span${uniWrap}><span class="lbl">universe</span>${uniSel}</span>${vbSel}`+
@@ -646,6 +673,7 @@ function renderBacktest(){
         `<div class="s-row"><span title="share of days the rule held any position at all">exposure</span><b>${(res.exposure*100).toFixed(0)}%</b></div></div>`+
       `<div class="s-stat"><div class="s-k">Trades &amp; frictions</div>`+
         `<div class="s-row"><span>round trips</span><b class="${thin?'neg':''}"${thin?` title="under ${BT_TRADE_MIN} round trips the Sharpe above is an anecdote with a decimal point — it is shown, not trusted"`:''}>${res.trades.length}${thin?' ⚠':''}</b></div>`+
+        `<div class="s-row"><span title="mean return per round trip on the net curve — the open position counts at its mark">avg trade</span>${res.avgTrade!=null?`<b class="${res.avgTrade>=0?'pos':'neg'}">${pn(res.avgTrade,2)}</b>`:`<b class="sec">—</b>`}</div>`+
         `<div class="s-row"><span>win rate</span><b>${res.trades.length?Math.round(wins/res.trades.length*100)+'%':'—'}</b></div>`+
         fundRow+feeRow+`</div>`
     : `<div class="s-stat"><div class="s-k">Frictions</div>`+
@@ -796,6 +824,9 @@ function attachBtControls(){
   }
   document.querySelectorAll('#backtest-body [data-btx]').forEach(x=>x.addEventListener('click',()=>{
     state.backtest.picks=state.backtest.picks.filter(c=>c!==x.dataset.btx); drawBacktest(); }));
+  const wp=el('btWatchPick'); if(wp) wp.addEventListener('click',()=>{ const w=btWatchPicks();
+    if(!w.length) return pushToast(`No ★ starred ${state.scope==='crypto'?'coin':'name'} in this scope has enough daily history to test`);
+    state.backtest.picks=w; drawBacktest(); });
   const cp=el('btClearPick'); if(cp) cp.addEventListener('click',()=>{ state.backtest.picks=[]; drawBacktest(); });
 }
 function drawBacktest(){ const host=el('backtest-body'); if(!host) return; host.innerHTML=renderBacktest(); attachBtControls(); attachRetestControls(); attachLineHover(); loadDuelData(); loadRetestStudy(); }

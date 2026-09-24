@@ -77,6 +77,21 @@ instant, and the per-IP rate limit stops being a per-user problem.
   25 rows a page. Presets or any date in the last year; a name listed after the anchor is drawn
   with a dashed ring and marked *late*. The same study as a sortable table with CSV. A client-side study over `/api/daily`, no route of its own. Ships
   admin-only. The design mock is `docs/xyz-monitor-return-drawdown-mock.html`.
+- **Backtest target mode** (built 2026.08.22, completed in build 2026.09.24-97) — the Backtest tab
+  tests a cross-sectional rule; the **target** box asks the smaller question, "does this signal
+  work on NVDA?". A typeahead over the live scope (free text never resolves; a scope flip clears
+  the picks) plus a **★ watchlist** pill that replaces the picks with your starred names in this
+  scope that carry the 25d of daily history a test needs. **One** name collapses the cross-section
+  into a timing rule: the score's own sign against an **entry** band (sign / ±0.5σ / ±1σ of that
+  name's trailing score scale, RMS about zero, measured on past scores only) is the
+  position; weighting re-reads as sizing (flat 1×, by |score|, 20% vol target, capped 0.25–2×); the
+  book quantile, the rank gate and the universe select dim with the reason on hover. Buy & hold of
+  the name is the dashed benchmark, a position ribbon runs under the curve, the book panel becomes
+  the current position plus the trade log, and the trades box reads round trips, avg trade, win
+  rate, funding and fees — under 10 round trips the count flags the Sharpe as an anecdote (shown,
+  not hidden). **Several** names stay cross-sectional over exactly those, floor 4, with the
+  thin-book arithmetic in the banner. Same cost, funding, hold-window and IS/OOS accounting as the
+  universe path; client-side, no route. The design mock is `docs/xyz-monitor-backtest-target-mock.html`.
 - **D1 retest study** (`/api/retest-study`, build 2026.09.24-96) — the Trend board's D1 **RETEST**
   replayed over every closed day the server holds, on the Backtest tab under the score duel: does
   the pullback into a stacked daily ribbon beat the trend it rides? An event is the ladder's own D1
@@ -503,7 +518,7 @@ app footer, the `?` card.
 
 `docs/` also holds the longer reference pages — the feature map, system map, mechanics and signal
 reference — plus the design mocks that preceded the funding heatmap, notes, insiders,
-backtest-target and return/drawdown work, the site-shell redesign mock
+backtest-target (built — see **Backtest target mode** above) and return/drawdown work, the site-shell redesign mock
 (`xyz-monitor-shell-redesign-mock.html`: one shell, one type scale, three controls — built in 2026.09.23-93: the shell, the tokens, every control family on one base, every controls row in zones, and no literal size or radius left in the stylesheet or the client; `test/client-shell.test.js` keeps it that way), the share-to-chat mock (`xyz-monitor-share-to-chat-mock.html`, now built — see **Share to chat** above) and the call-targets mock (`xyz-monitor-call-targets-mock.html`: "$INTC to 32 by Oct 15" as a tracked target that resolves on hit, miss or an invalidation level — built in 2026.09.24-95, see **Call targets** above). The six reference pages are served at `/docs/ref/explainer`, `/docs/ref/howto`,
 `/docs/ref/features`, `/docs/ref/map`,
 `/docs/ref/mechanics` and `/docs/ref/signals` (nonce-stamped, same gate); the mocks are not served.

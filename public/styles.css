@@ -496,7 +496,12 @@ svg.spark{width:100%;height:46px;display:block;margin:5px 0 2px}
 .cg-chip.bt-tgt{border-color:var(--accent-dim);color:var(--accent);background:rgba(227,165,60,.08);font-family:var(--mono);font-size:var(--fs-xs)}
 .cg-chip.bt-tgt.off{opacity:.45;border-style:dashed}
 .bt-grp{display:inline-flex;align-items:center;gap:10px}
-.bt-na{opacity:.35;pointer-events:none;filter:saturate(.25)}
+.bt-na{opacity:.35;filter:saturate(.25);cursor:not-allowed}
+/* -97: the wrapper keeps its pointer events so its title — the REASON it is dimmed — actually shows
+   on hover; only the controls inside go dead. pointer-events:none on the wrapper itself (as it was)
+   killed the tooltip along with the clicks, so "dimmed with the reason on hover" was dimmed only. */
+.bt-na *{pointer-events:none}
+.cg-pill:disabled{opacity:.4;cursor:not-allowed}
 .bt-mode{font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted);line-height:1.6;background:var(--panel2);
   border:1px solid var(--border);border-left:2px solid var(--accent);border-radius:0 var(--r-2) var(--r-2) 0;padding:7px 12px;margin:0 0 12px}
 .bt-mode b{color:var(--text)}
