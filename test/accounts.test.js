@@ -1743,3 +1743,161 @@ test("moderation -94: striking a call removes it from the record altogether — 
   // The moderation columns survive a re-open of the same file.
   assert.ok(A._db.prepare("PRAGMA table_info(dm_msg)").all().map((c) => c.name).includes("callDroppedBy"));
 });
+
+// ===== build 2026.09.24-95: call targets — a price and a date on the same row, resolved once =====
+test("targets -95: the words set a target on the stamped row; a refused target is a plain call; the wire carries level, stop and deadline", async () => {
+  const marks = { HOOD: 113.9 };
+  const A = freshAccounts(marks);
+  const { g, l } = await seedTwo(A);
+  const T = A.threadFor(g.uid, l.uid, true).id;
+  const resolve = (x) => (marks[x] ? x : null);
+  const DAY = 86400e3;
+  const a = A.send(g.uid, null, "I think $HOOD goes to 125 in 2w, wrong under 105", resolve, { thread: T }).message;
+  assert.equal(a.side, "long"); assert.equal(a.call.h, 14, "the deadline IS the horizon");
+  assert.deepEqual(a.call.tg, { px: 125, stop: 105, by: a.ts + 14 * DAY, res: null, at: null });
+  // The target decides the side when no word did: below the mark is a short.
+  const s = A.send(g.uid, null, "$HOOD 100 in 10d", resolve, { thread: T }).message;
+  assert.ok(s.side === "short" && s.call.tg.px === 100 && s.call.h === 10, JSON.stringify(s.call));
+  // Refused targets stay plain calls with the plain horizon — never a wrong target.
+  const bad = A.send(g.uid, null, "short $HOOD to 125 in 2w", resolve, { thread: T }).message;
+  assert.ok(bad.call && bad.call.tg === null && bad.side === "short" && bad.call.h === 7, JSON.stringify(bad.call));
+  const ov = A.send(g.uid, null, "$HOOD to 125 in 2w", resolve, { thread: T, callSide: "short" }).message;
+  assert.ok(ov.side === "short" && ov.call.tg === null, "an applied reading that disagrees with the target drops the target, not the reading");
+  assert.equal(A.send(g.uid, null, "$HOOD 30d", resolve, { thread: T }).message.call.tg, null, "a horizon is not a target");
+  // No stamp, no target: a card or a command result never reads one.
+  assert.equal(A.send(g.uid, null, "$HOOD to 125 in 2w", resolve, { thread: T, cmd: "top" }).message.call, null);
+  // Extend moves the deadline (one clock, not two); close early resolves it as 'early'.
+  const ex = A.callExtend(g.uid, a.id, 21);
+  assert.ok(ex.ok && ex.message.call.tg.by === a.ts + 21 * DAY, JSON.stringify(ex.message.call));
+  marks.HOOD = 118;
+  const ce = A.callClose(g.uid, s.id);
+  assert.ok(ce.ok && ce.message.call.early && ce.message.call.tg.res === "early" && ce.message.call.tg.at > 0, JSON.stringify(ce.message.call));
+  assert.equal(A.callClose(g.uid, bad.id).message.call.tg, null, "a plain call's close writes no target resolution");
+  // The operator's strike takes the target with the stamp.
+  const st = A.callDrop(g.uid, a.id, true);
+  assert.ok(st.ok && st.message.call === null);
+  const row = A._db.prepare("SELECT tgPx, tgStop, tgRes FROM dm_msg WHERE id = ?").get(a.id);
+  assert.deepEqual({ ...row }, { tgPx: null, tgStop: null, tgRes: null });
+});
+
+test("targets -95: the resolver — hit and stop on the 5m bars (stop wins a shared bar), hit on the live mark, miss at the deadline's close, once", async () => {
+  const marks = { HOOD: 113.9, PLTR: 50, NVDA: 176, AMD: 150, TSLA: 341.55 };
+  const A = freshAccounts(marks);
+  const { g, l } = await seedTwo(A);
+  const T = A.threadFor(g.uid, l.uid, true).id;
+  const resolve = (x) => (marks[x] ? x : null);
+  const DAY = 86400e3, MIN = 60e3;
+  const bars = {}, closes = new Map();
+  A.setBarSource((coin, from, to) => (bars[coin] || []).filter((b) => b[0] >= from && b[0] <= to));
+  A.setPxHistory((coin, at) => (closes.has(coin + "@" + at) ? closes.get(coin + "@" + at) : null));
+  const hit = A.send(g.uid, null, "$HOOD to 125 in 2w, stop 105", resolve, { thread: T }).message;
+  const wrong = A.send(g.uid, null, "$PLTR to 60 in 2w unless 45", resolve, { thread: T }).message;
+  const live = A.send(g.uid, null, "short $TSLA to 300 in 2w unless 360", resolve, { thread: T }).message;
+  const miss = A.send(l.uid, null, "$NVDA to 200 in 1w", resolve, { thread: T }).message;
+  const open = A.send(l.uid, null, "$AMD to 200 in 2w", resolve, { thread: T }).message;
+  const t0 = hit.ts;
+  // HOOD: a bar from BEFORE the send touches 130 (ignored: it carries pre-send prices); then 120, then 126.
+  bars.HOOD = [[t0 - 5 * MIN, 113, 130, 112, 114], [t0 + 5 * MIN, 114, 120, 110, 119], [t0 + 10 * MIN, 119, 126, 118, 124]];
+  // PLTR: one bar touches the stop AND the target — it cannot say which printed first: wrong.
+  bars.PLTR = [[t0 + 5 * MIN, 50, 61, 44, 55]];
+  // AMD: bars that touch nothing advance the cursor, nothing else.
+  bars.AMD = [[t0 + 5 * MIN, 150, 160, 148, 155], [t0 + 10 * MIN, 155, 170, 150, 165]];
+  marks.TSLA = 299;   // the live mark reaches the short's target: TSLA has no archive at all
+  const now = t0 + 2 * 3600e3;
+  const out = A.targetSweep(now);
+  const by = (id) => out.find((r) => r.id === id);
+  assert.deepEqual(out.map((r) => r.res).sort(), ["hit", "hit", "wrong"], JSON.stringify(out));
+  assert.ok(by(hit.id).at === t0 + 10 * MIN && by(hit.id).px === 125, "hit on the first bar through the level, at the level");
+  assert.match(by(hit.id).text, /^🎯 \$HOOD hit 125 — target reached 13 days early · sent 113\.9 on \w+ \d+, \+9\.7% · the call closed at the target$/);
+  assert.ok(by(wrong.id).res === "wrong" && by(wrong.id).px === 45, "the stop wins a shared bar");
+  assert.match(by(wrong.id).text, /^✗ \$PLTR wrong — 45 printed before 60 .* closed at the stop, −10\.0% against$/);
+  assert.ok(by(live.id).res === "hit" && by(live.id).at === now && by(live.id).px === 300 && /\$TSLA short hit 300/.test(by(live.id).text));
+  assert.equal(A._db.prepare("SELECT tgSeen FROM dm_msg WHERE id = ?").get(open.id).tgSeen, t0 + 10 * MIN, "the cursor moved past the scanned bars");
+  // The row now reads closed at the level; a second sweep changes nothing; the lifecycle verbs refuse.
+  const h = A.history(g.uid, T).messages.find((m) => m.id === hit.id).call;
+  assert.ok(h.closed && !h.early && h.closePx === 125 && Math.abs(h.final - (125 / 113.9 - 1)) < 1e-9 && h.tg.res === "hit" && h.tg.at === t0 + 10 * MIN, JSON.stringify(h));
+  assert.deepEqual(A.targetSweep(now + MIN), []);
+  assert.ok(!A.callClose(g.uid, hit.id).ok && !A.callExtend(g.uid, hit.id, 30).ok, "resolved is closed");
+  // The miss waits for the deadline's daily close — past the deadline with no close yet is still open.
+  assert.deepEqual(A.targetSweep(miss.ts + 8 * DAY), []);
+  closes.set("NVDA@" + (miss.ts + 7 * DAY), 190);
+  const m2 = A.targetSweep(miss.ts + 8 * DAY);
+  assert.equal(m2.length, 1); assert.ok(m2[0].res === "miss" && m2[0].px === 190 && m2[0].sender === l.uid && m2[0].thread === T);
+  assert.match(m2[0].text, /^⌛ \$NVDA missed 200 — the \w+ \d+ deadline passed at 190, 58% of the way .* closed at the deadline’s close, \+8\.0%$/);
+  // The record: a second, binary column per person — hit / miss / wrong, and the median days to a hit.
+  const rec = A.calls(g.uid, {});
+  const gs = rec.summary.find((x) => x.uid === g.uid), ls = rec.summary.find((x) => x.uid === l.uid);
+  assert.deepEqual({ hit: gs.tg.hit, miss: gs.tg.miss, wrong: gs.tg.wrong, open: gs.tg.open }, { hit: 2, miss: 0, wrong: 1, open: 0 });
+  assert.ok(gs.tg.medHitD >= 0 && gs.tg.medHitD < 1, "both hits came inside the first day");
+  assert.deepEqual({ hit: ls.tg.hit, miss: ls.tg.miss, wrong: ls.tg.wrong, open: ls.tg.open, med: ls.tg.medHitD }, { hit: 0, miss: 1, wrong: 0, open: 1, med: null });
+  const ro = rec.calls.find((c) => c.id === open.id);
+  assert.ok(ro.tg && ro.tg.res === null && Math.abs(ro.tg.prog - 0) < 1e-9, "open, and 0% there at the sent mark: " + JSON.stringify(ro.tg));
+  marks.AMD = 175;
+  assert.equal(A.calls(g.uid, {}).calls.find((c) => c.id === open.id).tg.prog, 0.5, "progress is (mark - sent) / (target - sent)");
+  assert.equal(rec.calls.find((c) => c.id === miss.id).tg.prog, (190 - 176) / 24, "a resolved target's progress reads its close");
+});
+
+test("targets -95: a long-unswept target catches up a month of archive a pass, and the live mark waits for the scan", async () => {
+  const marks = { HOOD: 100 };
+  const A = freshAccounts(marks);
+  const { g, l } = await seedTwo(A);
+  const T = A.threadFor(g.uid, l.uid, true).id;
+  const DAY = 86400e3;
+  const bars = [];
+  A.setBarSource((coin, from, to) => bars.filter((b) => b[0] >= from && b[0] <= to));
+  const c = A.send(g.uid, null, "$HOOD to 130 in 2 months unless 80", (x) => (marks[x] ? x : null), { thread: T }).message;
+  bars.push([c.ts + 40 * DAY, 100, 131, 99, 120]);    // the hit, 40 days in; nothing archived before it
+  marks.HOOD = 70;                                     // …and the live mark now sits through the stop
+  assert.deepEqual(A.targetSweep(c.ts + 45 * DAY), [], "pass one reads 30 days of an empty archive and does not let the live mark decide");
+  assert.equal(A._db.prepare("SELECT tgSeen FROM dm_msg WHERE id = ?").get(c.id).tgSeen, c.ts + 30 * DAY, "the cursor passed the empty stretch");
+  const r = A.targetSweep(c.ts + 45 * DAY);
+  assert.ok(r.length === 1 && r[0].res === "hit" && r[0].at === c.ts + 40 * DAY, "pass two finds the bar that hit, before the live stop: " + JSON.stringify(r));
+});
+
+// ===== build 2026.09.24-104: session-true call targets ============================================
+// A date deadline on a US session name ends at that date's cash close (not 24:00 UTC, not the send
+// time rounded up to whole days); an off-hours wick is not a hit (nor a stop) — only an in-session
+// touch or an off-hours 5m CLOSE through the level; a crypto target keeps any touch and 24:00 UTC.
+test("targets -104: session names — deadline at the cash close, in-session touch or off-hours close-through, stops alike; crypto unchanged", async () => {
+  const { marketSessions, closedWindows, etParts, callTargetDeadline } = require("../src/compute");
+  const marks = { "xyz:HOOD": 100, "xyz:PLTR": 50, "xyz:AMD": 150, BTC: 100 };
+  const A = freshAccounts(marks);
+  const { g, l } = await seedTwo(A);
+  const T = A.threadFor(g.uid, l.uid, true).id;
+  const resolve = (x) => (x === "BTC" ? "BTC" : marks["xyz:" + x] ? "xyz:" + x : null);
+  const DAY = 86400e3, MIN = 60e3;
+  const bars = {};
+  A.setBarSource((coin, from, to) => (bars[coin] || []).filter((b) => b[0] >= from && b[0] <= to));
+  A.setPxHistory(() => null);
+  const ymd = (t) => new Date(t).toISOString().slice(0, 10);
+  const day20 = ymd(Date.now() + 20 * DAY);
+  const eq = A.send(g.uid, null, "$HOOD to 125 by " + day20 + " stop 90", resolve, { thread: T }).message;
+  const exp = callTargetDeadline(day20, true, eq.ts);
+  assert.equal(eq.call.tg.by, exp, "the deadline is the cash close the calendar names");
+  const et = etParts(exp);
+  assert.ok((et.h === 16 || et.h === 13) && et.mi === 0, "…16:00 ET (13:00 on a half day): " + JSON.stringify(et));
+  const cr = A.send(g.uid, null, "$BTC to 125 by " + day20, resolve, { thread: T }).message;
+  assert.equal(cr.call.tg.by, Date.parse(day20 + "T00:00:00Z") + DAY, "crypto keeps 24:00 UTC of the date — exact, not rounded from the send time");
+  const pl = A.send(g.uid, null, "$PLTR to 60 by " + day20 + " unless 45", resolve, { thread: T }).message;
+  const amd = A.send(g.uid, null, "$AMD to 170 by " + day20, resolve, { thread: T }).message;
+  // An off-hours window after the send, and the next cash session.
+  const t0 = eq.ts;
+  const win = closedWindows(t0, t0 + 10 * DAY)[0];
+  const ses = marketSessions(t0, t0 + 10 * DAY).find((s) => s.open >= win.exit);
+  const off = Math.ceil((win.enter + 2 * 3600e3) / (5 * MIN)) * 5 * MIN, inS = Math.ceil((ses.open + 30 * MIN) / (5 * MIN)) * 5 * MIN;
+  // HOOD: an off-hours wick to 126 that closes at 110 (not a hit), then an in-session touch of 125.
+  bars["xyz:HOOD"] = [[off, 105, 126, 104, 110], [inS, 110, 125.5, 109, 112]];
+  // PLTR: an off-hours wick through the STOP that closes back above it (not wrong), then an off-hours bar that CLOSES through 60.
+  bars["xyz:PLTR"] = [[off, 50, 52, 44, 49], [off + 10 * MIN, 55, 61, 54, 60.5]];
+  // AMD: only an off-hours wick to the target — stays open.
+  bars["xyz:AMD"] = [[off, 150, 171, 149, 160]];
+  const out = A.targetSweep(inS + 30 * MIN);
+  const by = (id) => out.find((r) => r.id === id);
+  assert.ok(by(eq.id) && by(eq.id).res === "hit" && by(eq.id).at === inS, "the off-hours wick is skipped; the in-session touch hits: " + JSON.stringify(out));
+  assert.ok(by(pl.id) && by(pl.id).res === "hit" && by(pl.id).at === off + 10 * MIN, "the off-hours stop wick is not wrong; the off-hours close through the target is a hit");
+  assert.equal(by(amd.id), undefined, "an off-hours wick alone never hits");
+  // Crypto: the same wick is a hit (any touch, around the clock).
+  bars.BTC = [[off, 100, 126, 99, 101]];
+  const c2 = A.targetSweep(inS + 31 * MIN);
+  assert.ok(c2.length === 1 && c2[0].id === cr.id && c2[0].res === "hit" && c2[0].at === off, JSON.stringify(c2));
+});

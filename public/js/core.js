@@ -36,7 +36,7 @@ const store = { get(k){ try{ return localStorage.getItem(k); }catch(_){ return n
 const PKEY = 'xyzmon.prefs.v1';
 const LKEY = 'xyzmon.layouts.v1';
 function maCell(r,key,nD){ const v=r[key];
-  if(v==null||!isFinite(v)) return `<td><span class="na" title="needs ${nD} daily closes \u2014 ${r.uni==='main'&&nD>20?'crypto retention is 31d, so this MA is out of reach by design':'fills in as daily history loads'}">\u2014</span></td>`;
+  if(v==null||!isFinite(v)) return `<td><span class="na" title="needs ${nD} ${r.uni==='main'?'daily':'session'} closes \u2014 ${r.uni==='main'&&nD>50?'crypto history on the wire is ~90d, so this MA is out of reach by design':'fills in as daily history loads'}">\u2014</span></td>`;
   const above=r.px!=null&&isFinite(r.px)?r.px>=v:null, d=above!=null&&v>0?((r.px/v-1)*100):null;
   return `<td class="${above==null?'sec':(above?'pos':'neg')}" title="SMA${nD} ${fmtPrice(v)}${d!=null?` \u00b7 price ${d>=0?'+':''}${d.toFixed(1)}% ${d>=0?'above':'below'}`:''}">${fmtPrice(v)}</td>`; }
 function vwapCell(r){ const v=r.vwap30;
@@ -54,8 +54,8 @@ function liq24Cell(r){ if(r.uni!=='main') return '<td><span class="na">\u2014</s
   return `<td class="${sk||'sec'}" title="24h forced liquidations ${fmtUsd(tot)} \u00b7 longs ${fmtUsd(L)} (${lp}%) / shorts ${fmtUsd(S)} (${100-lp}%)${lp>=67?' \u2014 long-side flush':(lp<=33?' \u2014 short-side squeeze':'')} \u00b7 aggregated CEX (Coinalyze), USD source-converted \u2014 context, not HL-native">${fmtUsd(tot)}</td>`; }
 const COL_BY_KEY={};
 // Default table layout (order + which columns show). Hidden by default: beta, Vol(ann), ΔOI, Squeeze, Carry, OI.
-const DEFAULT_ORDER=['ticker','sess','px','m5','m15','h1','h4','d1','dopen','hopen','h4open','h12open','d7','d30','gap','rs','vstape','momp','vol','funding','rvol','adr','turn','vwap','prem','trend','dvb','dcap','hitr','mom','dd','swr','ddy','yopen','mopen','beta','vol30','doi','sqz','cascT','liq24','carry','oi','pos','ma20','ma50','ma100','ma200','vsvwap'];
-const DEFAULT_HIDDEN=['m5','m15','hopen','h4open','h12open','prem','trend','dvb','dcap','hitr','beta','mom','vol30','dd','swr','ddy','yopen','mopen','doi','sqz','cascT','liq24','carry','oi','pos','ma20','ma50','ma100','ma200','vsvwap'];
+const DEFAULT_ORDER=['ticker','sess','px','m5','m15','h1','h4','d1','vcc','dopen','hopen','h4open','h12open','d7','d30','gap','rs','rscc','vstape','momp','vol','funding','rvol','adr','turn','vwap','prem','trend','dvb','dcap','hitr','mom','dd','swr','ddy','yopen','mopen','beta','vol30','doi','sqz','cascT','liq24','carry','oi','pos','ma20','ma50','ma100','ma200','vsvwap'];
+const DEFAULT_HIDDEN=['m5','m15','vcc','rscc','hopen','h4open','h12open','prem','trend','dvb','dcap','hitr','beta','mom','vol30','dd','swr','ddy','yopen','mopen','doi','sqz','cascT','liq24','carry','oi','pos','ma20','ma50','ma100','ma200','vsvwap'];
 const LAYOUT_V=5; // bump to force a one-time reset of saved layouts to the new default (v5: sess home-market chip column after ticker)
 
 const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return localStorage.getItem('xyz-scope')==='crypto'?'crypto':'stocks';}catch(_){return 'stocks';}})(), sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:30000, benchCoin:null, benchMain:null, dvbBasket:'MAG7',
@@ -63,6 +63,7 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
   // it in place. grpSort is the lens's own sort (the names sort must survive a round trip);
   // grpDrill is the transient member filter a group-row click leaves behind — never persisted.
   grp:'names', grpWt:'vol', grpSort:{key:'d1',dir:'desc'}, grpDrill:null,
+  sessOff:null, sessOffV:0,   // (-105) the server's session calendars {US:Set, KR:Set, ...} of non-trading UTC days + a version for the sessDaily memo
   pos:new Map(), posOnly:false, posMeta:null,   // positions overlay (build 2026.09.16-79): coin -> held position, the ⬡ held filter, the last /api/positions envelope
   actOpen:true,   // action lists under the markets table: OPEN by default (-03), collapse persisted
   filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'30', ctf:'1d', topN:40, selected:null, search:'', topPairs:10, pair:null, showBuiltins:false},
@@ -70,7 +71,7 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
   sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30', grp:'sector' }, dataTs:0, connOk:true, view:'markets', prevView:null, regimeSrv:null,
   backtest:{ signal:'mom', lookback:20, cadence:5, quantile:0.2, cost:5, universe:'all', split:0.6,
     direction:'high', structure:'ls', weighting:'eq', reqSign:false, holdWindow:'cc', vsBasket:'',
-    picks:[], entry:0 },   // picks: explicitly targeted coins — one = single-asset timing test, several = a custom universe. entry: the σ threshold that replaces the book quantile on one name.
+    picks:[], entry:0, lag:'next', slip:5 },   // lag/slip (build 2026.09.24-106): fill at the next bar's close by default; slippage bps per side. picks: explicitly targeted coins — one = single-asset timing test, several = a custom universe. entry: the σ threshold that replaces the book quantile on one name.
   duel:{ data:null, at:0, pending:false },   // score-duel record (/api/duel), 60s client memo
   watch:new Set(), watchOnly:false, detail:null,
   notes:null, notesRev:0, noteOnly:false, noteTag:null, noteQ:'',   // written notes: the book from /api/notes, the ★-only-style row filter, and the Notes tab's own filters
@@ -128,6 +129,66 @@ function parseAmount(str){ if(str==null) return null; const s=String(str).trim()
   return v*mult; }
 function stdev(a){ if(a.length<2)return 0; const m=a.reduce((p,q)=>p+q,0)/a.length; let v=0; for(const x of a)v+=(x-m)*(x-m); return Math.sqrt(v/(a.length-1)); }
 function median(a){ if(!a.length)return 0; const s=[...a].sort((x,y)=>x-y),n=s.length; return n%2?s[(n-1)/2]:(s[n/2-1]+s[n/2])/2; }
+// ===== session-day daily view (build 2026.09.24-105) ============================================
+// Client twin of src/compute.js sessionFold — same rule, same output, held to it by a parity test
+// (test/accuracy.test.js). The UTC bar for date D (00:00Z D -> 00:00Z D+1 = 20:00 ET D-1 -> 20:00
+// ET D) contains the whole cash session of D, so a trading day's session bar IS its UTC bar; a
+// weekend / exchange-holiday bar folds into the next session bar (h max, l min, o first, c the
+// session's, v summed — no move lost). A fold still waiting for its session is a forming bar keyed
+// at that session's date (f:1). tl = every folded bar carried a real low. The calendar is the
+// server's (/api/daily sessOff: per calendar, the UTC day indexes that are NOT trading days), so
+// the client never re-derives holidays. Crypto: no fold (calendar days).
+function sessionFold(bars, off){
+  if(!Array.isArray(bars)||typeof off!=='function') return bars;
+  const num=x=>(x==null||x==='')?NaN:+x;
+  const out=[]; let p=null;
+  for(const k of bars){
+    if(!k) continue;
+    const t=+k.t, c=num(k.c);
+    if(!Number.isFinite(t)||!(c>0)) continue;
+    const h0=num(k.h), l0=num(k.l), o0=num(k.o), v0=num(k.v);
+    const hasL=k.tl!=null?!!k.tl:l0>0;
+    const h=h0>0?h0:c, l=l0>0?l0:c;
+    if(!p) p={t, o:o0>0?o0:null, h, l, c, v:v0>0?v0:null, tl:hasL, n:0};
+    else { if(h>p.h) p.h=h; if(l<p.l) p.l=l; p.c=c; p.t=t; if(v0>0) p.v=(p.v||0)+v0; if(!hasL) p.tl=false; }
+    p.n++;
+    if(!off(Math.floor(t/DAY))){ out.push(p); p=null; }
+  }
+  if(p){ let d=Math.floor(p.t/DAY)+1; for(let g=0;g<30&&off(d);g++) d++; p.t=d*DAY; p.f=1; out.push(p); }
+  return out;
+}
+// The row's session calendar: crypto none; a foreign-home listing its home exchange (r.hm); every
+// other xyz row (and a basket's virtual row) the US. `cal` overrides (a crypto row aligned onto a
+// session matrix). Null while the server's calendar has not shipped (an older server): calendar days.
+function sessCalOf(r){ return (!r||r.uni==='main')?null:(r.hm||'US'); }
+function sessOffFor(r, cal){ const c=cal!==undefined?cal:sessCalOf(r); if(!c) return null;
+  const S=state.sessOff&&state.sessOff[c]; return S?(d=>S.has(d)):null; }
+// r.daily in its session view, memoized on the daily array's identity and the calendar version.
+function sessDaily(r){ if(!r||!Array.isArray(r.daily)) return null;
+  if(r._sdSrc===r.daily&&r._sdV===state.sessOffV) return r._sd;
+  const off=sessOffFor(r), v=off?sessionFold(r.daily,off):r.daily;
+  r._sdSrc=r.daily; r._sdV=state.sessOffV; r._sd=v; return v; }
+// Bars whose period has ended (t + DAY <= now): the forming UTC day and a forming fold are dropped.
+function closedDaily(bars, now){ if(!Array.isArray(bars)) return bars; const n=now==null?Date.now():now; let e=bars.length;
+  while(e>0&&+bars[e-1].t+DAY>n) e--; return e===bars.length?bars:bars.slice(0,e); }
+// Yang-Zhang σ over the last n CLOSED session bars (build 2026.09.24-105), annualized ×√252 (per
+// session), in %. Needs n+1 bars and a TRUE low on each of the n (null otherwise — the caller falls
+// back, never guesses). A missing open is the prior close: a 24/7 perp opens where it last traded,
+// so the overnight term is then exactly 0 and YZ reduces to k·σ²(close-to-close) + (1−k)·Rogers-
+// Satchell — the range still carries the intraday excursion the close-to-close σ cannot see.
+//   o_i = ln(O/C₋₁), c_i = ln(C/O), rs_i = ln(H/C)·ln(H/O) + ln(L/C)·ln(L/O), k = 0.34/(1.34+(n+1)/(n−1))
+//   σ² = var(o) + k·var(c) + (1−k)·mean(rs)
+function yzVol(bars, n){
+  if(!Array.isArray(bars)||!(n>=2)||bars.length<n+1) return null;
+  const B=bars.slice(-(n+1)), os=[], cs=[]; let rs=0;
+  for(let i=1;i<B.length;i++){ const pc=+B[i-1].c, b=B[i], c=+b.c, h0=+b.h, l0=+b.l;
+    if(!(pc>0&&c>0&&h0>0&&l0>0)||!b.tl) return null;
+    const o=+b.o>0?+b.o:pc, h=Math.max(h0,o,c), l=Math.min(l0,o,c);
+    os.push(Math.log(o/pc)); cs.push(Math.log(c/o));
+    rs+=Math.log(h/c)*Math.log(h/o)+Math.log(l/c)*Math.log(l/o); }
+  const k=0.34/(1.34+(n+1)/(n-1)), v=a=>{ const m=a.reduce((p,q)=>p+q,0)/a.length; let s=0; for(const x of a) s+=(x-m)*(x-m); return s/(a.length-1); };
+  const s2=v(os)+k*v(cs)+(1-k)*rs/n;
+  return s2>0?Math.sqrt(s2*252)*100:null; }
 function linregR2(ys){ const n=ys.length; if(n<3)return {slope:0,r2:0};
   let sx=0,sy=0,sxx=0,sxy=0; for(let i=0;i<n;i++){sx+=i;sy+=ys[i];sxx+=i*i;sxy+=i*ys[i];}
   const d=n*sxx-sx*sx; if(d===0)return {slope:0,r2:0};
@@ -270,4 +331,59 @@ function detectBenchmark(){
   for(const a of SP_ALIASES){ for(const r of state.rows.values()) if(r.uni!=='main'&&!r.delisted&&r.ticker.toUpperCase()===a) return r.coin; }
   for(const r of state.rows.values()){ if(r.uni!=='main'&&!r.delisted&&/(?:^|[^A-Z])(SPX|SP500|S&P)/i.test(r.ticker)) return r.coin; }
   return null; }
-export { COL_BY_KEY, DAY, DEFAULT_HIDDEN, DEFAULT_ORDER, G, HOUR, LAYOUT_V, LKEY, PKEY, RG_COLOR, RG_STORY, SCROLL_B, TF_MAP, TF_MS, activeRows, brkBar, claimDelta, clamp, detectBenchmark, el, esc, fmtFunding, fmtPct, fmtPrice, fmtUsd, inScope, isoUtc, lerp, liq24Cell, liveMark, maCell, median, mktGrp, momColor, overlayCloseAll, overlayCloseTop, overlayPop, overlayPush, overlayTop, parseAmount, pctTxt, recomputeChanges, regimeDetail, regimeMeter, regimeReadout, regimeTip, safeHref, scopeBench, setPrice, state, stdev, store, turnCell, vwapCell };
+// ===== lazy tab modules (build 2026.09.24-103) ================================================
+// The entry used to import every module eagerly — ~1.7 MB of unminified JS parsed and evaluated
+// before the first paint, including whole tabs most sessions never open. The modules below are
+// reached ONLY through a tab (or a terminal verb that is that tab's CLI), so they now load on first
+// use: showView / the verb calls lazyCall(name, fn, ...args), which imports the module once,
+// runs its __boot_* functions (what app.js used to run for it at startup) and then calls into it.
+// Kept eager, deliberately: anything another module calls synchronously (showView lives in
+// backtest.js, IS_ADMIN/featureOn/hoverChart in admin.js, aiPick in report.js, the unread pip and
+// SSE handlers in messages.js, renderRetestSection inside drawBacktest's HTML) — lazy-loading those
+// would mean restructuring, not a loader.
+// Specifiers are string LITERALS on purpose: the server stamps ?v=<build> onto every "./x.js"
+// import specifier it serves, dynamic import() included, so a lazy module resolves to the SAME URL
+// its eager neighbours import it by — one instance, one build, immutable-cached like the rest.
+const LAZY_IMPORTERS={
+  charts:()=>import("./charts.js"),
+  drawdown:()=>import("./drawdown.js"),
+  funds:()=>import("./funds.js"),
+  insiders:()=>import("./insiders.js"),
+  positioning:()=>import("./positioning.js"),
+  usageadm:()=>import("./usageadm.js"),   // (build 2026.09.24-109) the Admin Usage fold, fetched only when that fold opens
+};
+const LAZY={}, _lazyP={};
+// Namespace once loaded (booted), else null — for callers that should only act on an ALREADY
+// loaded module (a data refresh repainting an open tab), never trigger a load themselves.
+function lazyLoaded(name){ return LAZY[name]||null; }
+function lazyMod(name){
+  if(LAZY[name]) return Promise.resolve(LAZY[name]);
+  if(_lazyP[name]) return _lazyP[name];
+  const imp=LAZY_IMPORTERS[name]; if(!imp) return Promise.reject(new Error('unknown lazy module '+name));
+  return (_lazyP[name]=imp().then(m=>{
+    // Boot in name order (one per module today); a boot throwing is a module failing to load.
+    for(const k of Object.keys(m).filter(k=>k.startsWith('__boot_')).sort()) m[k]();
+    LAZY[name]=m; return m;
+  }).catch(e=>{ delete _lazyP[name]; throw e; }));   // a failed fetch (offline blip) OR a throwing boot may be retried by the next click (build 2026.09.24-108: the boot's throw used to stay cached as the module's answer)
+}
+// (build 2026.09.24-108) A tab left open across a deploy imports its lazy module with LAST build's
+// stamp; the server now answers that stale ?v= with a 409 rather than this build's bytes (which
+// would import the new core.js as a second, empty module instance). Once the tab knows a new build
+// is live (alerts.js notifyNewBuild sets state.newBuild) a failed lazy load says so and offers the
+// reload — no amount of retrying fetches last build's module again.
+function lazyFailToast(name){
+  const w=typeof document!=='undefined'&&document.getElementById('toastwrap'); if(!w) return;
+  const t=document.createElement('div'); t.className='toast toast-sticky';
+  if(state.newBuild){
+    t.textContent='A new version is live — this tab ('+name+') needs a reload to load it. Click to reload.';
+    t.onclick=()=>{ try{ location.reload(); }catch(_){} };
+  } else { t.textContent='Could not load this tab ('+name+') — check the connection and try again'; t.onclick=()=>t.remove(); }
+  w.appendChild(t);
+}
+function lazyCall(name, fn, ...args){
+  return lazyMod(name).then(m=>m[fn](...args)).catch(e=>{
+    try{ console.error('lazy module '+name+'.'+fn+' failed', e); }catch(_){}
+    lazyFailToast(name);
+  });
+}
+export { COL_BY_KEY, DAY, DEFAULT_HIDDEN, DEFAULT_ORDER, G, HOUR, LAYOUT_V, LAZY_IMPORTERS, LKEY, PKEY, RG_COLOR, RG_STORY, SCROLL_B, TF_MAP, TF_MS, activeRows, brkBar, claimDelta, clamp, closedDaily, detectBenchmark, el, esc, fmtFunding, fmtPct, fmtPrice, fmtUsd, inScope, isoUtc, lazyCall, lazyLoaded, lazyMod, lerp, liq24Cell, liveMark, maCell, median, mktGrp, momColor, overlayCloseAll, overlayCloseTop, overlayPop, overlayPush, overlayTop, parseAmount, pctTxt, recomputeChanges, regimeDetail, regimeMeter, regimeReadout, regimeTip, safeHref, scopeBench, sessCalOf, sessDaily, sessOffFor, sessionFold, setPrice, state, stdev, store, turnCell, vwapCell, yzVol };

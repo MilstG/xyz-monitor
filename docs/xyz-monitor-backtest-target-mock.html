@@ -136,9 +136,10 @@ ol.impl code,p code,.qb code{font-family:var(--mono);font-size:11.5px;color:var(
 </style>
 
 <div class="mockhd">
-  <p class="eyebrow">xyz-monitor · backtest tab · proposal</p>
+  <p class="eyebrow">xyz-monitor · backtest tab · built</p>
   <h1>Pick a name, not just a universe</h1>
   <p class="lede">The Backtest tab tests a <b>cross-sectional</b> rule: rank a universe, long one tail, short the other. There's no way to ask the smaller question — <b>"does this signal work on NVDA?"</b> This mock adds a typeahead target picker (no dropdown — the roster is too long) and shows what the tab becomes when the target is a single name: the cross-section collapses, so the controls that only exist to slice a cross-section have to go with it.</p>
+  <p class="lede" style="margin-top:12px"><b>Built.</b> The target picker, single-asset mode and the custom universe shipped in 2026.08.22 (<code>public/js/backtest.js</code> — <code>btPickRows</code>, <code>btRunOne</code>, <code>btPositionPanel</code>); the last pieces of this page — the <b>★ watchlist</b> pill, the <b>avg trade</b> row and the universe-mode banner — landed in build 2026.09.24-97. Both calls below were settled the way this page recommended. The prototype stays as the design record; the app is the source of truth.</p>
   <p style="margin:14px 0 0"><span class="mockchip">◆ mock · synthetic prices, nothing is wired to live data</span></p>
 </div>
 
@@ -243,18 +244,18 @@ ol.impl code,p code,.qb code{font-family:var(--mono);font-size:11.5px;color:var(
 </table>
 </div>
 
-<div class="cp-sub s-sec"><span class="t">◆ Two calls I'd like you to make</span> <span class="d">— before I wire any of this into app.js</span></div>
+<div class="cp-sub s-sec"><span class="t">◆ The two calls, and how they were settled</span> <span class="d">— asked before wiring; answered as recommended</span></div>
 
 <div class="q">
   <div class="qh">1 · What should 2+ picked names do?</div>
-  <div class="qb">The mock treats them as a <b>custom universe</b> — rank just those names, long/short their tails, everything cross-sectional stays on. It's the honest reading of "test these five", but the tails get thin fast: five names at a 20% book is one long and one short, and <code>btRun</code> currently refuses to run under 8 names at all. The alternative is capping the picker at one name and keeping this strictly a single-asset feature. My preference is the custom universe with a visible <b>thin book</b> warning and the 8-name floor relaxed to 4 — it costs one guard rail, and "MAG7 only" is a question people actually have.</div>
+  <div class="qb">The mock treats them as a <b>custom universe</b> — rank just those names, long/short their tails, everything cross-sectional stays on. It's the honest reading of "test these five", but the tails get thin fast: five names at a 20% book is one long and one short, and <code>btRun</code> currently refuses to run under 8 names at all. The alternative is capping the picker at one name and keeping this strictly a single-asset feature. My preference is the custom universe with a visible <b>thin book</b> warning and the 8-name floor relaxed to 4 — it costs one guard rail, and "MAG7 only" is a question people actually have.<br><b>Settled:</b> custom universe, with the thin-book arithmetic in the mode banner and the caption, and the floor for a picked set relaxed to 4 (<code>BT_SET_MIN</code>) — the whole universe keeps its 8.</div>
 </div>
 <div class="q">
   <div class="qh">2 · Should a single-name run be allowed to look good?</div>
-  <div class="qb">One name over ~120 days at a 5d rebalance is roughly <b>24 decisions</b>, and crypto ships ~90 days, so it's more like 18. A Sharpe on that is an anecdote with a decimal point. The mock states the trade count next to every stat box and puts the warning in the caption rather than blocking the run. The stricter option is to <b>refuse to print Sharpe</b> under some trade count and show "n too small" instead — the same spine as the Score duel's verdict gate. Say the word and it ships gated.</div>
+  <div class="qb">One name over ~120 days at a 5d rebalance is roughly <b>24 decisions</b>, and crypto ships ~90 days, so it's more like 18. A Sharpe on that is an anecdote with a decimal point. The mock states the trade count next to every stat box and puts the warning in the caption rather than blocking the run. The stricter option is to <b>refuse to print Sharpe</b> under some trade count and show "n too small" instead — the same spine as the Score duel's verdict gate. Say the word and it ships gated.<br><b>Settled:</b> flagged, not gated — the round-trip count sits in the trades box and turns red with a ⚠ under 10 (<code>BT_TRADE_MIN</code>), and the caption says the Sharpe is an anecdote; the out-of-sample half carries the honesty.</div>
 </div>
 
-<div class="cp-sub s-sec"><span class="t">◆ How it lands in the code</span> <span class="d">— roughly 200 lines, no server change, no new payload</span></div>
+<div class="cp-sub s-sec"><span class="t">◆ How it lands in the code</span> <span class="d">— as proposed and as built: no server change, no new payload</span></div>
 <ol class="impl">
   <li><b>State:</b> one field — <code>state.backtest.picks: []</code> (coins, not tickers), plus <code>entry: 0</code>. Session-only, like every other backtest param: <code>savePrefs</code> and the URL hash carry none of them today, and persisting the target alone would be the odd one out. A scope flip clears the picks — a target belongs to exactly one universe.</li>
   <li><b>Picker:</b> reuses the COMP/G typeahead wholesale — <code>.cg-pick</code> / <code>.cg-sugg</code> / <code>.cg-sg</code> markup, the same universe-validated resolve (free text never matches), the same chip anatomy with <code>⬒</code> reserved for baskets. Scoped to the active scope, so crypto search never returns equities.</li>

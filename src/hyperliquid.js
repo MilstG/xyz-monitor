@@ -35,9 +35,36 @@ function fundingWeight(items) {
   return 20 + Math.ceil(n / 20);
 }
 
+// Sliding-window weight ledger (build 2026.09.24-101). The limiter used to rebuild its event array
+// with filter() and re-sum it with reduce() on EVERY grant check — O(events in the last minute),
+// i.e. a few hundred allocations per pump under load. Grants are stamped with Date.now(), so the
+// array is in time order and expiry is always a prefix: pop expired events off the front and keep
+// a running sum. An out-of-order stamp (a wall-clock step backwards) is inserted in order, so the
+// set of live events — and therefore used() — is exactly what the filter+reduce computed: an event
+// is live iff now - t < windowMs.
+function usageWindow(windowMs) {
+  let ev = [], head = 0, sum = 0;
+  function expire(now) {
+    while (head < ev.length && !(now - ev[head].t < windowMs)) { sum -= ev[head].w; head++; }
+    if (head === ev.length) { ev = []; head = 0; sum = 0; }   // empty: reset (and shed any float drift)
+    else if (head > 512 && head * 2 > ev.length) { ev = ev.slice(head); head = 0; }   // amortized compaction
+  }
+  return {
+    push(t, w) {
+      const e = { t, w };
+      if (ev.length === head || ev[ev.length - 1].t <= t) ev.push(e);
+      else { let i = ev.length; while (i > head && ev[i - 1].t > t) i--; ev.splice(i, 0, e); }
+      sum += w;
+    },
+    used(now) { expire(now); return sum; },
+    oldest() { return head < ev.length ? ev[head].t : null; },
+    size() { return ev.length - head; },
+  };
+}
+
 const limiter = (() => {
   const MAX = 1150;
-  let ev = [];
+  const win = usageWindow(60000);
   // A 429 from Hyperliquid pauses EVERY caller, not just the one that saw it: with 4% headroom
   // under the 1200 cap, one caller backing off while the rest keep firing at full budget is how
   // a blip turned into a minute of 429s. Retry-After when they send one, a growing pause if not.
@@ -52,15 +79,16 @@ const limiter = (() => {
   // not queue behind a minute of candle pulls.
   const queue = [];   // { w, prio, resolve }
   let timer = null;
-  function usedNow(now) { ev = ev.filter((e) => now - e.t < 60000); return ev.reduce((s, e) => s + e.w, 0); }
+  function usedNow(now) { return win.used(now); }
   function pump() {
     if (timer) { clearTimeout(timer); timer = null; }
     while (queue.length) {
       const now = Date.now();
       if (now < pausedUntil) { timer = setTimeout(pump, Math.min(pausedUntil - now, 5000)); return; }
       const head = queue[0];
-      if (usedNow(now) + head.w <= MAX) { ev.push({ t: now, w: head.w }); queue.shift(); head.resolve(); continue; }
-      const wait = ev.length ? 60000 - (now - ev[0].t) + 40 : 120;
+      if (usedNow(now) + head.w <= MAX) { win.push(now, head.w); queue.shift(); head.resolve(); continue; }
+      const oldest = win.oldest();
+      const wait = oldest != null ? 60000 - (now - oldest) + 40 : 120;
       timer = setTimeout(pump, Math.max(wait, 120) + Math.floor(Math.random() * 200));
       return;
     }
@@ -79,8 +107,7 @@ const limiter = (() => {
     queued() { return queue.length; },
     usage() {
       const now = Date.now();
-      ev = ev.filter((e) => now - e.t < 60000);
-      const used = ev.reduce((s, e) => s + e.w, 0);
+      const used = win.used(now);
       return { used, max: MAX, pct: Math.round((100 * used) / MAX), pausedMs: Math.max(0, pausedUntil - now), queued: queue.length };
     },
   };
@@ -320,4 +347,4 @@ function createCoinalyze({ key, log, sleep429CapMs }) {
   };
 }
 
-module.exports = { infoPost, fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, fetchClearinghouseState, sleep, limiterUsage, limiter, candleWeight, fundingWeight, CANDLE_MAX_BARS, createUniverseSocket, createCoinalyze };
+module.exports = { usageWindow, infoPost, fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, fetchClearinghouseState, sleep, limiterUsage, limiter, candleWeight, fundingWeight, CANDLE_MAX_BARS, createUniverseSocket, createCoinalyze };

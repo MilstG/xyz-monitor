@@ -188,17 +188,23 @@ test("earnings: reaction study — print day's own bar for BMO and AMC, expansio
     { t: "NVDA", d: "2019-01-01", s: "BMO" },   // predates the window -> skipped, not fabricated
   ];
   const st = earnReactionsFor(prints, daily);
-  assert.equal(st.n, 2, "only prints matched to retained candles count");
-  assert.equal(st.up, 1, "one up reaction, one down");
-  assert.ok(st.avgAbs > 6 && st.avgAbs < 7, `avg |move| ~6.5, got ${st.avgAbs}`);
-  assert.ok(st.xMed > 4, `both reactions are multiples of the ~1% base tape, got ${st.xMed}x`);
-  assert.equal(st.gapN, 1, "gap stats only where the reaction candle carries a real gap open");
-  assert.equal(st.gapUp, 1);
-  assert.equal(st.gapHeld, 1, "gapped up +5%, closed +8% — held");
+  // (re-pinned -107) the AMC print has no intraday anchors, and its session-bar window spans two
+  // sessions (the print day's bar closes after the print) — excluded from the pool and counted.
+  assert.equal(st.n, 1, "only prints matched to retained candles count; the daily-tier AMC is excluded");
+  assert.equal(st.amcWideN, 1, "…and counted as excluded");
+  assert.equal(st.up, 1, "the BMO reaction is up");
+  assert.ok(st.avgAbs > 7.5 && st.avgAbs < 8.5, `avg |move| ~8, got ${st.avgAbs}`);
+  assert.ok(st.xMed > 4, `the reaction is a multiple of the ~1% base tape, got ${st.xMed}x`);
+  // (re-pinned -106) the daily open is NOT a gap: a 24/7 perp's 00:00Z open is the prior 00:00Z
+  // close. Gaps are cash-session gaps read intraday only; with no intraday data both timed prints
+  // are excluded and counted (gap n=0 of 2), never approximated from these opens.
+  assert.equal(st.gapN, 0, "no intraday anchors -> no gap claims");
+  assert.equal(st.gapOf, 1, "…but the excluded timed print is counted");
+  assert.equal(st.dailyN, 1, "the reaction came off session-bar closes (the labelled fallback)");
   // closes-only candles (warm cache shape): move stats compute, gap stats honestly absent
   const co = daily.map((k) => ({ t: k.t, c: k.c }));
   const st2 = earnReactionsFor(prints, co);
-  assert.equal(st2.n, 2);
+  assert.equal(st2.n, 1);
   assert.equal(st2.gapN, 0, "no opens -> no gap claims");
   assert.equal(earnReactionsFor([], daily), null, "no prints -> null, not zeros");
 });
@@ -682,11 +688,15 @@ test("earnings: what was expected, what printed, and what the tape did", () => {
   // bar before — the same definition the reaction study uses, so the brief and the study can never
   // disagree. The old "next session" rule measured from a reference close that was already
   // post-print. `now` is pinned so "closed" means closed on the test's clock, not the wall clock.
-  const now = d0 + 3 * D + 3600e3;
+  // (re-pinned -106) ONE window: the last cash close before the print -> the first cash close after
+  // it. An AMC print on Wed 07-29 reacts in Thursday's session: the 07-28 session bar -> 07-30's.
+  daily.push({ t: d0 + 3 * D, c: 104 });
+  const now = d0 + 4 * D + 3600e3;
   const amc = C.earnPrintRow({ t: "msft", s: "AMC", d: "2026-07-29", eps: 3.12, epsA: 3.31 }, daily, null, null, now);
   assert.equal(amc.verdict, "beat");
   assert.equal(amc.surprisePct, 6.1);
-  assert.equal(amc.reactionPct, 2.4, "last close BEFORE the print (07-28 bar) to the first close AFTER it (the print day's own bar)");
+  assert.equal(amc.reactionPct, 4, "last close BEFORE the print (07-28 bar) to the first close AFTER it (07-30, the reaction session)");
+  assert.equal(amc.reactionSrc, "daily", "and the row says which tier measured it");
 
   const bmo = C.earnPrintRow({ t: "x", s: "BMO", d: "2026-07-29", eps: 1, epsA: 0.9 }, daily, null, null, now);
   assert.equal(bmo.verdict, "miss");
@@ -832,43 +842,45 @@ test("landscape render: sources footer, URL guard, honest degradation, shed orde
     "an over-long story still delivers the commentary, not the unavailable line");
 });
 
-test("earnings reaction: an AMC print whose candle has not closed still yields a number", () => {
+test("earnings reaction: an AMC print whose reaction session has not closed still yields a number", () => {
   const C = require("../src/compute");
-  // Re-baselined (AMC timing fix): the print day's OWN UTC bar carries an AMC reaction (its 00:00Z
-  // close is hours after the 16:05 ET print), so the live case is a print dated TODAY read before
-  // today's bar exists / has closed. The clock is pinned to 21:00Z so "today" is unambiguous.
-  const DAY = 86400000, day0 = Math.floor(Date.now() / DAY) * DAY, now = day0 + 21 * 3600e3;
+  // Re-pinned (build 2026.09.24-106): ONE window — the last cash close before the print -> the first
+  // cash close after it. A Wednesday AMC print reacts in THURSDAY's session, so the live case is the
+  // evening of the print (and all of Thursday) before that session's close. Fixed clock (the old
+  // version rode Date.now(), so a weekend run changed which session a print reacted in).
+  const DAY = 86400000, HOUR = 3600e3, day0 = Date.UTC(2026, 8, 16), now = day0 + 21 * HOUR;   // Wed 2026-09-16, 17:00 ET
   const dstr = (t) => new Date(t).toISOString().slice(0, 10);
-  // Daily series ending YESTERDAY — exactly the live shape when the brief runs in the evening of
-  // the print day before the day's bar has been pulled.
+  // Daily series ending YESTERDAY (Fri 09-11 .. Tue 09-15, weekend bars included) — the live shape
+  // when the brief runs in the evening of the print day before the day's bar has been pulled.
   const daily = [];
   for (let k = 5; k >= 1; k--) daily.push({ t: day0 - k * DAY, c: 100 });
-  // The AMC print is dated today; today's bar is still open, so the live mark carries the number.
   // The original single-tier version asked for a closed candle and returned null — which is why
   // ARM, HOOD, META and MSFT all showed a dash on one brief.
   const rx = C.earnPrintReaction({ t: "ARM", d: dstr(day0), s: "AMC" }, daily, 106, null, now);
   assert.ok(rx, "an AMC print from this afternoon must not be unmeasurable");
   assert.equal(rx.state, "forming");
   assert.equal(rx.pct, 6, "the live mark against the last close before the print");
-  // Today's bar present but still open: still forming, still the mark.
+  // The print day's own bar present: still forming — the reaction session is Thursday's.
   const open = daily.concat([{ t: day0, c: 104 }]);
   assert.equal(C.earnPrintReaction({ t: "ARM", d: dstr(day0), s: "AMC" }, open, 106, null, now).state, "forming");
-  // Once the print day's bar CLOSES, closed-bar arithmetic takes over and the live mark is
+  assert.equal(C.earnPrintReaction({ t: "ARM", d: dstr(day0), s: "AMC" }, open, 106, null, now).pct, 6, "the reference is Tuesday's close, never the print day's post-print 20:00 ET close");
+  // Once the reaction session's bar CLOSES, closed-bar arithmetic takes over and the live mark is
   // ignored — the number must not keep drifting after it is final.
-  const fin = C.earnPrintReaction({ t: "ARM", d: dstr(day0), s: "AMC" }, open, 999, null, day0 + DAY + 3600e3);
+  const thu = open.concat([{ t: day0 + DAY, c: 104 }]);
+  const fin = C.earnPrintReaction({ t: "ARM", d: dstr(day0), s: "AMC" }, thu, 999, null, day0 + 2 * DAY + HOUR);
   assert.equal(fin.state, "final");
   assert.equal(fin.pct, 4, "a settled reaction ignores the live mark entirely");
-  // BMO scores its own candle, unchanged convention.
+  // A Monday BMO reads Friday's close -> Monday's close.
   assert.equal(C.earnPrintReaction({ t: "X", d: dstr(day0 - 2 * DAY), s: "BMO" }, open, 999, null, now).state, "final");
   // A print older than the retained window stays absent rather than being invented.
   assert.equal(C.earnPrintReaction({ t: "X", d: "2019-01-01", s: "BMO" }, open, 100, null, now), null);
-  // With an HOURLY spine the print anchors at its ET time: AMC 16:00 ET. Reference = the spine's
-  // close at the anchor, reaction = +24h once printed, forming against the mark until then.
-  const HOUR = 3600e3, t16 = C.etWallToUtc(+dstr(day0).slice(0, 4), +dstr(day0).slice(5, 7), +dstr(day0).slice(8, 10), 16, 0);
+  // With an HOURLY spine the exact cash anchors resolve: reference = Wednesday's 16:00 ET close,
+  // reaction = Thursday's 16:00 ET close once printed, forming against the mark until then.
+  const t16 = C.etWallToUtc(2026, 9, 16, 16, 0);
   const hs = []; for (let t = t16 - 30 * HOUR; t < t16 + 30 * HOUR; t += HOUR) hs.push([t, 100, 100, 100, t + HOUR <= t16 ? 100 : 110, 1]);
   const hRx = C.earnPrintReaction({ t: "ARM", d: dstr(day0), s: "AMC" }, daily, 108, hs, t16 + 3 * HOUR);
-  assert.deepEqual(hRx, { pct: 8, state: "forming" }, "hourly anchor: mark vs the 16:00 ET close, not the UTC-day close");
-  assert.deepEqual(C.earnPrintReaction({ t: "ARM", d: dstr(day0), s: "AMC" }, daily, 108, hs, t16 + 25 * HOUR), { pct: 10, state: "final" }, "+24h close settles it");
+  assert.deepEqual(hRx, { pct: 8, state: "forming", src: "cash" }, "hourly anchor: mark vs the 16:00 ET close, not the UTC-day close");
+  assert.deepEqual(C.earnPrintReaction({ t: "ARM", d: dstr(day0), s: "AMC" }, daily, 108, hs, t16 + 25 * HOUR), { pct: 10, state: "final", src: "cash" }, "Thursday's 16:00 ET close settles it");
   // And the row carries the tier so the renderer can label it.
   const row = C.earnPrintRow({ t: "ARM", d: dstr(day0), s: "AMC", eps: 0.41, epsA: 0.45 }, daily, 106, null, now);
   assert.equal(row.verdict, "beat");

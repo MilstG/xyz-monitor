@@ -844,8 +844,11 @@ test("sse push 2026.07.29-07: client — poll survives stretched, snaps back on 
   assert.ok(app.includes("function _cycleMs(){ return _sseOk?Math.max(state.refreshMs,120000):state.refreshMs; }"),
     "healthy stream stretches the poll to a 120s fallback — never kills it (half-open streams are real)");
   assert.ok(/_sseSrc\.onerror=\(\)=>\{\s*\n\s*if\(_sseOk\)\{ _sseOk=false; startCycle\(\); \}/.test(app), "stream error snaps cadence back instantly");
-  assert.ok(app.includes("if(d&&d.dataTs&&d.dataTs!==state.dataTs){ loadSnapshot();"),
-    "a pushed version triggers the EXISTING loadSnapshot — the stream changes when we pull, never what");
+  // Since build 2026.09.24-103 through pullSnapshot, which is loadSnapshot while visible (and a
+  // dirty flag / slow alert pull while hidden) — still the one pull path, never a second one.
+  assert.ok(app.includes("if(d&&d.dataTs&&d.dataTs!==state.dataTs){ pullSnapshot();"),
+    "a pushed version triggers the EXISTING pull path — the stream changes when we pull, never what");
+  assert.ok(/function pullSnapshot\(\)\{[\s\S]*?\n  loadSnapshot\(\); return true;\n\}/.test(app), "pullSnapshot ends in the same loadSnapshot");
   assert.ok(app.includes("startEvents();   // push channel first"), "stream armed at boot");
   // startCycle must derive its interval through _cycleMs so a stretch/snap re-arm actually re-times.
   assert.ok(app.includes("const ms=_cycleMs(); cycleTimer=setInterval("), "cycle interval derives from _cycleMs");
@@ -864,7 +867,7 @@ test("D open column: manifest wiring — placed after 24h, visible by default, l
   // new column exists, right after d1 in COLS and in the default order, and NOT hidden
   assert.ok(/key:'dopen', label:'D open'/.test(app), "D open column defined");
   const ord = app.match(/const DEFAULT_ORDER=\[[^\]]*\];/)[0];
-  assert.ok(ord.includes("'d1','dopen','hopen','h4open','h12open','d7'"), "D open leads the anchored block (2026.08.10-01: + H/4h/12h open) between 24h and 7d in the default order");
+  assert.ok(ord.includes("'d1','vcc','dopen','hopen','h4open','h12open','d7'"), "D open leads the anchored block (2026.08.10-01: + H/4h/12h open) between 24h and 7d in the default order (2026.09.24-104: the hidden-by-default vs-cash-close column sits beside 24h)");
   const hid = app.match(/const DEFAULT_HIDDEN=\[[^\]]*\];/)[0];
   assert.ok(!hid.includes("'dopen'"), "D open is visible by default — it is the point of the column");
   assert.ok(/const LAYOUT_V=5;/.test(app), "LAYOUT_V bumped so saved layouts pick the column up (v5: sess column, 2026.08.14-01)");

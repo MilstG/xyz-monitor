@@ -383,6 +383,9 @@ table.cmx td{width:var(--cell);height:var(--cell);min-width:var(--cell);padding:
 table.cmx td:hover{outline:2px solid var(--text);outline-offset:-1px}
 table.cmx td.diag{background:var(--panel2)!important}
 table.cmx td.nodata{background:var(--panel2)!important;background-image:repeating-linear-gradient(45deg,transparent,transparent 3px,rgba(124,135,148,.16) 3px,rgba(124,135,148,.16) 4px)!important}
+/* (build 2026.09.24-105) daily matrix: under the 10-return floor the cell reads n<10; a CI spanning 0 fades */
+table.cmx td.lown{color:var(--dim);letter-spacing:-.02em}
+table.cmx td.ns{opacity:.38}
 table.cmx th.corner{position:sticky;left:0;background:var(--panel);z-index:3}
 table.cmx th.cl{height:72px;width:var(--cell);vertical-align:bottom;cursor:pointer;padding:0;position:relative}
 table.cmx th.cl span{position:absolute;bottom:5px;left:calc(50% - 1px);transform-origin:left bottom;transform:rotate(-50deg);white-space:nowrap;font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted)}
@@ -496,7 +499,12 @@ svg.spark{width:100%;height:46px;display:block;margin:5px 0 2px}
 .cg-chip.bt-tgt{border-color:var(--accent-dim);color:var(--accent);background:rgba(227,165,60,.08);font-family:var(--mono);font-size:var(--fs-xs)}
 .cg-chip.bt-tgt.off{opacity:.45;border-style:dashed}
 .bt-grp{display:inline-flex;align-items:center;gap:10px}
-.bt-na{opacity:.35;pointer-events:none;filter:saturate(.25)}
+.bt-na{opacity:.35;filter:saturate(.25);cursor:not-allowed}
+/* -97: the wrapper keeps its pointer events so its title — the REASON it is dimmed — actually shows
+   on hover; only the controls inside go dead. pointer-events:none on the wrapper itself (as it was)
+   killed the tooltip along with the clicks, so "dimmed with the reason on hover" was dimmed only. */
+.bt-na *{pointer-events:none}
+.cg-pill:disabled{opacity:.4;cursor:not-allowed}
 .bt-mode{font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted);line-height:1.6;background:var(--panel2);
   border:1px solid var(--border);border-left:2px solid var(--accent);border-radius:0 var(--r-2) var(--r-2) 0;padding:7px 12px;margin:0 0 12px}
 .bt-mode b{color:var(--text)}
@@ -831,6 +839,21 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .earn-study{font-family:var(--mono);font-size:var(--fs-xs);color:var(--accent);min-width:180px;cursor:help}
 .earn-study.sec{color:var(--dim)}
 .earn-live{margin-left:auto;font-family:var(--mono);font-size:var(--fs-xs);cursor:help;white-space:nowrap}
+
+/* ===== pre-earnings setup cards (build 2026.09.24-100) ===== */
+.earn-setup{background:var(--panel);border-left:2px solid var(--accent);margin-bottom:2px;font-size:var(--fs-sm)}
+.earn-setup>summary{display:flex;align-items:center;gap:14px;padding:7px 10px;cursor:pointer;list-style:none}
+.earn-setup>summary::-webkit-details-marker{display:none}
+.earn-setup>summary:hover{background:var(--panel2)}
+.earn-setup[open]>summary{border-bottom:1px solid var(--border)}
+.setup-verdict{font-size:var(--fs-xs);line-height:1.45;color:var(--text);min-width:0;overflow-wrap:anywhere}
+.setup-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 16px;padding:8px 10px 10px}
+.setup-blk{min-width:0}
+.setup-h{font-family:var(--mono);font-size:var(--fs-xs);letter-spacing:.6px;text-transform:uppercase;color:var(--muted);margin-bottom:3px;cursor:help}
+.setup-kv{display:flex;justify-content:space-between;gap:10px;font-size:var(--fs-xs);line-height:1.6}
+.setup-kv>span:last-child{font-family:var(--mono);text-align:right;min-width:0;overflow-wrap:anywhere}
+#dsetup .setup-grid{padding:4px 0 8px}
+@media (max-width:640px){.earn-setup>summary{flex-wrap:wrap;gap:4px 10px}.earn-setup .earn-sess{min-width:0}}
 
 /* ===== trend leaderboard tab (build -47) ===== */
 .tsec-h{font-size:var(--fs-sm);text-transform:uppercase;letter-spacing:1.1px;font-weight:700;color:var(--text);
@@ -2469,8 +2492,8 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .dm-typing{font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted);padding:0 16px 8px;font-style:italic}
 /* chat terminal (build 2026.09.11-69): a posted command result, and the private lines under the log */
 .dm-msg.cmd{max-width:92%}
-/* ---- share to chat (build 2026.09.21-84): the glyph, the menu, the sheet, the card ---- */
-.shr-fly{position:fixed;z-index:60;width:16px;height:16px;border-radius:var(--r-1);border:none;padding:0;cursor:pointer;
+/* ---- share to chat (build 2026.09.21-84): the glyph, the menu, the sheet, the card ---- */ /* the glyph sits above the drawer (81) since build 2026.09.24-98 — its section headers carry it — and under the sheet (84+) */
+.shr-fly{position:fixed;z-index:82;width:16px;height:16px;border-radius:var(--r-1);border:none;padding:0;cursor:pointer;
   background:var(--panel2);color:var(--muted);font-family:var(--mono);font-size:var(--fs-xs);line-height:1;box-shadow:0 1px 4px rgba(0,0,0,.4)}
 .shr-fly:hover{color:var(--accent);background:rgba(227,165,60,.18)}
 .shr-menu{position:fixed;z-index:95;background:var(--panel2);border:1px solid var(--border);border-radius:var(--r-2);padding:4px;min-width:240px;
@@ -2526,6 +2549,29 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .dm-card .cft .dm-tool{font-size:var(--fs-xs);text-decoration:none;color:var(--blue)} .dm-card .cft .dm-tool:hover{color:var(--accent)}
 .dm-card .cft .now{margin-left:auto} .dm-card .cft .now b{font-weight:600}
 .dm-cardmk{font-family:var(--mono);font-size:var(--fs-2xs);color:var(--dim);margin-top:2px}
+/* share to chat everywhere (build 2026.09.24-98): a panel's lines, its redrawn spark, a chart's
+   picture, a live screen's two tables, and the Charts pane's glyph */
+.dm-card .plines{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+.dm-card .plines .pl{display:flex;align-items:baseline;gap:10px;padding:5px 10px;border-bottom:1px solid var(--grid);min-width:0}
+.dm-card .plines .pl:nth-child(odd){border-right:1px solid var(--grid)}
+.dm-card .plines .pl.wide{grid-column:1/-1;border-right:none}
+.dm-card .plines .k{font-family:var(--mono);font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto}
+.dm-card .plines .v{font-family:var(--mono);font-size:var(--fs-sm);margin-left:auto;text-align:right;overflow-wrap:anywhere}
+.dm-card .plines .pl.wide .v{margin-left:0;text-align:left}
+.dm-card .pspark{padding:4px 10px 6px}
+.dm-card .pspark .k{display:block;font-family:var(--mono);font-size:var(--fs-2xs);color:var(--dim)}
+.dm-card .cimg{max-width:100%;margin:0;padding:8px 10px 4px}
+.dm-card .cimg img{width:100%}
+.dm-card .cimg-na{padding:10px;font-family:var(--mono);font-size:var(--fs-xs)}
+.dm-card .lvh{padding:5px 10px;font-family:var(--mono);font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.5px;color:var(--muted);border-bottom:1px solid var(--grid)}
+.dm-card .lvh b{color:var(--accent);font-weight:600} .dm-card .lvh.asw{border-top:1px solid var(--border);color:var(--dim)}
+.dm-card .lvnone{padding:8px 10px;font-family:var(--mono);font-size:var(--fs-xs)}
+.dm-card tr.nw td{background:rgba(227,165,60,.05)} .dm-card .nwk{font-size:var(--fs-2xs);color:var(--accent);font-weight:400;margin-left:4px}
+.dm-card tr.gone td{opacity:.45} .dm-card tr.gone td.tk{text-decoration:line-through}
+.dm-msg.card:has(.cimg){max-width:100%;width:min(100%,640px)}
+.chshr{background:transparent;border:none;color:var(--dim);font-family:var(--mono);font-size:var(--fs-xs);padding:0 3px;cursor:pointer;border-radius:var(--r-1)}
+.chshr:hover,.chshr:focus-visible{color:var(--accent);background:rgba(227,165,60,.12)}
+@media (max-width:560px){.dm-card .plines{grid-template-columns:minmax(0,1fr)} .dm-card .plines .pl:nth-child(odd){border-right:none}}
 @media (max-width:560px){.dm-card .kv{grid-template-columns:repeat(2,minmax(0,1fr))} .dm-card .kv div:nth-child(2n){border-right:none} .dm-msg.card{max-width:100%}}
 .dm-b.dm-cmdb{padding:6px 10px 7px;max-width:100%}
 .dm-cmdhd{font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted);margin-bottom:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
@@ -2619,7 +2665,7 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .dm-callsum .grow{flex:1;min-width:70px}
 .dm-callhzrec{font-size:var(--fs-xs);color:var(--muted);white-space:nowrap}
 .dm-callsum span:not(.grow){font-family:var(--mono);font-size:var(--fs-xs)}
-.dm-callrow{align-self:stretch;display:grid;grid-template-columns:64px 1fr auto 74px 68px 68px 58px 52px 52px;gap:10px;align-items:center;
+.dm-callrow{align-self:stretch;display:grid;grid-template-columns:64px 1fr auto 74px 68px 68px 58px 52px 52px 118px;gap:10px;align-items:center;
   padding:7px 0;border-bottom:1px solid var(--grid);cursor:pointer;font-size:var(--fs-sm)}
 .dm-callrow:hover{background:var(--panel2)}
 .dm-callst{font-family:var(--mono);font-size:var(--fs-xs);white-space:nowrap}
@@ -2634,7 +2680,7 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .dm-callpx{color:var(--muted)}
 .dm-callnow{color:var(--text)}
 .dm-callmv{font-weight:700}
-@media (max-width:820px){ .dm-callrow{grid-template-columns:56px 1fr 58px} .dm-callrow .acc-mu,.dm-callpx,.dm-callhz{display:none} }
+@media (max-width:820px){ .dm-callrow{grid-template-columns:56px 1fr 58px} .dm-callrow .acc-mu,.dm-callpx,.dm-callhz,.dm-calltg{display:none} }
 /* the column-label row above the record, and the tombstone row */
 .dm-callhead{border-bottom:1px solid var(--border);padding-bottom:4px;cursor:default}
 .dm-callhead span{font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.8px;color:var(--dim)}
@@ -2645,6 +2691,30 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .dm-callsum{cursor:pointer;border-radius:var(--r-2);padding:1px 6px;margin:0 -6px}
 .dm-callsum:hover{background:var(--panel2)}
 .dm-callsum.sel{background:var(--panel2);outline:1px solid var(--accent-dim)}
+/* call targets (build 2026.09.24-95): the board's target cell, the binary record beside the % one,
+   the composer's target chip, and the row under a target's stamp — a progress bar from the sent mark
+   (zero line) to the target, the time-used triangle under it, a red tick at the stop, a status pill */
+.dm-calltg{font-family:var(--mono);font-size:var(--fs-xs);text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dm-calltgrec{font-size:var(--fs-xs);color:var(--muted);white-space:nowrap}
+.dm-tgpv b{color:var(--text)}
+.dm-tg{background:var(--bg);border:1px solid var(--border);border-top:none;border-radius:0 0 var(--r-2) var(--r-2);
+  padding:6px 10px 7px;margin-top:-1px;font-family:var(--mono);font-size:var(--fs-2xs);color:var(--muted)}
+.dm-tk:has(+ .dm-tg){border-bottom-left-radius:0;border-bottom-right-radius:0}
+.dm-tg-h{display:flex;align-items:center;gap:8px;justify-content:space-between}
+.dm-tg-h b{color:var(--text)}
+.dm-tg-pill{border:1px solid var(--border);border-radius:999px;padding:0 7px;white-space:nowrap}
+.dm-tg-pill.open{color:var(--accent);border-color:var(--accent-dim)}
+.dm-tg-pill.hit{color:var(--up);border-color:var(--up)}
+.dm-tg-pill.wrong{color:var(--down);border-color:var(--down)}
+.dm-tg-pill.miss,.dm-tg-pill.early{color:var(--muted)}
+.dm-tg-bar{position:relative;height:6px;margin:7px 0 9px;background:var(--panel2);border-radius:var(--r-1)}
+.dm-tg-bar i{position:absolute;display:block}
+.dm-tg-zero{top:-2px;bottom:-2px;width:1px;background:var(--faint)}
+.dm-tg-fill{top:0;bottom:0;border-radius:var(--r-1)}
+.dm-tg-fill.pos{background:var(--up)} .dm-tg-fill.neg{background:var(--down)}
+.dm-tg-stop{top:-3px;bottom:-3px;width:2px;margin-left:-1px;background:var(--down)}
+.dm-tg-clock{top:8px;width:0;height:0;margin-left:-4px;border-left:4px solid transparent;border-right:4px solid transparent;border-bottom:5px solid var(--text)}
+.dm-tg-f{line-height:1.4}
 /* direction chip on the stamp card + the one-tap alert hand (dm-dir, NOT dm-side — that's the rail) */
 .dm-dir{font-family:var(--mono);font-size:var(--fs-2xs);font-weight:700;letter-spacing:.5px;margin-left:7px;vertical-align:1px}
 .dm-tkbell{margin-left:8px;color:var(--muted)}
@@ -2758,3 +2828,90 @@ tr[data-wlsep] td:first-child{position:relative} tr[data-wlsep] td:first-child::
 .s-ctrls .zone,.cg-ctrls .zone{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap}
 .s-ctrls .zone.cut::before,.cg-ctrls .zone.cut::before{content:"";width:1px;height:20px;background:var(--border);margin:0 var(--sp-1)}
 .s-ctrls .zone.act,.cg-ctrls .zone.act{margin-left:auto}
+
+/* ===== Usage (build 2026.09.24-109): the Admin Usage fold (usageadm.js) and the member's
+   "Your usage" card in the Messages rail (usage.js). Lifted from docs/xyz-monitor-usage-stats-mock.html
+   onto the -93 scale; every class is us- so nothing here can restyle another tab's .card/.kpi/.bar. */
+.us-row{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-2);margin:0 0 var(--sp-3)}
+.us-row .right{margin-left:auto;display:flex;gap:var(--sp-2);align-items:center;flex-wrap:wrap}
+.us-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:var(--sp-2);margin:0 0 var(--sp-3)}
+.us-kpi{background:var(--panel2);border:1px solid var(--border);border-radius:var(--r-2);padding:var(--sp-2) var(--sp-3);min-width:0}
+.us-kpi .k{font-family:var(--mono);font-size:var(--fs-2xs);letter-spacing:.1em;text-transform:uppercase;color:var(--dim)}
+.us-kpi .v{font-family:var(--mono);font-size:var(--fs-xl);font-weight:500;margin:2px 0 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.us-kpi .s{font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted)}
+.us-live{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--up);margin-right:6px;vertical-align:middle;box-shadow:0 0 0 3px rgba(70,185,126,.18)}
+.us-card{background:var(--panel2);border:1px solid var(--border);border-radius:var(--r-2);padding:var(--sp-3)}
+.us-card h4{margin:0 0 2px;font-size:var(--fs-md);font-weight:600}
+.us-card .sub{font-size:var(--fs-xs);color:var(--muted);margin:0 0 var(--sp-2)}
+.us-svg{display:block;width:100%;height:auto}
+.us-axis{font-family:var(--mono);font-size:var(--fs-2xs);fill:var(--dim)}
+.us-grid{stroke:var(--grid)}
+.us-barf{fill:var(--accent);opacity:.85}
+.us-bar0{fill:var(--border)}
+.us-mean{fill:none;stroke:var(--muted);stroke-width:1.5}
+.us-legend{display:flex;gap:var(--sp-3);font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted);margin-top:var(--sp-1)}
+.us-legend i{display:inline-block;width:9px;height:9px;border-radius:var(--r-1);margin-right:5px;vertical-align:-1px}
+.us-legend i.us-legmean{height:2px;vertical-align:3px;background:var(--muted)}
+.us-tw{overflow-x:auto;border:1px solid var(--border);border-radius:var(--r-2)}
+.us-tbl{width:100%;border-collapse:collapse;font-size:var(--fs-sm)}
+.us-tbl th{font-family:var(--mono);font-size:var(--fs-2xs);letter-spacing:.08em;text-transform:uppercase;color:var(--dim);font-weight:500;text-align:left;padding:7px 10px;border-bottom:1px solid var(--border);background:var(--panel2);white-space:nowrap;cursor:pointer;user-select:none}
+.us-tbl th.n,.us-tbl td.n{text-align:right}
+.us-tbl th.sorted{color:var(--accent)}
+.us-tbl td{padding:6px 10px;border-bottom:1px solid var(--grid);white-space:nowrap}
+.us-tbl td.n,.us-tbl td.mono{font-family:var(--mono)}
+.us-tbl tr:last-child td{border-bottom:0}
+.us-tbl tbody tr:hover{background:rgba(255,255,255,.02)}
+.us-mrow{cursor:pointer}
+.us-tbl tbody tr.sel{background:rgba(227,165,60,.07)}
+.us-bar{display:inline-block;height:6px;border-radius:var(--r-1);background:var(--accent);vertical-align:middle;opacity:.85}
+.us-bar.b{background:var(--blue)}
+.us-handle{font-weight:600}
+.us-you{font-family:var(--mono);font-size:var(--fs-2xs);color:var(--accent);margin-left:var(--sp-1)}
+.us-drawer{margin-top:var(--sp-3);border:1px solid var(--accent-dim);border-radius:var(--r-2);background:var(--panel2);padding:var(--sp-3)}
+.us-drawer .hd{display:flex;align-items:baseline;gap:var(--sp-2);flex-wrap:wrap;margin-bottom:var(--sp-2)}
+.us-drawer .hd .t{font-size:var(--fs-lg);font-weight:700}
+.us-drawer .hd .right{margin-left:auto}
+.us-audit{font-family:var(--mono);font-size:var(--fs-xs);color:var(--accent);background:rgba(227,165,60,.08);border:1px solid var(--accent-dim);border-radius:var(--r-1);padding:var(--sp-1) var(--sp-2);margin:0 0 var(--sp-3)}
+.us-grid2{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:var(--sp-3)}
+@media (max-width:820px){.us-grid2{grid-template-columns:minmax(0,1fr)}}
+.us-mix{display:flex;height:10px;border-radius:var(--r-1);overflow:hidden;margin:var(--sp-1) 0 6px}
+.us-mixleg{display:flex;flex-wrap:wrap;gap:var(--sp-1) var(--sp-3);font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted)}
+.us-mixleg i{display:inline-block;width:8px;height:8px;border-radius:var(--r-1);margin-right:var(--sp-1)}
+.us-mix .c0,.us-mixleg .c0,.us-legend .c0{background:var(--accent)}
+.us-mix .c1,.us-mixleg .c1{background:var(--blue)}
+.us-mix .c2,.us-mixleg .c2{background:var(--up)}
+.us-mix .c3,.us-mixleg .c3{background:var(--muted)}
+.us-mix .c4,.us-mixleg .c4{background:var(--down)}
+.us-mix .c5,.us-mixleg .c5{background:var(--faint)}
+/* the member's card, in the Messages rail */
+.dm-usage{border-top:1px solid var(--border);margin-top:10px;padding:11px 13px 12px}
+.dm-usage:empty{display:none}
+.dm-usage .us-kpis{grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-1);margin:var(--sp-2) 0}
+.dm-usage .us-kpi{padding:var(--sp-1) var(--sp-2)}
+.dm-usage .us-kpi .v{font-size:var(--fs-lg)}
+.dm-usage .us-row{margin:0}
+.us-disc{font-family:var(--mono);font-size:var(--fs-2xs);color:var(--dim);line-height:1.5}
+/* (build 2026.09.24-110) stage B+C: heatmap, adoption funnel, join-week cohorts, features row, client health */
+.us-heatc{fill:var(--accent)}
+.us-heat{max-width:420px}
+.us-flag{font-size:var(--fs-xs);color:var(--muted);margin-top:6px;line-height:1.45}
+.us-flag b{color:var(--accent);font-weight:500}
+.us-fr{display:grid;grid-template-columns:150px minmax(0,1fr) 70px;gap:var(--sp-2);align-items:center;margin:0 0 6px;font-size:var(--fs-sm)}
+.us-fr .v{font-family:var(--mono);text-align:right;color:var(--muted)}
+.us-track{background:var(--bg);border-radius:var(--r-1);height:8px;overflow:hidden}
+.us-track span{display:block;height:100%;background:var(--up);opacity:.8}
+@media (max-width:560px){.us-fr{grid-template-columns:110px minmax(0,1fr) 56px}}
+.us-cohort{border-collapse:collapse;width:100%}
+.us-cohort th{font-family:var(--mono);font-size:var(--fs-2xs);letter-spacing:.08em;text-transform:uppercase;color:var(--dim);font-weight:500;padding:4px 6px;text-align:center}
+.us-cohort th:first-child{text-align:left}
+.us-cohort td{text-align:center;font-family:var(--mono);font-size:var(--fs-xs);padding:5px 6px}
+.us-cohort td:first-child{text-align:left;color:var(--muted);white-space:nowrap}
+.us-cohort td.na{color:var(--dim)}
+.us-cohort td.cur{outline:1px dashed var(--accent-dim);outline-offset:-2px}
+.us-acts{display:flex;flex-wrap:wrap;gap:var(--sp-1)}
+.dm-usage .us-acts{margin:0 0 var(--sp-2)}
+.us-health{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:var(--sp-2)}
+.us-hv{font-family:var(--mono);font-size:var(--fs-xl);font-weight:500}
+.us-hv .acc-mu{font-size:var(--fs-md)}
+.us-hs{font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted);overflow-wrap:anywhere}
+.us-errs td.us-emsg{white-space:normal;overflow-wrap:anywhere;min-width:220px}

@@ -526,8 +526,8 @@ test("server route manifest: every load-bearing API route is registered exactly 
   const fs = require("fs"), path = require("path");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const routes = ["/api/snapshot", "/api/daily", "/api/analytics", "/api/duel", "/api/trend", "/api/signals",
-    "/api/earnings", "/api/series", "/api/ledger", "/api/candles", "/api/corr-crypto", "/api/derivs", "/api/fundamentals", "/api/ai-report", "/api/ai-reports", "/api/health",
-    "/api/actionable", "/api/triggers",
+    "/api/earnings", "/api/earnings/setups", "/api/series", "/api/ledger", "/api/candles", "/api/corr-crypto", "/api/derivs", "/api/fundamentals", "/api/ai-report", "/api/ai-reports", "/api/health",
+    "/api/actionable", "/api/triggers", "/api/retest-study",
     "/api/export/ledger", "/api/news", "/api/news/channels", "/api/alerts", "/api/alerts/rules",
     "/manifest.webmanifest", "/icon.svg", "/sw.js"];
   for (const r of routes) {
@@ -720,7 +720,7 @@ test("client + server integrity: the Report tab ships end to end (markers, style
   // shadows at 216) for eight builds while the 370d retention sat unread. The loop must read the
   // deep map, and the deep map must be written before the wire slice.
   assert.ok(pol.includes("deepDaily.set(r.coin, dr);"), "full crypto tuples stashed for the signal loop");
-  assert.ok(pol.includes("const closes = closedDailyCloses(deepDaily.get(r.coin) || dc.daily[r.coin] || null)"), "the signal loop prefers full depth (closed bars only, -67)");
+  assert.ok(pol.includes("const closes = closedDailyCloses(sessTuplesM(r, deepDaily.get(r.coin) || dc.daily[r.coin] || null))"), "the signal loop prefers full depth (closed bars only, -67; session-folded on a calendar market, -105)");
 });
 
 test("mobile suite -100: touch parity, mobile preset and PWA shell are fully wired", () => {
@@ -748,13 +748,18 @@ test("mobile suite -100: touch parity, mobile preset and PWA shell are fully wir
   assert.ok(app.includes("serviceWorker.register('/sw.js')"), "SW registration missing");
   assert.ok(srv.includes("PWA_MANIFEST") && srv.includes("PWA_SW"), "inline PWA payloads missing from server");
   // The worker lives in public/sw.js since -66 (it grew push handlers); the server reads it at
-  // boot with the old inline no-op as fallback. The contract stands either way: a fetch handler
-  // for installability, ZERO caching or interception — a stale client is worse than no client.
+  // boot with the old inline no-op as fallback. The contract: a fetch handler for installability,
+  // and (since build 2026.09.24-103) interception ONLY for this build's exact-stamped static assets —
+  // never /api, HTML or an unversioned URL; a stale client is still worse than no client. The
+  // behavioral half of this contract runs the worker in a vm (client-perf.test.js).
   assert.ok(/const PWA_SW = \(\(\) => \{/.test(srv) && srv.includes('"public", "sw.js"'), "PWA_SW must read the worker file at boot");
   assert.ok(/return "self\.addEventListener\('install'/.test(srv), "the inline no-op fallback must survive — installability must not break on a missing file");
   const swf = fs.readFileSync(path.join(__dirname, "..", "public", "sw.js"), "utf8");
   assert.ok(swf.includes('addEventListener("fetch"'), "SW needs a fetch handler for installability");
-  assert.ok(!swf.includes("caches") && !swf.includes("respondWith"), "SW must not cache or intercept — stale-client hazard");
+  assert.ok(swf.includes('const BUILD = "{{build}}";') && srv.includes('"sw.js"), "utf8").split("{{build}}").join(VERSION)'), "the worker's only cacheable stamp is the build the server stamps into it");
+  assert.ok(swf.includes('url.search !== "?v=" + BUILD') && swf.includes('if (!isVersionedAsset(url)) return;'), "SW intercepts nothing but exact-stamped assets — stale-client hazard");
+  assert.equal(swf.split("respondWith").length - 1, 1, "exactly one interception site");
+  assert.ok(swf.includes('k.indexOf(ASSET_PREFIX) === 0 && k !== ASSET_CACHE') , "activate purges every other build's cache");
   assert.ok(swf.includes('addEventListener("push"') && swf.includes("showNotification"), "the push leg renders notifications");
   assert.ok(swf.includes('addEventListener("notificationclick"'), "and a click lands the reader in the app");
   // Mobile CSS: sticky ticker column, full-width drawer, scrollable tab strip, touch targets.
@@ -826,7 +831,10 @@ test("perf batch 2026.07.21-08: getFunding memo, bucketsFor memo, gzip+dataTs wi
 
   // #4 getFunding memo + its per-row invalidation at every fundH mutation site (5 writes + clear + sweep)
   assert.ok(pol.includes("r._fgVer === r._fVer && r._fgH === hourKey"), "getFunding memo key missing");
-  assert.equal((pol.match(/r\._fVer = \(r\._fVer \|\| 0\) \+ 1/g) || []).length, 6, "every fundH mutation site must bump _fVer (seed, 2x foldCtx, backfill, clear, sweep)");
+  // Since build 2026.09.24-102 both foldCtx writes go through fundSet, which bumps once (and keeps the memo incrementally).
+  assert.equal((pol.match(/r\._fVer = \(r\._fVer \|\| 0\) \+ 1/g) || []).length, 5, "every fundH mutation site must bump _fVer (seed, fundSet, backfill, clear, sweep)");
+  assert.equal((pol.match(/fundSet\(r, hourNow, fn\)/g) || []).length, 2, "both foldCtx forward-fill writes go through fundSet");
+  assert.ok(!/r\.fundH\.set\(hourNow/.test(pol), "no raw forward-fill write left that would skip the version bump");
 
   // #3 bucketsFor memo, and NO raw spine bucketing left at the hot call sites
   assert.ok(pol.includes("function bucketsFor(r, width)"), "bucketsFor memo helper missing");
@@ -919,7 +927,7 @@ test("deep archive + CHARTS tab: source + wiring manifest (store, capture lane, 
   assert.ok(app.includes("'markets','focus','funds','trend','charts'"), "HASH_VIEWS must route #charts");
   assert.ok(app.includes("'markets','trend','charts','report'"), "CRYPTO_VIEWS must keep charts visible in crypto scope");
   assert.ok(app.includes("{v:'charts',label:'Charts'}"), "command palette must reach charts");
-  assert.ok(app.includes("setHidden('view-charts'") && app.includes("if(v==='charts'){ if(el('view-charts')) openCharts();"), "showView must wire the charts section");
+  assert.ok(app.includes("setHidden('view-charts'") && app.includes("if(v==='charts'){ if(el('view-charts')) lazyCall('charts','openCharts');"), "showView must wire the charts section");
   // the crosshair/readout hover contract holds on every pane (standing requirement: all charts hover)
   assert.ok(app.includes("chHoverAll(p,tAt(e))") && app.includes("hover for OHLC"), "per-pane crosshair + OHLC readout wired");
   // intraday base stays under the route cap so the server never coarsens it off the 5m grid —
@@ -1030,7 +1038,8 @@ test("build -07 manifest: pair math welded across compute.js and app.js; duel pl
   // -04: the 5m/15m pair added two adjacency calls per merge site (m5 beside px, m15 beside m5);
   // 2026.08.10-01: the anchored-open trio (hopen/h4open/h12open beside dopen) added three more per site
   // 2026.09.16-79: the Position column (pos beside oi) added one more per site
-  assert.equal(app.split("colAdjacent(").length - 1, 15, "adjacency migration: one definition + (momp, m5, m15, hopen, h4open, h12open, pos) on the prefs path + the same seven on the layout path");
+  // 2026.09.24-104: the cash-close pair (vcc beside d1, rscc beside rs) added two more per site
+  assert.equal(app.split("colAdjacent(").length - 1, 19, "adjacency migration: one definition + (momp, m5, m15, hopen, h4open, h12open, pos, vcc, rscc) on the prefs path + the same nine on the layout path");
   assert.ok(app.includes("renderDuelSection()") && app.includes("loadDuelData()"), "duel panel wired into the backtest render");
   // -08: the hot dot rides BOTH momentum cells — it flags the name, not the incumbent score,
   // and must survive when only one of the two columns is visible.
@@ -1082,8 +1091,12 @@ test("-17 hotfix: analytics ETag is scope-namespaced so the two universes can't 
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   // the route builds a scope-prefixed validator and 304s only on an exact scope-tag match
   assert.ok(srv.includes('const tag = \'W/"\' + scope + "-" +'), "ETag prefixes the scope");
-  assert.ok(srv.includes('if (req.headers["if-none-match"] === tag) { return reply.code(304).send(); }'),
+  // Since -101 the route serves through sendCachedBody (memoized serialize + gzip), whose 304 is the
+  // same exact-tag match on the validator the route hands it.
+  assert.ok(srv.includes('if (req.headers["if-none-match"] === tag) { reply.code(304).send(); return; }'),
     "304 only when the scope-namespaced tag matches");
+  const route = srv.slice(srv.indexOf('fastify.get("/api/analytics"'), srv.indexOf('fastify.get("/api/funding"'));
+  assert.ok(route.includes("return sendCachedBody(req, reply, body, tag);"), "the analytics route hands its scope-namespaced tag to sendCachedBody");
   // prove the two tags differ even at an identical dataTs
   const tagOf = (scope, dataTs) => 'W/"' + scope + "-" + dataTs + '"';
   assert.notEqual(tagOf("stocks", 1721000000000), tagOf("crypto", 1721000000000), "same-ms builds still get distinct tags");
@@ -1395,7 +1408,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.23-94"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.24-110"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -1595,7 +1608,7 @@ test("loop instrumentation 2026.07.29-05: histogram armed before the store/polle
   // Boot restore trims to the cap so a hand-edited or legacy-format file can't grow unbounded.
   assert.ok(srv.includes("loopRing = j.ring.slice(-LOOP_RING_MAX)"), "boot restore trims to the ring cap");
   // Health surface: live sample + ring + maxEver, on the existing route (no new endpoint).
-  assert.ok(/\/api\/health"[\s\S]{0,600}loop: \{ \.\.\.loopSample\(\), sinceMs: Date\.now\(\) - loopResetAt, windowMs: LOOP_WINDOW, maxEver: loopMaxEver, hist: loopRing \}/.test(srv),
+  assert.ok(/\/api\/health"[\s\S]{0,1200}loop: \{ \.\.\.loopSample\(\), sinceMs: Date\.now\(\) - loopResetAt, windowMs: LOOP_WINDOW, maxEver: loopMaxEver, hist: loopRing \}/.test(srv),
     "/api/health must ship the live sample, window age, maxEver and the ring");
 });
 
@@ -1725,7 +1738,7 @@ test("perf -08: tick instrumentation, cooperative yields and the serialized buil
   assert.ok(pol.includes("buildAnalyticsSafe(scope).catch(() => {});"), "getAnalytics fires the async self-heal and serves the fallback this once");
   // The previously bare intervals are timed + isolated now.
   assert.ok(pol.includes('setInterval(safeTick(buildSnapshot, "buildSnapshot"), 15 * 1000);'), "buildSnapshot runs through safeTick");
-  assert.ok(pol.includes('setInterval(safeTick(buildDaily, "buildDaily"), 60 * 1000);'), "buildDaily runs through safeTick");
+  assert.ok(pol.includes('staggered(safeTick(buildDaily, "buildDaily"), 60 * 1000, 8 * 1000);'), "buildDaily runs through safeTick (phase-staggered since -101)");
   // The names reach the wire, and the harness can settle the chain.
   assert.ok(pol.includes("ticks: [...tickStats]"), "stats() must ship the named tick durations");
   assert.ok(pol.includes("settleBuildsNow: () => buildChain"), "harness chain-settle export missing");
@@ -1893,10 +1906,10 @@ test("whale wiring manifest: feature keys, routes, tab markup, terminal + planne
   assert.ok(ih.includes('data-view="funds"') && ih.includes('id="view-funds"'), "tab button + section in the shell");
   const app = require("./_client").clientSource();
   assert.ok(app.includes("'funds'") && /setHidden\('view-funds', v!=='funds'\)/.test(app), "showView wired");
-  assert.ok(/if\(v==='funds'\)\{ if\(el\('view-funds'\)\) openFunds\(\)/.test(app), "open hook");
-  assert.ok(/h==='whale'\|\|h==='13f'\) return termWhale/.test(app), "termExec routes whale");
+  assert.ok(/if\(v==='funds'\)\{ if\(el\('view-funds'\)\) lazyCall\('funds','openFunds'\)/.test(app), "open hook");
+  assert.ok(/h==='whale'\|\|h==='13f'\) return lazyCall\('insiders','termWhale'/.test(app), "termExec routes whale");
   assert.ok(app.includes("'fund','etf','whale'"), "TERM_VERBS carries whale (completion engine)");
-  assert.ok(app.includes("data-whale=") && app.includes("whlOpenFund(k)"), "news filings lane deep-links a whale row to the FUNDS tab, never a ticker drawer");
+  assert.ok(app.includes("data-whale=") && app.includes("lazyCall('funds','whlOpenFund',k)"), "news filings lane deep-links a whale row to the FUNDS tab, never a ticker drawer");
   assert.ok(app.includes("no prior filing ingested") && app.includes("share count not claimed"), "honest-null framing rendered, not implied");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   assert.ok(pol.includes("whale <FUND>") && pol.includes("whale season") && pol.includes("context.whales"), "planner grammar advertises the family and the watchlist rides the context");

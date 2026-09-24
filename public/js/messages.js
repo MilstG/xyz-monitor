@@ -11,8 +11,9 @@ import { fetchJSON } from "./data.js";
 import { openDetail } from "./drawer.js";
 import { HELP_KEYS, closeHelp } from "./nav.js";
 import { TFIELD, nlResolve, termActive, termAsk, termComps, termErr, termExec, termFind, termGrammarComplete, termHistPush, termOutTrans, termSetSink, termSink, tpad } from "./terminal.js";
-import { cardHtml, cardOpen, cardPost, cardRecapture, shareCommand } from "./share.js";
+import { cardCanRecapture, cardHtml, cardOpen, cardPost, cardRecapture, shSvgPng, shareCommand } from "./share.js";
 import { loadRules } from "./triggers.js";
+import { usageCardHtml, usageMeLoad } from "./usage.js";
 
 
 // ===== MESSAGES tab (build 2026.08.30-46, groups/files/reactions/search 2026.08.31-47) =========
@@ -526,7 +527,7 @@ const DM_CMD_GUIDE=[
     ['report <ticker> \u00b7 report sector <name> \u00b7 report basket <t> <t> \u2026','the AI analyst report \u2014 opens the report view','ti']]},
   {h:'Chat only',rows:[
     ['/alert <ticker> <above|below|crosses> <n>','a threshold alert that fires INTO this conversation \u00b7 /alert NVDA > 200 \u00b7 /alert NVDA crosses down 180 \u00b7 /alert NVDA above 200ma \u00b7 /alert HOOD d1 > 5 \u00b7 /alert list \u00b7 /alert off <id>','c'],
-    ['/share <ticker> [column] \u00b7 /share screen','a piece of the screener as a data card \u2014 /share HOOD funding \u00b7 /share NVDA \u00b7 /share screen \u00b7 the \u2934 glyph on the table does the same with a picker','c'],
+    ['/share <ticker> [column] \u00b7 /share screen','a piece of the screener as a data card \u2014 /share HOOD funding \u00b7 /share NVDA \u00b7 /share screen \u00b7 the \u2934 glyph on the table, the boards, the drawer and the charts shares with a picker (charts as a picture, screens optionally live)','c'],
     ['/help','the short card, privately \u2014 only you see it','c'],
     ['/clear','forget your private lines; the conversation is untouched','c'],
     ['//text','send a message that really starts with a slash','c']]},
@@ -616,12 +617,9 @@ async function dmRatioChart(args){
   if(!d.tf) d.tf=tf;
   const S=ratioImageSvg(d,{scale:'reb',colors,tf});
   const title=`${d.num} \u00f7 ${d.den} \u00b7 ${tf.toUpperCase()} \u00b7 rebased 100${d.ema200?' \u00b7 EMA '+(d.emaSpan||200):''} \u00b7 last ${d.shown||d.candles.length}/${d.bars||d.candles.length} bars`;
-  const W=S.W, H=S.H, svg=S.svg;
-  const png=await new Promise((res)=>{
-    const img=new Image(); const url=URL.createObjectURL(new Blob([svg],{type:'image/svg+xml;charset=utf-8'}));
-    img.onload=()=>{ try{ const c=document.createElement('canvas'); c.width=W*2; c.height=H*2; const g=c.getContext('2d'); g.scale(2,2); g.drawImage(img,0,0); c.toBlob(bl=>{ URL.revokeObjectURL(url); res(bl); },'image/png'); }catch(_){ URL.revokeObjectURL(url); res(null); } };
-    img.onerror=()=>{ URL.revokeObjectURL(url); res(null); };
-    img.src=url; });
+  // One rasteriser for every chart that leaves as a picture (build 2026.09.24-98): share.js owns it,
+  // and the drawer's candles and the Charts panes ride the same one when shared to chat.
+  const png=await shSvgPng(S.svg,S.W,S.H);
   if(!png) return {error:'could not render the chart image'};
   const legs=[d.numBasket?'numerator is a basket (EW, synthesized hourly)':null, d.denBasket?'denominator is a basket (EW, synthesized hourly)':null].filter(Boolean);
   const last=d.candles[d.candles.length-1], first=d.candles[0];
@@ -815,6 +813,7 @@ function dmDrafts(){ try{ return JSON.parse(localStorage.getItem(DM_DRAFT_KEY)||
 const CALL_SHORT_BEFORE=/(^|\W)(short|shorting|sell|selling|fade|fading|bearish|bear|dump|dumping|puts|downside)(\W|$)/i;
 const CALL_SHORT_AFTER=/^[\s,:;\u2014-]*(short|puts|lower|down|bearish|dump)\b/i;
 const CALL_SELL_BEFORE=/(^|\W)(sell|selling|sold|write|writing)(\W|$)/i;
+const CALL_SIDE_AFTER=/^[\s,:;\u2014-]*(long|buy|buying|short|shorting|sell|selling)\b/i;   // (build 2026.09.24-108) a side word between the ticker and its horizon/target
 const CALL_MONTHS={jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,sept:8,oct:9,nov:10,dec:11};
 function dmCallRead(text,sym,nowMs){
   const t=String(text||''), S=String(sym||'').toUpperCase();
@@ -822,24 +821,27 @@ function dmCallRead(text,sym,nowMs){
   if(i<0) return {side:'long',sideWord:null,horizonMs:null,horizonWord:null};
   const before=t.slice(Math.max(0,i-40),i), after=t.slice(i+S.length+1,i+S.length+41);
   let side='long', sideWord=null;
-  const optAfter=/^[\s,:;\u2014-]*(?:\$?\d+(?:\.\d+)?\s*)?(puts|calls)\b/i.exec(after);
+  const optAfter=/^[\s,:;\u2014-]*(?:(sell|selling|sold|write|writing|buy|buying)\s+)?(?:\$?\d+(?:\.\d+)?\s*)?(puts|calls)\b/i.exec(after);
   if(optAfter){
-    const sold=CALL_SELL_BEFORE.exec(before);
-    const opt=optAfter[1].toLowerCase();
-    if(opt==='puts'){ side=sold?'long':'short'; sideWord=sold?sold[2]+' \u2026 puts':'puts'; }
-    else { side=sold?'short':'long'; sideWord=sold?sold[2]+' \u2026 calls':'calls'; }
+    const sb=CALL_SELL_BEFORE.exec(before);
+    const sold=optAfter[1]?(/^buy/i.test(optAfter[1])?null:optAfter[1]):sb?sb[2]:null;
+    const opt=optAfter[2].toLowerCase();
+    if(opt==='puts'){ side=sold?'long':'short'; sideWord=sold?sold+' \u2026 puts':'puts'; }
+    else { side=sold?'short':'long'; sideWord=sold?sold+' \u2026 calls':'calls'; }
   } else {
-    const b=CALL_SHORT_BEFORE.exec(before), a=CALL_SHORT_AFTER.exec(after);
+    const b=CALL_SHORT_BEFORE.exec(before), a=CALL_SHORT_AFTER.exec(after), w=CALL_SIDE_AFTER.exec(after);
     if(b){ side='short'; sideWord=b[2]; } else if(a){ side='short'; sideWord=a[1]; }
+    else if(w){ side=/^(long|buy)/i.test(w[1])?'long':'short'; sideWord=w[1]; }
   }
   const DAY=86400e3, now=Number.isFinite(+nowMs)?+nowMs:Date.now();
   let horizonMs=null, horizonWord=null;
   const days=(d)=>(d>=1&&d<=365?d*DAY:null);
   const endOfUtcDay=(y,m,d)=>Date.UTC(y,m,d+1)-1;
+  const lead=CALL_SIDE_AFTER.exec(after), ha=lead?after.slice(lead[0].length):after;
   let m;
-  if((m=/^\s*(\d{1,3})\s*(d|days?)\b/i.exec(after))){ horizonMs=days(+m[1]); horizonWord=horizonMs?m[0].trim():null; }
-  else if((m=/^\s*(\d{1,2})\s*(w|wks?|weeks?)\b/i.exec(after))){ horizonMs=days(+m[1]*7); horizonWord=horizonMs?m[0].trim():null; }
-  else if((m=/^\s*(\d{1,2})\s*(mo|months?)\b/i.exec(after))){ horizonMs=days(+m[1]*30); horizonWord=horizonMs?m[0].trim():null; }
+  if((m=/^\s*(?:in\s+)?(\d{1,3})\s*(d|days?)\b/i.exec(ha))){ horizonMs=days(+m[1]); horizonWord=horizonMs?m[0].trim():null; }
+  else if((m=/^\s*(?:in\s+)?(\d{1,2})\s*(w|wks?|weeks?)\b/i.exec(ha))){ horizonMs=days(+m[1]*7); horizonWord=horizonMs?m[0].trim():null; }
+  else if((m=/^\s*(?:in\s+)?(\d{1,2})\s*(mo|months?)\b/i.exec(ha))){ horizonMs=days(+m[1]*30); horizonWord=horizonMs?m[0].trim():null; }
   else if((m=/(?:^|\W)(a week|next week|this week)(?:\W|$)/i.exec(after))){ horizonMs=days(7); horizonWord=m[1]; }
   else if((m=/(?:^|\W)(a month|next month|this month)(?:\W|$)/i.exec(after))){ horizonMs=days(30); horizonWord=m[1]; }
   else if((m=/(?:^|\W)(eow|end of (?:the )?week|by friday)(?:\W|$)/i.exec(after))){
@@ -861,8 +863,123 @@ function dmCallRead(text,sym,nowMs){
       horizonMs=days(Math.min(365,Math.max(1,Math.ceil((end-now)/DAY)))); horizonWord=m[0].trim();
     }
   }
+  if(!sideWord&&horizonWord&&!lead&&ha.trim().indexOf(horizonWord)===0){   // "$NVDA 2w short" (-108)
+    const tail=ha.slice(ha.indexOf(horizonWord)+horizonWord.length), w=CALL_SIDE_AFTER.exec(tail)||CALL_SHORT_AFTER.exec(tail);
+    if(w&&!/^(puts)$/i.test(w[1])){ side=/^(long|buy)/i.test(w[1])?'long':'short'; sideWord=w[1]; }
+  }
   return {side,sideWord,horizonMs,horizonWord};
 }
+// Call targets (build 2026.09.24-95): a byte-for-byte port of compute.callTarget (server) — "$INTC to
+// 32 by Oct 15, wrong under 27" read as a price, a deadline and an optional stop, checked against the
+// mark the stamp will carry. null = no target in the words; {ok:false,error} = the words tried and
+// the send will be a plain call; {ok:true,...} = what the server will store. The suite holds the two in step.
+const TG_NUM="\\$?(\\d+(?:\\.\\d+)?)\\s*(k)?(?![\\w%/]|\\.\\d)";
+const TG_PX=new RegExp("^[\\s,:;\u2014-]*((?:(?:goes|going|heading|headed|runs?|back)\\s+)?(?:to|\u2192|->|target(?:ing)?|tgt)\\s*)?"+TG_NUM,"i");
+const TG_STOP=new RegExp("(?:^|\\W)(?:unless|stop(?:\\s+at)?|(?:wrong|invalid(?:ated)?)\\s+(?:under|over|above|below|at|if))\\s+"+TG_NUM,"i");
+const CALL_SIZE_AFTER=/^\s*(?:shares?|shs?|contracts?|cts?|lots?|units?|x)\b/i;   // (build 2026.09.24-108 follow-up) "200 shares" is a size
+const TG_DATED=/^(?:by\b|eo[wmy]\b|end of|year[ -]?end)/i;   // callRead's DATE words (vs relative horizons)
+// (build 2026.09.24-107) The server's deadline calendar, ported for the preview (compute.js
+// callTargetDeadline / callSessionClose / usDayStatus): a date ends at its US cash close for a
+// session name (16:00 ET, 13:00 on an early close, the last close before a shut day), 24:00 UTC
+// otherwise; a relative deadline on a session name ends at its day's close. The suite holds it in step.
+const DM_ET_FMT=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false,weekday:'short'});
+const DM_WD={Sun:0,Mon:1,Tue:2,Wed:3,Thu:4,Fri:5,Sat:6};
+function dmEtParts(ms){ const p=DM_ET_FMT.formatToParts(new Date(ms)); const g=(t)=>p.find((x)=>x.type===t).value; let h=+g('hour'); if(h===24) h=0; return {y:+g('year'),mo:+g('month'),d:+g('day'),h,mi:+g('minute'),wd:DM_WD[g('weekday')]}; }
+function dmEtWallToUtc(y,mo,d,h,mi){ const base=Date.UTC(y,mo-1,d,h,mi), probe=base+5*3600e3, et=dmEtParts(probe); const off=Math.round((Date.UTC(et.y,et.mo-1,et.d,et.h,et.mi)-probe)/3600e3); return base-off*3600e3; }
+function dmWallWd(y,mo,d){ return new Date(Date.UTC(y,mo-1,d)).getUTCDay(); }
+function dmShiftWall(y,mo,d,days){ const x=new Date(Date.UTC(y,mo-1,d)+days*86400e3); return {y:x.getUTCFullYear(),mo:x.getUTCMonth()+1,d:x.getUTCDate()}; }
+function dmNthWd(y,mo,wd,n){ const first=dmWallWd(y,mo,1); return {y,mo,d:1+((wd-first+7)%7)+(n-1)*7}; }
+function dmLastWd(y,mo,wd){ const dim=new Date(Date.UTC(y,mo,0)).getUTCDate(); return {y,mo,d:dim-((dmWallWd(y,mo,dim)-wd+7)%7)}; }
+function dmEaster(y){ const a=y%19,b=Math.floor(y/100),c=y%100,dd=Math.floor(b/4),e=b%4,f=Math.floor((b+8)/25),g=Math.floor((b-f+1)/3),h=(19*a+b-dd-g+15)%30,i=Math.floor(c/4),k=c%4,l=(32+2*e+2*i-h-k)%7,m=Math.floor((a+11*h+22*l)/451),mo=Math.floor((h+l-7*m+114)/31),d=((h+l-7*m+114)%31)+1; return {y,mo,d}; }
+function dmObservedHol(y,mo,d){ const wd=dmWallWd(y,mo,d); if(wd===6) return dmShiftWall(y,mo,d,-1); if(wd===0) return dmShiftWall(y,mo,d,1); return {y,mo,d}; }
+function dmUsDayStatus(y,mo,d){
+  const wd=dmWallWd(y,mo,d); if(wd===0||wd===6) return 2;
+  const K=(w)=>w.y+'-'+w.mo+'-'+w.d, key=y+'-'+mo+'-'+d, es=dmEaster(y);
+  const closed=[dmObservedHol(y,1,1),dmNthWd(y,1,1,3),dmNthWd(y,2,1,3),dmShiftWall(es.y,es.mo,es.d,-2),dmLastWd(y,5,1),dmObservedHol(y,6,19),dmObservedHol(y,7,4),dmNthWd(y,9,1,1),dmNthWd(y,11,4,4),dmObservedHol(y,12,25)];
+  if(closed.some((w)=>w.y===y&&K(w)===key)) return 2;
+  const early=[]; const j4=dmWallWd(y,7,4);
+  if(j4>=2&&j4<=5) early.push({y,mo:7,d:3});
+  early.push(dmShiftWall(y,11,dmNthWd(y,11,4,4).d,1));
+  if(dmWallWd(y,12,24)>=1&&dmWallWd(y,12,24)<=5) early.push({y,mo:12,d:24});
+  return early.some((w)=>K(w)===key)?1:0;
+}
+function dmCallTargetDeadline(byDay,sessionRule,nowMs){
+  if(typeof byDay!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(byDay)) return null;
+  const now=Number.isFinite(+nowMs)?+nowMs:Date.now();
+  let y=+byDay.slice(0,4), mo=+byDay.slice(5,7), d=+byDay.slice(8,10), end;
+  if(!sessionRule) end=Date.UTC(y,mo-1,d+1);
+  else {
+    let st=dmUsDayStatus(y,mo,d), k=0;
+    while(st===2&&k++<10){ ({y,mo,d}=dmShiftWall(y,mo,d,-1)); st=dmUsDayStatus(y,mo,d); }
+    if(st===2) return null;
+    end=dmEtWallToUtc(y,mo,d,st===1?13:16,0);
+  }
+  return end>now?end:null;
+}
+function dmCallSessionClose(ts,nowMs){
+  const now=Number.isFinite(+nowMs)?+nowMs:-Infinity;
+  let {y,mo,d}=dmEtParts(ts), st=dmUsDayStatus(y,mo,d), k=0;
+  while(st===2&&k++<10){ ({y,mo,d}=dmShiftWall(y,mo,d,-1)); st=dmUsDayStatus(y,mo,d); }
+  let end=dmEtWallToUtc(y,mo,d,st===1?13:16,0);
+  for(k=0;!(end>now)&&k<15;k++){ ({y,mo,d}=dmShiftWall(y,mo,d,1)); st=dmUsDayStatus(y,mo,d); if(st!==2) end=dmEtWallToUtc(y,mo,d,st===1?13:16,0); }
+  return end;
+}
+function dmCallTarget(text,sym,markPx,nowMs,sideOverride,sessionRule){
+  const t=String(text||''), S=String(sym||'').toUpperCase();
+  const i=S?t.toUpperCase().indexOf('$'+S):-1;
+  if(i<0) return null;
+  const after0=t.slice(i+S.length+1,i+S.length+81), lead=CALL_SIDE_AFTER.exec(after0);   // (-108) read past a side word
+  const after=lead?after0.slice(lead[0].length):after0;
+  const p=TG_PX.exec(after);
+  if(!p) return null;
+  const rest=after.slice(p[0].length);
+  if(/^\s*(puts|calls)\b/i.test(rest)) return null;
+  if(CALL_SIZE_AFTER.test(rest)) return null;   // (build 2026.09.24-108 follow-up) "200 shares" is a size, not a target
+  if(lead&&!p[1]) return null;   // (-108 follow-up) behind a side word only an explicit target word ("to 150") makes a target
+  const px=+p[2]*(p[3]?1000:1);
+  const DAY=86400e3, now=Number.isFinite(+nowMs)?+nowMs:Date.now();
+  let horizonMs=null, byWord=null, dated=false, m;
+  const days=(d)=>(d>=1&&d<=365?d*DAY:null);
+  if((m=/(?:^|\W)in\s+(\d{1,3})\s*(d|days?|w|wks?|weeks?|mo|months?)\b/i.exec(rest))){
+    const u=m[2].toLowerCase(), n=+m[1];
+    horizonMs=days(u[0]==='d'?n:u[0]==='w'?n*7:n*30); byWord=horizonMs?m[0].replace(/^\W/,'').trim():null;
+  } else if((m=/(?:^|\W)by\s+(\d{4})-(\d{2})-(\d{2})\b/i.exec(rest))){
+    const end=Date.UTC(+m[1],+m[2]-1,+m[3]+1)-1;
+    if(new Date(Date.UTC(+m[1],+m[2]-1,+m[3])).getUTCDate()===+m[3]&&end>now){ horizonMs=days(Math.max(1,Math.ceil((end-now)/DAY))); byWord=horizonMs?m[0].replace(/^\W/,'').trim():null; dated=!!horizonMs; }
+  } else {
+    const r=dmCallRead('$'+S+' '+rest,S,now);
+    if(r.horizonMs){ horizonMs=r.horizonMs; byWord=r.horizonWord; dated=TG_DATED.test(byWord); }
+  }
+  if(!horizonMs) return p[1]?{ok:false,px,error:'a target needs a deadline — by Oct 15 · in 3w'}:null;
+  if(!(markPx>0)) return {ok:false,px,error:'no live mark to aim from'};
+  const st=TG_STOP.exec(rest);
+  const stop=st?+st[1]*(st[2]?1000:1):null;
+  const read=dmCallRead(t,S,now);
+  const side=sideOverride==='long'||sideOverride==='short'?sideOverride:read.sideWord?read.side:(px<markPx?'short':'long');
+  if(side==='long'?px<=markPx:px>=markPx){   // (-108) a word-decided side the target contradicts: refused, and the reason names the word
+    const why=sideOverride==='long'||sideOverride==='short'?' \u2014 the applied reading says '+side
+      :read.sideWord?' \u2014 \u201c'+read.sideWord+'\u201d makes it a '+side+', so the target has to sit '+(side==='long'?'above':'below')+' the mark':'';
+    return {ok:false,px,error:side+' to '+px+' is behind the mark ('+markPx+')'+why};
+  }
+  if(stop!=null&&(side==='long'?stop>=markPx:stop<=markPx)) return {ok:false,px,error:'the stop ('+stop+') sits on the wrong side of the mark'};
+  const word=(p[0]+rest.slice(0,Math.max(0,rest.indexOf(byWord))+byWord.length)).replace(/^[\s,:;—-]+/,'').replace(/[\s,.;:]+$/,'');
+  const byDay=dated?new Date(now+horizonMs-DAY+1).toISOString().slice(0,10):null;   // (-104) the date a dated deadline names; null for "in 3w"
+  if(sessionRule!==true&&sessionRule!==false) return {ok:true,px,stop,side,horizonMs,word,byDay};
+  const by=byDay?dmCallTargetDeadline(byDay,sessionRule,now):sessionRule?dmCallSessionClose(now+horizonMs,now):now+horizonMs;   // (-107)
+  if(!(by>now)) return {ok:false,px,error:'the '+byDay+' close has already passed \u2014 pick a later date'};
+  return {ok:true,px,stop,side,horizonMs,word,byDay,by};
+}
+// How a target resolves for this name (build 2026.09.24-104) — the server's rule (accounts.targetSweep,
+// compute.callTargetDeadline / callBarReaches), stated where the call is written and where it runs.
+function dmTgSessionRule(r){ return !!r&&r.uni!=='main'&&/^xyz:/.test(String(r.coin||''))&&!r.hm; }
+function dmTgRuleTxt(sr){
+  return sr?'US-session name: a touch counts during the 09:30\u201316:00 ET cash session; off-hours only a 5-minute close through the level counts (a thin overnight/weekend wick is not a hit, nor a stop); a date deadline ends at that date\u2019s 16:00 ET cash close (13:00 on an early-close day; the last close before it when the exchange is shut)'
+    :'any 5-minute touch counts, around the clock; a date deadline ends 24:00 UTC';
+}
+// (build 2026.09.24-108) Whole days until a deadline, rounded UP — the one count the composer's preview,
+// the stamp's "closes … (Nd)", the target row's "Nd left" and the calls list all show. The preview
+// said 22d (rounded) where the bubble said 21d (the stored horizon, rounded) for the same deadline.
+function dmDaysLeft(ts){ return Math.max(0,Math.ceil((ts-Date.now())/86400e3)); }
 // The composer's preview: what the send will stamp, which words decided it, and — when the words
 // decided nothing — an offer to ask the model. An applied reading is the SENDER's choice: it rides
 // the send as an explicit override and is dropped the moment the text changes.
@@ -874,16 +991,23 @@ function dmStampPreview(text){
   const ov=dmState.callOverride&&dmState.callOverride.text===key?dmState.callOverride:null;
   if(dmState.callOverride&&!ov) dmState.callOverride=null;   // the words moved under it
   const read=dmCallRead(text,m[1]);
-  const side=ov&&ov.side?ov.side:read.side, days=ov&&ov.days?ov.days:(read.horizonMs?Math.round(read.horizonMs/86400e3):7);
+  // A target (build 2026.09.24-95) decides the side and the horizon when the words carry one — the
+  // same reader the server runs at send, against the same mark this line shows.
+  const tg=dmCallTarget(text,m[1],r.px,undefined,ov&&ov.side?ov.side:null,dmTgSessionRule(r));
+  const tgOk=tg&&tg.ok?tg:null;
+  const side=tgOk?tgOk.side:ov&&ov.side?ov.side:read.side, days=tgOk?Math.max(1,(tgOk.by||0)>0?dmDaysLeft(tgOk.by):Math.ceil(tgOk.horizonMs/86400e3)):ov&&ov.days?ov.days:(read.horizonMs?Math.round(read.horizonMs/86400e3):7);
   const words=String(text).replace(/\$[A-Za-z][A-Za-z0-9.\-]{0,9}/,'').trim().split(/\s+/).filter(Boolean).length;
   // Vague = no direction word in a message long enough to have meant one. The horizon has an
   // honest default; the direction is the claim, and a defaulted direction is the wrong claim.
-  const vague=!ov&&!read.sideWord&&words>=4;
+  const vague=!ov&&!tgOk&&!read.sideWord&&words>=4;   // a target decided the side
   const why=ov?'<span class="sec">(AI reading applied'+(ov.why?': '+esc(ov.why):'')+')</span>'
     :'<span class="sec">('+(read.sideWord?'because of \u201c'+esc(read.sideWord)+'\u201d':'no direction word: long by default')+(read.horizonWord?' \u00b7 horizon from \u201c'+esc(read.horizonWord)+'\u201d':' \u00b7 7d by default')+')</span>';
   const ask=vague&&dmAskAllowed()?' <button type="button" class="dm-tool" id="dm-callask"'+(dmState.callAsking?' disabled':'')+' title="Ask the model what this message means \u2014 you apply the reading or ignore it; nothing posts on its say-so. Spends one ask.">ask AI what I mean</button>':'';
   const drop=ov?' <button type="button" class="dm-tool" id="dm-calldrop" title="Back to the words">undo</button>':'';
-  pv.hidden=false; pv.innerHTML='will stamp <b>'+esc(r.ticker)+'</b> at <b>'+fmtPrice(r.px)+'</b> as <b class="'+(side==='short'?'neg':'pos')+'">'+side+'</b> \u00b7 <b>'+days+'d</b> '+why+ask+drop+(dmState.callAsking?' <span class="sec">asking\u2026</span>':'')
+  const need=tgOk&&r.px>0?tgOk.px/r.px-1:null;
+  const tgTxt=tgOk?' \u00b7 <span class="dm-tgpv" title="a target: it resolves on whichever comes first \u2014 the mark reaches the level (hit), the deadline\u2019s close prints (miss)'+(tgOk.stop!=null?', or the stop is reached (wrong)':'')+'. '+esc(dmTgRuleTxt(dmTgSessionRule(r)))+'">target <b>'+fmtPrice(tgOk.px)+'</b> <span class="'+(need>=0?'pos':'neg')+'">'+(need>=0?'+':'')+(need*100).toFixed(1)+'%</span> \u00b7 from \u201c'+esc(tgOk.word)+'\u201d'+(tgOk.stop!=null?' \u00b7 wrong at <b class="neg">'+fmtPrice(tgOk.stop)+'</b>':'')+'</span>'
+    :tg&&!tg.ok?' \u00b7 <span class="dm-tgpv neg" title="the words tried to set a target and the reader refused it \u2014 the send stays a plain call">no target: '+esc(tg.error)+' \u2014 sends as a plain call</span>':'';
+  pv.hidden=false; pv.innerHTML='will stamp <b>'+esc(r.ticker)+'</b> at <b>'+fmtPrice(r.px)+'</b> as <b class="'+(side==='short'?'neg':'pos')+'">'+side+'</b> \u00b7 <b>'+days+'d</b> '+(tgOk?'':why)+tgTxt+ask+drop+(dmState.callAsking?' <span class="sec">asking\u2026</span>':'')
     +(dmState.callProposal&&dmState.callProposal.text===key&&!ov
       ?'<div class="dm-callprop">AI reads this as <b class="'+(dmState.callProposal.side==='short'?'neg':'pos')+'">'+(dmState.callProposal.side||'no view')+'</b>'+(dmState.callProposal.days?' \u00b7 <b>'+dmState.callProposal.days+'d</b>':'')+(dmState.callProposal.why?' <span class="sec">\u2014 '+esc(dmState.callProposal.why)+'</span>':'')
         +(dmState.callProposal.side?' <button type="button" class="dm-tool" id="dm-callapply">apply</button>':' <span class="sec">nothing to apply</span>')+' <button type="button" class="dm-tool" id="dm-callignore">ignore</button></div>':'');
@@ -1081,7 +1205,9 @@ async function dmMicToggle(){
   _dmRec=rec; _dmRecT0=Date.now();
   rec.start();
   dmMicPaint();
-  _dmRecTimer=setInterval(dmMicPaint,1000);
+  // (build 2026.09.24-103) The tick only repaints while a take is actually running and the page is
+  // visible; the elapsed seconds derive from _dmRecT0, so the first visible tick is exact.
+  _dmRecTimer=setInterval(()=>{ if(!_dmRec||document.hidden) return; dmMicPaint(); },1000);
 }
 function dmMicPaint(){
   const btn=el('dm-mic'); if(!btn) return;
@@ -1254,14 +1380,50 @@ function dmStamp(m){
   // The lifecycle (build 2026.09.22-88): open calls say when they close; closed ones show the
   // final result, frozen, in place of the live move.
   const cl=m.call||null;
-  const finalTxt=(cl&&cl.closed&&cl.final!=null)?'<span class="dm-tk-d '+(cl.final>0?'pos':(cl.final<0?'neg':'sec'))+'" title="final: direction-adjusted result at the close'+(cl.early?' (closed early by the author)':' (the '+cl.h+'-day horizon)')+'">'+(cl.final>0?'+':'')+(cl.final*100).toFixed(1)+'% <i class="dm-tk-cl">closed</i></span>':null;
+  const finalTxt=(cl&&cl.closed&&cl.final!=null)?'<span class="dm-tk-d '+(cl.final>0?'pos':(cl.final<0?'neg':'sec'))+'" title="final: direction-adjusted result at the close'+(cl.early?' (closed early by the author)':cl.tg&&cl.tg.res?' (the target resolved: '+cl.tg.res+')':' (the '+cl.h+'-day horizon)')+'">'+(cl.final>0?'+':'')+(cl.final*100).toFixed(1)+'% <i class="dm-tk-cl">closed</i></span>':null;
   const lifeTxt=!cl?'':cl.closed?(' \u00b7 closed '+dmDayShort(cl.closeTs)+(cl.closePx?' at '+fmtPx(cl.closePx):'')+(cl.early?' (early)':''))
-    :(' \u00b7 closes '+dmDayShort(cl.closeTs)+' ('+cl.h+'d)');
+    :(' \u00b7 closes '+dmDayShort(cl.closeTs)+' ('+dmDaysLeft(cl.closeTs)+'d)');   // (-108) days LEFT, the same count as the preview and the target row
   const sub=has?('sent at '+fmtPx(at)+(cl&&cl.closed?'':(live?' \u00b7 now '+fmtPx(now):' \u00b7 no longer listed'))+lifeTxt):'no mark at send';
   // The card is a door, not just a label: clicking it opens the market drawer for the name \u2014
   // same in-place drawer the earnings rows and news badges use, so no tab switch.
   return '<div role="button" tabindex="0" class="dm-tk" data-coin="'+esc(m.ref)+'" title="open the '+esc(dmTkName(m.ref))+' drawer"><div><div class="dm-tk-s">'+esc(dmTkName(m.ref))+dirChip+'</div>'
-    +'<div class="dm-tk-m">'+esc(sub)+bell+'</div></div>'+(finalTxt||right)+'</div>';
+    +'<div class="dm-tk-m">'+esc(sub)+bell+'</div></div>'+(finalTxt||right)+'</div>'+dmTargetRow(m);
+}
+// The target row (build 2026.09.24-95), under the stamp of a call that named a price and a date.
+// The bar is price progress from the sent mark to the target — (mark − sent) / (target − sent),
+// clamped to [−1, 1], red and leftward of the zero line when the mark went the wrong way; the
+// triangle under it is time used, (now − sent) / (deadline − sent). Bar ahead of the triangle:
+// ahead of its clock. A red tick is the stop. The stamp's own right-hand number stays the raw move
+// since sent, exactly as on a plain call; the pill says what the TARGET did. Everything here is
+// derived at render from the wire's levels and the live mark — nothing that moves is stored.
+const DM_TG_ZERO=25;   // % of the track left of the zero line: the wrong-way side is a quarter, the target side the rest
+function dmTgPos(v){ return v<0?DM_TG_ZERO+v*DM_TG_ZERO:DM_TG_ZERO+v*(100-DM_TG_ZERO); }
+function dmTargetRow(m){
+  const cl=m.call, tg=cl&&cl.tg; if(!tg||!(m.refPx>0)) return '';
+  const DAY=86400e3, res=tg.res, open=!res&&!cl.closed;
+  const end=open?m.px:(cl.closePx>0?cl.closePx:m.px);
+  const prog=end>0?Math.max(-1,Math.min(1,(end-m.refPx)/(tg.px-m.refPx))):null;
+  const tEnd=open?Date.now():(tg.at||cl.closeTs);
+  const used=Math.max(0,Math.min(1,(tEnd-m.ts)/Math.max(1,tg.by-m.ts)));
+  const stopPos=tg.stop!=null?Math.max(-1,Math.min(1,(tg.stop-m.refPx)/(tg.px-m.refPx))):null;
+  const got=prog==null?null:Math.round(Math.max(0,prog)*100);
+  const pill=open?'<span class="dm-tg-pill open" title="still running: it resolves on the first touch of the target or the stop, or at the deadline\u2019s close \u2014 '+esc(dmTgRuleTxt(dmTgSessionRule(state.rows&&state.rows.get(m.ref))))+'">open</span>'
+    :res==='hit'?'<span class="dm-tg-pill hit" title="the mark touched the target before the deadline'+(tg.stop!=null?' and before the stop':'')+'">hit \u2713'+(tg.at&&tg.by-tg.at>=DAY?' \u00b7 '+Math.floor((tg.by-tg.at)/DAY)+'d early':'')+'</span>'
+    :res==='wrong'?'<span class="dm-tg-pill wrong" title="the stop printed before the target">wrong \u2717 \u00b7 stop '+fmtPx(tg.stop)+'</span>'
+    :res==='miss'?'<span class="dm-tg-pill miss" title="the deadline\u2019s close printed with neither level touched \u2014 a miss on the binary record, whatever the % record says">missed'+(got!=null?' \u00b7 '+got+'% there':'')+'</span>'
+    :res==='early'||cl.early?'<span class="dm-tg-pill early" title="closed early by the author \u2014 neither a hit nor a miss; the binary record leaves it out">closed early</span>'
+    :'<span class="dm-tg-pill miss" title="the deadline\u2019s close has printed; the resolver writes the result within a minute">deadline passed</span>';
+  const need=open&&end>0?tg.px/end-1:null;
+  const pace=open&&prog!=null?(prog>=used?'<span class="pos">ahead</span> of its clock':'<span class="neg">behind</span> its clock'):'';
+  const foot=open
+    ?(got!=null?got+'% there \u00b7 ':'')+dmDaysLeft(tg.by)+'d left'+(pace?' \u00b7 '+pace:'')+(need!=null?' \u00b7 needs '+(need>=0?'+':'')+(need*100).toFixed(1)+'% more':'')
+    :'resolved '+dmDayShort(tEnd)+(end>0?' at '+fmtPx(end):'')+' \u00b7 '+(res==='hit'?'closed at the target':res==='wrong'?'closed at the stop':res==='miss'?'closed at the deadline\u2019s close':'closed at the mark');
+  const fill=prog==null?'':'<i class="dm-tg-fill '+(prog<0?'neg':'pos')+'" style="left:'+Math.min(dmTgPos(0),dmTgPos(prog)).toFixed(1)+'%;width:'+Math.abs(dmTgPos(prog)-dmTgPos(0)).toFixed(1)+'%"></i>';
+  return '<div class="dm-tg"><div class="dm-tg-h"><span>\u2192 <b>'+fmtPx(tg.px)+'</b> by '+esc(dmDayShort(tg.by))+(tg.stop!=null?' \u00b7 <span class="neg">wrong at '+fmtPx(tg.stop)+'</span>':'')+'</span>'+pill+'</div>'
+    +'<div class="dm-tg-bar" title="price progress from the sent mark to the target (the triangle is time used; the red tick is the stop)"><i class="dm-tg-zero" style="left:'+DM_TG_ZERO+'%"></i>'+fill
+      +(stopPos!=null&&stopPos<0?'<i class="dm-tg-stop" style="left:'+dmTgPos(stopPos).toFixed(1)+'%"></i>':'')
+      +'<i class="dm-tg-clock" style="left:'+dmTgPos(used).toFixed(1)+'%"></i></div>'
+    +'<div class="dm-tg-f">'+foot+'</div></div>';
 }
 function dmDayShort(ts){ try{ return new Date(ts).toLocaleDateString('en-US',{month:'short',day:'numeric'}); }catch(_){ return ''; } }
 // One tap on a stamp arms a "back to the level" alert: crossing DOWN through the stamp when the
@@ -1365,7 +1527,7 @@ function dmMessageHtml(m,t,p){
     +'<button type="button" class="dm-tool" data-dmreply="'+m.id+'" title="Quote this message in your reply">reply</button>'
     +'<button type="button" class="dm-tool" data-dmpin="'+m.id+'" data-on="'+(m.pinned?'0':'1')+'" title="'+(m.pinned?'Unpin':'Pin this to the top of the conversation')+'">'+(m.pinned?'unpin':'pin')+'</button>'
     +((m.ref&&m.refPx!=null&&dmState.admin)?'<button type="button" class="dm-tool" data-dmnote="'+m.id+'" title="Write this into the notes book, keeping the price and time it was called at">\u2192 note</button>':'')
-    +(m.card?'<button type="button" class="dm-tool" data-dmrecap="'+m.id+'" title="Post a fresh card of the same cell, row or screen \u2014 live values, new capture time">re-capture</button>':'')
+    +(m.card&&cardCanRecapture(m.card)?'<button type="button" class="dm-tool" data-dmrecap="'+m.id+'" title="Post a fresh card of the same cell, row or screen \u2014 live values, new capture time">re-capture</button>':'')
     // The author's own open call: close it now at the live mark, or give it another week.
     +((own&&m.call&&!m.call.closed)?'<button type="button" class="dm-tool" data-dmcallclose="'+m.id+'" title="Close this call now, at the current mark \u2014 the result freezes and enters the record">close call</button>'
       +'<button type="button" class="dm-tool" data-dmcallext="'+m.id+'" data-days="'+(m.call.h+7)+'" title="Extend the horizon by a week (now '+m.call.h+'d) \u2014 the call keeps running">+7d</button>':'')
@@ -1635,14 +1797,19 @@ function dmCallsHtml(){
     +(x.upPct!=null?'<span class="'+(x.upPct>=0.5?'pos':'neg')+'" title="fraction of closed calls that ended right: sent price against the close price, direction-adjusted (a short that fell counts as right)">'+Math.round(x.upPct*100)+'% right</span>'
     +'<span class="'+(x.avg>=0?'pos':'neg')+'" title="average direction-adjusted result at the close">avg '+pct(x.avg)+'</span>'
     +(x.best?'<span class="sec" title="best closed call">best $'+esc(dmTkName(x.best.ref))+' '+pct(x.best.adj)+'</span>':''):'<span class="sec">nothing closed yet</span>')
-    +hzRec(x.h1,'1d')+hzRec(x.h7,'7d')+'</div>').join('');
+    +hzRec(x.h1,'1d')+hzRec(x.h7,'7d')
+    // The binary record (build 2026.09.24-95): hit / missed / wrong over resolved targets, and the
+    // median days to a hit. Beside the % record, never instead of it.
+    +(x.tg&&(x.tg.hit+x.tg.miss+x.tg.wrong)?'<span class="dm-calltgrec" title="targets: hit / missed / wrong over the targets that have resolved \u2014 an early close is neither and is left out">targets <span class="pos">'+x.tg.hit+'</span>/<span class="sec">'+x.tg.miss+'</span>/<span class="neg">'+x.tg.wrong+'</span>'+(x.tg.medHitD!=null?' \u00b7 median hit '+Math.max(1,Math.round(x.tg.medHitD))+'d':'')+'</span>':'')
+    +'</div>').join('');
   const hz=(v)=>v==null?'<span class="sec">—</span>':'<span class="'+(v>0?'pos':(v<0?'neg':'sec'))+'">'+((v>0?'+':'')+(v*100).toFixed(1)+'%')+'</span>';
   const head='<div class="dm-callrow dm-callhead"><span>call</span><span>message</span><span>who \u00b7 when</span>'
     +'<span class="dm-callst" title="open: still running until its horizon (7d by default, or the days written after the ticker); closed: frozen at the close">status</span>'
     +'<span class="dm-callpx">sent</span><span class="dm-callpx" title="the current mark while open; the close price once closed">now / close</span>'
     +'<span title="price move since sent (to the close, once closed) — colored by whether the call is right">move</span>'
     +'<span class="dm-callhz" title="direction-adjusted move at the fixed 1-day horizon (the first daily close ≥ 24h after the call) — positive means the call was right">1d</span>'
-    +'<span class="dm-callhz" title="the same at the 7-day horizon">7d</span></div>';
+    +'<span class="dm-callhz" title="the same at the 7-day horizon">7d</span>'
+    +'<span class="dm-calltg" title="a target call: the level and its deadline, and how far along it is (open) or how it resolved">target</span></div>';
   const rows=d.calls.map(c=>{
     const cls=c.adj==null?'sec':(c.adj>0?'pos':'neg');
     const mv=c.chg==null?'\u2014':((c.chg>0?'+':'')+(c.chg*100).toFixed(1)+'%');
@@ -1651,14 +1818,25 @@ function dmCallsHtml(){
         +(c.side==='short'?'<span class="neg" title="short call">\u25bc</span>':'<span class="pos" title="long call">\u25b2</span>')+' '+esc(dmTkName(c.ref))+'</span>'
       +'<span class="dm-callb">'+(c.deleted?'<span class="dm-calldelmk">message deleted \u2014 the stamp stands</span>':esc(String(c.body||'').slice(0,120)))+'</span>'
       +'<span class="acc-mu">'+esc(c.sender)+' \u00b7 '+esc(c.kind==='dm'&&c.threadName===c.sender?'DM':c.threadName)+' \u00b7 '+dmWhen(c.ts)+'</span>'
-      +'<span class="dm-callst '+(c.closed?'sec':'pos')+'" title="'+(c.closed?('closed '+(c.early?'early ':'')+dmDayShort(c.closeTs)):('closes '+dmDayShort(c.closeTs)+' \u00b7 '+c.horizonD+'d horizon'))+'">'+(c.closed?(c.early?'closed \u2298':'closed'):'open \u00b7 '+Math.max(0,Math.ceil((c.closeTs-Date.now())/86400e3))+'d')+'</span>'
+      +'<span class="dm-callst '+(c.closed?'sec':'pos')+'" title="'+(c.closed?('closed '+(c.early?'early ':'')+dmDayShort(c.closeTs)):('closes '+dmDayShort(c.closeTs)+' \u00b7 '+c.horizonD+'d horizon'))+'">'+(c.closed?(c.early?'closed \u2298':'closed'):'open \u00b7 '+dmDaysLeft(c.closeTs)+'d')+'</span>'
       +'<span class="dm-callpx" title="the mark when it was sent">'+(c.refPx!=null?fmtPx(c.refPx):'\u2014')+'</span>'
       +'<span class="dm-callpx dm-callnow" title="the current mark">'+(c.px!=null?fmtPx(c.px):'\u2014')+'</span>'
       +'<span class="dm-callmv '+cls+'" title="price move since sent \u2014 colored by whether the '+(c.side||'long')+' is right">'+mv+'</span>'
       +'<span class="dm-callhz">'+hz(c.adj1)+'</span>'
-      +'<span class="dm-callhz">'+hz(c.adj7)+(dmState.admin?' <button type="button" class="dm-tool dm-mod" data-dmcalldrop="'+c.id+'" title="Remove this call from the record altogether \u2014 the words stay, the stamp and score go. Operator only, audited.">drop</button>':'')+'</span></div>';
+      +'<span class="dm-callhz">'+hz(c.adj7)+(dmState.admin?' <button type="button" class="dm-tool dm-mod" data-dmcalldrop="'+c.id+'" title="Remove this call from the record altogether \u2014 the words stay, the stamp and score go. Operator only, audited.">drop</button>':'')+'</span>'
+      +'<span class="dm-calltg">'+dmCallTgCell(c)+'</span></div>';
   }).join('');
   return '<div class="dm-log" id="dm-log"><div class="dm-callsums">'+sum+'</div>'+head+rows+'</div>';
+}
+// The board's target cell (build 2026.09.24-95): "32 by 10/15 · 39%" while open, then what it did.
+function dmCallTgCell(c){
+  const tg=c.tg; if(!tg) return '<span class="sec">\u2014</span>';
+  const lvl=fmtPx(tg.px), got=tg.prog==null?null:Math.round(Math.max(0,tg.prog)*100);
+  if(tg.res==='hit') return '<span class="pos" title="hit '+esc(dmDayShort(tg.at))+'">'+lvl+' \u00b7 hit \u2713</span>';
+  if(tg.res==='wrong') return '<span class="neg" title="the stop printed first">'+lvl+' \u00b7 stop '+fmtPx(tg.stop)+' \u2717</span>';
+  if(tg.res==='miss') return '<span class="sec" title="the deadline passed with neither level touched">'+lvl+' \u00b7 missed'+(got!=null?' '+got+'%':'')+'</span>';
+  if(tg.res==='early'||c.closed) return '<span class="sec" title="closed before it resolved">'+lvl+' \u00b7 closed</span>';
+  return '<span title="target '+lvl+' by '+esc(dmDayShort(tg.by))+(tg.stop!=null?' \u00b7 wrong at '+fmtPx(tg.stop):'')+'">'+lvl+' by '+esc(dmDayShort(tg.by))+(got!=null?' \u00b7 '+got+'%':'')+'</span>';
 }
 // One fetch for the calls board, filter included \u2014 both the open and the 45s tick ride it.
 async function dmFetchCalls(){
@@ -1853,7 +2031,9 @@ function dmRenderNow(){
       +'<div role="button" tabindex="0" class="dm-new" id="dm-newbtn">'+(dmState.picking?'× close':'+ new message')+'</div>'+dmPickerHtml()
       +dmTopicsHtml()
       +dmTgHintHtml()
-      +watchBox+'</div>'
+      +watchBox
+      // (build 2026.09.24-109) "Your usage": what the operator can see about this member, and the pause.
+      +'<div class="dm-usage" id="dm-usage">'+usageCardHtml()+'</div>'+'</div>'
     +'<div class="dm-main">'+main+composer+disclosure+'</div></div>';
 
   const ta=el('dm-input');
@@ -2123,6 +2303,7 @@ function dmKeys(e){
 async function openDM(){
   dmWire();
   dmPushProbe();                  // reflect this browser's real subscription state, async
+  usageMeLoad();                  // (build 2026.09.24-109) the "Your usage" card fills itself when its numbers land
   dmRender();                     // paint the shell immediately, fill it as data lands
   await dmLoad();
   if(!dmState.sel&&dmState.threads.length) { await dmOpenThread(dmState.threads[0].id); return; }

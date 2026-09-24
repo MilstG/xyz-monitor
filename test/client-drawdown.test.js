@@ -16,26 +16,53 @@ function studyApi() {
   return new Function("store", "DAY", "isoUtc", app.slice(a, b) + "; return { rvdStudy, rvdAnchorTs, RVD, rvdToday };")({ get: () => null, set() {} }, DAY, () => "");
 }
 
-test("drawdown study: best return, max drawdown with its dates, now, and the live mark as the last point", () => {
+test("drawdown study: base = the prior close (the anchor day's move counts), best, max drawdown with its dates, now, the live mark as the last point", () => {
   const { rvdStudy } = studyApi();
   const bars = [90, 100, 110, 120, 90, 105].map((c, i) => ({ t: D(i - 1), c }));   // the 90 sits a day BEFORE the anchor
   const s = rvdStudy(bars, D(0), 108);
   assert.ok(s, "a path with points on/after the anchor is a study");
-  assert.equal(s.base, 100, "the anchor close is the first bar on/after the anchor — the bar before it is ignored");
-  assert.equal(s.baseT, D(0)); assert.equal(s.late, false, "a bar on the anchor day is not late");
-  assert.ok(Math.abs(s.best.ret - 0.20) < 1e-12, "best = highest close over base"); assert.equal(s.best.t, D(2)); assert.equal(s.best.c, 120);
+  // (-105) the base is the last close BEFORE the anchor: "since June 1" includes June 1's own +11%
+  assert.equal(s.base, 90, "the base is the prior close — the anchor day's own move is in the return");
+  assert.equal(s.baseT, D(-1)); assert.equal(s.late, false, "a prior bar exists: never late");
+  assert.ok(Math.abs(s.best.ret - (120 / 90 - 1)) < 1e-12, "best = highest close over base"); assert.equal(s.best.t, D(2)); assert.equal(s.best.c, 120);
   assert.ok(Math.abs(s.dd.ret - (90 / 120 - 1)) < 1e-12, "max drawdown is measured from the running peak, not from the anchor");
   assert.equal(s.dd.peakT, D(2)); assert.equal(s.dd.troughT, D(3)); assert.equal(s.dd.peakC, 120); assert.equal(s.dd.troughC, 90);
-  assert.ok(Math.abs(s.now.ret - 0.08) < 1e-12, "now = the live mark over base"); assert.equal(s.now.live, true, "the live mark is the last point");
-  assert.equal(s.n, 6, "five bars in the window plus the live point");
+  assert.ok(Math.abs(s.now.ret - (108 / 90 - 1)) < 1e-12, "now = the live mark over base"); assert.equal(s.now.live, true, "the live mark is the last point");
+  assert.equal(s.n, 7, "the base, five bars in the window, and the live point");
   // the same path without a live mark ends on the last close
   const s2 = rvdStudy(bars, D(0), null);
-  assert.ok(Math.abs(s2.now.ret - 0.05) < 1e-12 && s2.now.live === false && s2.n === 5, "no mark: the last close is now");
+  assert.ok(Math.abs(s2.now.ret - (105 / 90 - 1)) < 1e-12 && s2.now.live === false && s2.n === 6, "no mark: the last close is now");
   // a live mark on a day whose bar already exists REPLACES that bar's close rather than adding a point
   const today = Math.floor(Date.now() / DAY) * DAY;
   const s3 = rvdStudy([{ t: today - DAY, c: 100 }, { t: today, c: 101 }], today - DAY, 130);
   assert.equal(s3.n, 2, "today's forming bar is overwritten by the mark, not duplicated");
   assert.ok(Math.abs(s3.best.ret - 0.30) < 1e-12 && s3.now.live === true, "the mark drives today's point");
+});
+
+test("drawdown study -105: intraday = running peak of HIGHS to a later true LOW; a bar's own high never counts against its own low; close mode unchanged; missing lows fall back and are counted", () => {
+  const { rvdStudy } = studyApi();
+  // base 100 (prior close); day 1 spikes to 130 intraday but closes 110; day 2 wicks to 95, closes 108
+  const bars = [
+    { t: D(-1), c: 100, h: 101, l: 99, tl: true },
+    { t: D(0), c: 110, h: 130, l: 104, tl: true },
+    { t: D(1), c: 108, h: 112, l: 95, tl: true },
+    { t: D(2), c: 111, h: 113, l: 107, tl: true },
+  ];
+  const i = rvdStudy(bars, D(0), null);
+  assert.equal(i.mode, "intraday");
+  assert.ok(Math.abs(i.dd.ret - (95 / 130 - 1)) < 1e-12, "peak = the 130 HIGH, trough = the later 95 LOW: " + i.dd.ret);
+  assert.equal(i.dd.peakT, D(0)); assert.equal(i.dd.troughT, D(1)); assert.equal(i.dd.peakC, 130); assert.equal(i.dd.troughC, 95);
+  assert.equal(i.lowN, 3, "every path bar read a true low");
+  const c = rvdStudy(bars, D(0), null, "close");
+  assert.ok(Math.abs(c.dd.ret - (108 / 110 - 1)) < 1e-12, "close to close: 110 -> 108 only");
+  assert.ok(i.dd.ret < c.dd.ret, "the intraday drawdown is never shallower than close to close");
+  // the same-bar rule: a bar that spikes AND flushes cannot draw down against its own high
+  const one = rvdStudy([{ t: D(-1), c: 100 }, { t: D(0), c: 100, h: 140, l: 90, tl: true }], D(0), null);
+  assert.ok(Math.abs(one.dd.ret - (90 / 100 - 1)) < 1e-12, "measured from the prior peak (the base), not the bar's own 140");
+  // a bar without a true low reads its close and is not counted as a true-low bar
+  const mixed = rvdStudy([{ t: D(-1), c: 100 }, { t: D(0), c: 97, h: 101, l: 80 }, { t: D(1), c: 99, h: 100, l: 96, tl: true }], D(0), null);
+  assert.ok(Math.abs(mixed.dd.ret - (96 / 101 - 1)) < 1e-12, "the tl-less 80 is ignored (its close 97 stands in); the true 96 under the 101 high counts");
+  assert.equal(mixed.lowN, 1);
 });
 
 test("drawdown study: floors and edges — best is never negative, drawdown never positive, thin windows are null, late listings are flagged", () => {
@@ -53,7 +80,10 @@ test("drawdown study: floors and edges — best is never negative, drawdown neve
   // fewer than two points on/after the anchor is not a study
   assert.equal(rvdStudy([{ t: D(0), c: 100 }], D(0), null), null, "one close is a dot with no path");
   assert.equal(rvdStudy([{ t: D(-5), c: 100 }, { t: D(-4), c: 110 }], D(0), null), null, "every bar before the anchor: nothing to study");
-  assert.equal(rvdStudy([{ t: D(-5), c: 100 }], D(0), 120), null, "a live mark alone is one point");
+  // (-105) a prior close plus the live mark IS a path: the move since the anchor, from the last close before it
+  const lm = rvdStudy([{ t: D(-5), c: 100 }], D(0), 120);
+  assert.ok(lm && Math.abs(lm.now.ret - 0.2) < 1e-12 && lm.base === 100, "prior close + mark = a two-point study");
+  assert.equal(rvdStudy([], D(0), 120), null, "a live mark alone is one point");
   assert.equal(rvdStudy(null, D(0), 1), null); assert.equal(rvdStudy("x", D(0), 1), null);
   // garbage bars are skipped, not counted
   const g = rvdStudy([{ t: D(0), c: 100 }, { t: D(1), c: NaN }, { t: D(2), c: 0 }, null, { t: D(3), c: 150 }], D(0), null);
@@ -115,14 +145,16 @@ test("drawdown tab: wired end to end — manifest, markup, routing, scope, dispa
   assert.ok(html.includes('id="rvd-ctrls"') && html.includes('id="rvd-wrap"'), "the renderer's two mount points");
   const app = require("./_client").clientSource();
   assert.ok(require("./_client").CLIENT_MODULES.includes("drawdown"), "the suite's module list carries drawdown");
-  assert.ok(fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8").includes('import "./js/drawdown.js";'), "the entry loads the module");
+  // Lazy since build 2026.09.24-103: a tab-only module, imported by core.js lazyCall on first open.
+  assert.ok(fs.readFileSync(path.join(__dirname, "..", "public", "js", "core.js"), "utf8").includes('drawdown:()=>import("./drawdown.js"),'), "the lazy loader carries the module");
+  assert.ok(!fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8").includes('"./js/drawdown.js"'), "and the entry no longer loads it eagerly");
   const hv = app.match(/const HASH_VIEWS=new Set\(\[([^\]]*)\]\)/);
   assert.ok(hv && hv[1].includes("'drawdown'"), "#drawdown routes");
   assert.ok(/const CRYPTO_VIEWS=new Set\(\[[^\]]*'drawdown'/.test(app), "the study runs in crypto scope too");
   assert.ok(app.includes("setHidden('view-drawdown', v!=='drawdown');"), "showView hides/shows the section");
-  assert.ok(app.includes("if(v==='drawdown'){ if(el('view-drawdown')) openDrawdown(); else { showView('markets'); return; } }"), "showView dispatches the renderer, with the missing-section bounce");
-  assert.ok(app.includes("if(state.view==='drawdown') renderDrawdown();"), "a scope flip repaints the study for the other universe");
-  assert.ok(/const dv=el\('view-drawdown'\); if\(dv&&!dv\.hidden\) renderDrawdown\(\);/.test(app), "applyDaily repaints an open tab when closes land");
+  assert.ok(app.includes("if(v==='drawdown'){ if(el('view-drawdown')) lazyCall('drawdown','openDrawdown'); else { showView('markets'); return; } }"), "showView dispatches the renderer (lazily), with the missing-section bounce");
+  assert.ok(app.includes("if(state.view==='drawdown') lazyCall('drawdown','renderDrawdown');"), "a scope flip repaints the study for the other universe");
+  assert.ok(/const dv=el\('view-drawdown'\), dd=lazyLoaded\('drawdown'\); if\(dv&&!dv\.hidden&&dd\) dd\.renderDrawdown\(\);/.test(app), "applyDaily repaints an open (loaded) tab when closes land");
   assert.ok(/const HELP=\{[\s\S]*?\n  drawdown:`/.test(app), "the ? explainer has an entry");
   assert.ok(app.includes("{v:'drawdown',label:'Drawdown'}"), "the command palette literal names it");
   const docs = fs.readFileSync(path.join(__dirname, "..", "public", "docs.html"), "utf8");
@@ -131,10 +163,10 @@ test("drawdown tab: wired end to end — manifest, markup, routing, scope, dispa
   for (const pin of [".rvd-title", ".rvd-sub", ".rvd-head", ".rvd-tbl", ".rvdsvg.hv .rvd-dot:not(.hot)", ".rvd-legend i.late", ".rvd-late"])
     assert.ok(css.includes(pin), "css pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.23-94"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.24-110"'), "build stamp");
   // the renderer's contract with the DOM: closes only, the caption says so, and the CSV carries the dates
   const src = fs.readFileSync(path.join(__dirname, "..", "public", "js", "drawdown.js"), "utf8");
-  assert.ok(src.includes("intraday lows are not in the daily feed"), "the caption discloses close-to-close");
+  assert.ok(src.includes("Max drawdown = the deepest close-to-close fall from any running peak inside the window — a wick below the close is not counted.") && src.includes("Max drawdown = the deepest fall from the running peak of daily HIGHS to a later daily LOW"), "the caption discloses which drawdown is shown (-105: intraday default, close-to-close toggle)");
   assert.ok(src.includes("'best_date','max_dd_pct','dd_peak','dd_trough'"), "CSV columns carry the dates");
   assert.ok(src.includes("const xM=v=>px1-Math.min(-v,maxX)/maxX*(px1-px0);"), "zero drawdown sits at the RIGHT edge — up-and-right is better");
   assert.ok(src.includes("shallower →") && src.includes("Up and to the right is better"), "the axis and the subtitle say which way is good");

@@ -810,7 +810,7 @@ function _btHarness(){
   global.window = { addEventListener() {}, location: { reload() {}, href: "/", hash: "" }, matchMedia: () => ({ matches: false, addEventListener() {} }), __FLAGS: {}, __ADMIN: true };
   global.localStorage = { _d: {}, getItem(k) { return this._d[k] ?? null; }, setItem(k, v) { this._d[k] = String(v); }, removeItem(k) { delete this._d[k]; } };
   global.fetch = () => new Promise(() => {});
-  const api = new Function(app + "\n;return {state, btRun, btMode, btPickRows, btUniverse, btPickerHtml, renderBacktest, dailyReturns};")();
+  const api = new Function(app + "\n;return {state, btRun, btMode, btPickRows, btUniverse, btPickerHtml, btWatchPicks, renderBacktest, dailyReturns};")();
   const restore = () => { global.setInterval = saved.si; global.setTimeout = saved.st; global.requestAnimationFrame = saved.raf;
     global.clearTimeout = saved.ct; global.clearInterval = saved.ci;
     global.document = saved.doc; global.window = saved.win; global.localStorage = saved.ls; global.fetch = saved.f; };
@@ -835,7 +835,8 @@ function _btHarness(){
     ["LLY", 111, "Health Care"], ["VST", 121, "Utilities"]]) state.rows.set(c, mkRow(c, sd, 150, sec));
   state.scope = "stocks"; state.view = "backtest";
   const reset = () => { Object.assign(state.backtest, { signal: "mom", lookback: 20, cadence: 5, quantile: 0.2, cost: 5,
-    universe: "all", split: 0.6, direction: "high", structure: "ls", weighting: "eq", reqSign: false, holdWindow: "cc", vsBasket: "", picks: [], entry: 0 }); };
+    universe: "all", split: 0.6, direction: "high", structure: "ls", weighting: "eq", reqSign: false, holdWindow: "cc", vsBasket: "", picks: [], entry: 0,
+    lag: "same", slip: 0 }); };   // (-106) the pre-106 fill (same close, no slippage) — the fixtures below pin that accounting; the -106 tests set lag/slip themselves
   reset();
   return { api, state, reset, restore };
 }

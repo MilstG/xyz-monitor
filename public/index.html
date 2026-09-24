@@ -8,6 +8,12 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/styles.css">
+<!-- (build 2026.09.24-103) The entry's import graph is discovered one hop at a time; preloading the
+     three modules the first paint cannot happen without lets the browser fetch them in parallel with
+     app.js instead of after it. The server stamps ?v=<build> onto each href, like the entry's. -->
+<link rel="modulepreload" href="/js/core.js">
+<link rel="modulepreload" href="/js/data.js">
+<link rel="modulepreload" href="/js/markets.js">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <meta name="theme-color" content="#0E1116">
@@ -464,6 +470,15 @@
   <div class="adm-fold" data-fold="access">
     <button type="button" class="adm-foldhd"><span class="asec-c">▸</span>Access<span class="adm-foldsub">members · invites · revocation</span></button>
     <div class="adm-foldbody" hidden><div class="adm-navgrp" id="admAccessBox"></div></div>
+  </div>
+
+  <!-- Usage (build 2026.09.24-109): who uses the site and how — daily aggregates from the
+       first-party beacon (visible, attended time per tab). Rendered by the lazy usageadm.js, loaded
+       only when this fold is open. The sitewide numbers are not logged; opening one member's detail
+       is, in the read log of the box below. -->
+  <div class="adm-fold" data-fold="usage">
+    <button type="button" class="adm-foldhd"><span class="asec-c">▸</span>Usage<span class="adm-foldsub" id="admUsageSub">who uses the site · tabs · members</span></button>
+    <div class="adm-foldbody" hidden><div class="adm-navgrp" id="admUsageBox"></div></div>
   </div>
 
   <!-- Operator read-through. Separate box from Access because it is a different kind of power:

@@ -10,17 +10,21 @@ test("fire-time stamps F5/vr: a breakout claim carries ib (intrabar) and vr (vol
   const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
     saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, archiveClosed: () => {} };
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
-  // 160 daily bars (>=140 so the coil/vr percentile computes; a gentle wave keeps a real 30d high).
+  // 230 UTC-day bars = ~160 US sessions (>=140 so the coil/vr percentile computes; a gentle wave
+  // keeps a real 30-session high). The signal loop reads the SESSION view (-105), so the prior-30
+  // high is taken over the closed session bars exactly as the loop folds them.
   const daily = [];
-  for (let i = 0; i < 160; i++) { const c = 100 + Math.sin(i / 5) * 1.5;
-    daily.push({ t: (Math.floor(Date.now() / DAY) - 160 + i) * DAY, c, l: c * 0.98, h: c * 1.02 }); }
-  const hi30 = Math.max(...daily.slice(-31, -1).map((d) => d.c));
+  for (let i = 0; i < 230; i++) { const c = 100 + Math.sin(i / 5) * 1.5;
+    daily.push({ t: (Math.floor(Date.now() / DAY) - 230 + i) * DAY, c, l: c * 0.98, h: c * 1.02 }); }
+  const sess = C.sessionFold(daily, C.sessOffFn("US")).filter((b) => !b.f);
+  const hi30 = Math.max(...sess.slice(-31, -1).map((d) => d.c));
   const hourly = []; for (let i = 0; i < 48; i++) hourly.push({ t: (Math.floor(Date.now() / HOUR) - 48 + i) * HOUR, o: 100, h: 100, l: 100, c: 100, v: 1 });
   // Build 1: mark just BELOW the prior-30d high — no breakout, but the pass-2 block stamps r._vr.
   const r = p.seedRowNow("VRSIG", { px: hi30 * 0.99, ticker: "VRSIG", uni: "xyz", vol: 1e6, dailyRaw: daily, hourlyRaw: hourly });
   p.buildDailyNow();
   await p.buildSignalsNow();
-  assert.equal(p.ledgerOpenNow().size, 0, "no breakout yet — mark is under the high");
+  // (-105: the swing shadows now read the fixture's true lows, so an invisible swpull may open here)
+  assert.ok(![...p.ledgerOpenNow().keys()].some((k) => k.startsWith("VRSIG|breakout")), "no breakout yet — mark is under the high");
   // Build 2: push the mark above the high. The last COMPLETED daily close is still ~100 (< the
   // high), so the cross is intrabar (ib=1); r._vr is already present from build 1, so it stamps.
   r.px = hi30 * 1.03;
@@ -477,7 +481,7 @@ test("-80 regression: string-typed closes can't kill the board — detectors coe
 test("warm-boot signals cadence: 2-min builds for the first 20 minutes, then the steady 10", () => {
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  for (const pin of ['setInterval(safeTick(buildSignals, "buildSignals"), 10 * 60 * 1000);',
+  for (const pin of ['staggered(signalsThenActionable, 10 * 60 * 1000, 5 * 1000);',
     'setTimeout(safeTick(buildSignals, "buildSignals"), 45 * 1000);',
     'if (Date.now() - bootT > 20 * 60 * 1000) clearInterval(earlyIv);',
     'signals warm-boot build:'])
@@ -590,9 +594,10 @@ test("parametric chart parity: pair board ships EMAs + rrv/swing, and the deeper
   const now = Date.now(), endH = Math.floor(now / HOUR), N = 16 * 24, hourly = [];
   for (let i = 0; i < N; i++) { const t = (endH - N + i) * HOUR, c = 100 * Math.pow(1.0005, i); hourly.push({ t, o: c, h: c * 1.001, l: c * 0.999, c, v: i >= N - 24 ? 2 : 1 }); }
   const px = hourly[N - 1].c * 1.0005, daily = [];
-  for (let i = 0; i < 60; i++) daily.push({ t: (Math.floor(now / DAY) - 60 + i) * DAY, c: px * Math.pow(1.01, i - 59), l: px * Math.pow(1.01, i - 59) * 0.90, h: px * Math.pow(1.01, i - 59) * 1.002 });
+  // 80 UTC days = ~56 US sessions: the D1 rung is the session view (-105) and must seed EMA50
+  for (let i = 0; i < 80; i++) daily.push({ t: (Math.floor(now / DAY) - 80 + i) * DAY, c: px * Math.pow(1.01, i - 79), l: px * Math.pow(1.01, i - 79) * 0.90, h: px * Math.pow(1.01, i - 79) * 1.002 });
   p.seedRowNow("PARITY", { px, uni: "xyz", vol: 1e6, hourlyRaw: hourly, dailyRaw: daily });
-  // 13/50: D1 (60 bars) + H4 (96 buckets) + H1 (280 bars) seed EMA50; H12 (32 buckets) can't → grey
+  // 13/50: D1 (~56 sessions) + H4 (96 buckets) + H1 (280 bars) seed EMA50; H12 (32 buckets) can't → grey
   const board = p.getTrendPair(13, 50);
   const row = board.long.stocks.find((e) => e.coin === "PARITY");
   assert.ok(row, "the pair row reaches the long board");
@@ -1502,7 +1507,7 @@ test("trend events: close-confirmed on the closed ladder, seeded on the first pa
   // can only come into existence at a candle close; the close IS the confirmation.
   assert.ok(/const cl = trendClosed\(coin, tb, now\);/.test(fn), "the closed ladder is the transition's only truth source");
   assert.ok(/if \(!cl\) continue;/.test(fn), "no closed read means silence, never a guess at a confirmation");
-  assert.ok(/closedLadder\(\{/.test(pol) && /closedBars\(r\.dailyRaw, DAY, now\)/.test(pol),
+  assert.ok(/closedLadder\(\{/.test(pol) && /closedBars\(trendD1\(r, r\.dailyRaw, null, now\), DAY, now\)/.test(pol),
     "trendClosed feeds compute.closedLadder with period-trimmed series — same rung sourcing as the board");
   assert.ok(!/TREND_CROSS_CONFIRM/.test(pol),
     "the scan-count debounce is GONE — closed state cannot revert between closes, so counting scans would only add lag");
@@ -1938,9 +1943,10 @@ test("ema200 -26: end-to-end through the analytics build — the section publish
   const TKS = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOG"];
   for (let m = 0; m < 6; m++) {
     const coin = "xyz:" + TKS[m], dailyRaw = [], hourlyRaw = [];
-    for (let i = 320; i >= 1; i--) {
-      const j = 320 - i;
-      const c = j < 260 ? 100 - j * 0.03 + m * 0.1 : (92.2 + m * 0.1) + (j - 260) * 0.4;
+    // 400 UTC days ≈ 275 US sessions: the D1 lane walks the SESSION view (-105) and needs 226
+    for (let i = 400; i >= 1; i--) {
+      const j = 400 - i;
+      const c = j < 340 ? 100 - j * 0.03 + m * 0.1 : (89.8 + m * 0.1) + (j - 340) * 0.4;
       dailyRaw.push({ t: now - i * DAY_, c, h: c + 0.5, v: 500 });
     }
     for (let i = 200; i >= 0; i--) { const c = 110 + (i % 3); hourlyRaw.push({ t: now - i * H, o: c, h: c + 0.4, l: c - 0.4, c, v: 5 }); }
@@ -1978,7 +1984,7 @@ test("ema200 shadows -28: EV_META convention, wiring manifest, panel rows, close
     "stp: eb.stop, tgt: eb.target, tm: 1",                        // touch mode + frozen absolute levels
     "stp: er.stop, tgt: er.target, tm: 1",
     "const ccl = closes.length && +closes[closes.length - 1][0] + DAY > nowD ? closes.slice(0, -1) : closes;",   // the forming day never reaches the detector
-    "detectEmaRetest(closedBars(mergedDailyBars(r), DAY, nowD), r.px, sd30, lvlBars)",                          // true lows for the touch, forming day trimmed
+    "detectEmaRetest(closedBars(sessDailyBars(r), DAY, nowD), r.px, sd30, lvlBars)",                          // true lows for the touch, forming day trimmed
     '"emabrk", "emarts",',                                        // MAIN_EVS: crypto fires these too
     'ev: "emabrk", uni: "both"', 'ev: "emarts", uni: "both"',     // shadow panel rows, both universes
   ]) assert.ok(pol.includes(pin), `poller.js missing -28 pin: ${pin}`);
@@ -1992,10 +1998,15 @@ test("ema200 shadows -28: end-to-end — the breakout fires as an invisible touc
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   // dailies: ~100 flat for the EMA anchor, four closes below, then the buffered cross — all
   // CLOSED (t + DAY <= now); pivot highs at 118 give the structural target. Two pivots, k=3.
+  // (-105) the signal loop reads SESSION bars, so the fixture is laid on US trading days only
+  // (the fold is then the identity and the cross sits exactly where the fixture puts it,
+  // whatever weekday the suite runs on)
+  const off = C.sessOffFn("US"), sDays = [];
+  for (let d = Math.floor((now - H) / DAY_) - 1; sDays.length < 302; d--) if (!off(d)) sDays.unshift(d);
   const dailyRaw = [];
   const nD = 302;
   for (let i = 0; i < nD; i++) {
-    const t = now - (nD - i) * DAY_ - H;   // every bar closed at least an hour ago
+    const t = sDays[i] * DAY_;   // every bar closed (its day has ended)
     let c = 100, h = 100.4;
     if (i === 60 || i === 90) h = 118;
     if (i >= nD - 5 && i < nD - 1) { c = 98; h = 98.4; }

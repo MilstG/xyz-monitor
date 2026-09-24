@@ -311,11 +311,54 @@ test("modules: the entry is a module, every /js module is served stamped, precom
   assert.equal((await get("/js/core.js?v=" + VERSION, gus, { "if-none-match": core.headers.etag })).statusCode, 304);
   const br = await get("/js/markets.js?v=" + VERSION, gus, { "accept-encoding": "br" });
   assert.equal(br.headers["content-encoding"], "br", "modules ride the brotli-at-boot path");
+  // (build 2026.09.24-108) a stamp from another build is refused outright (409, no-store) — see fixes-108
   const stale = await get("/js/core.js?v=old", gus);
-  assert.equal(stale.statusCode, 200); assert.equal(stale.headers["cache-control"], "no-cache", "a stale stamp revalidates, never caches for a year");
+  assert.equal(stale.statusCode, 409); assert.equal(stale.headers["cache-control"], "no-store", "a stale stamp is never answered with this build's bytes, nor cached");
   const raw = require("fs").readFileSync(require("path").join(__dirname, "..", "public", "js", "markets.js"), "utf8");
   assert.ok(/from "\.\/core\.js"/.test(raw), "on disk the modules stay unstamped");
   assert.ok((await get("/js/markets.js", gus)).body.includes(`from "./core.js?v=${VERSION}"`), "and stamped on the wire");
+});
+
+test("modules -108: a stamped asset from ANOTHER build is a 409 (no-store); current, unstamped and the worker's cache rule are unchanged", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const { VERSION } = require("../server.js");
+  // The repro: a tab open across a deploy lazily imports charts.js with LAST build's stamp. It used
+  // to get THIS build's bytes, whose imports name core.js?v=<new> — a second core.js instance.
+  for (const u of ["/js/charts.js?v=2026.09.24-107", "/app.js?v=old", "/styles.css?v=old", "/js/core.js?v=" + VERSION + "&v=x", "/js/core.js?v="]) {
+    const r = await get(u, gus);
+    assert.equal(r.statusCode, 409, u); assert.equal(r.headers["cache-control"], "no-store", u + " is never cached");
+    assert.ok(!/immutable/.test(r.headers["cache-control"]));
+  }
+  for (const u of ["/js/charts.js?v=" + VERSION, "/app.js?v=" + VERSION, "/styles.css?v=" + VERSION]) {
+    const r = await get(u, gus);
+    assert.equal(r.statusCode, 200, u); assert.match(r.headers["cache-control"], /immutable/, u);
+  }
+  for (const u of ["/js/charts.js", "/app.js", "/styles.css", "/js/charts.js?x=1"]) assert.equal((await get(u, gus)).statusCode, 200, "no v, no refusal: " + u);
+  // the shell's own stamps are the current build, so a normal load never meets the 409
+  const shell = (await get("/", gus)).body;
+  const stamps = [...shell.matchAll(/(?:src|href)="[^"]*[?&]v=([^"&]+)"/g)].map((m) => m[1]);
+  assert.ok(stamps.length >= 3 && stamps.every((v) => v === VERSION), "every stamp in the shell is current: " + [...new Set(stamps)]);
+  // the worker keeps complete 200s only — a 409 passes through uncached
+  const sw = (await get("/sw.js", gus)).body;
+  assert.ok(sw.includes("if (res && res.status === 200 && res.type === \"basic\")"), "the service worker caches 200s only");
+});
+
+test("modules -103: lazy import() specifiers, modulepreload hints and the service worker all carry the build stamp", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const { VERSION } = require("../server.js");
+  const core = (await get("/js/core.js?v=" + VERSION, gus)).body;
+  for (const m of ["charts", "drawdown", "funds", "insiders", "positioning"])
+    assert.ok(core.includes(`${m}:()=>import("./${m}.js?v=${VERSION}")`), "lazy specifier stamped on the wire: " + m);
+  assert.ok(!/import\("\.\/[a-z]+\.js"\)/.test(core), "no unstamped dynamic import survives");
+  const entry = (await get("/app.js?v=" + VERSION, gus)).body;
+  assert.ok(!entry.includes("/charts.js") && !entry.includes("/insiders.js"), "the entry does not pull the lazy tabs");
+  const shell = (await get("/", gus)).body;
+  for (const m of ["core", "data", "markets"])
+    assert.ok(shell.includes(`<link rel="modulepreload" href="/js/${m}.js?v=${VERSION}">`), "modulepreload stamped: " + m);
+  const sw = await get("/sw.js", gus);
+  assert.equal(sw.statusCode, 200); assert.equal(sw.headers["cache-control"], "no-cache");
+  assert.ok(sw.body.includes(`const BUILD = "${VERSION}";`) && !sw.body.includes("{{build}}"), "the worker knows exactly one cacheable stamp");
+  assert.ok(sw.body.includes('addEventListener("push"'), "push handling ships intact");
 });
 
 // ===== security batch 2026.09.20 ===============================================================
@@ -454,6 +497,73 @@ test("security -20: /api/health is three views — open, member, operator", asyn
   const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
   const op = JSON.parse((await get("/api/health", gus)).body);
   assert.ok(op.volume && op.volume.dataDir && op.csp && "provider" in op.ai && "backup" in op && "rate" in op, "the operator gets the deployment");
+});
+
+// build 2026.09.24-101: the anonymous health view (Railway's healthcheck) is answered before
+// poller.stats() is built; a signed-in caller still gets the full member/operator views.
+test("perf -101: anonymous /api/health never builds poller.stats(); members and operators still do", async () => {
+  const { _poller } = require("../server.js");
+  const p = _poller(), orig = p.stats;
+  let calls = 0;
+  p.stats = (...a) => { calls++; return orig.apply(p, a); };
+  try {
+    const anon = JSON.parse((await get("/api/health")).body);
+    assert.deepEqual(Object.keys(anon).sort(), ["ok", "stale", "ts", "version"], "same anonymous shape as before");
+    assert.equal(anon.ok, true); assert.equal(typeof anon.stale, "boolean");
+    assert.equal(calls, 0, "the healthcheck costs no stats() walk");
+    const cara = jar(); cara.absorb(await post("/login", { handle: "cara", password: "yet-another-long-pw" }));
+    const member = JSON.parse((await get("/api/health", cara)).body);
+    assert.equal(calls, 1, "a member's view is built from the full stats");
+    assert.ok(member.loop && "failing" in member && member.volume === undefined, "the member view is unchanged");
+    const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+    const op = JSON.parse((await get("/api/health", gus)).body);
+    assert.equal(calls, 2);
+    assert.ok(op.volume && op.csp && "backup" in op, "the operator view is unchanged");
+  } finally { p.stats = orig; }
+});
+
+// build 2026.09.24-101: /api/analytics rides the shared serialize + gzip memo.
+test("perf -101: /api/analytics serves through sendCachedBody — scoped ETag, 304, memoized serialize", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const a = await get("/api/analytics?u=stocks", gus);
+  assert.equal(a.statusCode, 200);
+  const tag = a.headers.etag;
+  assert.match(tag, /^W\/"stocks-/, "scope-prefixed validator kept");
+  assert.equal(a.headers["cache-control"], "no-cache");
+  assert.ok(JSON.parse(a.body), "a JSON body");
+  const b = await get("/api/analytics?u=stocks", gus, { "if-none-match": tag });
+  assert.equal(b.statusCode, 304);
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const route = srv.slice(srv.indexOf('fastify.get("/api/analytics"'), srv.indexOf('fastify.get("/api/funding"'));
+  assert.ok(route.includes("return sendCachedBody(req, reply, body, tag);") && !route.includes("JSON.stringify(body)"), "no per-request stringify");
+});
+
+// build 2026.09.24-101: SSE writes respect backpressure.
+test("perf -101: an SSE client past the buffer cap is dropped; destroyed sockets are detached, never written", () => {
+  const { _sseWriteTo, SSE_MAX_BUFFERED } = require("../server.js");
+  assert.equal(SSE_MAX_BUFFERED, 64 * 1024);
+  const mk = (over) => Object.assign({ destroyed: false, writableEnded: false, writableLength: 0, wrote: [], killed: false,
+    write(f) { this.wrote.push(f); return true; }, destroy() { this.killed = true; this.destroyed = true; } }, over || {});
+  const detached = [];
+  const detach = (e) => detached.push(e);
+  const ok = { res: mk() };
+  assert.equal(_sseWriteTo(ok, "data: 1\n\n", detach), true);
+  assert.deepEqual(ok.res.wrote, ["data: 1\n\n"]); assert.equal(detached.length, 0);
+  const at = { res: mk({ writableLength: SSE_MAX_BUFFERED }) };
+  assert.equal(_sseWriteTo(at, "x", detach), true, "exactly at the cap still writes");
+  const slow = { res: mk({ writableLength: SSE_MAX_BUFFERED + 1 }) };
+  assert.equal(_sseWriteTo(slow, "x", detach), false);
+  assert.ok(slow.res.killed && slow.res.wrote.length === 0 && detached.includes(slow), "a stalled reader is detached and destroyed, nothing more buffered");
+  const dead = { res: mk({ destroyed: true }) };
+  assert.equal(_sseWriteTo(dead, "x", detach), false);
+  assert.ok(dead.res.wrote.length === 0 && detached.includes(dead), "a destroyed socket is detached, not written");
+  const ended = { res: mk({ writableEnded: true }) };
+  assert.equal(_sseWriteTo(ended, "x", detach), false);
+  assert.ok(ended.res.wrote.length === 0 && detached.includes(ended));
+  const throws = { res: mk({ write() { throw new Error("EPIPE"); } }) };
+  assert.equal(_sseWriteTo(throws, "x", detach), false, "a throwing write is contained");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(srv.includes("const sseWrite = (entry, frame) => sseWriteTo(entry, frame, sseDetach);"), "every fan-out goes through the guarded writer");
 });
 
 test("security -20: the reset step-2 cookie is signed — a hand-set handle spends nobody's guesses", async () => {
@@ -671,6 +781,47 @@ test("dm: a card posts with a server-rendered body, an optional note behind it, 
   assert.ok(/CLIENT_MODULES = \(\(\) => \{ try \{ return fs\.readdirSync/.test(srv), "modules are discovered from the directory, so share.js ships precompressed and stamped");
 });
 
+// ===== build 2026.09.24-98: share to chat everywhere — panels, charts, live screens over the wire ====
+test("dm: a panel posts as a card, a chart only as the caption of its own uploaded picture, a live screen keeps its query", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const cara = jar(); cara.absorb(await post("/login", { handle: "cara", password: "yet-another-long-pw" }));
+  const members = JSON.parse((await get("/api/access", gus)).body).members;
+  const gusUid = members.find((m) => m.handle === "gus").uid;
+  // A drawer section: label/value lines and a spark, the body rendered by the server.
+  const panel = { kind: "panel", view: "drawer", title: "Funding APR · last 7d", coin: "xyz:NVDA", t: "NVDA", px: 176.4, cols: [{ k: "v", l: "value" }],
+    rows: [{ t: "from", c: [{ s: "4.10", c: "" }] }, { t: "to", c: [{ s: "11.30", c: "" }] }], spark: { v: [4.1, 6, -1, 11.3], l: "Funding APR", z: true }, at: 1790000000000 };
+  const p1 = JSON.parse((await post("/api/dm", { to: gusUid, card: panel }, cara)).body);
+  assert.ok(p1.ok, JSON.stringify(p1));
+  assert.equal(p1.message.card.kind, "panel"); assert.equal(p1.message.card.title, "Funding APR · last 7d");
+  assert.deepEqual(p1.message.card.spark.v, [4.1, 6, -1, 11.3]);
+  assert.ok(p1.message.body.startsWith("⤴ NVDA · Funding APR · last 7d · captured "), p1.message.body);
+  assert.ok(/\nfrom  4\.10\nto    11\.30\n/.test(p1.message.body), "label/value lines, padded: " + p1.message.body);
+  // A chart without its picture is refused; an upload into the thread, then the caption naming it, posts.
+  const chart = { kind: "chart", view: "charts", title: "4H candles · 90 bars", coin: "xyz:NVDA", t: "NVDA", tf: "4H", cols: [{ k: "v", l: "value" }],
+    rows: [{ t: "last", c: [{ s: "176.40", c: "" }] }], at: 1790000000000 };
+  const noPic = await post("/api/dm", { thread: p1.thread, card: chart }, cara);
+  assert.equal(noPic.statusCode, 400); assert.match(JSON.parse(noPic.body).error, /no-image/);
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4E, 0x47, 13, 10, 26, 10]), Buffer.alloc(32)]);
+  const up = JSON.parse((await post("/api/dm/upload", { thread: p1.thread, name: "chart-NVDA-4H.png", data: png.toString("base64") }, cara)).body);
+  assert.ok(up.ok, JSON.stringify(up));
+  const c1 = JSON.parse((await post("/api/dm", { thread: p1.thread, card: chart, fileId: up.file.id }, cara)).body);
+  assert.ok(c1.ok, JSON.stringify(c1));
+  assert.equal(c1.message.card.kind, "chart"); assert.ok(c1.message.file && c1.message.file.inline, "the picture rides the card's message, inline");
+  assert.ok(c1.message.body.includes("(the chart is attached as a picture)"));
+  // Somebody else's upload cannot be captioned; a panel never carries a file even when one is named.
+  const up2 = JSON.parse((await post("/api/dm/upload", { thread: p1.thread, name: "g.png", data: png.toString("base64") }, gus)).body);
+  assert.equal((await post("/api/dm", { thread: p1.thread, card: chart, fileId: up2.file.id }, cara)).statusCode, 400, "the attachment is not yours");
+  const p2 = JSON.parse((await post("/api/dm", { thread: p1.thread, card: panel, fileId: up2.file.id }, gus)).body);
+  assert.ok(p2.ok && !p2.message.file, "a panel ignores a fileId");
+  // A live screen keeps its query as data; the text body says it is live.
+  const screen = { kind: "screen", cols: [{ k: "d1", l: "24h" }], rows: [{ coin: "xyz:NVDA", t: "NVDA", c: [{ s: "+1.2%", c: "pos" }] }],
+    q: { f: "NV", vmin: 1e6, sk: "d1", sd: "desc", sc: "stocks", grp: ["xyz:NVDA"] }, live: true, at: 1790000000000 };
+  const s1 = JSON.parse((await post("/api/dm", { thread: p1.thread, card: screen }, cara)).body);
+  assert.ok(s1.ok, JSON.stringify(s1));
+  assert.equal(s1.message.card.live, true); assert.equal(s1.message.card.q.f, "NV"); assert.equal(s1.message.card.q.vmin, 1e6);
+  assert.ok(s1.message.body.split("\n")[0].includes("· live") && /live: re-runs these filters/.test(s1.message.body), s1.message.body);
+});
+
 // ===== build 2026.09.22-88: closing and extending a call over the wire =========================
 test("dm: close and extend are the author's verbs on an open call; a stamp needs a live mark to close", async () => {
   const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
@@ -717,7 +868,7 @@ test("dm: /api/dm/call-read is gated like an ask from a chat, needs a real marke
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "js", "messages.js"), "utf8");
   assert.ok(/const ov=\(!dmState\.editing&&dmState\.callOverride&&dmState\.callOverride\.text===ta\.value\.trim\(\)\)/.test(app), "the client sends an override only for the exact (trimmed) text it was applied to");
   assert.ok(/id="dm-callask"/.test(app) && /id="dm-callapply"/.test(app) && /vague&&dmAskAllowed\(\)/.test(app), "the ask is offered only when the words decided nothing, and only where dm.ask allows");
-  assert.ok(/const vague=!ov&&!read\.sideWord&&words>=4;/.test(app), "vague means no direction word");
+  assert.ok(/const vague=!ov&&!tgOk&&!read\.sideWord&&words>=4;/.test(app), "vague means no direction word (and no target, build 2026.09.24-95)");
   assert.ok(/dmState\.callOverride\.text===ta\.value\.trim\(\)/.test(app), "the override is keyed on the trimmed text on both sides");
   // ai.ask off is the operator's model-spend switch: the reader honours it before dm.ask.
   assert.equal(JSON.parse((await post("/api/features", { key: "ai.ask", state: "off" }, gus)).body).ok, true);
@@ -764,4 +915,69 @@ test("dm -94: the operator edits and deletes a member's message and strikes a ca
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   assert.ok(/r = ACCOUNTS\.drop\(me\.uid, b\.id, isAdmin\(req\)\)/.test(srv) && /r = ACCOUNTS\.edit\(me\.uid, b\.id, b\.body, isAdmin\(req\)\)/.test(srv), "authz is decided at the route");
   assert.ok(/if \(r\.ok && r\.moderated\) \{ log\(.*dmPoke\(r\.thread, \{ refresh: Number\(r\.thread\) \}\); \}/.test(srv), "a moderated row tells the room to re-pull it");
+});
+
+// ===== build 2026.09.24-95: call targets over the wire ================================================
+test("dm -95: /api/dm/targets reads the record narrowed to targets; the operator's resolve-now is admin-only; the resolver is wired", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const cara = jar(); cara.absorb(await post("/login", { handle: "cara", password: "yet-another-long-pw" }));
+  assert.equal((await get("/api/dm/targets")).statusCode, 401);
+  const r = await get("/api/dm/targets", cara);
+  assert.equal(r.statusCode, 200);
+  const d = JSON.parse(r.body);
+  assert.ok(d.ok && Array.isArray(d.open) && Array.isArray(d.resolved) && Array.isArray(d.summary), r.body);
+  assert.equal(r.headers["cache-control"], "no-store");
+  // No markets in this suite, so nothing stamps and no target can exist: a target-shaped send is a plain message.
+  const members = JSON.parse((await get("/api/access", gus)).body).members;
+  const gusUid = members.find((m) => m.handle === "gus").uid;
+  const sent = JSON.parse((await post("/api/dm", { to: gusUid, body: "$NVDA to 250 by Oct 15" }, cara)).body);
+  assert.ok(sent.ok && sent.message.call === null);
+  // Resolve-now posts under other people's names: the operator's button, not a member's.
+  const no = await post("/api/dm/targets", {}, cara);
+  assert.equal(no.statusCode, 403); assert.deepEqual(JSON.parse(no.body), { ok: false, error: "forbidden" });
+  assert.equal((await post("/api/dm/targets", {})).statusCode, 401);
+  const yes = JSON.parse((await post("/api/dm/targets", {}, gus)).body);
+  assert.deepEqual(yes, { ok: true, resolved: 0 });
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(srv.includes("ACCOUNTS.setBarSource((coin, from, to) => (store.readCandles ? store.readCandles(coin, from, to) : []));"), "the resolver reads the 5m archive");
+  assert.ok(/setInterval\(\(\) => \{ try \{ targetTick\(\); \}/.test(srv), "the resolver runs on a timer");
+  assert.ok(/const post = ACCOUNTS\.send\(r\.sender, null, r\.text, null, \{ thread: r\.thread, cmd: "target \$"/.test(srv) && /dmPoke\(post\.thread\); dmMirror\(post\.thread\);/.test(srv),
+    "a resolution posts where the call was made, under its author, as a command result — the /alert road");
+});
+
+// ===== build 2026.09.24-96: the D1 retest study over the wire =========================================
+test("retest study -96: /api/retest-study rides the Backtest tab's gate, answers the pending body, and 304s on its walk signature", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const cara = jar(); cara.absorb(await post("/login", { handle: "cara", password: "yet-another-long-pw" }));
+  assert.equal((await get("/api/retest-study")).statusCode, 401, "the site gate first");
+  assert.equal((await get("/api/retest-study", cara)).statusCode, 403, "a member is refused while Backtest is admin");
+  const r = await get("/api/retest-study?u=stocks&def=touch&cd=10", gus);
+  assert.equal(r.statusCode, 200);
+  const d = JSON.parse(r.body);
+  assert.equal(d.pending, true, "no markets in this suite: the study says what it needs");
+  assert.equal(d.scope, "stocks"); assert.equal(d.params.def, "touch"); assert.equal(d.params.cd, 10);
+  assert.deepEqual(d.params.horizons, [1, 3, 5, 10, 20]);
+  // (-107) the build and a per-boot nonce ride the tag: a restart never 304s onto another body
+  assert.match(r.headers.etag, /^W\/"rt-2026\.09\.24-110-[0-9a-z]+-stocks-touch-10-0-[0-9a-z]+-[^"]+"$/);
+  assert.equal(r.headers["cache-control"], "no-cache");
+  assert.equal((await get("/api/retest-study?u=stocks&def=touch&cd=10", gus, { "if-none-match": r.headers.etag })).statusCode, 304);
+  const bad = JSON.parse((await get("/api/retest-study?u=moon&def=%3Cx%3E&cd=999", gus)).body);
+  assert.ok(bad.scope === "stocks" && bad.params.def === "board" && bad.params.cd === 5, "junk normalises to the defaults");
+  const cx = await get("/api/retest-study?u=crypto", gus);
+  assert.notEqual(cx.headers.etag, r.headers.etag, "the universes never share a validator");
+  const C = require("../src/compute");
+  assert.ok(C.FEATURES.find((f) => f.key === "backtest").routes.includes("/api/retest-study"), "the manifest owns the route");
+});
+
+test("earnings setups -100: the route is session-gated, serves the empty payload honestly, and revalidates to a 304", async () => {
+  assert.equal((await get("/api/earnings/setups")).statusCode, 401, "signed out: 401 like every API read");
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const r = await get("/api/earnings/setups", gus);
+  assert.equal(r.statusCode, 200);
+  const b = JSON.parse(r.body);
+  assert.deepEqual(b.cards, []); assert.equal(b.sessions, 5); assert.equal(b.runupD, 7);
+  assert.equal(b.error, "earnings calendar not fetched yet", "no calendar under test: the empty strip says why");
+  assert.ok(r.headers.etag, "ETag carried");
+  const again = await get("/api/earnings/setups", gus, { "if-none-match": r.headers.etag });
+  assert.equal(again.statusCode, 304, "unchanged content revalidates");
 });

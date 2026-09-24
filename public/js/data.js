@@ -6,14 +6,13 @@ import { fhLiveRefresh } from "./admin.js";
 import { notifyNewBuild } from "./alerts.js";
 import { updateBenchNote } from "./backtest.js";
 import { COLS } from "./base.js";
-import { _earnLast, _newsLast, _sigLast, loadEarnings, loadNews, loadSignals, renderMacroStrip } from "./calendar.js";
-import { DAY, HOUR, TF_MAP, TF_MS, activeRows, clamp, detectBenchmark, el, esc, fmtUsd, isoUtc, recomputeChanges, regimeDetail, setPrice, state } from "./core.js";
-import { COMPG, dailyReturns, openCorr, renderCompg } from "./corr.js";
-import { computeSqueeze, render, renderRegimeStrip, rowSessState, scheduleRender, updateMovers } from "./markets.js";
+import { _earnLast, _newsLast, _setupLast, _sigLast, loadEarnSetups, loadEarnings, loadNews, loadSignals, renderMacroStrip } from "./calendar.js";
+import { DAY, HOUR, TF_MAP, TF_MS, activeRows, clamp, closedDaily, detectBenchmark, el, esc, fmtUsd, isoUtc, lazyLoaded, recomputeChanges, regimeDetail, sessCalOf, sessDaily, setPrice, state, stdev, yzVol } from "./core.js";
+import { COMPG, openCorr, renderCompg, sessReturns } from "./corr.js";
+import { computeSqueeze, mktPaintable, render, renderRegimeStrip, rowSessState, scheduleRender, updateMovers } from "./markets.js";
 import { _hsgLast, _liqLast, loadHousing, loadLiquidity } from "./notes.js";
 import { aiFmtAgo } from "./report.js";
 import { renderSectors } from "./sectors.js";
-import { renderDrawdown } from "./drawdown.js";
 import { loadTriggers } from "./triggers.js";
 
 
@@ -51,6 +50,8 @@ function maybePullSidecars(){
   { const vis=el('view-signals')&&!el('view-signals').hidden;
     if(Date.now()-_sigLast > (vis?60*1000:5*60*1000)) loadSignals(); }
   if(Date.now()-_earnLast > 10*60*1000) loadEarnings();   // 6h server refresh — 10 min client pull is already generous
+  { const vis=el('view-earnings')&&!el('view-earnings').hidden;   // setup cards carry live positioning: 1 min while the tab is open, 5 min otherwise (the drawer section reads them)
+    if(Date.now()-_setupLast > (vis?60*1000:5*60*1000)) loadEarnSetups(); }
   if(el('view-housing')&&!el('view-housing').hidden&&Date.now()-_hsgLast > 15*60*1000) loadHousing();   // 6h server refresh; only pulled while the tab is open
   if(el('view-liquidity')&&!el('view-liquidity').hidden&&Date.now()-_liqLast > 15*60*1000) loadLiquidity();
   renderMacroStrip();   // cheap re-derive so the strip flips at 8:30 / 14:00 ET between pulls
@@ -156,15 +157,35 @@ function applySnapshot(s){
     if(prev!=null&&prev!==sig) loadDaily();
     state._hmSig=sig; }
   updateBenchNote();
-  updateAggregates(); render(); updateMovers(); updateSyncProgress(); renderRegimeStrip();
+  // render() always derives + evaluates alerts; its DOM paint, the movers and the regime strip only
+  // run while Markets is on screen — otherwise G.mktDirty and showView('markets') / foregrounding
+  // paint once (build 2026.09.24-103).
+  updateAggregates(); render(); if(mktPaintable()){ updateMovers(); renderRegimeStrip(); } updateSyncProgress();
 }
 function applyDaily(d){ if(!d||!d.daily) return;
   if(!state._ohSnap) state.offHours = d.offHours || {closed:false};   // legacy path: only until a snapshot has shipped the fresher copy
+  // Unchanged-body skip (build 2026.09.24-103). The warm-up cadence pulls /api/daily every 20s and
+  // the server answers 304 while its content version (dataTs, the same value its ETag is minted
+  // from) holds — but fetch() turns a 304 into a 200 carrying the CACHED body, so every pull used to
+  // re-walk ~140 series, null every per-row memo (_dret/_wrL/_dlvl/...), and repaint the matrix and
+  // the sectors map from scratch for identical data. Skip when the same version has already been
+  // applied to the same row set: the key carries how many of the body's coins have a row, so a
+  // daily that landed before the first snapshot (boot races the two) still applies once rows exist.
+  if(d.dataTs){ let have=0; for(const coin in d.daily) if(state.rows.has(coin)) have++;
+    const key=d.dataTs+'|'+have+'|'+state.rows.size;
+    if(key===state._dailyKey) return;
+    state._dailyKey=key; }   // an unversioned body (older server, empty fallback) always applies
+  // (-105) the session calendars the sessionFold twin folds on: {US:[day...], KR:[...], ...} of
+  // non-trading UTC day indexes. Absent (older server): every row stays on calendar days.
+  if(d.sessOff&&typeof d.sessOff==='object'){ const so={}; for(const k in d.sessOff) if(Array.isArray(d.sessOff[k])) so[k]=new Set(d.sessOff[k]); state.sessOff=so; state.sessOffV++; }
   for(const coin in d.daily){ const r=state.rows.get(coin); if(!r) continue;
     const arr=d.daily[coin];
-    r.daily=Array.isArray(arr)?arr.map(p=>({t:p[0], c:p[1], h:p[2], v:p[3]})):r.daily;   // h/v are additive tuple columns (2026.07.24-04) — absent on an older server, undefined here
+    // h/v are additive tuple columns (2026.07.24-04), l since -105 (the candle's own low; tl marks it
+    // true — a null l is a closes-only bar, which every low reader falls back to c on)
+    r.daily=Array.isArray(arr)?arr.map(p=>{ const l=p[4]; return {t:p[0], c:p[1], h:p[2], v:p[3], l:l>0?l:undefined, tl:l>0}; }):r.daily;
     if(d.oi && Array.isArray(d.oi[coin])){ r.dailyOI=d.oi[coin]; r._doi=null; }
     r.closePx=(d.liveClose && d.liveClose[coin]>0)?d.liveClose[coin]:null;   // price at the last close, for the live in-progress gap
+    { const cc=d.cashClose&&d.cashClose[coin]; r.cashClose=(Array.isArray(cc)&&cc[1]>0)?{t:cc[0],px:cc[1]}:null; }   // (-104) the last US cash close, any session state — "vs cash close" 
     if(d.funding && Array.isArray(d.funding[coin])){ r.dailyFund=d.funding[coin].map(p=>({t:p[0], f:p[1]})); r._dfund=null; }
     if(d.overnight && Array.isArray(d.overnight[coin])){ r.overnight=d.overnight[coin].map(p=>({t:p[0], g:p[1], f:p[2]})); r._dov=null;
       const cut=Date.now()-30*DAY; let eq=1, n=0;                    // 30d cumulative off-hours drift (tooltip)
@@ -172,7 +193,7 @@ function applyDaily(d){ if(!d||!d.daily) return;
       r.gap30 = n? (eq-1)*100 : undefined;
       const last=r.overnight[r.overnight.length-1]; r.gapDone = last&&isFinite(last.g)? last.g*100 : undefined;   // last completed close->open gap
     }
-    r._dret=null; r._wrL=null; r._dlvl=null; }
+    r._dret=null; r._wrL=null; r._dlvl=null; r._sret=null; r._vyz=null; }
   scheduleRender();
   if(!el('view-corr').hidden){ openCorr();           // wrapper, so the "loading X/Y" sync counter advances with the data
     // -07 self-heal: a COMP/G panel painted before this data landed rendered its honest loading
@@ -180,7 +201,7 @@ function applyDaily(d){ if(!d||!d.daily) return;
     // panel had no path back from empty and stayed broken-looking for the life of the page.
     if(COMPG._empty && el('compg') && !el('compg').hidden) renderCompg(); }
   if(!el('view-sectors').hidden) renderSectors();   // leaders map + sector corr fill in live as daily coverage grows
-  { const dv=el('view-drawdown'); if(dv&&!dv.hidden) renderDrawdown(); }   // the study is a pure function of these closes
+  { const dv=el('view-drawdown'), dd=lazyLoaded('drawdown'); if(dv&&!dv.hidden&&dd) dd.renderDrawdown(); }   // (-103: lazy tab — only an already-loaded study repaints; one still loading renders these closes on open)   // the study is a pure function of these closes
 }
 function updateAggregates(){ const rows=activeRows(); let v=0,o=0;
   for(const r of rows){ if(r.vol)v+=r.vol; if(r.oi)o+=r.oi; }
@@ -341,6 +362,12 @@ function computeMomentum(r){
   }
   return {mom:100*Math.tanh(coreA/1.5), momp:100*Math.tanh(coreB/1.5), why:why.length?why.join(' · '):null};
 }
+// Δ% of the live mark vs the last US cash close; undefined for crypto, a foreign-home name (its close
+// is not the US one) or while the close has not shipped.
+function vsCashClose(r){
+  if(!r||r.uni==='main'||r.hm||!r.cashClose||!(r.cashClose.px>0)||!(r.px>0)||!isFinite(r.px)) return undefined;
+  return (r.px/r.cashClose.px-1)*100;
+}
 function computeDerived(){
   const tfKey=TF_MAP[state.tf]||'d1';
   const bX=state.benchCoin?state.rows.get(state.benchCoin):null, bM=state.benchMain?state.rows.get(state.benchMain):null;
@@ -353,7 +380,13 @@ function computeDerived(){
     for(const u of ['xyz','main']){ const a=acc[u]; if(a.length>=5){ a.sort((x,y)=>x-y);
       tapeMed[u]=a.length%2?a[(a.length-1)/2]:(a[a.length/2-1]+a[a.length/2])/2; } } }
   state._tapeMed=tapeMed;
+  const bXcc=bX?vsCashClose(bX):null;   // (-104) the S&P's own move vs its last cash close, for the RS variant
   for(const r of state.rows.values()){ if(r.delisted)continue;
+    // vs cash close (build 2026.09.24-104): the mark vs the LAST US cash close (16:00 ET; 13:00 on a
+    // half day; holidays skipped), the equity trader's "change on the day". 24h stays Hyperliquid's
+    // rolling prevDayPx — on a Monday that is Sunday's price, not Friday's close.
+    r.vcc=vsCashClose(r);
+    r.rscc=(r.vcc==null||!state.benchCoin||r.uni==='main')?undefined:(r.coin===state.benchCoin?0:(bXcc!=null?r.vcc-bXcc:undefined));
     // vs tape: this market's window return minus the universe median — the live counterpart of
     // DownCap/Hit% (same reference), and the direct read for "holding stronger than the rest".
     { const tm=tapeMed[r.uni==='main'?'main':'xyz'], a=r[tfKey];
@@ -373,14 +406,29 @@ function computeDerived(){
     else if(r.coin===benchC) r.rs=0;
     else if(benchRet==null) r.rs=null;
     else { const a=r[tfKey]; r.rs=(a!=null&&isFinite(a))?a-benchRet:null; }
-    r.vol30=(r.feat&&r.feat.volH>0)?r.feat.volH*Math.sqrt(24*365)*100:undefined;
-    const adrN=state.tf==='30d'?30:7;
+    // Vol (ann) (build 2026.09.24-105). Session names: Yang-Zhang over the last 20 CLOSED session
+    // bars ×√252 (core.js yzVol — range-based, true lows); a window with a closes-only bar falls back
+    // to the close-to-close σ of those 20 session returns ×√252; under 21 closed sessions, the hourly
+    // read. Crypto: hourly log returns ×√(24·365), the forming hour excluded server-side. The
+    // estimator rides r.vol30Est for the tooltip. Memoized on the session view (it moves daily).
+    { const ses=sessCalOf(r)?sessDaily(r):null; let v=null, est=null;
+      if(ses){ const m=r._vyz; if(m&&m.src===ses&&m.day===Math.floor(Date.now()/DAY)){ v=m.v; est=m.est; }
+        else { const cl=closedDaily(ses); if(cl.length>=21){ v=yzVol(cl,20); est='YZ';
+            if(v==null){ const rt=[]; for(let i=cl.length-20;i<cl.length;i++){ const a=+cl[i-1].c, b=+cl[i].c; if(a>0&&b>0) rt.push(Math.log(b/a)); }
+              if(rt.length>=15){ v=stdev(rt)*Math.sqrt(252)*100; est='c2c'; } } }
+          r._vyz={src:ses, day:Math.floor(Date.now()/DAY), v, est}; } }
+      if(v!=null&&isFinite(v)){ r.vol30=v; r.vol30Est=est; }
+      else { r.vol30=(r.feat&&r.feat.volH>0)?r.feat.volH*Math.sqrt(24*365)*100:undefined; r.vol30Est=r.vol30!=null?'hourly':null; } }
+    // Avg range: the server's per-SESSION (h−l)/c series for a session name (weekends folded, true
+    // lows off the hourly spine) — a week is 5 sessions, a month 21; crypto keeps 7 / 30 days.
+    const adrN=sessCalOf(r)?(state.tf==='30d'?21:5):(state.tf==='30d'?30:7);
     r.adr=(r.feat&&r.feat.dr&&r.feat.dr.length)?(()=>{ const s=r.feat.dr.slice(-adrN); return s.reduce((p,q)=>p+q,0)/s.length; })():undefined;
     r.dd=(r.px!=null&&r.feat&&r.feat.hi30>0)?(r.px-r.feat.hi30)/r.feat.hi30*100:undefined;
     // 30d rolling VWAP (server-computed from the hourly spine; candle-typical-price approximation)
     r.vwap30=(r.feat&&r.feat.vwap30>0)?r.feat.vwap30:undefined;
     r.vsvwap=(r.vwap30!==undefined&&r.px!=null&&isFinite(r.px))?(r.px/r.vwap30-1)*100:undefined;
-    // vs YTD high: distance below the year's highest DAILY CLOSE. Honest only when the daily
+    // vs YTD high: distance below the year's highest DAILY HIGH (build 2026.09.24-105 — the bar's own
+    // high where the feed carries it, the close otherwise). Honest only when the daily
     // history actually covers the year: series reaching ~Jan 1, or a name listed this year
     // (xyz 370d retention means a late first point IS a new listing; crypto's flat 31d buffer
     // can't distinguish new listing from truncation unless the series is shorter than the
@@ -390,7 +438,7 @@ function computeDerived(){
       if(Array.isArray(cl)&&cl.length){
         const y0=Date.UTC(new Date().getUTCFullYear(),0,1);
         const covered = cl[0].t<=y0+3*DAY || (r.uni!=='main' ? cl[0].t>y0 : cl.length<28);
-        if(covered) for(const k of cl){ if(k.t>=y0){ const c=+k.c; if(isFinite(c)&&(hy==null||c>hy)) hy=c; } }
+        if(covered) for(const k of cl){ if(k.t>=y0){ const c=+k.c, h=+k.h, x=(h>0&&isFinite(h))?Math.max(h,c):c; if(isFinite(x)&&(hy==null||x>hy)) hy=x; } }
       }
       if(hy!=null&&r.px!=null&&isFinite(r.px)&&r.px>hy) hy=r.px;
       r.ddy=(r.px!=null&&isFinite(r.px)&&hy>0)?(r.px-hy)/hy*100:undefined; }
@@ -430,9 +478,11 @@ function computeDerived(){
       r.gap = r.uni==='main' ? undefined : ((oh && oh.closed && r.closePx>0 && isFinite(r.px)) ? (r.px/r.closePx-1)*100 : r.gapDone); }   // crypto never gaps (24/7); else live in-progress gap when the name's cash market is closed, else the last completed gap
     r.trend=(r.d30!=null&&isFinite(r.d30))?r.d30:undefined;
     r.turn=(r.oi>0&&r.vol>0)?r.oi/r.vol:undefined;
-    // Simple moving averages of DAILY closes. null until enough history: crypto (31d retention)
-    // supports MA20 only — the longer MAs stay honest dashes rather than fabricated values.
-    { const cl=r.daily; let m=null;
+    // Simple moving averages of daily closes — SESSION closes on a session name (build 2026.09.24-105:
+    // MA200 = 200 sessions ≈ 10 months, not 200 UTC days ≈ 140 sessions; the newest, possibly forming,
+    // session bar is in the average as before). Crypto: calendar days. null until enough history:
+    // crypto (~90d on the wire) reaches MA20/50 only — the longer MAs stay honest dashes.
+    { const cl=sessDaily(r); let m=null;
       if(Array.isArray(cl)&&cl.length){ m={}; for(const nD of [20,50,100,200]){
         if(cl.length>=nD){ let t=0,k=0; for(let i=cl.length-nD;i<cl.length;i++){ const c=+cl[i].c; if(isFinite(c)){t+=c;k++;} }
           m[nD]=k===nD?t/k:null; } else m[nD]=null; } }
@@ -443,8 +493,10 @@ function computeDerived(){
     else r.beta=undefined;
   }
 }
+// β on SESSION returns with the forming bar dropped (sessReturns, build 2026.09.24-105) — the same
+// definition compute.dailyBeta runs on the server's session fold (parity test: accuracy.test.js).
 function computeBeta(r, bench, Ldays){
-  const mr=dailyReturns(r), mb=dailyReturns(bench); if(!mr||!mb) return null;
+  const mr=sessReturns(r), mb=sessReturns(bench); if(!mr||!mb) return null;
   const cutoff=Math.floor(Date.now()/DAY)-Ldays, xs=[],ys=[];
   for(const [d,vb] of mb){ if(d<cutoff)continue; const va=mr.get(d); if(va!==undefined){ xs.push(vb); ys.push(va); } }
   const n=xs.length; if(n<20) return null;

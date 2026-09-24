@@ -14,13 +14,14 @@ import { applyKsel } from "./nav.js";
 import { _notesLoading, loadNotes, notesStale, renderDrawerNotes, renderNotes } from "./notes.js";
 import { posDecorate, savePrefs } from "./prefs.js";
 import { sectorShort } from "./sectors.js";
+import { usageFirstPaint } from "./usage.js";
 
 
 // ===== rendering =====
 let renderQueued=false;
-function scheduleRender(){ if(renderQueued)return; renderQueued=true; requestAnimationFrame(()=>{renderQueued=false; render(); updateMovers();}); }
+function scheduleRender(){ if(renderQueued)return; renderQueued=true; requestAnimationFrame(()=>{renderQueued=false; render(); if(mktPaintable()) updateMovers();}); }
 function scCls(r){ return (r.candleTs && (Date.now()-r.candleTs>2*state.refreshMs+60000)) ? 'stale':''; }
-const XYZ_ONLY_COLS=new Set(['gap']);   // session-anchored concepts — a 24/7 market has none
+const XYZ_ONLY_COLS=new Set(['gap','vcc','rscc']);   // session-anchored concepts — a 24/7 market has none (vcc/rscc: build 2026.09.24-104)
 const MAIN_ONLY_COLS=new Set(['cascT','liq24']);   // aggregated-CEX derivs context — exists only for the crypto universe
 // Migration adjacency: when a stored order predates a column that belongs beside another
 // (momp beside mom), move it there instead of leaving it appended at the table's far edge.
@@ -235,10 +236,11 @@ function trendCell(r){
   if(!cl || cl.length<3) return '<td><span class="na">·</span></td>';
   const up=cl[cl.length-1]>=cl[0]; return `<td title="30d path">${miniSpark(cl, up?'var(--up)':'var(--down)')}</td>`; }
 function volCell(r){ if(r.vol30==null||!isFinite(r.vol30)) return '<td><span class="na" title="loading hourly history…">·</span></td>';
-  return `<td class="sec" title="annualized realized vol">${r.vol30.toFixed(0)}%</td>`; }
+  const est={YZ:'Yang-Zhang, last 20 closed sessions \u00d7\u221a252',c2c:'close-to-close \u03c3, last 20 session returns \u00d7\u221a252 (a bar without a true low in the window)',hourly:'hourly log returns \u00d7\u221a(24\u00b7365), forming hour excluded'}[r.vol30Est]||'annualized realized vol';
+  return `<td class="sec" title="annualized realized vol \u00b7 ${est}">${r.vol30.toFixed(0)}%</td>`; }
 function adrCell(r){ if(r.adr==null||!isFinite(r.adr)) return '<td><span class="na" title="loading hourly history…">·</span></td>';
   const t=Math.min(r.adr/8,1)*0.18;
-  return `<td class="sec" style="background:rgba(227,165,60,${t.toFixed(3)})" title="avg daily high−low as % of close, over ${state.tf==='30d'?'30d':'7d'}">${r.adr.toFixed(2)}%</td>`; }
+  return `<td class="sec" style="background:rgba(227,165,60,${t.toFixed(3)})" title="avg daily high−low as % of close, over ${r.uni!=='main'?(state.tf==='30d'?'21 sessions':'5 sessions'):(state.tf==='30d'?'30d':'7d')}">${r.adr.toFixed(2)}%</td>`; }
 function ddCell(r){ if(r.dd==null||!isFinite(r.dd)) return '<td><span class="na">·</span></td>';
   const c=r.dd>=-0.5?'pos':(r.dd<=-15?'neg':'sec'); return `<td class="${c}" title="distance below the 30-day high">${r.dd.toFixed(1)}%</td>`; }
 function ddyCell(r){ if(r.ddy==null||!isFinite(r.ddy)) return '<td><span class="na" title="needs daily history reaching Jan 1 \u2014 crypto retention is 31d, so outside January this is out of reach by design; equities fill in as the daily backfill loads">\u2014</span></td>';
@@ -743,6 +745,14 @@ function renderActionLists(){
     else c.addEventListener('click',()=>openDetail(c.dataset.coin));
   });
 }
+// True when the markets section is actually on screen: the Markets tab is the active view and the
+// page itself is visible. The table, movers, regime strip and action lists all live in
+// #view-markets, so this one predicate gates all four (build 2026.09.24-103).
+function mktPaintable(){ return state.view==='markets'&&!(typeof document!=='undefined'&&document.hidden); }
+// The full markets repaint a deferred (dirty) state owes: table/lens + action lists via render(),
+// then the movers row and the regime strip. Called by showView('markets') and the foregrounding
+// catch-up when G.mktDirty is set.
+function paintMarkets(){ render(); updateMovers(); renderRegimeStrip(); }
 function render(){
   if(!state.rows.size) return; computeDerived(); evaluateAlerts(); posDecorate();
   // Reconcile the note book against the digest riding the snapshot. The digest is authoritative:
@@ -756,7 +766,16 @@ function render(){
     loadNotes().then(()=>{ render(); if(state.detail) renderDrawerNotes(state.detail);
       if(el('view-notes')&&!el('view-notes').hidden) renderNotes(); });
   }
-  if(mktGrp()!=='names'){ renderGroupBoard(); return; }   // the markets #body always mirrors the active lens, whichever tab is on top
+  // Paint gate (build 2026.09.24-103). Everything above — derive, the in-browser alert evaluator,
+  // position decoration, the notes reconcile — is state other tabs and the bell read, so it runs on
+  // every call. Everything below is DOM that lives inside #view-markets: rebuilding a 140-row table
+  // for a hidden section (another tab on top) or a hidden page (background tab on its 60s alert
+  // pull) was pure waste. Mark it dirty instead; showView('markets') and the visibilitychange
+  // catch-up call paintMarkets() once, which re-enters here and paints exactly what the latest
+  // state says — the lens included.
+  if(!mktPaintable()){ G.mktDirty=true; return; }
+  G.mktDirty=false;
+  if(mktGrp()!=='names'){ renderGroupBoard(); return; }   // the markets #body always mirrors the active lens, on every paint
   const body=el('body'), rows=sortedRows(), vc=visibleCols();
   const fc=el('fcount'); if(fc){ const tot=activeRows().length; fc.textContent=(rows.length!==tot)?`showing ${rows.length} of ${tot}`:''; }
   { const c2=el('fcount2'); if(c2){ const tot=activeRows().length; const on=[state.watchOnly&&'\u2605 only',state.noteOnly&&'\u25e2 noted'].filter(Boolean).join(' \u00b7 ');
@@ -781,6 +800,7 @@ function render(){
   rowRefocus(body, had);
   applyKsel();   // rebuild wipes the j/k highlight; a patch may have replaced the selected row — re-pin either way
   renderActionLists();   // the rate-of-change lists under the table describe exactly what it just rendered
+  usageFirstPaint();   // (build 2026.09.24-110) the first real table paint of this page load: the usage beacon's one perf sample
 }
 function updateMovers(){ const rows=activeRows().filter(r=>r.d1!=null&&isFinite(r.d1));
   if(rows.length<3){ el('movers').hidden=true; return; } el('movers').hidden=false;
@@ -888,4 +908,4 @@ function renderRegimeStrip(){
     +mixHtml
     +`<span class="rs-m" data-tip="${esc(corrTip)}"><span class="rs-k">30d corr</span> ${corrTxt}</span>`;
 }
-export { adrCell, anchOpenCell, buildHead, carryCell, cdsHtml, clearDrill, colAdjacent, computeSqueeze, dcapCell, ddCell, ddyCell, dopenCell, drillMembers, gapCell, groupRowsSorted, hitCell, homeWallToEtMin, momCell, mompCell, oiCell, openCell, pctInner, premCell, railHtml, render, renderActionLists, renderRegimeStrip, rowSessState, rsCell, rvolCell, scCls, scheduleRender, sessCell, sessDrawerHtml, sessEx, setGrp, shade, sortedRows, sqzCell, syncGrpSeg, trendCell, updateDrillChip, updateMovers, visibleCols, volCell, vsTapeCell };
+export { adrCell, anchOpenCell, buildHead, carryCell, cdsHtml, clearDrill, colAdjacent, computeSqueeze, dcapCell, ddCell, ddyCell, dopenCell, drillMembers, gapCell, groupRowsSorted, hitCell, homeWallToEtMin, mktPaintable, momCell, mompCell, oiCell, openCell, paintMarkets, pctInner, premCell, railHtml, render, renderActionLists, renderRegimeStrip, rowSessState, rsCell, rvolCell, scCls, scheduleRender, sessCell, sessDrawerHtml, sessEx, setGrp, shade, sortedRows, sqzCell, syncGrpSeg, trendCell, updateDrillChip, updateMovers, visibleCols, volCell, vsTapeCell };

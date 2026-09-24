@@ -8,24 +8,27 @@ import { showView } from "./backtest.js";
 import { nowChip } from "./base.js";
 import { loadNews } from "./calendar.js";
 import { DAY, G, activeRows, el, esc, fmtFunding, fmtPct, fmtPrice, fmtUsd, inScope, momColor, overlayPop, overlayPush, regimeReadout, state } from "./core.js";
-import { corrColor, dailyReturns, pearson, sparkline } from "./corr.js";
+import { corrColor, pearson, sessReturns, sparkline } from "./corr.js";
 import { fetchJSON } from "./data.js";
 import { render, sessDrawerHtml, sessEx } from "./markets.js";
 import { openRuleFor, updateFocusChip } from "./nav.js";
-import { earnDrawerHtml, loadNotes, noteDrawerHtml, renderDrawerNotes, wireDrawerNotes } from "./notes.js";
+import { earnDrawerHtml, earnSetupDrawerHtml, loadNotes, noteDrawerHtml, renderDrawerNotes, wireDrawerNotes } from "./notes.js";
 import { renderDrawerPos, savePrefs } from "./prefs.js";
 import { aiPick, openAiReport } from "./report.js";
+import { shChartCard, shSvgPng, shSvgResolve, shThemeVar } from "./share.js";
 import { EV_LABELS, fillDrawerNews, fmtAge } from "./trend.js";
+import { usageAct } from "./usage.js";
 
 
 // ===== per-ticker detail drawer =====
 function comoversFor(coin, L){ const me=state.rows.get(coin); if(!me||!me.daily) return null;
-  const mr=dailyReturns(me); if(!mr) return null; const cutoff=Math.floor(Date.now()/DAY)-L, res=[];
-  for(const r of activeRows()){ if(r.coin===coin||!r.daily) continue; const or=dailyReturns(r); if(!or) continue;
+  const mr=sessReturns(me); if(!mr) return null; const cutoff=Math.floor(Date.now()/DAY)-L, res=[];   // session returns, forming bar dropped (-105): the matrix's own definition
+  for(const r of activeRows()){ if(r.coin===coin||!r.daily) continue; const or=sessReturns(r); if(!or) continue;
     const a=[],b=[]; for(const [d,v] of mr){ if(d<cutoff)continue; const w=or.get(d); if(w!==undefined){a.push(v);b.push(w);} }
     if(a.length<20) continue; const c=pearson(a,b); if(c!=null&&isFinite(c)) res.push([r.ticker,c]); }
   res.sort((x,y)=>y[1]-x[1]); return res; }
 function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.detail=coin;
+  usageAct('drawer-open');   // (build 2026.09.24-110) counted, never which ticker — the owner decided: no ticker tracking
   // Remember the opener EVERY open (it was recorded once and never used). A re-open from inside the
   // drawer keeps the original opener: the element under the caret is about to be rebuilt.
   { const ae=document.activeElement, dr=el('drawer');
@@ -77,6 +80,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
     <div id="dpos"></div>
     ${sessDrawerHtml(r)}
     ${earnDrawerHtml(r)}
+    ${earnSetupDrawerHtml(r)}
     ${noteDrawerHtml(r)}
     ${closes.length>2?`<div class="dsec">90-day price</div>${sparkline(closes,{color: closes[closes.length-1]>=closes[0]?'var(--up)':'var(--down)'})}`:''}
     <div id="dcandles"></div>
@@ -133,12 +137,15 @@ function sessionSplit30(r){
 }
 // Hourly candlestick chart for the drawer, fed by /api/candles. Crosshair + OHLC readout via
 // the shared hoverChart infrastructure (same one the Sessions curves use).
-function candleSvg(cd){
+function candleSvg(cd){ const g=candleGeom(cd); return g?hoverChart(g.s,{w:g.W,h:g.H,pt:g.pt,pb:g.pb,xs:g.xs,rows:g.rows}):''; }
+// The drawing itself, apart from the hover wrapper, so the share path (build 2026.09.24-98) can lay
+// the same marks into a standalone SVG and rasterise it — one chart, never a second renderer.
+function candleGeom(cd){
   const W=420,H=176, pl=4,pr=52,pt=10,pb=20;
-  if(!cd||cd.length<5) return '';
+  if(!cd||cd.length<5) return null;
   let lo=Infinity,hi=-Infinity;
   for(const k of cd){ if(isFinite(k[3])&&k[3]<lo)lo=k[3]; if(isFinite(k[2])&&k[2]>hi)hi=k[2]; }
-  if(!(hi>lo)) return '';
+  if(!(hi>lo)) return null;
   const pad=(hi-lo)*0.06; hi+=pad; lo-=pad;
   const n=cd.length, X=i=>pl+(i+0.5)/n*(W-pl-pr), Y=v=>pt+(1-(v-lo)/(hi-lo))*(H-pt-pb);
   const bw=Math.max(1,Math.min(6,(W-pl-pr)/n*0.72));
@@ -163,7 +170,29 @@ function candleSvg(cd){
   const rows=cd.map(k=>{ const chg=(isFinite(k[1])&&k[1]>0&&isFinite(k[4]))?(k[4]/k[1]-1)*100:null;
     return `<b style="color:var(--text)">${dfmt(k[0])}</b><br>O ${fmtPrice(k[1])} · H ${fmtPrice(k[2])}<br>L ${fmtPrice(k[3])} · C ${fmtPrice(k[4])}`+
       (chg!=null?`<br><span class="${chg>=0?'pos':'neg'}" style="color:${chg>=0?'var(--up)':'var(--down)'}">${chg>=0?'+':''}${chg.toFixed(2)}%</span>`:''); });
-  return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
+  return {s,W,H,pt,pb,xs,rows};
+}
+// Share the drawer's candle chart (build 2026.09.24-98): the candles on screen, drawn again into a
+// standalone SVG — theme variables resolved, the tick class spelled out, the panel colour laid under
+// it, because an <img> knows none of the page's CSS — rasterised at 2x, with the window's facts as
+// the card's caption. Async: the sheet opens once the picture exists.
+let _dcand=null;   // {coin, days, cd} — what loadDrawerCandles last drew
+async function drawerCandleCard(coin){
+  const d=_dcand; if(!d||d.coin!==coin) return null;
+  const g=candleGeom(d.cd); if(!g) return null;
+  const mono=shThemeVar('--mono')||'monospace', muted=shThemeVar('--muted')||'#7E8794';
+  const inner=g.s.replace(/class="lc-tick"/g,`fill="${esc(muted)}" font-size="9" font-family="${esc(mono)}"`);
+  const svg=shSvgResolve(`<svg xmlns="http://www.w3.org/2000/svg" width="${g.W}" height="${g.H}" viewBox="0 0 ${g.W} ${g.H}"><rect width="${g.W}" height="${g.H}" fill="var(--panel)"/>${inner}</svg>`);
+  const png=await shSvgPng(svg,g.W,g.H); if(!png) return null;
+  const k0=d.cd[0], k1=d.cd[d.cd.length-1];
+  let lo=Infinity,hi=-Infinity; for(const k of d.cd){ if(isFinite(k[3])&&k[3]<lo)lo=k[3]; if(isFinite(k[2])&&k[2]>hi)hi=k[2]; }
+  const chg=(k0&&k0[1]>0&&k1&&isFinite(k1[4]))?(k1[4]/k0[1]-1)*100:null;
+  const r=state.rows.get(coin), tk=r?r.ticker:coin;
+  return shChartCard({ view:'drawer', coin, tf:d.days+'d', title:'Hourly candles \u00b7 '+d.days+'d', name:'candles-'+tk+'-'+d.days+'d.png', png,
+    rows:[{t:'last',c:[{s:fmtPrice(k1[4]),c:''}]},
+      ...(chg!=null?[{t:'window',c:[{s:(chg>=0?'+':'')+chg.toFixed(2)+'%',c:chg>0?'pos':chg<0?'neg':'sec'}]}]:[]),
+      {t:'range',c:[{s:fmtPrice(lo)+' \u2013 '+fmtPrice(hi),c:''}]},
+      {t:'bars',c:[{s:d.cd.length+' \u00d7 1h',c:'sec'}]}] });
 }
 async function loadDrawerCandles(coin){
   const box=el('dcandles'); if(!box) return;
@@ -172,7 +201,8 @@ async function loadDrawerCandles(coin){
     const res=await fetchJSON('/api/candles?coin='+encodeURIComponent(coin)+'&days='+days);
     if(state.detail!==coin || !box.isConnected) return;
     const cd=(res&&Array.isArray(res.candles))?res.candles:[];
-    if(cd.length<5){ box.innerHTML=''; return; }   // server not updated yet, or spine still filling — the drawer just omits the chart
+    if(cd.length<5){ box.innerHTML=''; _dcand=null; return; }   // server not updated yet, or spine still filling — the drawer just omits the chart
+    _dcand={coin,days,cd};
     const seg=[3,7,14,30,90].map(d=>`<button type="button" class="cdtf${d===days?' on':''}" data-d="${d}">${d}d</button>`).join('');
     box.innerHTML=`<div class="dsec" style="display:flex;align-items:center;gap:8px">Hourly candles <span class="cdtf-seg" style="margin-left:auto">${seg}</span></div>`+candleSvg(cd);
     box.querySelectorAll('.cdtf').forEach(b=>b.addEventListener('click',()=>{ state.candTf=+b.dataset.d; loadDrawerCandles(coin); }));
@@ -471,4 +501,4 @@ function closeDetail(){ state.detail=null; overlayPop('drawer'); el('drawer').cl
   if(!t&&f.coin){ const b=el('body'); t=b&&b.querySelector?b.querySelector(`tr[data-coin="${CSS.escape(f.coin)}"]`):null; }
   if(t&&t.focus) try{ t.focus({preventScroll:true}); }catch(_){} }
 function toggleWatch(coin){ if(state.watch.has(coin)) state.watch.delete(coin); else state.watch.add(coin); savePrefs(); render(); }
-export { closeDetail, openDetail, openSigHistory, runSigHist, shDate, toggleWatch };
+export { closeDetail, drawerCandleCard, openDetail, openSigHistory, runSigHist, shDate, toggleWatch };

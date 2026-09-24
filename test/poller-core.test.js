@@ -556,9 +556,10 @@ test("candles tf param: the chart series IS the ladder series — the modal cann
   const r1 = p.getTfCandles("TCHART", "1h");
   assert.equal(r1.candles.length, 96, "1h: the ladder's 96-bar spine tail, not the drawer's days window");
   assert.equal(r1.candles[95][0], hourly[N - 1].t, "1h: tail ends at the last spine bar");
-  const g = withFormingDaily(daily, px, Date.now(), DAY);
+  const Cmp = require("../src/compute");
+  const g = Cmp.sessionFold(withFormingDaily(daily, px, Date.now(), DAY), Cmp.sessOffFn("US"));   // (-105) an xyz US name's D1 rung is its session view
   const rd = p.getTfCandles("TCHART", "1d");
-  assert.equal(rd.candles.length, g.length, "1d: through the withFormingDaily staleness guard");
+  assert.equal(rd.candles.length, g.length, "1d: through the withFormingDaily staleness guard, folded to sessions");
   // OHLC upgrade (build -73): closes-only bars — the synthetic forming bar included — take their
   // o/h/l from the REAL hourly aggregation of that UTC day when the spine covers it. That is
   // measured data, not fabrication: the invariant "never a fabricated flat candle" is preserved
@@ -851,7 +852,8 @@ test("daily payload v2 (2026.07.24-04): [t,c,h,v] tuples + per-name OI series, b
   const a = dc.daily["xyz:AAA"];
   assert.ok(a && a.length >= 60, "dailyRaw path ships");
   const row = a[a.length - 1];
-  assert.equal(row.length, 4, "tuple is [t,c,h,v]");
+  assert.equal(row.length, 5, "tuple is [t,c,h,v,l] (l since -105; the open is not shipped)");
+  assert.equal(row[4], 98, "the candle's own low ships (build 2026.09.24-105)");
   assert.ok(row[2] > row[1], "high above close (h = c+4 by construction)");
   assert.ok(row[3] > 0, "volume ships");
   const b = dc.daily["xyz:BBB"];
@@ -860,7 +862,7 @@ test("daily payload v2 (2026.07.24-04): [t,c,h,v] tuples + per-name OI series, b
   assert.ok(fullDay, "derived day volume is the summed hourly volume (24 x 10)");
   assert.ok(fullDay[2] >= fullDay[1] && fullDay[2] <= fullDay[1] + 1.5, "derived day high is the max hourly high");
   const e = dc.daily["ETH"];
-  assert.ok(e && e.length <= 94 && e[e.length - 1].length === 4, "crypto rides the same tuple under the MAIN_DAILY_DAYS cap");
+  assert.ok(e && e.length <= 94 && e[e.length - 1].length === 5, "crypto rides the same tuple under the MAIN_DAILY_DAYS cap");
   const oiA = dc.oi && dc.oi["xyz:AAA"];
   assert.ok(Array.isArray(oiA) && oiA.length >= 10, "OI daily series ships for the seeded history");
   assert.ok(oiA.every((k) => k.length === 2 && k[1] > 0), "OI rows are [day, oi]");
@@ -939,7 +941,8 @@ test("daily payload v3 (2026.07.24-06): warm closes-only bars overlay h/v from t
   // source pins: the persist map writes h/v, the sig carries the coverage terms
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  assert.ok(pol.includes("daily: r.dailyRaw ? r.dailyRaw.map((k) => [k.t, k.c, Number.isFinite(k.h) ? k.h : null, Number.isFinite(k.v) ? k.v : null]) : null"), "warm persist must write 4-tuples");
+  assert.ok(pol.includes("daily: r.dailyRaw ? r.dailyRaw.map(warmDailyTuple) : null"), "warm persist must write [t,c,h,v,l,o] tuples (-105)");
+  assert.ok(pol.includes("const a = [k.t, k.c, Number.isFinite(k.h) ? k.h : null, Number.isFinite(k.v) ? k.v : null, Number.isFinite(k.l) ? k.l : null, Number.isFinite(k.o) ? k.o : null];"), "h/v/l/o round-trip");
   assert.ok(pol.includes('+ ":" + ohlcN + ":" + oiN'), "content signature must carry the OHLC/OI coverage terms");
   assert.ok(pol.includes("function dailyTuples(r, hs)"), "the shared tuple builder must exist (one code path for both universes)");
 });
@@ -1575,7 +1578,7 @@ test("the drain picks the first ELIGIBLE item, so a deferred message cannot head
     "a message held until 07:00 sitting at the head would block every urgent one behind it for hours");
   const drain = pol.slice(pol.indexOf("async function pushDrain()"), pol.indexOf("function pushLogAdd"));
   assert.ok(!/pushQueue\.shift\(\)/.test(drain), "every removal in the drain must target the chosen index, not the head");
-  assert.equal((drain.match(/pushQueue\.splice\(idx, 1\)/g) || []).length, 3, "success, 4xx drop and give-up all remove by index");
+  assert.equal((drain.match(/pushQueue\.splice\(idx, 1\)/g) || []).length, 4, "success, 4xx drop, give-up and a rebuilt-away sync (build 2026.09.24-107) all remove by index");
 });
 
 test("recipients are per-browser: two people link independently and cannot see each other", () => {
@@ -2678,14 +2681,14 @@ test("reliability: calendar lanes carry in-flight guards, the daily rebuild is d
   assert.ok(pol.includes("if (!(await fetchEarnings())) lastEarnOk = 0;"), "the operator-forced backfill notices a skipped republish and arms the staleness retry");
   assert.equal(pol.match(/async function fetchMacro\(\)/g).length, 1, "still exactly one fetch engine per lane");
   // refreshDaily -> one buildDaily per second (trailing edge); the harness's buildDailyNow stays the synchronous buildDaily.
-  assert.ok(/r\.dailyRaw = c; r\.dailyTs = Date\.now\(\); r\.isNew = false;\s*\n\s*scheduleBuildDaily\(\);/.test(pol), "refreshDaily schedules the rebuild");
+  assert.ok(/r\.dailyRaw = normDailyCandles\(c\); r\.dailyTs = Date\.now\(\); r\.isNew = false;\s*\n\s*scheduleBuildDaily\(\);/.test(pol), "refreshDaily schedules the rebuild");
   assert.ok(/function scheduleBuildDaily\(\) \{\s*\n\s*if \(buildDailyT\) return;\s*\n\s*buildDailyT = setTimeout\(/.test(pol) && /\}, 1000\);\s*\n\s*if \(buildDailyT\.unref\) buildDailyT\.unref\(\);/.test(pol), "one trailing 1s timer, unref'd");
   assert.ok(pol.includes("buildDailyNow: buildDaily,"), "the harness entry is still the synchronous rebuild");
   // persistLedger: the alert path batches (~2s trailing), the signals pass and the shutdown export force.
   assert.ok(/function persistLedger\(force\) \{\s*\n\s*if \(!ledgerDirty\) return;\s*\n\s*if \(!force\) \{/.test(pol), "non-forced calls coalesce");
   assert.ok(pol.includes("const LEDGER_BATCH_MS = 2000;"), "2s trailing batch");
   assert.ok(pol.includes("if (fired) { persistTriggers(); persistLedger(); log(`ledger alerts:"), "the level-alert path is the batched caller");
-  assert.ok(pol.includes("persistLedger(true);   // the end of a signals pass is the batch boundary"), "the signals pass forces");
+  assert.ok(pol.includes("await persistLedgerAsync();   // the end of a signals pass is the batch boundary"), "the signals pass forces (async write, awaited, since -101)");
   assert.ok(pol.includes("persistLedger: () => { ledgerDirty = true; persistLedger(true); }"), "the shutdown/crash export is synchronous");
 });
 
@@ -2722,9 +2725,9 @@ test("study wiring 2026.09.20: hourly funding nets the daily base rates, the 5m 
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   assert.ok(pol.includes("split: r._st.ovsplit || null"), "the ondrift card carries the overnight split");
   assert.ok(pol.includes("st.gap = studyGapFade(hs, wins, 3 * HOUR, fine);") && pol.includes("st.ondrift = offDriftStats(hs, wins, 3 * HOUR, fine);"), "gap and drift studies take the fine series");
-  assert.ok(pol.includes("earnReactionsFor(prints, row.dailyRaw, now, row.hourlyRaw)") && pol.includes("earnReactionCurve(prints, row.hourlyRaw, { now })"), "the earnings study anchors on the hourly spine and ships the curve");
+  assert.ok(pol.includes("earnReactionsFor(prints, row.dailyRaw, now, row.hourlyRaw, { off: sessOffOf(row), fine })") && pol.includes("const fine = fineAround(row, earnFineWins(prints));") && pol.includes("earnReactionCurve(prints, row.hourlyRaw, { now })"), "the earnings study anchors on the hourly spine and ships the curve");
   assert.ok(pol.includes("detectPead(prints, r.dailyRaw, r.px, sd30, r.hourlyRaw, now)"), "PEAD reads the print anchor off the hourly spine");
-  assert.ok(pol.includes("meanPairwiseCorr(top.map((r) => r.dailyRaw), REGIME_LOOKBACK, Date.now())"), "the regime correlation excludes the open day");
+  assert.ok(pol.includes("meanPairwiseCorr(top.map((r) => sessFoldOf(r, r.dailyRaw)), REGIME_LOOKBACK, Date.now())"), "the regime correlation excludes the open day");
   assert.ok(/rvolMulti\(hs, RVOL_WINS, nowMs, undefined, r\.uni === "xyz" \? "ET" : undefined\)/.test(pol), "equity rvol is keyed on the ET clock");
 });
 
@@ -2768,12 +2771,13 @@ test("rules: /alert grammar parses what people type, in plain words either way",
 
 test("rules: the 200-day MA rides the snapshot row, and a conversation-bound rule fires into its sink, quiet on the wire", () => {
   const { p } = ruleHarness();
-  const closes = (v) => Array.from({ length: 205 }, (_, i) => ({ t: i, c: v }));
+  // (-105) the 200 is 200 SESSIONS: 320 UTC days from 2024-10-04 hold ~218 US sessions
+  const closes = (v) => Array.from({ length: 320 }, (_, i) => ({ t: (20000 + i) * 86400e3, c: v }));
   p.seedRowNow("AAA", { ticker: "AAA", px: 95, uni: "xyz", ref: { p1h: 100, p4h: 100, p7d: 100, p30d: 100 }, dailyRaw: closes(100) });
   p.seedRowNow("BBB", { ticker: "BBB", px: 95, uni: "xyz", ref: { p1h: 100, p4h: 100, p7d: 100, p30d: 100 }, dailyRaw: closes(100).slice(0, 150) });
   p.buildSnapshotNow();
   const row = (c) => p.getSnapshot().markets.find((r) => r.coin === c);
-  assert.equal(row("AAA").ma200, 100, "SMA of the last 200 daily closes");
+  assert.equal(row("AAA").ma200, 100, "SMA of the last 200 session closes");
   assert.equal(row("BBB").ma200, undefined, "under 200 closes: absent, never guessed");
 
   const fired = [];
@@ -2828,7 +2832,9 @@ test("share to chat: validateCard bounds every field and cardText pads a screen 
   // Shape rules: a cell is one row × one column; a row is one row; a screen is any.
   assert.equal(validateCard({ kind: "cell", cols: [{ k: "a", l: "A" }, { k: "b", l: "B" }], rows: [{ t: "X", c: [{ s: "1" }, { s: "2" }] }] }).error, "shape");
   assert.equal(validateCard({ kind: "row", cols: [{ k: "a", l: "A" }], rows: [{ t: "X", c: [] }, { t: "Y", c: [] }] }).error, "shape");
-  assert.equal(validateCard({ kind: "chart", cols: [{ k: "a", l: "A" }], rows: [{ t: "X", c: [] }] }).error, "bad-kind");
+  // chart and panel became kinds in build 2026.09.24-98 (and need a title); an unknown kind is still refused.
+  assert.equal(validateCard({ kind: "map", cols: [{ k: "a", l: "A" }], rows: [{ t: "X", c: [] }] }).error, "bad-kind");
+  assert.equal(validateCard({ kind: "chart", cols: [{ k: "a", l: "A" }], rows: [{ t: "X", c: [] }] }).error, "no-title");
   assert.equal(validateCard({ kind: "row", cols: [], rows: [{ t: "X", c: [] }] }).error, "no-columns");
   assert.equal(validateCard({ kind: "row", cols: [{ k: "a", l: "A" }], rows: [] }).error, "no-rows");
   assert.equal(validateCard("nope").error, "not-a-card");
@@ -2861,6 +2867,57 @@ test("share to chat: validateCard bounds every field and cardText pads a screen 
   }
   const row = validateCard({ kind: "row", cols: [{ k: "px", l: "Price" }, { k: "d1", l: "24h" }], rows: [{ coin: "xyz:NVDA", t: "NVDA", px: 176.4, c: [{ s: "176.40" }, { s: "+1.2%", c: "pos" }] }], at: 1790000000000 });
   assert.deepEqual(cardText(row.card).split("\n").slice(1), ["Price  176.40", "24h    +1.2%", "mark   176.4"]);
+});
+
+// ===== build 2026.09.24-98: share to chat everywhere — panel, chart, live screen ======================
+test("share everywhere: a panel is titled lines or a table with a spark, a chart is a caption, a live screen carries a bounded query", () => {
+  const { validateCard, cardText, cardTitle } = require("../src/compute");
+  // A drawer section: the market is named outright (the rows are fields), label-less lines are kept,
+  // a panel line may be a sentence fragment up to 64 characters, and the spark is numbers, not a picture.
+  const p = validateCard({ kind: "panel", view: "drawer", title: "Notes", coin: "xyz:HOOD", t: "HOOD", px: 113.9, cols: [{ k: "v", l: "value" }],
+    rows: [{ t: "3d", c: [{ s: "the 110 shelf held twice; ".repeat(4) }] }, { t: "", c: [{ s: "wrote it at 108.20 · +5.3% since" }] }],
+    spark: { v: [1, null, 2, "x", 4], l: "OI", z: false }, at: 1790000000000 });
+  assert.ok(p.ok, p.error);
+  assert.equal(p.card.coin, "xyz:HOOD"); assert.equal(p.card.t, "HOOD"); assert.equal(p.card.px, 113.9);
+  assert.equal(p.card.rows[0].c[0].s.length, 64, "a panel line is clipped at 64, not the screener's 32");
+  assert.equal(p.card.rows.length, 2, "a label-less line survives in a panel");
+  assert.deepEqual(p.card.spark.v, [1, null, 2, null, 4], "non-numbers in a spark are gaps, never zeros");
+  assert.equal(cardTitle(p.card), "⤴ HOOD · Notes");
+  const pt = cardText(p.card).split("\n");
+  assert.ok(pt[1].startsWith("3d  the 110 shelf") && pt[2] === "wrote it at 108.20 · +5.3% since", pt.join("|"));
+  assert.ok(/^[▁-█ ]+  OI$/.test(pt[3]), "the spark renders as block heights for the phone: " + pt[3]);
+  assert.equal(pt[4], "mark 113.9");
+  // A spark needs two real points; a panel needs a title; a board panel (several columns) is a table.
+  assert.equal(validateCard({ kind: "panel", title: "x", cols: [{ k: "v", l: "v" }], rows: [{ t: "a", c: [{ s: "1" }] }], spark: { v: [1, null] } }).card.spark, undefined);
+  assert.equal(validateCard({ kind: "panel", cols: [{ k: "v", l: "v" }], rows: [{ t: "a", c: [{ s: "1" }] }] }).error, "no-title");
+  const b = validateCard({ kind: "panel", view: "trend", title: "Trend ladder", cols: [{ k: "c2", l: "D1" }, { k: "c3", l: "H4" }],
+    rows: [{ coin: "xyz:NVDA", t: "NVDA", c: [{ s: "+4", c: "pos" }, { s: "✓" }] }, { coin: "xyz:AMD", t: "AMD", c: [{ s: "-2", c: "neg" }] }], total: 40 });
+  assert.ok(b.ok, b.error);
+  assert.equal(b.card.coin, "", "a board names no single market"); assert.equal(b.card.total, 40);
+  assert.equal(b.card.rows[1].c[1].s, "—", "a missing cell pads to an honest dash");
+  const bt = cardText(b.card).split("\n");
+  assert.equal(bt[0].split(" · captured")[0], "⤴ Trend ladder");
+  assert.deepEqual(bt.slice(1, 4), ["      D1  H4", "NVDA  +4   \u2713", "AMD   -2   \u2014"]);
+  assert.equal(bt[4], "2 of 40 rows");
+  // A chart: a title and up to eight caption lines; no rows is fine (the picture is the body).
+  const ch = validateCard({ kind: "chart", title: "Hourly candles · 7d", coin: "xyz:NVDA", t: "NVDA", tf: "7d", cols: [{ k: "v", l: "value" }],
+    rows: Array.from({ length: 12 }, (_, i) => ({ t: "f" + i, c: [{ s: String(i) }] })) });
+  assert.ok(ch.ok, ch.error); assert.equal(ch.card.rows.length, 8, "a caption is a handful of facts");
+  assert.ok(validateCard({ kind: "chart", title: "t", cols: [], rows: [] }).ok, "a bare picture with a title is a chart");
+  assert.equal(cardTitle(ch.card), "⤴ NVDA · Hourly candles · 7d · chart");
+  assert.ok(cardText(ch.card).includes("(the chart is attached as a picture)"));
+  // A live screen: the query is bounded field by field; live without a query is not live.
+  const sc = (extra) => validateCard(Object.assign({ kind: "screen", cols: [{ k: "d1", l: "24h" }], rows: [{ coin: "xyz:A", t: "A", c: [{ s: "1" }] }] }, extra));
+  const q = sc({ live: true, q: { f: "x".repeat(99), vmin: "5", omax: 7, grp: Array.from({ length: 300 }, (_, i) => "xyz:C" + i), sk: "d1", sd: "sideways", sc: "moon", evil: 1 } });
+  assert.ok(q.ok, q.error);
+  assert.equal(q.card.live, true); assert.equal(q.card.q.f.length, 40); assert.equal(q.card.q.vmin, null, "a number or nothing");
+  assert.equal(q.card.q.omax, 7); assert.equal(q.card.q.grp.length, 150); assert.equal(q.card.q.sd, "desc"); assert.equal(q.card.q.sc, "stocks");
+  assert.equal(q.card.q.evil, undefined);
+  assert.equal(sc({ live: true }).card.live, undefined, "no query, no live");
+  assert.equal(sc({ q: { f: "A" } }).card.live, false, "a query alone is a frozen screen that can still say what passes");
+  assert.ok(cardTitle(q.card).endsWith("· live"));
+  // The cell/row shapes did not loosen: a row's rows are still markets and still exactly one.
+  assert.equal(validateCard({ kind: "row", cols: [{ k: "a", l: "A" }], rows: [{ t: "", c: [{ s: "1" }] }] }).error, "no-rows", "only a panel keeps a label-less line");
 });
 
 // ===== build 2026.09.22-89: reading a call — the vocabulary, and the client copy in step ==========
@@ -2936,4 +2993,169 @@ test("callRead: the client's copy reads every case exactly as the server does", 
     "$HOOD by Oct 15", "$HOOD by 10/15", "$HOOD by Jan 5", "$HOOD ran 3d in a row", "$HOOD 999d", "nothing here", "$NVDA short",
     "lower risk $HOOD here", "$HOOD: bearish", "$HOOD 100 puts", "sell $HOOD 100 puts", "$HOOD by July 4", "$HOOD by 13/5", "$HOOD by 2/30", "$HOOD 53w"];
   for (const t of texts) assert.deepEqual(clientRead(t, "HOOD", now), callRead(t, "HOOD", now), "parity: " + t);
+});
+
+// ===== build 2026.09.24-95: call targets — the grammar, and the client copy in step ==================
+test("callTarget: a price and a deadline after the ticker, an optional stop, the side from the target unless a word decided it", () => {
+  const { callTarget } = require("../src/compute");
+  const DAY = 86400e3, now = Date.UTC(2026, 8, 22, 15, 0, 0);   // Tue Sep 22 2026 15:00Z
+  const T = (t, sym, mark, side) => callTarget(t, sym, mark, now, side);
+  // The mock's four examples read exactly as the mock says.
+  const intc = T("I think $INTC goes to 32 by Oct 15, wrong under 27", "INTC", 28.9);
+  assert.deepEqual(intc, { ok: true, px: 32, stop: 27, side: "long", horizonMs: 24 * DAY, word: "goes to 32 by Oct 15", byDay: "2026-10-15" });   // to the end of Oct 15 UTC, rounded up; byDay names the date (-104)
+  const hood = T("$HOOD 125 in 2w", "HOOD", 113.9);
+  assert.ok(hood.ok && hood.px === 125 && hood.horizonMs === 14 * DAY && hood.stop === null && hood.side === "long" && hood.byDay === null, JSON.stringify(hood));
+  const tsla = T("short $TSLA to 300 by 10/31 unless 360", "TSLA", 341.55);
+  assert.ok(tsla.ok && tsla.side === "short" && tsla.px === 300 && tsla.stop === 360 && tsla.horizonMs === 40 * DAY, JSON.stringify(tsla));
+  const btc = T("$BTC 120k by year end", "BTC", 112400);
+  assert.ok(btc.ok && btc.px === 120000 && btc.side === "long", "k means thousands; year end is callRead's own word");
+  // Direction follows the target's side of the mark when no word decided it.
+  assert.equal(T("$NVDA 165 by friday", "NVDA", 176.4).side, "short");
+  assert.ok(T("$HOOD → 130 by 2026-10-15 stop 105", "HOOD", 113.9).ok, "arrow, ISO date, stop");
+  assert.equal(T("$HOOD to 32.50 in 10d", "HOOD", 30).px, 32.5, "decimals");
+  assert.equal(T("$HOOD to 125. By Oct 15", "HOOD", 113.9).px, 125, "a full stop after the number is punctuation, not a decimal");
+  // Not a target: horizons, strikes, entries, prose — silence, and the send stays a plain call.
+  for (const t of ["$HOOD 30d", "$HOOD 2 weeks", "$HOOD 100 puts by Oct 15", "long $HOOD at 113 by friday", "$HOOD looks heavy", "$HOOD 3 more days"])
+    assert.equal(T(t, "HOOD", 113.9), null, "no target in: " + t);
+  // Tried and refused: the composer says why; the server stores a plain call.
+  assert.match(T("$HOOD to 125", "HOOD", 113.9).error, /needs a deadline/);
+  assert.match(T("short $HOOD to 125 by Oct 15", "HOOD", 113.9).error, /short to 125 is behind the mark/, "the short word still wins, and the target must agree with it");
+  assert.match(T("$HOOD to 130 by Oct 15 stop 120", "HOOD", 113.9).error, /wrong side of the mark/);
+  assert.match(T("$HOOD to 130 by Oct 15", "HOOD", null).error, /no live mark/);
+  assert.match(T("$HOOD to 125 by Oct 15", "HOOD", 113.9, "short").error, /behind the mark/, "an applied reading decides the side too");
+  assert.equal(T("$HOOD to 125 in 999d", "HOOD", 113.9).error.includes("deadline"), true, "past a year is not a deadline");
+});
+
+test("callTarget: the client's copy reads every case exactly as the server does", () => {
+  const fs = require("fs"), path = require("path");
+  const { callTarget } = require("../src/compute");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "js", "messages.js"), "utf8");
+  const src = app.slice(app.indexOf("const CALL_SHORT_BEFORE="), app.indexOf("// The composer's preview:"));
+  const clientTarget = new Function(src + "\nreturn dmCallTarget;")();
+  const now = Date.UTC(2026, 8, 22, 15, 0, 0);
+  const texts = ["I think $HOOD goes to 132 by Oct 15, wrong under 97", "$HOOD 125 in 2w", "short $HOOD to 100 by 10/31 unless 130", "$HOOD 120k by year end",
+    "$HOOD 30d", "$HOOD 2 weeks", "$HOOD 100 puts by Oct 15", "long $HOOD at 113 by friday", "$HOOD to 125", "short $HOOD to 125 by Oct 15",
+    "$HOOD → 130 by 2026-10-15 stop 105", "$HOOD -> 130 by 2026-02-30", "$HOOD to 130 by Oct 15 stop 120", "$HOOD target 150 in 3 months", "$HOOD tgt 99 eom",
+    "$HOOD to 32.50 in 10d", "$HOOD to 125. By Oct 15", "$HOOD heading to 140 by next week invalidated under 100", "nothing here"];
+  for (const t of texts) for (const side of [null, "long", "short"])
+    assert.deepEqual(clientTarget(t, "HOOD", 113.9, now, side), callTarget(t, "HOOD", 113.9, now, side), "parity: " + t + " / " + side);
+});
+
+// ===== build 2026.09.24-96: D1 retest study — the walk, the cooldown, the pool, the poller's cache ====
+test("d1RetestEvents: the ladder's D1 probe on closed bars — board fires in runs, touch once per pullback, lows gate it, the control excludes probes", () => {
+  const { d1RetestEvents, d1RetestCooldown, D1_RT_HORIZONS } = require("../src/compute");
+  const DAY = 86400e3;
+  // A steady ~+0.4%/day (alternating +0.3/+0.5 so σ exists) with every 10th bar's LOW wicking 4% under its close (true extremes), closes
+  // untouched: the ribbon stays stacked up and each wick probes EMA13 while the close holds.
+  const mk = (n, tl) => { const b = []; let c = 100;
+    for (let i = 0; i < n; i++) { c *= i % 2 ? 1.005 : 1.003; b.push({ t: i * DAY, c, h: c * 1.001, l: i % 10 === 5 ? c * 0.96 : c * 0.999, tl }); } return b; };
+  const bars = mk(120, true);
+  const board = d1RetestEvents(bars, { def: "board" }), touch = d1RetestEvents(bars, { def: "touch" });
+  assert.equal(board.n, 120);
+  assert.ok(touch.cand.length > 0 && touch.cand.every((e) => e.side === "long" && (e.i % 10) === 5), "touch fires on the wick bar itself: " + touch.cand.map((e) => e.i));
+  assert.ok(touch.cand.every((e) => e.tl), "every probe read a true low");
+  // board = the 3-bar window: the wick bar and the two after it
+  const idx = new Set(board.cand.map((e) => e.i));
+  for (const e of touch.cand) for (const k of [0, 1, 2]) if (e.i + k < 120) assert.ok(idx.has(e.i + k), "board run covers wick+" + k);
+  assert.equal(board.cand.length, idx.size);
+  // no event before emaLast would have published the EMAs (max(slow+5, 26) bars)
+  assert.ok(Math.min(...board.cand.map((e) => e.i)) >= 25);
+  // the cooldown folds the run: cd 0 keeps all, cd 5 keeps exactly the wick bars
+  assert.equal(d1RetestCooldown(board.cand, 0).kept.length, board.cand.length);
+  const cd5 = d1RetestCooldown(board.cand, 5);
+  assert.deepEqual(cd5.kept.map((e) => e.i), touch.cand.map((e) => e.i), "cd 5 leaves one event per pullback");
+  assert.equal(cd5.suppressed, board.cand.length - touch.cand.length, "suppressed are counted, not dropped");
+  // outcomes: signed %, one per horizon, null where the horizon runs past the data
+  const e0 = touch.cand[0];
+  assert.equal(e0.f.length, D1_RT_HORIZONS.length);
+  assert.ok(Math.abs(e0.f[0] - 0.3) < 0.01, "+1d after a wick bar (odd index) is the +0.3% even day: " + e0.f[0]);
+  assert.ok(e0.sd > 0 && e0.e13 > e0.e21 && e0.c > e0.e13, "σ, EMAs and the held close ride along");
+  assert.deepEqual(e0.v, D1_RT_HORIZONS.map(() => false), "no later low reaches the event's EMA21");
+  const last = touch.cand[touch.cand.length - 1];
+  assert.ok(last.f.includes(null), "an event near the edge leaves its long horizons open");
+  // control: stacked bars whose probe did NOT hold — a board-window bar is never a control bar
+  const stacked = 120 - 25, ctl1 = board.ctl.long[0].n;
+  assert.ok(ctl1 > 0 && ctl1 < stacked - board.cand.length + 1, "control excludes the retest bars");
+  assert.equal(board.ctl.short[0].n, 0, "no down-stack on a rising tape");
+  // closes-only history: the close stands in for the low, so the wick is invisible — no touch fires
+  const flat = mk(120, false).map((k) => ({ t: k.t, c: k.c }));
+  assert.equal(d1RetestEvents(flat, { def: "touch" }).cand.length, 0, "no low, no probe");
+  // the short mirror: a falling tape whose highs wick up into the ribbon
+  const dn = []; let c = 100;
+  for (let i = 0; i < 120; i++) { c *= 0.996; dn.push({ t: i * DAY, c, l: c * 0.999, h: i % 10 === 5 ? c * 1.04 : c * 1.001, tl: true }); }
+  const s = d1RetestEvents(dn, { def: "touch" });
+  assert.ok(s.cand.length > 0 && s.cand.every((e) => e.side === "short" && e.f[0] > 0), "a short that falls scores positive");
+  // junk in, nothing out
+  assert.equal(d1RetestEvents(null).cand.length, 0);
+  assert.equal(d1RetestEvents(bars.slice(0, 20)).cand.length, 0, "under TREND_MIN_BARS");
+  assert.equal(d1RetestEvents(bars, { def: "nonsense" }).cand.length, board.cand.length, "an unknown definition is the board's");
+});
+
+test("d1RetestStudy: pools names, applies the cooldown, publishes nothing under the floor, excess is event minus control", () => {
+  const { d1RetestEvents, d1RetestStudy } = require("../src/compute");
+  const DAY = 86400e3, names = [];
+  for (let k = 0; k < 6; k++) {
+    const b = []; let c = 50 + k;
+    for (let i = 0; i < 200; i++) { c *= 1.004; b.push({ t: i * DAY, c, h: c * 1.001, l: (i + k) % 10 === 5 ? c * 0.96 : c * 0.999, tl: i > 100 }); }
+    names.push(Object.assign({ coin: "xyz:N" + k, ticker: "N" + k }, d1RetestEvents(b, { def: "board" })));
+  }
+  const st = d1RetestStudy(names, { cd: 5, cellFloor: 30 });
+  const L = st.side.long;
+  assert.equal(st.names, 6);
+  assert.ok(L.n >= 90 && L.suppressed > 0, `events ${L.n}, suppressed ${L.suppressed}`);
+  assert.ok(L.tl > 0 && L.tl < L.n, "the true-low share is partial by construction");
+  const c5 = L.cells[5];
+  assert.ok(c5.n >= 30 && c5.hit === 1 && c5.void === 0, JSON.stringify(c5));
+  assert.ok(Math.abs(c5.exMean - +(c5.mean - c5.ctl.mean).toFixed(3)) <= 0.002, "excess = event mean − control mean");
+  assert.ok(Math.abs(c5.exHit - +(c5.hit - c5.ctl.hit).toFixed(3)) <= 0.002);
+  assert.equal(st.side.short.n, 0);
+  assert.equal(st.side.short.cells[5].hit, null, "an empty side publishes no rate");
+  // the floor: raise it past n and every rate goes null, n stays
+  const hi = d1RetestStudy(names, { cd: 5, cellFloor: 10000 });
+  assert.equal(hi.side.long.cells[5].n, c5.n);
+  assert.equal(hi.side.long.cells[5].mean, null); assert.equal(hi.side.long.cells[5].exSd, null);
+  // newest first; byName ranks by event count
+  for (let i = 1; i < st.events.length; i++) assert.ok(st.events[i - 1].t >= st.events[i].t);
+  assert.equal(st.byName.length, 6);
+  assert.ok(st.byName.every((x) => x.long > 0 && x.short === 0 && x.lastSide === "long"));
+  // cd 0 keeps the whole board run
+  assert.ok(d1RetestStudy(names, { cd: 0, cellFloor: 30 }).side.long.n > L.n);
+});
+
+test("getD1Retest: pending under five names, cached per (scope, definition, cooldown), params normalised, events capped newest-first", () => {
+  const { createPoller } = require("../src/poller");
+  const DAY = 86400e3;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const d0 = Math.floor(Date.now() / DAY);
+  // closes-only dailyRaw (the real feed's shape): a dip close under EMA13 recovered the next day is
+  // what a board probe looks like without true lows
+  const seed = (k) => { const daily = []; let c = 100 + k;
+    for (let i = 0; i < 200; i++) { c *= i % 10 === 8 ? 0.97 : i % 10 === 9 ? 1.045 : 1.003; daily.push({ t: (d0 - 200 + i) * DAY, c, h: c * 1.005 }); }
+    p.seedRowNow("RT" + k, { px: c, uni: "xyz", vol: 1e6, dailyRaw: daily }); };
+  for (let k = 0; k < 4; k++) seed(k);
+  const pend = p.getD1Retest("stocks", "board", 5);
+  assert.equal(pend.pending, true); assert.equal(pend.count, 4); assert.equal(pend.need, 5);
+  assert.ok(pend.params && pend.params.cooldowns.includes(5) && pend.params.defs.includes("touch"), "the controls' options ride the pending body");
+  seed(4); seed(5);
+  const b = p.getD1Retest("stocks", "board", 5);
+  assert.ok(!b.pending && b.count === 6 && b.names === 6, JSON.stringify({ c: b.count, n: b.names }));
+  assert.ok(b.side.long.n > 0 && b.side.long.suppressed > 0, "board runs fold under the cooldown");
+  assert.equal(b.side.long.tl, 0, "no spine: every probe read closes");
+  assert.equal(p.getD1Retest("stocks", "board", 5), b, "an unchanged tape serves the same body (the ETag's stable identity)");
+  assert.equal(p.getD1Retest("stocks", "board", "5").key, b.key, "the query string's cd normalises");
+  const odd = p.getD1Retest("stocks", "bogus", 7);
+  assert.equal(odd.params.def, "board"); assert.equal(odd.params.cd, 5, "unknown values fall back to the defaults");
+  assert.notEqual(p.getD1Retest("stocks", "board", 0).key, b.key, "each cooldown has its own body and validator");
+  // (-105) session bars: a weekend's UTC closes fold into Monday's bar as its low — real prints, so
+  // a touch can now register on closes-only data, but never as a TRUE low
+  assert.equal(p.getD1Retest("stocks", "touch", 5).side.long.tl, 0, "closes-only bars never claim a true low, folded or not");
+  assert.equal(p.getD1Retest("crypto", "board", 5).pending, true, "the universes never mix");
+  for (let i = 1; i < b.events.length; i++) assert.ok(b.events[i - 1].t >= b.events[i].t, "newest first");
+  assert.ok(b.events.length <= 500 && b.eventsTotal >= b.events.length);
+  assert.ok(!("i" in b.events[0]) && b.events[0].ticker && Array.isArray(b.events[0].f), "the wire event drops the walk index");
+  const pol = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes("const bars = closedBars(sessDailyBars(r), DAY, now);"), "the study reads the one merged daily source in its session view (-105), forming day trimmed");
+  assert.ok(/if \(ov\) bars\.push\(\{ t: \+k\.t, c: \+ov\.c, h: \+ov\.h, l: \+ov\.l, v: [^\n]*, tl: true, o: \+ov\.o \}\);/.test(pol), "overlay bars flag their true extremes");
+  assert.ok(pol.includes("bars.push({ t: +k.t, c, h: isFinite(h) && h > 0 ? h : c, l: tl ? l : c, v: +k.v > 0 ? +k.v : 0, tl, o:"), "(-105) a daily candle's own low counts as true; a closes-only bar falls back to c, tl false");
 });

@@ -32,7 +32,20 @@ function trigEligibleClient(ev,c){
   if(Array.isArray(c.muted) && c.muted.includes(ev.coin)) return false;
   return true;
 }
+// (build 2026.09.24-108 follow-up) Single-flight. The SSE frame's alertVer (nav.js) and the snapshot's
+// (data.js) can both call this for the same bump; two pulls in flight read the same cursor and fired
+// the same events twice (duplicate toasts and notifications). A call made while one is in flight is
+// coalesced into ONE more pull after it finishes, so a bump that lands mid-pull is never lost.
+let trigInFlight=null, trigAgain=false;
 async function loadTriggers(){
+  if(trigInFlight){ trigAgain=true; return trigInFlight; }
+  trigInFlight=(async()=>{
+    try{ do{ trigAgain=false; await loadTriggersOnce(); }while(trigAgain); }
+    finally{ trigInFlight=null; }
+  })();
+  return trigInFlight;
+}
+async function loadTriggersOnce(){
   // Deliberately NOT gated on A.trig.on. That toggle governs whether a new SETUP interrupts you;
   // it was never meant to decide whether ops events, void hits and resolutions are recorded at
   // all. Gating the whole pull on it meant a user who turned setup toasts off silently lost the

@@ -17,6 +17,7 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { vacuumIntoAsync } = require("./vacuum");
 
 // ---- code alphabet -----------------------------------------------------------------------------
 // Crockford base32: no I, L, O or U, so a code survives being read down a phone line and typed back.
@@ -142,7 +143,8 @@ function firstTickerRef(body) {
   return m ? m[1].toUpperCase() : "";
 }
 
-const { callRead } = require("./compute");
+const { callRead, callTarget, callBarReaches, inCashSession, marketSessions, callSessionClose, etDayStr, etParts } = require("./compute");
+const { homeMkt } = require("./sectors");
 
 function openAccounts(dataDir, opts) {
   const options = opts || {};
@@ -163,7 +165,8 @@ CREATE TABLE IF NOT EXISTS user (
   createdAt INTEGER NOT NULL,
   invitedBy TEXT,
   lastSeen INTEGER NOT NULL DEFAULT 0,
-  disabledAt INTEGER
+  disabledAt INTEGER,
+  usagePaused INTEGER NOT NULL DEFAULT 0   -- (build 2026.09.24-109) 1 = this member paused the usage beacon
 ) STRICT;
 CREATE UNIQUE INDEX IF NOT EXISTS user_handle ON user(handle);
 
@@ -251,7 +254,14 @@ CREATE TABLE IF NOT EXISTS dm_msg (
   cmdAi INTEGER,                   -- 1 when that output came back from the AI fallback rather than the local grammar; NULL/0 otherwise
   editedBy TEXT,                   -- moderation (build 2026.09.23-94): the operator who rewrote somebody else's message, else NULL
   deletedBy TEXT,                  -- the operator who removed somebody else's message, else NULL
-  callDroppedBy TEXT               -- the operator who struck this row's call from the record, else NULL (the words stay)
+  callDroppedBy TEXT,              -- the operator who struck this row's call from the record, else NULL (the words stay)
+  -- Call targets (build 2026.09.24-95): "$INTC to 32 by Oct 15". The deadline is NOT its own column:
+  -- it is the lifecycle's horizon (ts + callH), so extending a target moves its deadline by construction.
+  tgPx REAL,                       -- the target level; the side follows from it unless the words said otherwise
+  tgStop REAL,                     -- the optional invalidation level ("unless 27"), else NULL
+  tgRes TEXT,                      -- 'hit' | 'wrong' | 'miss' | 'early', written ONCE; NULL while open
+  tgAt INTEGER,                    -- when it resolved; closePx carries the price it resolved at
+  tgSeen INTEGER                   -- the resolver's 5m-bar cursor: bars opening at/before this were already scanned
 ) STRICT;
 
 -- Tickers a member wants to hear about even when they are not looking. A message carrying one of
@@ -302,6 +312,23 @@ CREATE TABLE IF NOT EXISTS dm_reaction (
   PRIMARY KEY (msg, uid, emoji)
 ) STRICT, WITHOUT ROWID;
 
+-- Telegram sync (build 2026.09.24-99): which Telegram message carries which message here, per
+-- chat. An edit, a delete or a reaction on either side needs the other side's id, and Telegram
+-- has no lookup by content. One Telegram message can carry SEVERAL rows (the mirror packs a burst
+-- into one send), so the key is the triple. dir 'out' = the bot's mirror post; 'in' = the member's
+-- own line typed at the bot, which became the row. media = a photo/document post, whose words are
+-- a caption (editMessageCaption), not a text (editMessageText).
+CREATE TABLE IF NOT EXISTS dm_tg (
+  chat TEXT NOT NULL,
+  tgId INTEGER NOT NULL,
+  msg INTEGER NOT NULL,
+  uid TEXT NOT NULL,
+  dir TEXT NOT NULL,
+  media INTEGER NOT NULL DEFAULT 0,
+  at INTEGER NOT NULL,
+  PRIMARY KEY (chat, tgId, msg)
+) STRICT, WITHOUT ROWID;
+
 -- The row is the record; the bytes live on the volume under dm-files/<id>. mime is what WE sniffed
 -- from the first bytes, never what the uploader claimed — see safeMime.
 CREATE TABLE IF NOT EXISTS dm_file (
@@ -349,6 +376,51 @@ CREATE TABLE IF NOT EXISTS dm_webpush (
   ua TEXT,
   addedAt INTEGER NOT NULL
 ) STRICT;
+
+-- Usage (build 2026.09.24-109): DAILY AGGREGATES, never an event log. One row per (ET calendar
+-- day, member, kind, key): kind 'tab' = visible ms on that tab (n = beacons that carried it), kind
+-- 'dev' = the coarse device class the beacons came from (desktop | mobile | tablet, '-pwa' when
+-- installed; never the raw UA). uid '0' is the sitewide bucket: per-member rows older than the
+-- retention window fold into it (summed per day/kind/key) and are deleted, so the long-run tab
+-- trend survives and the per-person history does not. No free text, no tickers, no filters.
+CREATE TABLE IF NOT EXISTS usage_day (
+  day TEXT NOT NULL,
+  uid TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  key TEXT NOT NULL,
+  n INTEGER NOT NULL DEFAULT 0,
+  ms INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, uid, kind, key)
+) STRICT, WITHOUT ROWID;
+-- (build 2026.09.24-110) More kinds in the same table, same fold:
+--   'act'  key = one word of a fixed allowlist (call, target, alert, share, csv, ask, ai-report,
+--          drawer-open, telegram-link, push-enable); n = times. Never a ticker, never text.
+--   'hr'   key = '<dow>-<hh>' in ET (dow 0 = Sunday), ms = screen time received in that hour.
+--   'perf' key = '<build>|<bucket ms>' (first markets-table paint, bucketed); n = samples.
+--   'err'  key = '<build>|<file:line>|<message hash>'; n = hits. The text lives in usage_err.
+--   'wk'   day = key = the Monday (YYYY-MM-DD) of an ET week the member was active in (any day
+--          with a minute on screen); n = 1, ms = 0. A yes/no bit, and the ONE per-member kind
+--          EXEMPT from the 30-day fold, so join-week retention can reach past the window.
+-- usage_err: one row per distinct error key, at most 200 per build; its message is truncated to
+-- 200 characters by the server and is browser-supplied, so every reader escapes it. Rows no hit
+-- has touched for the retention window go with the daily fold.
+CREATE TABLE IF NOT EXISTS usage_err (
+  key TEXT PRIMARY KEY,
+  build TEXT NOT NULL,
+  loc TEXT NOT NULL,
+  msg TEXT NOT NULL,
+  firstAt INTEGER NOT NULL,
+  lastAt INTEGER NOT NULL
+) STRICT;
+-- (build 2026.09.24-110 follow-up) The builds this deployment has actually SERVED, newest last:
+-- the server notes its VERSION at every boot and only the last USAGE_BUILDS_KEEP stay. A beacon's
+-- build stamp is believed only when it is one of these — a client-chosen string can no longer mint
+-- a fresh 200-error / perf-histogram bucket per request. usage_err is further capped at 500 rows
+-- in total (least-recently-seen evicted) and 20 new distinct errors per member per ET day.
+CREATE TABLE IF NOT EXISTS usage_build (
+  build TEXT PRIMARY KEY,
+  at INTEGER NOT NULL
+) STRICT;
 `);
 
   // ---- migration from the pair-columns schema --------------------------------------------------
@@ -360,10 +432,12 @@ CREATE TABLE IF NOT EXISTS dm_webpush (
   // ALTERs: the next column added to the schema above only has to be named here, and forgetting is
   // what produced "table dm_msg has no column named sys" the first time round.
   const ADDED_COLUMNS = {
+    user: [["usagePaused", "INTEGER NOT NULL DEFAULT 0"]],   // (build 2026.09.24-109)
     dm_thread: [["kind", "TEXT NOT NULL DEFAULT 'dm'"], ["pairKey", "TEXT"], ["title", "TEXT"], ["createdBy", "TEXT"]],
     dm_msg: [["sys", "TEXT"], ["fileId", "TEXT"], ["via", "TEXT"], ["pinnedAt", "INTEGER"], ["pinnedBy", "TEXT"], ["replyTo", "INTEGER"], ["side", "TEXT"],
       ["cmd", "TEXT"], ["cmdAi", "INTEGER"], ["card", "TEXT"], ["callH", "INTEGER"], ["closedAt", "INTEGER"], ["closePx", "REAL"],
-      ["editedBy", "TEXT"], ["deletedBy", "TEXT"], ["callDroppedBy", "TEXT"]],
+      ["editedBy", "TEXT"], ["deletedBy", "TEXT"], ["callDroppedBy", "TEXT"],
+      ["tgPx", "REAL"], ["tgStop", "REAL"], ["tgRes", "TEXT"], ["tgAt", "INTEGER"], ["tgSeen", "INTEGER"]],
     dm_read: [["hiddenUpTo", "INTEGER NOT NULL DEFAULT 0"], ["clearedUpTo", "INTEGER NOT NULL DEFAULT 0"],
       ["boardNotify", "INTEGER NOT NULL DEFAULT 0"], ["tgSync", "INTEGER NOT NULL DEFAULT 0"]],
   };
@@ -395,6 +469,7 @@ CREATE INDEX IF NOT EXISTS dm_member_uid ON dm_member(uid, leftAt);
 CREATE INDEX IF NOT EXISTS dm_by_thread ON dm_msg(thread, id);
 CREATE INDEX IF NOT EXISTS dm_by_sender ON dm_msg(sender, ts);
 CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
+CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
 `);
 
   // ---- statements ------------------------------------------------------------------------------
@@ -446,9 +521,18 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     memAll: db.prepare("SELECT * FROM dm_member WHERE thread = ?"),
     memLeave: db.prepare("UPDATE dm_member SET leftAt = ? WHERE thread = ? AND uid = ? AND leftAt IS NULL"),
 
-    msgIns: db.prepare("INSERT INTO dm_msg (thread, sender, ts, body, ref, refPx, side, sys, fileId, via, replyTo, cmd, cmdAi, card, callH) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"),
+    msgIns: db.prepare("INSERT INTO dm_msg (thread, sender, ts, body, ref, refPx, side, sys, fileId, via, replyTo, cmd, cmdAi, card, callH, tgPx, tgStop) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"),
     callSetH: db.prepare("UPDATE dm_msg SET callH = ? WHERE id = ? AND sender = ?"),
-    callClose: db.prepare("UPDATE dm_msg SET closedAt = ?, closePx = ? WHERE id = ? AND sender = ? AND closedAt IS NULL"),
+    // An early close on a target is also its resolution ('early'): neither a hit nor a miss, and
+    // guarded on tgRes IS NULL so a close racing the resolver cannot overwrite a hit.
+    callClose: db.prepare("UPDATE dm_msg SET closedAt = ?, closePx = ?, tgRes = CASE WHEN tgPx IS NULL THEN NULL ELSE 'early' END, tgAt = CASE WHEN tgPx IS NULL THEN NULL ELSE ? END WHERE id = ? AND sender = ? AND closedAt IS NULL AND tgRes IS NULL"),
+    // The target resolver (build 2026.09.24-95): the open targets, oldest first, and one guarded
+    // write per resolution — written once, never revised, exactly like the stamp.
+    // (build 2026.09.24-107) Keyset-paged (id > ?) so a sweep reaches every open target, not the
+    // oldest 500 forever.
+    tgOpen: db.prepare("SELECT * FROM dm_msg WHERE tgPx IS NOT NULL AND tgRes IS NULL AND closedAt IS NULL AND ref IS NOT NULL AND refPx IS NOT NULL AND id > ? ORDER BY id LIMIT 500"),
+    tgResolve: db.prepare("UPDATE dm_msg SET tgRes = ?, tgAt = ?, closePx = ? WHERE id = ? AND tgRes IS NULL AND closedAt IS NULL"),
+    tgSeenSet: db.prepare("UPDATE dm_msg SET tgSeen = ? WHERE id = ?"),
     msgById: db.prepare("SELECT * FROM dm_msg WHERE id = ?"),
     msgEdit: db.prepare("UPDATE dm_msg SET body = ?, ref = ?, editedAt = ? WHERE id = ? AND sender = ? AND deletedAt IS NULL"),
     msgDrop: db.prepare("UPDATE dm_msg SET deletedAt = ?, body = '', fileId = NULL, card = NULL WHERE id = ? AND sender = ?"),
@@ -458,7 +542,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     // the words stand, and retainSweep now ages the row like any other prose.
     msgEditAdm: db.prepare("UPDATE dm_msg SET body = ?, editedAt = ?, editedBy = ? WHERE id = ? AND deletedAt IS NULL"),
     msgDropAdm: db.prepare("UPDATE dm_msg SET deletedAt = ?, deletedBy = ?, body = '', fileId = NULL, card = NULL WHERE id = ?"),
-    callDrop: db.prepare("UPDATE dm_msg SET ref = NULL, refPx = NULL, side = NULL, callH = NULL, closedAt = NULL, closePx = NULL, callDroppedBy = ? WHERE id = ?"),
+    callDrop: db.prepare("UPDATE dm_msg SET ref = NULL, refPx = NULL, side = NULL, callH = NULL, closedAt = NULL, closePx = NULL, tgPx = NULL, tgStop = NULL, tgRes = NULL, tgAt = NULL, tgSeen = NULL, callDroppedBy = ? WHERE id = ?"),
     msgPage: db.prepare("SELECT * FROM dm_msg WHERE thread = ? AND id < ? AND id > ? ORDER BY id DESC LIMIT ?"),
     msgSince: db.prepare("SELECT * FROM dm_msg WHERE thread = ? AND id > ? ORDER BY id LIMIT ?"),
     msgLast: db.prepare("SELECT * FROM dm_msg WHERE thread = ? ORDER BY id DESC LIMIT 1"),
@@ -531,6 +615,11 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     reactDrop: db.prepare("DELETE FROM dm_reaction WHERE msg = ? AND uid = ? AND emoji = ?"),
     reactOf: db.prepare("SELECT * FROM dm_reaction WHERE msg = ?"),
     reactMine: db.prepare("SELECT 1 AS x FROM dm_reaction WHERE msg = ? AND uid = ? AND emoji = ?"),
+
+    tgMapIns: db.prepare("INSERT OR IGNORE INTO dm_tg (chat, tgId, msg, uid, dir, media, at) VALUES (?,?,?,?,?,?,?)"),
+    tgMapOfMsg: db.prepare("SELECT * FROM dm_tg WHERE msg = ? ORDER BY chat, tgId"),
+    tgMapOfTg: db.prepare("SELECT * FROM dm_tg WHERE chat = ? AND tgId = ? ORDER BY msg"),
+    tgMapPurge: db.prepare("DELETE FROM dm_tg WHERE msg = ?"),
 
     fileIns: db.prepare("INSERT INTO dm_file (id, thread, uid, name, mime, size, inline, createdAt) VALUES (?,?,?,?,?,?,?,?)"),
     fileById: db.prepare("SELECT * FROM dm_file WHERE id = ?"),
@@ -1164,6 +1253,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     db.exec("BEGIN IMMEDIATE");
     try {
       db.prepare("DELETE FROM dm_reaction WHERE msg IN (SELECT id FROM dm_msg WHERE thread = ?)").run(t.id);
+      db.prepare("DELETE FROM dm_tg WHERE msg IN (SELECT id FROM dm_msg WHERE thread = ?)").run(t.id);   // (build 2026.09.24-107) the sync map too
       db.prepare("DELETE FROM dm_msg WHERE thread = ?").run(t.id);
       db.prepare("DELETE FROM dm_member WHERE thread = ?").run(t.id);
       db.prepare("DELETE FROM dm_read WHERE thread = ?").run(t.id);
@@ -1309,7 +1399,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (!rows.length) return 0;
     db.exec("BEGIN IMMEDIATE");
     try {
-      for (const r of rows) { S.reactPurge.run(r.id); S.retainDrop.run(r.id); }
+      for (const r of rows) { S.reactPurge.run(r.id); S.tgMapPurge.run(r.id); S.retainDrop.run(r.id); }
       db.exec("COMMIT");
     } catch (e) { try { db.exec("ROLLBACK"); } catch (_) {} return 0; }
     // File bytes go after the rows are committed gone — a crash mid-sweep leaves an orphaned file
@@ -1369,6 +1459,11 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (!m || !m.ref || !(m.refPx > 0)) return null;
     const h = callHorizonOf(m), hzTs = m.ts + h;
     if (m.closedAt) return { closed: true, early: true, closeTs: m.closedAt, closePx: m.closePx > 0 ? m.closePx : null, horizonMs: h };
+    // A resolved target (build 2026.09.24-95) closed where it resolved: at the target (hit), at the
+    // stop (wrong) or at the deadline's close (miss). Only the resolver writes these; until it has,
+    // a target past its deadline reads exactly as a plain call at its horizon — the same close.
+    if (m.tgRes === "hit" || m.tgRes === "wrong" || m.tgRes === "miss")
+      return { closed: true, early: false, closeTs: m.tgAt || hzTs, closePx: m.closePx > 0 ? m.closePx : null, horizonMs: h };
     const p = pxHistory(m.ref, hzTs);
     if (p != null && isFinite(p) && p > 0) return { closed: true, early: false, closeTs: hzTs, closePx: p, horizonMs: h };
     return { closed: false, early: false, closeTs: hzTs, closePx: null, horizonMs: h };
@@ -1378,7 +1473,145 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const st = callState(m);
     if (!st) return null;
     return { h: Math.round(st.horizonMs / CALL_DAY), closed: st.closed, early: st.early, closeTs: st.closeTs, closePx: st.closePx,
-      final: st.closed ? callAdj(m, st.closePx) : null };
+      final: st.closed ? callAdj(m, st.closePx) : null, tg: tgWire(m) };
+  }
+  // ---- call targets (build 2026.09.24-95) --------------------------------------------------------
+  // "$INTC to 32 by Oct 15, wrong under 27": a call with more said. Same row, same stamp, same
+  // record — the target, its optional stop and its resolution are three more columns beside the
+  // lifecycle, and the lifecycle's horizon IS the deadline (extend moves it; close early resolves
+  // it as 'early', which is neither a hit nor a miss). The wire carries the level, the stop, the
+  // deadline and the resolution; progress and time used are derived at read, on the client, from
+  // the same sent/now marks the stamp already shows — nothing that moves is stored.
+  function tgWire(m) {
+    if (!(m.tgPx > 0)) return null;
+    return { px: m.tgPx, stop: m.tgStop > 0 ? m.tgStop : null, by: m.ts + callHorizonOf(m), res: m.tgRes || null, at: m.tgAt || null };
+  }
+  // bars5m(coin, fromTs, toTs) -> [[ts, o, h, l, c, ...]] is injected by the server (the 5m
+  // archive the level scanner and the sweep detector already read); this module never opens it.
+  let bars5m = options.bars5m || (() => []);
+  function setBarSource(fn) { if (typeof fn === "function") bars5m = fn; }
+  const TG_BAR_MS = 5 * 60e3, TG_SCAN_MS = 3 * CALL_DAY, TG_SCAN_PASS = 10;
+  const tgTk = (ref) => String(ref || "").replace(/^xyz:/, "");
+  // Session names (build 2026.09.24-104): the ET-anchored xyz roster — US equities, indices and the
+  // rest the gap engine anchors on the US session. Crypto (main dex) and a foreign-home listing
+  // (KRX/TSE/HKEX/SSE — its cash session is not the US one) keep 24:00 UTC and any touch.
+  const tgSessionRule = (ref) => /^xyz:/.test(String(ref || "")) && !homeMkt(tgTk(ref), "xyz");
+  const tgNum = (v) => String(+(+v).toPrecision(6));
+  const tgDay = (ts) => { try { return new Date(ts).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }); } catch (_) { return ""; } };
+  const tgPct = (v) => (v >= 0 ? "+" : "\u2212") + Math.abs(v * 100).toFixed(1) + "%";
+  // The line a resolution posts under its author's name — hit, wrong or missed, with the numbers
+  // that make it checkable: where it was sent, where it closed, the raw move, and for a miss how
+  // much of the way it got (the % record gives partial credit; the binary record never does).
+  function tgLine(m, res, at, px) {
+    const tk = "$" + tgTk(m.ref), short = m.side === "short", raw = px / m.refPx - 1;
+    const sent = "sent " + tgNum(m.refPx) + " on " + tgDay(m.ts);
+    if (res === "hit") {
+      const early = Math.floor((m.ts + callHorizonOf(m) - at) / CALL_DAY);
+      return "\ud83c\udfaf " + tk + (short ? " short" : "") + " hit " + tgNum(m.tgPx) + " \u2014 target reached"
+        + (early >= 1 ? " " + early + " day" + (early === 1 ? "" : "s") + " early" : " on its last day") + " \u00b7 " + sent + ", " + tgPct(raw) + " \u00b7 the call closed at the target";
+    }
+    if (res === "wrong")
+      return "\u2717 " + tk + (short ? " short" : "") + " wrong \u2014 " + tgNum(m.tgStop) + " printed before " + tgNum(m.tgPx) + " \u00b7 " + sent
+        + " \u00b7 closed at the stop, " + tgPct(raw) + (callAdj(m, px) < 0 ? " against" : "");
+    const got = Math.max(0, Math.min(1, (px - m.refPx) / (m.tgPx - m.refPx)));
+    return "\u231b " + tk + (short ? " short" : "") + " missed " + tgNum(m.tgPx) + " \u2014 the " + tgDay(m.ts + callHorizonOf(m)) + " deadline passed at " + tgNum(px)
+      + ", " + Math.round(got * 100) + "% of the way \u00b7 " + sent + " \u00b7 closed at the deadline\u2019s close, " + tgPct(raw);
+  }
+  // The resolver. Hits are intraday and misses are at the close: a target is a LEVEL, and levels
+  // are touched, not closed through — so a hit (or the stop) is decided on the 5-minute bars that
+  // opened after the send and before the deadline, then on the live mark for the bar still
+  // forming; the deadline is a DATE, and dates end at the close, so a miss waits for the first
+  // daily close at or past it (the same close a plain call's horizon reads). A bar that touches
+  // both the stop and the target cannot say which printed first; it resolves 'wrong', the reading
+  // that does not flatter the author. The bar cursor (tgSeen) makes a sweep O(new bars), and the
+  // archive makes a restart lose nothing: bars printed while the server was down are scanned on
+  // the next pass. Returns what resolved, with the line to post; the server posts it (the /alert
+  // road: a command result under the author's name, in the conversation the call was made in).
+  // (build 2026.09.24-107) The 5m lane stores CLOSED bars only and visits a coin every 5 minutes
+  // at best (15 on backoff), so for a while after the deadline the archive can still lack the bars
+  // that close at it. A miss (and the scan's "nothing touched") holds until the archive holds a bar
+  // ending at or past the deadline, or TG_BELL_GRACE (two lane stale windows) has passed.
+  const TG_BELL_GRACE = 20 * 60e3;
+  function tgOpenAll() {
+    const rows = [];
+    for (let after = 0; ;) {
+      const page = S.tgOpen.all(after);
+      rows.push(...page);
+      if (page.length < 500) return rows;
+      after = page[page.length - 1].id;
+    }
+  }
+  function targetSweep(nowMs) {
+    const now = Number.isFinite(+nowMs) ? +nowMs : Date.now();
+    const out = [];
+    for (const m of tgOpenAll()) {
+      const long = m.side !== "short", by = m.ts + callHorizonOf(m), upTo = Math.min(now, by);
+      const stop = m.tgStop > 0 ? m.tgStop : null, sr = tgSessionRule(m.ref);
+      let res = null, at = null, px = null, seen = m.tgSeen || 0;
+      // The archive is read in TG_SCAN_MS windows, at most TG_SCAN_PASS of them per target per
+      // pass, so a year-long target first scanned after an outage costs a month of bars a minute
+      // rather than 100k rows at once. The live and deadline legs wait until the scan has caught
+      // up: neither may overrule a bar not yet read.
+      let caughtUp = false;
+      for (let k = 0; k < TG_SCAN_PASS && !res && !caughtUp; k++) {
+        // A window that would end inside the last day takes the rest of the way at once (it is at
+        // most a day of bars), so the cursor rule below never has to wait on a young stretch.
+        let scanTo = Math.min(upTo, Math.max(m.ts, seen) + TG_SCAN_MS);
+        if (scanTo > now - CALL_DAY) scanTo = upTo;
+        caughtUp = scanTo >= upTo;
+        let bars;
+        try { bars = bars5m(m.ref, Math.max(m.ts, seen + 1), scanTo) || []; } catch (_) { bars = []; }
+        const ses = sr && bars.length ? marketSessions(Math.max(m.ts, seen + 1), scanTo) : null;
+        for (const b of bars) {
+          const ts = +b[0], hi = +b[2], lo = +b[3];
+          // Only bars that OPENED after the send: the bar the call was sent inside carries prices
+          // from before it. The live-mark leg below covers that sliver.
+          if (!(ts >= m.ts) || ts <= seen || ts > scanTo || !(hi > 0) || !(lo > 0)) continue;
+          // (build 2026.09.24-104) Session names: a touch counts in the US cash session, off-hours
+          // only a 5m CLOSE through the level — so an off-hours bar is judged once it has closed.
+          if (sr && ts + TG_BAR_MS > now && !inCashSession(ts, ses)) continue;
+          if (stop != null && callBarReaches(b, stop, !long, sr, ses)) { res = "wrong"; at = ts; px = stop; break; }
+          if (callBarReaches(b, m.tgPx, long, sr, ses)) { res = "hit"; at = ts; px = m.tgPx; break; }
+          if (ts + TG_BAR_MS <= now) seen = ts;
+        }
+        // A stretch the archive has nothing for (a coin the 5m lane does not keep, a gap) is
+        // passed once scanned — it is over a day old by construction, and the lane would have
+        // written it by then — so the cursor never sticks.
+        if (!res && !caughtUp) seen = Math.max(seen, scanTo);
+      }
+      // The live mark is an unclosed bar: for a session name it only counts inside the cash session
+      // (off-hours the closed 5m bars decide, a minute later at most).
+      if (!res && caughtUp && now <= by && (!sr || inCashSession(now, marketSessions(now, now)))) {
+        const live = markFor(m.ref);
+        if (live > 0) {
+          if (stop != null && (long ? live <= stop : live >= stop)) { res = "wrong"; at = now; px = stop; }
+          else if (long ? live >= m.tgPx : live <= m.tgPx) { res = "hit"; at = now; px = m.tgPx; }
+        }
+      }
+      if (!res && caughtUp && now > by) {
+        // (build 2026.09.24-107) The bell bar must be in the archive before the scan counts as
+        // complete — else hold (bounded by TG_BELL_GRACE).
+        let bell = now > by + TG_BELL_GRACE;
+        if (!bell) { let bs; try { bs = bars5m(m.ref, by - TG_BAR_MS, now) || []; } catch (_) { bs = []; }
+          for (const b of bs) if (+b[0] + TG_BAR_MS >= by) { bell = true; break; } }
+        // A session name's deadline IS a cash close: the miss prices at the close of the 5m bar
+        // ending at it (the tape at the bell; the last one before it only across an archive gap),
+        // else the first daily close past it as before.
+        if (bell) {
+          let p = null;
+          if (sr) { let bs; try { bs = bars5m(m.ref, by - 6 * 3600e3, by) || []; } catch (_) { bs = []; }
+            let bt = -Infinity;
+            for (const b of bs) if (+b[0] + TG_BAR_MS <= by && +b[0] > bt && +b[4] > 0) { bt = +b[0]; p = +b[4]; } }
+          if (!(p > 0)) p = pxHistory(m.ref, by);
+          if (p != null && isFinite(p) && p > 0) { res = "miss"; at = by; px = p; }
+        }
+      }
+      if (res) {
+        if (S.tgResolve.run(res, at, px, m.id).changes)
+          out.push({ id: m.id, thread: m.thread, sender: m.sender, ref: m.ref, side: long ? "long" : "short", res, at, px, text: tgLine(m, res, at, px) });
+      } else if (seen > (m.tgSeen || 0)) S.tgSeenSet.run(seen, m.id);
+    }
+    return out;
   }
   function callClose(uid, id) {
     const m = S.msgById.get(+id);
@@ -1389,7 +1622,8 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (st.closed) return { ok: false, error: st.early ? "already closed" : "that call closed at its horizon" };
     const px = markFor(m.ref);
     if (!(px > 0)) return { ok: false, error: "no live mark for " + m.ref + " right now" };
-    S.callClose.run(Date.now(), px, +id, uid);
+    const now = Date.now();
+    S.callClose.run(now, px, now, +id, uid);
     return { ok: true, thread: m.thread, message: wire(S.msgById.get(+id), uid) };
   }
   function callExtend(uid, id, days) {
@@ -1403,11 +1637,14 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (st.closed) return { ok: false, error: st.early ? "already closed" : "that call closed at its horizon" };
     // Extend means extend: a shorter horizon would re-score the call against a close it has
     // already lived past. Shortening is what "close early" is for.
+    // (build 2026.09.24-107) A session name's TARGET ends at a cash close, extended or not: the
+    // new deadline is the close of the day d days after the send (not the send's minute of day).
     if (d * CALL_DAY <= st.horizonMs) return { ok: false, error: "that is not longer than the current " + Math.round(st.horizonMs / CALL_DAY) + "-day horizon" };
-    const hzTs = m.ts + d * CALL_DAY;
+    const hzTs = m.tgPx > 0 && tgSessionRule(m.ref) ? callSessionClose(m.ts + d * CALL_DAY) : m.ts + d * CALL_DAY;
+    if (hzTs - m.ts <= st.horizonMs) return { ok: false, error: "that is not longer than the current " + Math.round(st.horizonMs / CALL_DAY) + "-day horizon" };
     const p = pxHistory(m.ref, hzTs);
     if (p != null && isFinite(p) && p > 0) return { ok: false, error: "a " + d + "-day horizon has already passed for this call" };
-    S.callSetH.run(d * CALL_DAY, +id, uid);
+    S.callSetH.run(hzTs - m.ts, +id, uid);
     return { ok: true, thread: m.thread, message: wire(S.msgById.get(+id), uid) };
   }
   const modName = (uid) => (uid ? ((users.get(uid) || {}).display || uid) : null);
@@ -1473,8 +1710,13 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     // reply) but MAY carry an attachment: /ratio posts its chart as a PNG. replyTo is dropped
     // rather than erred — the client never sends it.
     const file = o.fileId ? S.fileById.get(o.fileId) : null;
+    // (build 2026.09.24-107) A named attachment that does not exist is refused, not dropped: a chart
+    // card with a bogus fileId used to post as a caption with no picture under it.
+    if (o.fileId && !file) return { ok: false, error: "that attachment is no longer stored" };
     if (!text && !file) return { ok: false, error: "write something first" };
     if (file && (file.thread !== t.id || file.uid !== fromUid)) return { ok: false, error: "that attachment is not yours" };
+    if (o.card && o.card.kind === "chart" && !(file && file.inline && /^image\//.test(String(file.mime || ""))))
+      return { ok: false, error: "a chart card needs its picture (an image uploaded into this conversation)" };
     if (S.msgBurst.get(fromUid, Date.now() - DM_BURST_MS).n >= DM_BURST_N)
       return { ok: false, error: "slow down — too many messages at once", retry: true };
 
@@ -1504,10 +1746,27 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     }
     const now = Date.now();
     const oDays = Math.trunc(+o.callDays);
-    const callH = ref && sym ? (oDays >= 1 && oDays <= CALL_MAX_D ? oDays * CALL_DAY : callHorizonFromText(text, sym)) : null;
-    const id = Number(S.msgIns.run(t.id, fromUid, now, text, ref, refPx, side, null, file ? file.id : null, o.via || null, replyTo, cmd, cmdAi, cardJson, callH).lastInsertRowid);
+    // A target (build 2026.09.24-95) is read off the same words, against the same stamped mark, and
+    // only on a typed message — a card's body is a table, not a sentence. Its deadline becomes the
+    // horizon and its side the call's side (an applied reading still decides the side, and a
+    // target that disagrees with it is dropped). Anything the grammar cannot read, or reads and
+    // refuses, stays a plain call: never a wrong target.
+    // (build 2026.09.24-104) A DATE deadline ends at that date's US cash close for a session name
+    // (24:00 UTC for crypto) — exact, not rounded up to whole days from the send.
+    // (build 2026.09.24-107) callTarget decides it (`by`): a date whose close already passed is
+    // refused (the send stays a plain call) instead of becoming a silent one-day horizon, and a
+    // relative "in 3w" on a session name ends at that day's cash close.
+    const tg = ref && sym && refPx > 0 && !cardJson ? callTarget(text, sym, refPx, now, o.callSide === "short" || o.callSide === "long" ? o.callSide : null, tgSessionRule(ref)) : null;
+    const tgOk = tg && tg.ok ? tg : null;
+    if (tgOk) side = tgOk.side;
+    const callH = ref && sym ? (tgOk ? tgOk.by - now : oDays >= 1 && oDays <= CALL_MAX_D ? oDays * CALL_DAY : callHorizonFromText(text, sym)) : null;
+    const id = Number(S.msgIns.run(t.id, fromUid, now, text, ref, refPx, side, null, file ? file.id : null, o.via || null, replyTo, cmd, cmdAi, cardJson, callH,
+      tgOk ? tgOk.px : null, tgOk ? tgOk.stop : null).lastInsertRowid);
     S.thrTouch.run(id, now, t.id);
     S.readUp.run(t.id, fromUid, id);            // your own message is read by definition
+    // (build 2026.09.24-110) Usage counters: a stamped call (any road — typed, card, applied reading),
+    // and a target on top of it. Only the count; the ticker never reaches usage_day.
+    if (ref && refPx > 0) { usageAct(fromUid, "call", now); if (tgOk) usageAct(fromUid, "target", now); }
     return { ok: true, id, thread: t.id, message: wire(S.msgById.get(id), fromUid) };
   }
 
@@ -1795,12 +2054,103 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const rows = all.slice(-n);
     return { thread: t.id, name: threadName(t, uid), kind: t.kind, skipped: all.length - rows.length,
       upTo: raw[raw.length - 1].id,
-      rows: rows.map((m) => ({ id: m.id, sender: m.sender || "", mine: m.sender === uid, via: m.via || null,
-        who: m.sender ? ((users.get(m.sender) || {}).display || "—") : "",
-        sys: m.sys ? sysLine(m) : "",
-        cmd: m.cmd || "", body: m.body || "", ref: m.ref || null, card: !!m.card,
-        file: m.fileId ? ((S.fileById.get(m.fileId) || {}).name || "attachment") : "",
-        reply: m.replyTo ? replyPreview(m.replyTo, uid) : null })) };
+      rows: rows.map((m) => mirrorRow(m, uid)) };
+  }
+  // One row in the mirror's shape. The attachment rides as its id and sniffed type too (build
+  // 2026.09.24-99): the mirror uploads the bytes to the chat rather than naming the file.
+  function mirrorRow(m, uid) {
+    const f = m.fileId && !m.deletedAt ? S.fileById.get(m.fileId) : null;
+    return { id: m.id, sender: m.sender || "", mine: m.sender === uid, via: m.via || null,
+      who: m.sender ? ((users.get(m.sender) || {}).display || "—") : "",
+      sys: m.sys ? sysLine(m) : "",
+      cmd: m.cmd || "", body: m.body || "", ref: m.ref || null, card: !!m.card,
+      file: m.fileId ? ((f || {}).name || "attachment") : "",
+      fileId: f ? f.id : null, fileMime: f ? f.mime : null, fileInline: f ? !!f.inline : false,
+      edited: !!m.editedAt, editedBy: m.editedBy ? ((users.get(m.editedBy) || {}).display || "—") : "",
+      deleted: !!m.deletedAt,
+      reply: m.replyTo ? replyPreview(m.replyTo, uid) : null };
+  }
+  // ---- Telegram sync: edits, deletions, reactions, attachments (build 2026.09.24-99) ------------
+  // The map from a message here to the Telegram message(s) carrying it, per chat. Written by the
+  // wire once Telegram has answered a send with its message_id (out), or when a line typed at the
+  // bot becomes a row (in). Read to repaint, delete or react on the other side.
+  function tgMapAdd(chat, tgId, msgIds, uid, dir, media) {
+    const id = Math.trunc(+tgId);
+    if (!chat || !(id > 0)) return 0;
+    let n = 0;
+    for (const m of [].concat(msgIds || [])) {
+      if (!(+m > 0)) continue;
+      try { n += Number(S.tgMapIns.run(String(chat), id, Math.trunc(+m), String(uid || ""), dir === "in" ? "in" : "out", media ? 1 : 0, Date.now()).changes); } catch (_) {}
+    }
+    return n;
+  }
+  const tgMapFor = (msgId) => S.tgMapOfMsg.all(Math.trunc(+msgId) || 0);
+  const tgMapPack = (chat, tgId) => S.tgMapOfTg.all(String(chat), Math.trunc(+tgId) || 0);
+  // The rows one Telegram message carries, in the mirror's shape, deleted ones flagged rather than
+  // dropped: the repaint decides whether the message shrinks or goes. Membership is re-checked —
+  // a member removed from a group keeps their old chat, but it stops being repainted from here.
+  function mirrorRowsById(uid, ids) {
+    const out = [];
+    for (const id of [].concat(ids || [])) {
+      const m = S.msgById.get(+id);
+      if (!m || !isMember(m.thread, uid)) continue;
+      out.push(mirrorRow(m, uid));
+    }
+    return out;
+  }
+  // A file sent at the bot, into the synced conversation, through the SAME door the composer's
+  // upload uses: the magic-byte sniff, the type allowlist and the 8 MB / 3 MB caps are putFile's,
+  // not re-implemented for Telegram. A refused file posts nothing and says why.
+  function bridgeSyncFile(uid, name, buf, caption) {
+    const who = users.get(uid);
+    if (!who || who.disabledAt) return { ok: false, error: "that chat is not linked to an account" };
+    const thread = tgSyncThread(uid);
+    if (!thread) return { ok: false, error: "not-synced", silent: true };
+    const f = putFile(uid, thread, name, buf);
+    if (!f.ok) return f;
+    const r = send(uid, null, String(caption == null ? "" : caption).trim(), null, { thread, via: "telegram", fileId: f.file.id });
+    if (!r.ok) removeFile(f.file.id);
+    return r;
+  }
+  // An edit made in Telegram to a line that came in over the bridge. Only the member's OWN line,
+  // found by the map (chat + Telegram id + 'in'), and through edit() itself: the same "not a
+  // command result, not a card, not deleted" rules and the same editedAt the composer sets. An
+  // edit to anything else in that chat (a /command, a line from before sync) is silently inert.
+  function bridgeEdit(uid, chat, tgId, text) {
+    // (build 2026.09.24-107) A disabled account acts through no door, the phone included.
+    const who = users.get(uid);
+    if (!who || who.disabledAt) return { ok: false, error: "that chat is not linked to an account" };
+    const hit = tgMapPack(chat, tgId).find((x) => x.dir === "in" && x.uid === uid);
+    if (!hit) return { ok: false, error: "not-mapped", silent: true };
+    return edit(uid, hit.msg, text, false);
+  }
+  // A reaction change from Telegram, already translated into the site's vocabulary: the emoji the
+  // member added and the ones they took away. Explicit add/drop rather than "set to exactly this",
+  // because Telegram only knows the reactions made THERE — a set would wipe the ones made here.
+  function reactApply(uid, msgId, add, dropList) {
+    const who = users.get(uid);
+    if (!who || who.disabledAt) return { ok: false, error: "that chat is not linked to an account" };   // (build 2026.09.24-107)
+    const m = S.msgById.get(+msgId);
+    if (!m || !isMember(m.thread, uid)) return { ok: false, error: "no such message" };
+    if (m.deletedAt || m.sys) return { ok: false, error: "that message was deleted" };
+    let changed = 0;
+    for (const e of [].concat(dropList || [])) if (REACTIONS.includes(e) && S.reactMine.get(m.id, uid, e)) { S.reactDrop.run(m.id, uid, e); changed++; }
+    for (const e of [].concat(add || [])) if (REACTIONS.includes(e) && !S.reactMine.get(m.id, uid, e)) { S.reactAdd.run(m.id, uid, e, Date.now()); changed++; }
+    return { ok: true, thread: m.thread, id: m.id, changed };
+  }
+  // The one reaction a bot may show on a message: the most-used here, the most recent on a tie.
+  // null when nothing (or nothing live) is left, which the wire turns into clearing the reaction.
+  function reactTop(msgId) {
+    const m = S.msgById.get(+msgId);
+    if (!m || m.deletedAt) return null;
+    const by = new Map();
+    for (const r of S.reactOf.all(m.id)) {
+      const e = by.get(r.emoji) || { n: 0, at: 0 };
+      e.n++; e.at = Math.max(e.at, r.at || 0); by.set(r.emoji, e);
+    }
+    let best = null;
+    for (const [emoji, e] of by) if (!best || e.n > best.n || (e.n === best.n && e.at > best.at)) best = { emoji, n: e.n, at: e.at };
+    return best ? best.emoji : null;
   }
   // Plain text typed in a synced chat. Silent no-op when nothing is synced: stray text at the bot
   // has never posted anywhere, and an opt-in elsewhere must not change that for a chat that did
@@ -1944,6 +2294,10 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
         chg1, adj1: adjOf(chg1), chg7, adj7: adjOf(chg7),
         closed, early: !!(st && st.early), closeTs: st ? st.closeTs : null, horizonD: st ? Math.round(st.horizonMs / DAY) : null,
         ageMs: Date.now() - m.ts,
+        // A target (build 2026.09.24-95): the level, the stop, the deadline, the resolution, and how
+        // far along it is — (end − sent) / (target − sent) against the same mark the move column
+        // reads, clamped to [−1, 1]: the one number the board and the digest both print.
+        tg: has && m.tgPx > 0 ? Object.assign(tgWire(m), { prog: endPx > 0 ? Math.max(-1, Math.min(1, (endPx - at) / (m.tgPx - at))) : null }) : null,
       });
     }
     // The summary is per person, because "who is right" is the only question a call record
@@ -1965,7 +2319,17 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const byWho = new Map();
     const tally = (e, k, v) => { if (v == null) return; const b = e[k]; b.n++; if (v > 0) b.up++; b.sum += v; };
     for (const c of out) {
-      const e = byWho.get(c.senderUid) || { uid: c.senderUid, who: c.sender, open: 0, closed: { n: 0, up: 0, sum: 0 }, best: null, worst: null, h1: { n: 0, up: 0, sum: 0 }, h7: { n: 0, up: 0, sum: 0 } };
+      const e = byWho.get(c.senderUid) || { uid: c.senderUid, who: c.sender, open: 0, closed: { n: 0, up: 0, sum: 0 }, best: null, worst: null, h1: { n: 0, up: 0, sum: 0 }, h7: { n: 0, up: 0, sum: 0 },
+        tg: { hit: 0, miss: 0, wrong: 0, open: 0, hitD: [] } };
+      // The second, binary record (build 2026.09.24-95): hit / miss / wrong per person over the
+      // targets resolved inside the window, and the median days from send to hit. An early close is
+      // neither and is left out; the % record above already scores it.
+      if (c.tg) {
+        const r = c.tg.res;
+        if (r === "hit" || r === "miss" || r === "wrong") {
+          if (!winMs || (c.tg.at || 0) >= nowTs - winMs) { e.tg[r]++; if (r === "hit") e.tg.hitD.push((c.tg.at - c.ts) / DAY); }
+        } else if (!r && !c.closed) e.tg.open++;
+      }
       if (c.closed && c.adj != null && (!winMs || c.closeTs >= nowTs - winMs)) {
         tally(e, "closed", c.adj);
         if (!e.best || c.adj > e.best.adj) e.best = { ref: c.ref, adj: c.adj };
@@ -1977,8 +2341,11 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const rec = (b) => (b.n ? { n: b.n, upPct: b.up / b.n, avg: b.sum / b.n } : null);
     const summary = [...byWho.values()].map((e) => {
       const cl = rec(e.closed);
+      const hd = e.tg.hitD.sort((a, b) => a - b), mid = hd.length >> 1;
+      const tg = e.tg.hit + e.tg.miss + e.tg.wrong + e.tg.open ? { hit: e.tg.hit, miss: e.tg.miss, wrong: e.tg.wrong, open: e.tg.open,
+        medHitD: hd.length ? (hd.length % 2 ? hd[mid] : (hd[mid - 1] + hd[mid]) / 2) : null } : null;
       return { uid: e.uid, who: e.who, open: e.open, n: cl ? cl.n : 0, upPct: cl ? cl.upPct : null, avg: cl ? cl.avg : null,
-        best: e.best, worst: e.worst, h1: rec(e.h1), h7: rec(e.h7) };
+        best: e.best, worst: e.worst, h1: rec(e.h1), h7: rec(e.h7), tg };
     }).filter((e) => e.n || e.open).sort((a, b) => (b.n - a.n) || (b.open - a.open));
     return { ok: true, calls: out, summary, windowMs: winMs, defaultHorizonD: CALL_DEFAULT_H / DAY };
   }
@@ -2145,6 +2512,426 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
       messages: S.msgMaxId.get().m };
   }
 
+  // ---- usage: daily aggregates behind the admin Usage fold (build 2026.09.24-109) ----------------
+  // The beacon (POST /api/usage) lands here as an in-memory increment — the request path never
+  // touches SQLite. usageFlush writes the pending map in ONE transaction of prepared upserts, every
+  // 60s from the server and once more from close() on the way out, and bumps a generation the
+  // admin payload's cache key is built on. Retention: USAGE_KEEP_DAYS ET days per member, then the
+  // rows fold into uid '0' (sitewide) and the per-member rows go.
+  const USAGE_KEEP_DAYS = 30;
+  const USAGE_SITE = "0";   // no real uid is one character (adoptableUid wants 12+), so it can never collide
+  // (build 2026.09.24-110) The action counters: a FIXED allowlist, counted where each feature
+  // already lives. Most are server-side (the authenticated call the action already is); csv and
+  // drawer-open happen only in the browser and ride the beacon (the server's usageClamp accepts
+  // exactly those two from it). A counter is a number per ET day — never a ticker, never text.
+  const USAGE_ACTS = ["call", "target", "alert", "share", "csv", "ask", "ai-report", "drawer-open", "telegram-link", "push-enable"];
+  const USAGE_ACT_SET = new Set(USAGE_ACTS);
+  const USAGE_ERR_CAP = 200;         // distinct error rows kept per build; the 201st new one is dropped
+  // (build 2026.09.24-110 follow-up) the owner asked for minimal retention: the weekly-active bits
+  // (kind 'wk') keep the week in progress plus the 8 before it — enough for a w0..w8 cohort table —
+  // then go. Was 182 days (26 weeks).
+  const USAGE_WK_KEEP_DAYS = 56;
+  const USAGE_WK_COHORTS = 9;        // cohort rows (join weeks) and cells (w0..w8)
+  // (build 2026.09.24-110 follow-up) error-row bounds on top of the per-build cap
+  const USAGE_ERR_TOTAL = 500;       // distinct usage_err rows overall; the least-recently-seen is evicted
+  const USAGE_ERR_NEW_PER_DAY = 20;  // NEW distinct errors one member may introduce per ET day
+  const USAGE_BUILDS_KEEP = 4;       // the current build + the 3 before it (what a beacon's b may be)
+  const USAGE_PREV_MIN_N = 5;        // first-paint samples a previous build needs to be the comparison
+  const US = {
+    up: db.prepare(`INSERT INTO usage_day (day, uid, kind, key, n, ms) VALUES (?,?,?,?,?,?)
+      ON CONFLICT(day, uid, kind, key) DO UPDATE SET n = n + excluded.n, ms = ms + excluded.ms`),
+    range: db.prepare("SELECT * FROM usage_day WHERE day >= ? AND day <= ? AND kind <> 'wk'"),
+    rangeOf: db.prepare("SELECT * FROM usage_day WHERE uid = ? AND day >= ? AND day <= ? AND kind <> 'wk'"),
+    // WHERE ... GROUP BY: the SELECT needs its WHERE for SQLite to parse the upsert's ON CONFLICT.
+    // (-110) 'wk' rows are the one per-member kind the fold never touches (see the schema note).
+    fold: db.prepare(`INSERT INTO usage_day (day, uid, kind, key, n, ms)
+      SELECT day, '${USAGE_SITE}', kind, key, SUM(n), SUM(ms) FROM usage_day WHERE day < ? AND uid <> '${USAGE_SITE}' AND kind <> 'wk' GROUP BY day, kind, key
+      ON CONFLICT(day, uid, kind, key) DO UPDATE SET n = n + excluded.n, ms = ms + excluded.ms`),
+    drop: db.prepare(`DELETE FROM usage_day WHERE day < ? AND uid <> '${USAGE_SITE}' AND kind <> 'wk'`),
+    pause: db.prepare("UPDATE user SET usagePaused = ? WHERE uid = ?"),
+    // (-110) The weekly-active bit, derived from the daily tab rows: a member is active in an ET
+    // week (Monday..Sunday) when any ONE day of it had a minute on screen — the daily rule, weekly.
+    // date(d, '-6 days', 'weekday 1') is the Monday on or before d. INSERT OR IGNORE: a bit, set once.
+    wkFill: db.prepare(`INSERT OR IGNORE INTO usage_day (day, uid, kind, key, n, ms)
+      SELECT wk, uid, 'wk', wk, 1, 0 FROM (SELECT date(day, '-6 days', 'weekday 1') AS wk, uid, SUM(ms) AS s
+        FROM usage_day WHERE kind = 'tab' AND uid <> '${USAGE_SITE}' AND day >= ? GROUP BY day, uid) WHERE s >= 60000 GROUP BY wk, uid`),
+    wkAll: db.prepare("SELECT uid, day FROM usage_day WHERE kind = 'wk'"),
+    wkMin: db.prepare("SELECT MIN(day) AS d FROM usage_day WHERE kind = 'wk'"),
+    wkDrop: db.prepare("DELETE FROM usage_day WHERE kind = 'wk' AND day < ?"),
+    errUp: db.prepare(`INSERT INTO usage_err (key, build, loc, msg, firstAt, lastAt) VALUES (?,?,?,?,?,?)
+      ON CONFLICT(key) DO UPDATE SET lastAt = MAX(lastAt, excluded.lastAt)`),
+    errIdx: db.prepare("SELECT key, build, lastAt FROM usage_err"),   // (-110 follow-up) <= USAGE_ERR_TOTAL rows by construction
+    errOne: db.prepare("SELECT key, build, loc, msg FROM usage_err WHERE key = ?"),
+    errDel: db.prepare("DELETE FROM usage_err WHERE key = ?"),
+    errPrune: db.prepare("DELETE FROM usage_err WHERE lastAt < ?"),
+    buildUp: db.prepare("INSERT INTO usage_build (build, at) VALUES (?, ?) ON CONFLICT(build) DO NOTHING"),
+    buildAll: db.prepare("SELECT build, at FROM usage_build ORDER BY at DESC, build DESC"),
+    buildDel: db.prepare("DELETE FROM usage_build WHERE build = ?"),
+  };
+  let usagePend = new Map(), usageErrPend = new Map(), usageGeneration = 0;
+  // (build 2026.09.24-110 follow-up) Every error row there is (stored or pending): key -> {build,
+  // lastAt}, plus a per-build count. Bounded by USAGE_ERR_TOTAL, so holding it is cheap and the cap
+  // checks never touch SQLite. Evicted keys wait in usageErrDel for the next flush's DELETE.
+  let usageErrIdx = new Map(), usageErrPerBuild = new Map(), usageErrDel = new Set();
+  const usageErrNewToday = new Map();   // uid -> {day, n}: new distinct errors introduced today
+  function usageErrReload() {
+    usageErrIdx = new Map(); usageErrPerBuild = new Map();
+    const add = (k, b, at) => { if (usageErrIdx.has(k)) return; usageErrIdx.set(k, { build: b, lastAt: at }); usageErrPerBuild.set(b, (usageErrPerBuild.get(b) || 0) + 1); };
+    for (const r of US.errIdx.all()) if (!usageErrDel.has(r.key)) add(r.key, r.build, r.lastAt);
+    for (const r of usageErrPend.values()) add(r.key, r.build, r.lastAt);
+  }
+  usageErrReload();
+  // (-110 follow-up) The known builds, newest first. usageBuildSeen is the server's boot call.
+  let usageBuildList = US.buildAll.all().map((r) => r.build);
+  function usageBuildSeen(build, now) {
+    if (typeof build !== "string" || !build) return usageBuildList.slice();
+    const t = now != null ? now : Date.now();
+    // Re-deploying the same build keeps its first-seen time; a new one goes to the front.
+    US.buildUp.run(build, Math.max(t, ...US.buildAll.all().map((r) => r.at + 1)));
+    const all = US.buildAll.all().map((r) => r.build);
+    for (const b of all.slice(USAGE_BUILDS_KEEP)) US.buildDel.run(b);
+    usageBuildList = all.slice(0, USAGE_BUILDS_KEEP);
+    return usageBuildList.slice();
+  }
+  const usageBuildKnown = (b) => typeof b === "string" && usageBuildList.includes(b);
+  // Calendar arithmetic on the ET day STRING (UTC-anchored, so DST can never skip or repeat a day).
+  const usageDayShift = (d, n) => new Date(Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)) + n * 864e5).toISOString().slice(0, 10);
+  // The Monday of the ET week holding day d (weeks run Monday..Sunday).
+  const usageWeekOf = (d) => usageDayShift(d, -((new Date(Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10))).getUTCDay() + 6) % 7));
+  const usageToday = (now) => etDayStr(now != null ? now : Date.now());
+  const usagePaused = (uid) => !!((users.get(uid) || {}).usagePaused);
+  // Stage-A data (and anything flushed before a crash) gets its weekly bits once, at open.
+  try { US.wkFill.run("0000-00-00"); } catch (_) {}
+  // (-110) The heatmap's bucket: the ET weekday (0 = Sunday) and hour the beacon ARRIVED in. A beacon
+  // carries at most two minutes, so a minute can land one hour late at an hour's edge — fine for
+  // "when are people here", and it needs no clock from the browser.
+  function usageHourKey(now) { const p = etParts(now); return p.wd + "-" + String(p.h).padStart(2, "0"); }
+  // First-paint samples are bucketed (100ms under 2s, 250ms under 5s, 1s under 30s, then one bin):
+  // percentiles come back out of the histogram at the bucket's midpoint.
+  function usagePerfBucket(ms) { const v = Math.max(0, +ms || 0); return v < 2000 ? Math.floor(v / 100) * 100 : v < 5000 ? Math.floor(v / 250) * 250 : v < 30000 ? Math.floor(v / 1000) * 1000 : 30000; }
+  const usagePerfWidth = (b) => (b < 2000 ? 100 : b < 5000 ? 250 : b < 30000 ? 1000 : 0);
+  function usagePct(hist, q) {   // hist: Map(bucket -> n)
+    const bins = [...hist].sort((a, b) => a[0] - b[0]);
+    const N = bins.reduce((s, x) => s + x[1], 0);
+    if (!N) return null;
+    let cum = 0;
+    for (const [b, n] of bins) { cum += n; if (cum >= q * N) return b + usagePerfWidth(b) / 2; }
+    return null;
+  }
+  function usageAdd(uid, day, kind, key, n, ms) {
+    const k = day + "\u0001" + uid + "\u0001" + kind + "\u0001" + key;
+    const cur = usagePend.get(k);
+    if (cur) { cur.n += n; cur.ms += ms; } else usagePend.set(k, { day, uid, kind, key, n, ms });
+  }
+  // One error sighting: its key, or null when it would be a NEW distinct error and this build already
+  // holds USAGE_ERR_CAP, or this member already introduced USAGE_ERR_NEW_PER_DAY new ones today.
+  // (-110 follow-up) Past USAGE_ERR_TOTAL rows overall, the least-recently-seen row is evicted.
+  // e = {msg, loc} already truncated and cleaned by the server; the text is never trusted anywhere.
+  function usageErrNote(uid, build, e, now) {
+    const key = build + "|" + e.loc + "|" + crypto.createHash("sha1").update(e.msg).digest("hex").slice(0, 12);
+    const known = usageErrIdx.get(key);
+    if (known) known.lastAt = Math.max(known.lastAt, now);
+    else {
+      if ((usageErrPerBuild.get(build) || 0) >= USAGE_ERR_CAP) return null;
+      const day = usageToday(now), q = usageErrNewToday.get(uid);
+      if (q && q.day === day && q.n >= USAGE_ERR_NEW_PER_DAY) return null;
+      if (!q || q.day !== day) usageErrNewToday.set(uid, { day, n: 1 }); else q.n++;
+      if (usageErrNewToday.size > 5000) usageErrNewToday.clear();   // a bound, not a policy: members are far fewer
+      while (usageErrIdx.size >= USAGE_ERR_TOTAL) {
+        let old = null, oldAt = Infinity;
+        for (const [k, x] of usageErrIdx) if (x.lastAt < oldAt) { old = k; oldAt = x.lastAt; }
+        const x = usageErrIdx.get(old);
+        usageErrIdx.delete(old); usageErrPerBuild.set(x.build, usageErrPerBuild.get(x.build) - 1);
+        usageErrPend.delete(old); usageErrDel.add(old);
+      }
+      usageErrIdx.set(key, { build, lastAt: now }); usageErrPerBuild.set(build, (usageErrPerBuild.get(build) || 0) + 1);
+      usageErrDel.delete(key);
+    }
+    const p = usageErrPend.get(key);
+    if (p) p.lastAt = Math.max(p.lastAt, now);
+    else usageErrPend.set(key, { key, build, loc: e.loc, msg: e.msg, firstAt: now, lastAt: now });
+    return key;
+  }
+  // One accepted beacon: {tab -> ms} already validated and clamped by the server, plus the device.
+  // (-110) `extra` = {acts: {csv|drawer-open -> n}, build, perf: ms|null, errs: [{msg, loc, c}]} —
+  // validated and clamped by the server too.
+  function usageRecord(uid, tabs, dev, now, extra) {
+    const u = users.get(uid);
+    if (!u || u.disabledAt || u.usagePaused) return { ok: true, stored: false };
+    const t = now != null ? now : Date.now();
+    const day = usageToday(t);
+    let tot = 0;
+    for (const [k, ms] of Object.entries(tabs || {})) { if (ms > 0) { usageAdd(uid, day, "tab", k, 1, ms); tot += ms; } }
+    if (tot > 0 && dev) usageAdd(uid, day, "dev", dev, 1, tot);
+    if (tot > 0) usageAdd(uid, day, "hr", usageHourKey(t), 1, tot);
+    const x = extra || {};
+    let acts = 0, perf = 0, errs = 0, errDropped = 0;
+    for (const [k, n] of Object.entries(x.acts || {})) if (USAGE_ACT_SET.has(k) && n > 0) { usageAdd(uid, day, "act", k, n, 0); acts += n; }
+    // (-110 follow-up) perf and errors only under a build this deployment served (the server checks
+    // too); anything else keeps its screen time and counters and loses the rest.
+    const build = usageBuildKnown(x.build) ? x.build : null;
+    if (build && x.perf > 0) { usageAdd(uid, day, "perf", build + "|" + usagePerfBucket(x.perf), 1, Math.round(x.perf)); perf = 1; }
+    for (const e of build ? x.errs || [] : []) {
+      const key = usageErrNote(uid, build, e, t);
+      if (key) { usageAdd(uid, day, "err", key, e.c, 0); errs += e.c; } else errDropped++;
+    }
+    return { ok: true, stored: tot > 0 || acts > 0 || perf > 0 || errs > 0, ms: tot, acts, perf, errs, errDropped };
+  }
+  // (-110) A server-side action counter: the call that IS the action already reached the server
+  // authenticated, so it counts here — more reliable than a beacon, and it cannot be forged by one.
+  // Paused, disabled or unknown member, or a word outside the allowlist: nothing.
+  function usageAct(uid, key, now) {
+    const u = users.get(uid);
+    if (!u || u.disabledAt || u.usagePaused || !USAGE_ACT_SET.has(key)) return false;
+    usageAdd(uid, usageToday(now), "act", key, 1, 0);
+    return true;
+  }
+  function usageFlush() {
+    if (!usagePend.size && !usageErrPend.size && !usageErrDel.size) return 0;
+    const rows = [...usagePend.values()], errs = [...usageErrPend.values()], dels = [...usageErrDel];
+    usagePend = new Map(); usageErrPend = new Map(); usageErrDel = new Set();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const r of rows) US.up.run(r.day, r.uid, r.kind, r.key, r.n, Math.round(r.ms));
+      for (const k of dels) US.errDel.run(k);   // (-110 follow-up) evicted past USAGE_ERR_TOTAL
+      for (const e of errs) US.errUp.run(e.key, e.build, e.loc, e.msg, e.firstAt, e.lastAt);
+      // (-110) the weekly bits for every week this flush touched (from the Monday of its oldest day)
+      let wkFrom = null;
+      for (const r of rows) if (r.kind === "tab" && (!wkFrom || r.day < wkFrom)) wkFrom = r.day;
+      if (wkFrom) US.wkFill.run(usageWeekOf(wkFrom));
+      db.exec("COMMIT");
+    } catch (e) {
+      try { db.exec("ROLLBACK"); } catch (_) {}
+      // put them back: a failed flush must not lose the minute it was carrying
+      for (const r of rows) usageAdd(r.uid, r.day, r.kind, r.key, r.n, r.ms);
+      for (const x of errs) if (!usageErrPend.has(x.key)) usageErrPend.set(x.key, x);
+      for (const k of dels) if (usageErrIdx.has(k) === false) usageErrDel.add(k);
+      throw e;
+    }
+    usageGeneration++;
+    return rows.length;
+  }
+  // Fold everything older than the window into the sitewide bucket, then drop the per-member rows.
+  // (-110) The weekly bits are filled first and survive the fold (they age out at USAGE_WK_KEEP_DAYS);
+  // error texts no hit has touched inside the window go too.
+  function usageRetain(now) {
+    usageFlush();
+    const t = now != null ? now : Date.now();
+    const cut = usageDayShift(usageToday(t), -(USAGE_KEEP_DAYS - 1));   // oldest day still kept per member
+    db.exec("BEGIN IMMEDIATE");
+    let dropped, errs;
+    try {
+      US.wkFill.run("0000-00-00");
+      // (-110 follow-up) whole weeks: the Monday USAGE_WK_KEEP_DAYS before this week's is the oldest kept
+      US.wkDrop.run(usageDayShift(usageWeekOf(usageToday(t)), -USAGE_WK_KEEP_DAYS));
+      US.fold.run(cut); dropped = Number(US.drop.run(cut).changes || 0);
+      errs = Number(US.errPrune.run(t - USAGE_KEEP_DAYS * 864e5).changes || 0);
+      db.exec("COMMIT");
+    }
+    catch (e) { try { db.exec("ROLLBACK"); } catch (_) {} throw e; }
+    if (errs) usageErrReload();
+    if (dropped || errs) usageGeneration++;
+    return { ok: true, cut, dropped, errs };
+  }
+  function setUsagePaused(uid, on) {
+    const u = users.get(uid);
+    if (!u) return { ok: false, error: "no such account" };
+    US.pause.run(on ? 1 : 0, uid); u.usagePaused = on ? 1 : 0;
+    // What was recorded before the click stays (it ages out with the window like anything else);
+    // pausing stops the recording from here on — the server refuses, the client stops sending.
+    usageGeneration++;
+    return { ok: true, paused: !!on };
+  }
+  // tabs: [{key, label, gate}] (the feature manifest's tabs, resolved by the server). online: Set of uids.
+  const usageMed = (a) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+  const USAGE_ACTIVE_MS = 60000;   // "active" = at least a minute on screen that ET day
+  function usageDays(today, r) { const out = []; for (let i = r - 1; i >= 0; i--) out.push(usageDayShift(today, -i)); return out; }
+  // (-110) Retention by join week. Cohorts are the ET weeks members joined in (user.createdAt), the
+  // last `weeks` of them; cell N is the share of that week's joiners active in week N after joining
+  // (N = 0 is the join week itself), read off the 'wk' bits. A cell is null when the week has not
+  // happened yet, or ends before the first bit on record (the beacon did not exist then: "not
+  // measured", never a zero). Paused members are left out — nothing is recorded for them, and
+  // counting them as absent would be a lie about the others.
+  function usageCohorts(today, members, weeks) {
+    const thisMon = usageWeekOf(today);
+    const bits = new Map();
+    for (const r of US.wkAll.all()) { if (!bits.has(r.uid)) bits.set(r.uid, new Set()); bits.get(r.uid).add(r.day); }
+    const first = (US.wkMin.get() || {}).d || null;
+    const out = [];
+    for (let i = weeks - 1; i >= 0; i--) {
+      const mon = usageDayShift(thisMon, -7 * i);
+      const who = members.filter((u) => !u.usagePaused && usageWeekOf(etDayStr(u.createdAt || 0)) === mon);
+      const cells = [];
+      for (let n = 0; n < weeks; n++) {
+        const w = usageDayShift(mon, 7 * n);
+        if (w > thisMon || !who.length || !first || usageDayShift(w, 6) < first) { cells.push(null); continue; }
+        cells.push(who.filter((u) => (bits.get(u.uid) || new Set()).has(w)).length / who.length);
+      }
+      out.push({ mon, n: who.length, cells, cur: i });   // cells[cur] is the week in progress
+    }
+    return { weeks, since: first, keepDays: USAGE_WK_KEEP_DAYS, rows: out };
+  }
+  function usageSummary(opts) {
+    usageFlush();
+    const o = opts || {}, now = o.now != null ? o.now : Date.now();
+    const r = Math.max(1, Math.min(USAGE_KEEP_DAYS, Math.trunc(+o.r || 7)));
+    const today = usageToday(now), days = usageDays(today, r);
+    const pFrom = usageDayShift(days[0], -r);   // the prior range runs pFrom .. the day before days[0]
+    const keepFrom = usageDayShift(today, -(USAGE_KEEP_DAYS - 1));
+    const priorKept = pFrom >= keepFrom;   // the prior range is still per-member (else only uid '0' totals survive)
+    const inRange = new Set(days);
+    const online = o.online || new Set();
+    const tabs = o.tabs || [];
+    // per (uid, day) screen ms; per (uid, tab) ms; per tab totals; per (uid, dev) ms — current and prior
+    const dayMs = new Map(), uTab = new Map(), tabMs = new Map(), tabPrev = new Map(), uDev = new Map(), uPrev = new Map();
+    // (-110) actions per key: the members who did it (in range) and the hits; the ET heat grid;
+    // first-paint histograms per build (+ the last day each build was seen); errors per key.
+    const actWho = new Map(), actHits = new Map(), heat = Array.from({ length: 7 }, () => new Array(24).fill(0));
+    const perfHist = new Map(), errHits = new Map(), errWho = new Map(), errRows = [];
+    const bump = (m, k, v) => m.set(k, (m.get(k) || 0) + v);
+    const addTo = (m, k, v) => { if (!m.has(k)) m.set(k, new Set()); m.get(k).add(v); };
+    for (const row of US.range.all(pFrom, today)) {
+      const cur = inRange.has(row.day);
+      if (row.kind === "tab") {
+        if (cur) bump(tabMs, row.key, row.ms); else bump(tabPrev, row.key, row.ms);
+        if (row.uid === USAGE_SITE) continue;
+        if (cur) { bump(dayMs, row.uid + "|" + row.day, row.ms); bump(uTab, row.uid + "|" + row.key, row.ms); }
+        else bump(uPrev, row.uid, row.ms);
+      } else if (!cur) continue;
+      else if (row.kind === "dev" && row.uid !== USAGE_SITE) bump(uDev, row.uid + "|" + row.key, row.ms);
+      else if (row.kind === "act") { bump(actHits, row.key, row.n); if (row.uid !== USAGE_SITE) addTo(actWho, row.key, row.uid); }
+      else if (row.kind === "hr") {
+        const m = /^([0-6])-(\d\d)$/.exec(row.key);
+        if (m && +m[2] < 24) heat[+m[1]][+m[2]] += row.ms;
+      } else if (row.kind === "perf") {
+        const i = row.key.lastIndexOf("|"), b = row.key.slice(0, i), bin = +row.key.slice(i + 1);
+        if (!usageBuildKnown(b)) continue;   // (-110 follow-up) only builds this deployment served
+        if (!perfHist.has(b)) perfHist.set(b, new Map());
+        bump(perfHist.get(b), bin, row.n);
+      } else if (row.kind === "err" && !o.lite) errRows.push(row);   // (-110 follow-up) kept to the two builds below
+    }
+    const activeOn = new Map();   // day -> Set(uid)
+    const uActive = new Map();    // uid -> {days, ms}
+    for (const [k, ms] of dayMs) {
+      if (ms < USAGE_ACTIVE_MS) continue;
+      const [uid, day] = k.split("|");
+      if (!activeOn.has(day)) activeOn.set(day, new Set());
+      activeOn.get(day).add(uid);
+      const a = uActive.get(uid) || { days: 0, ms: 0 };
+      a.days++; a.ms += ms; uActive.set(uid, a);
+    }
+    const series = days.map((d) => ({ day: d, n: activeOn.has(d) ? activeOn.get(d).size : 0 }));
+    const activeRange = uActive.size;
+    const meanDaily = series.reduce((s, x) => s + x.n, 0) / days.length;
+    const memberDayMin = [];
+    for (const [k, ms] of dayMs) if (ms >= USAGE_ACTIVE_MS && inRange.has(k.split("|")[1])) memberDayMin.push(ms / 60000);
+    const members = [...users.values()].filter((u) => !u.disabledAt);
+    const newMembers = members.filter((u) => etDayStr(u.createdAt) >= days[0]);
+    const tabRows = tabs.map((t) => {
+      const who = [];
+      for (const uid of uActive.keys()) { const ms = uTab.get(uid + "|" + t.key) || 0; if (ms > 0) who.push(ms / 60000); }
+      const ms = tabMs.get(t.key) || 0, prev = tabPrev.get(t.key) || 0;
+      return { key: t.key, label: t.label, gate: t.gate, users: who.length,
+        reach: activeRange ? who.length / activeRange : null, ms, medMin: usageMed(who),
+        prevMs: prev, delta: prev > 0 ? (ms - prev) / prev : null };
+    }).filter((t) => t.ms > 0 || t.prevMs > 0 || t.gate !== "off");
+    const TEN_DAYS = 10 * 864e5;
+    const memberRows = members.map((u) => {
+      const base = { handle: u.handle, display: u.display, admin: !!u.isAdmin, createdAt: u.createdAt,
+        lastSeen: u.lastSeen || 0, online: online.has(u.uid), paused: !!u.usagePaused };
+      base.lapsed = !base.online && now - Math.max(base.lastSeen, 0) > TEN_DAYS && now - (u.createdAt || 0) > TEN_DAYS;
+      if (u.usagePaused) return Object.assign(base, { days: null, minPerDay: null, top: [], dev: null, trend: null });
+      const a = uActive.get(u.uid) || { days: 0, ms: 0 };
+      const top = tabs.map((t) => [t.label, uTab.get(u.uid + "|" + t.key) || 0]).filter((x) => x[1] > 0)
+        .sort((x, y) => y[1] - x[1]).slice(0, 3).map((x) => x[0]);
+      let dev = null, devMs = 0;
+      for (const [k, ms] of uDev) { const i = k.indexOf("|"); if (k.slice(0, i) === u.uid && ms > devMs) { dev = k.slice(i + 1); devMs = ms; } }
+      let curMs = 0; for (const t of tabs) curMs += uTab.get(u.uid + "|" + t.key) || 0;
+      const prev = uPrev.get(u.uid) || 0;
+      return Object.assign(base, { days: a.days, minPerDay: a.days ? a.ms / a.days / 60000 : 0, top, dev,
+        trend: priorKept && prev > 0 ? (curMs - prev) / prev : null });
+    });
+    // (-110) Adoption: of the members ACTIVE in the range, how many did each thing at least once.
+    // Hits count everyone's (a member who acted without a minute on screen still did it).
+    const funnel = USAGE_ACTS.map((k) => ({ key: k, users: [...(actWho.get(k) || [])].filter((uid) => uActive.has(uid)).length, hits: actHits.get(k) || 0 }));
+    let heatTot = 0, core = 0, peak = null;
+    for (let d = 0; d < 7; d++) for (let h = 0; h < 24; h++) {
+      const v = heat[d][h]; heatTot += v; if (h >= 8 && h < 16) core += v;
+      if (v > 0 && (!peak || v > peak.ms)) peak = { dow: d, h, ms: v };
+    }
+    // (-110) Client health. First paint: this build against the previous one.
+    // (-110 follow-up) "Previous" = the most recent KNOWN build (the deploy order the server noted)
+    // other than this one with at least USAGE_PREV_MIN_N samples in range — never whatever string a
+    // beacon sent last.
+    const build = o.build || null;
+    const perfOf = (b) => { const h = b && perfHist.get(b); if (!h) return null; let n = 0; for (const v of h.values()) n += v; return { build: b, n, p50: usagePct(h, 0.5), p75: usagePct(h, 0.75) }; };
+    const prev = usageBuildList.find((b) => b !== build && (perfOf(b) || { n: 0 }).n >= USAGE_PREV_MIN_N) || null;
+    // Errors: only those of this build and the one deployed before it (known builds only, whatever
+    // their paint samples); the text is read for the five shown.
+    const errBuilds = new Set([build, usageBuildList.find((b) => b !== build)].filter(Boolean));
+    for (const row of errRows) {
+      if (!errBuilds.has(row.key.slice(0, row.key.indexOf("|")))) continue;
+      bump(errHits, row.key, row.n); if (row.uid !== USAGE_SITE) addTo(errWho, row.key, row.uid);
+    }
+    const errAll = [...errHits].map(([k, hits]) => ({ k, hits, members: (errWho.get(k) || new Set()).size }))
+      .sort((a, b) => b.hits - a.hits || b.members - a.members);
+    const errs = errAll.slice(0, 5).map(({ k, hits, members }) => {
+      const t = usageErrPend.get(k) || US.errOne.get(k) || {};
+      const parts = k.split("|");
+      return { build: t.build || parts[0], loc: t.loc || parts[1] || "?", msg: t.msg != null ? t.msg : "(message not kept)", hits, members };
+    });
+    return { ok: true, r, today, days, keepDays: USAGE_KEEP_DAYS, priorKept, gen: usageGeneration,
+      kpi: { online: members.filter((u) => online.has(u.uid)).length,
+        activeToday: activeOn.has(today) ? activeOn.get(today).size : 0,
+        activeRange, members: members.length,
+        stickiness: activeRange ? meanDaily / activeRange : null,
+        medMinPerDay: usageMed(memberDayMin),
+        newMembers: newMembers.length, newActive: newMembers.filter((u) => uActive.has(u.uid)).length },
+      series, tabs: tabRows, members: memberRows,
+      funnel, heat: { ms: heat, total: heatTot, peak, coreShare: heatTot ? core / heatTot : null },
+      cohorts: o.lite ? null : usageCohorts(today, members, USAGE_WK_COHORTS),
+      health: { build, perf: { cur: perfOf(build), prev: perfOf(prev) },
+        errors: { distinct: errAll.length, hits: errAll.reduce((s, e) => s + e.hits, 0), top: errs, builds: [...errBuilds] },
+        stale: o.stale != null ? o.stale : null, errCap: USAGE_ERR_CAP } };
+  }
+  // One member's last USAGE_KEEP_DAYS days: minutes per day, tab mix, device mix. Shared by the
+  // member's own card (usageMine) and the operator's drill-in (usageMember, which AUDITS).
+  function usageDetail(u, tabs, now) {
+    const today = usageToday(now), days = usageDays(today, USAGE_KEEP_DAYS);
+    const label = new Map((tabs || []).map((t) => [t.key, t.label]));
+    const perDay = new Map(), tab = new Map(), dev = new Map(), act = new Map();
+    const pend = [...usagePend.values()].filter((r) => r.uid === u.uid && r.day >= days[0]);
+    for (const r of US.rangeOf.all(u.uid, days[0], today).concat(pend)) {
+      if (r.kind === "tab") { perDay.set(r.day, (perDay.get(r.day) || 0) + r.ms); tab.set(r.key, (tab.get(r.key) || 0) + r.ms); }
+      else if (r.kind === "dev") dev.set(r.key, (dev.get(r.key) || 0) + r.ms);
+      else if (r.kind === "act") act.set(r.key, (act.get(r.key) || 0) + r.n);   // (-110) the features row
+    }
+    const total = [...tab.values()].reduce((s, v) => s + v, 0);
+    return { handle: u.handle, display: u.display, createdAt: u.createdAt,
+      invitedBy: u.invitedBy ? ((users.get(u.invitedBy) || {}).display || null) : null,
+      paused: !!u.usagePaused, keepDays: USAGE_KEEP_DAYS, days,
+      minutes: days.map((d) => Math.round((perDay.get(d) || 0) / 6000) / 10),
+      activeDays: days.filter((d) => (perDay.get(d) || 0) >= USAGE_ACTIVE_MS).length,
+      ms: total,
+      tabs: [...tab].sort((a, b) => b[1] - a[1]).map(([k, ms]) => ({ key: k, label: label.get(k) || k, ms, share: total ? ms / total : 0 })),
+      devices: [...dev].sort((a, b) => b[1] - a[1]).map(([k, ms]) => ({ key: k, ms })),
+      acts: USAGE_ACTS.map((k) => ({ key: k, n: act.get(k) || 0 })) };
+  }
+  function usageMine(uid, tabs, now) {
+    const u = users.get(uid);
+    if (!u) return { ok: false, error: "no such account" };
+    return Object.assign({ ok: true }, usageDetail(u, tabs, now));
+  }
+  function usageMember(adminUid, handle, tabs, now) {
+    const u = getUserByHandle(handle);
+    if (!u) return { ok: false, error: "no such member" };
+    // Every drill-in is written down, paused or not — the same rule as the message read-through.
+    adminAudit(adminUid, "view-usage", null, u.handle);
+    const d = usageDetail(u, tabs, now);
+    if (u.usagePaused) return { ok: true, handle: d.handle, display: d.display, createdAt: d.createdAt, invitedBy: d.invitedBy, paused: true, keepDays: USAGE_KEEP_DAYS };
+    return Object.assign({ ok: true }, d);
+  }
+
   // ---- backup + close --------------------------------------------------------------------------
   // accounts.db is the one file on the volume with no other copy anywhere: users, password hashes,
   // invites, every message and every attachment. VACUUM INTO writes a consistent, compacted copy
@@ -2153,28 +2940,79 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   // volume, which is what turns "survives a bad migration" into "survives losing the volume".
   // Deliberately NOT the GitHub ledger backup: this file carries PII.
   let lastBackup = null;
-  function backup(dir, keep) {
+  // Split in three (build 2026.09.24-101) so the scheduled path can run the copy off the event
+  // loop: plan (names, dir), copy (VACUUM INTO — in-process here, in a worker in backupAsync),
+  // land (rename over, stat, rotate). Same names, same rotation, same result shape either way.
+  function backupPlan(dir, keep) {
     const out = dir || path.join(dataDir, "backups");
     const n = Number.isFinite(keep) && keep >= 1 ? Math.floor(keep) : 7;
+    fs.mkdirSync(out, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+    const file = path.join(out, `accounts-${stamp}-${Date.now() % 100000}.db`);
+    const tmp = file + ".tmp";
+    // (build 2026.09.24-107) A copy a kill interrupted (SIGTERM mid-VACUUM) left its .tmp behind
+    // and nothing ever removed it. Backups are serialized, so at the start of one no other copy of
+    // this process is writing — every accounts-*.db.tmp here is litter.
+    try { for (const f of fs.readdirSync(out)) if (/^accounts-\d{8}-\d{6}-\d+\.db\.tmp$/.test(f)) { try { fs.unlinkSync(path.join(out, f)); } catch (_) {} } } catch (_) {}
+    return { out, n, file, tmp };
+  }
+  const backupCopySync = (tmp) => { try { fs.unlinkSync(tmp); } catch (_) {} db.exec("VACUUM INTO '" + tmp.replace(/'/g, "''") + "'"); };
+  function backupLand({ out, n, file, tmp }) {
+    fs.renameSync(tmp, file);
+    const bytes = fs.statSync(file).size;
+    // Rotate: newest n stay, the rest go. Names sort chronologically by construction.
+    const old = fs.readdirSync(out).filter((f) => /^accounts-\d{8}-\d{6}-\d+\.db$/.test(f)).sort();
+    for (const f of old.slice(0, Math.max(0, old.length - n))) { try { fs.unlinkSync(path.join(out, f)); } catch (_) {} }
+    lastBackup = { at: Date.now(), file, bytes };
+    return { ok: true, file, bytes, kept: Math.min(n, old.length) };
+  }
+  // Synchronous: tests, and the fallback shape. The daily schedule uses backupAsync.
+  function backup(dir, keep) {
+    let plan = null;
     try {
-      fs.mkdirSync(out, { recursive: true });
-      const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
-      const file = path.join(out, `accounts-${stamp}-${Date.now() % 100000}.db`);
-      const tmp = file + ".tmp";
-      try { fs.unlinkSync(tmp); } catch (_) {}
-      db.exec("VACUUM INTO '" + tmp.replace(/'/g, "''") + "'");
-      fs.renameSync(tmp, file);
-      const bytes = fs.statSync(file).size;
-      // Rotate: newest n stay, the rest go. Names sort chronologically by construction.
-      const old = fs.readdirSync(out).filter((f) => /^accounts-\d{8}-\d{6}-\d+\.db$/.test(f)).sort();
-      for (const f of old.slice(0, Math.max(0, old.length - n))) { try { fs.unlinkSync(path.join(out, f)); } catch (_) {} }
-      lastBackup = { at: Date.now(), file, bytes };
-      return { ok: true, file, bytes, kept: Math.min(n, old.length) };
+      plan = backupPlan(dir, keep);
+      backupCopySync(plan.tmp);
+      return backupLand(plan);
     } catch (e) {
+      if (plan) { try { fs.unlinkSync(plan.tmp); } catch (_) {} }
       return { ok: false, error: (e && e.message) || String(e) };
     }
   }
+  // The scheduled path (build 2026.09.24-101): the VACUUM runs in a worker thread on its own
+  // connection to accounts.db (WAL: a concurrent reader is fine), so the copy of every message and
+  // attachment no longer stalls the server. A worker that cannot start runs backupCopySync instead.
+  // Serialized: an overlapping call (boot timer racing the daily one) waits for the running copy.
+  let backupChain = Promise.resolve(), backupTmpLive = null;
+  function backupAsync(dir, keep, opts) {
+    const run = async () => {
+      let plan = null;
+      try {
+        plan = backupPlan(dir, keep);
+        backupTmpLive = plan.tmp;
+        await vacuumIntoAsync(file, plan.tmp, () => backupCopySync(plan.tmp), opts);
+        return backupLand(plan);
+      } catch (e) {
+        if (plan) { try { fs.unlinkSync(plan.tmp); } catch (_) {} }
+        return { ok: false, error: (e && e.message) || String(e) };
+      } finally { backupTmpLive = null; }
+    };
+    const p = backupChain.then(run, run);
+    backupChain = p.catch(() => {});
+    return p;
+  }
+  // (build 2026.09.24-107) Shutdown: give a running backup a moment to land (bounded — never holds
+  // the exit). true = idle, false = still copying at the deadline (close() then removes its .tmp).
+  function backupDrain(timeoutMs) {
+    let t;
+    const to = new Promise((r) => { t = setTimeout(() => r(false), timeoutMs > 0 ? timeoutMs : 0); });
+    return Promise.race([backupChain.then(() => true, () => true), to]).finally(() => clearTimeout(t));
+  }
   function close() {
+    // (build 2026.09.24-109) the last minute of usage lands before the handle closes
+    try { usageFlush(); } catch (_) {}
+    // A copy still running is abandoned with the process: its partial file goes now (the worker
+    // may still hold it open — unlinking an open file is fine), not at the next boot's backup.
+    if (backupTmpLive) { try { fs.unlinkSync(backupTmpLive); } catch (_) {} }
     try { db.exec("PRAGMA wal_checkpoint(TRUNCATE);"); } catch (_) {}
     try { db.close(); } catch (_) {}
   }
@@ -2182,7 +3020,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
   return {
     // identity
     signSession, sessionUser, tokenFor, countUsers, getUser, getUserByHandle, listUsers, pub, deriveKey,
-    backup, close, lastBackup: () => lastBackup, msgSeq,
+    backup, backupAsync, backupDrain, close, lastBackup: () => lastBackup, msgSeq,
     login, setPassword, signOutEverywhere, setDisabled, setAdmin, renameUser, touch, hydrate,
     // invites
     mintInvite, readInvite, revokeInvite, listInvites, redeem, bootstrap, claim, inviteState,
@@ -2191,14 +3029,24 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     setMarkSource, threadFor, threadPeers, isMember, memberUids, send, edit, drop,
     threads, history, sync, search, markRead, setMuted, setBoardNotify,
     setTgSync, tgSyncThread, tgSyncAll, mirrorRows, bridgeSyncText,
+    tgMapAdd, tgMapFor, tgMapPack, mirrorRowsById, bridgeSyncFile, bridgeEdit, reactApply, reactTop,
     closeThread, reopenThread, clearHistory,
     createGroup, addMembers, removeMember, leaveGroup, renameGroup, deleteGroup,
     createBoard, joinBoard, listBoards, setTweetSource,
     react, REACTIONS, putFile, readFile, removeFile, sweepFiles, sweepRetention, bridgeReply,
     watchList, setWatch, pin, pinsOf, calls, callClose, callExtend, callDrop, exportThread,
+    targetSweep, setBarSource,
     prefsGet, prefsPut,
     walletGet, walletSet, walletDrop, walletsAll,
     adminThreads, adminHistory, adminSearch, adminAuditLog,
+    // usage (build 2026.09.24-109)
+    usageRecord, usageFlush, usageRetain, usageSummary, usageMine, usageMember, usagePaused, setUsagePaused,
+    usageGen: () => usageGeneration, usagePending: () => usagePend.size, USAGE_KEEP_DAYS,
+    // (build 2026.09.24-110) action counters, the allowlist, and the perf bucket (exported for the tests)
+    usageAct, USAGE_ACTS, USAGE_ERR_CAP, usagePerfBucket, usageHourKey,
+    // (build 2026.09.24-110 follow-up) the known-build gate and the error-row bounds
+    usageBuildSeen, usageBuildKnown, usageBuilds: () => usageBuildList.slice(),
+    USAGE_ERR_TOTAL, USAGE_ERR_NEW_PER_DAY, USAGE_WK_KEEP_DAYS, USAGE_PREV_MIN_N,
     pendingEscalations, markEscalated,
     setPxHistory,
     // browser push subscriptions — stored here, delivered by the server (which holds the keys)

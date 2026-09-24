@@ -8,7 +8,7 @@ import { setScope, showView } from "./backtest.js";
 import { DAY, G, el, esc, safeHref, state } from "./core.js";
 import { fetchJSON } from "./data.js";
 import { render } from "./markets.js";
-import { renderEarnings } from "./notes.js";
+import { earnSetupDrawerHtml, renderEarnings } from "./notes.js";
 import { fillDrawerNews, fmtAge, renderNews, renderSignals } from "./trend.js";
 
 
@@ -102,6 +102,22 @@ async function loadEarnings(){
       wireMacroStrip(); renderMacroStrip();   // the banner rides this payload — every tab, both scopes
       if(el('view-earnings')&&!el('view-earnings').hidden) renderEarnings();
       render();   // paint/refresh the E badges without waiting for the next snapshot cycle
+    }
+  }catch(_){}
+}
+// Pre-earnings setup cards (build 2026.09.24-100): their own payload, pulled beside the calendar
+// and on a shorter leash (positioning moves; the server rebuilds at most once a minute and 304s
+// an unchanged body). Feeds the Setups strip on the tab and the drawer section — an open drawer
+// on a carded name is filled in place, so a pull that lands after the drawer opened still shows.
+let _setupLast=0;
+async function loadEarnSetups(){
+  _setupLast=Date.now();
+  try{ const d=await fetchJSON('/api/earnings/setups');
+    if(d&&Array.isArray(d.cards)){ state.earnSetups=d;
+      const m=new Map(); for(const c of d.cards) m.set(c.t,c); state.earnSetupMap=m;
+      if(el('view-earnings')&&!el('view-earnings').hidden) renderEarnings();
+      const ds=el('dsetup'), r=state.detail?state.rows.get(state.detail):null;
+      if(ds&&r){ const tmp=document.createElement('div'); tmp.innerHTML=earnSetupDrawerHtml(r); const nx=tmp.firstElementChild; if(nx) ds.replaceWith(nx); }
     }
   }catch(_){}
 }
@@ -214,5 +230,5 @@ function earnBadge(r){
   const eps=p.e.eps!=null?` \u00b7 EPS est ${p.e.eps}`:'';
   return `<i class="eb ${p.diff===0?'eb0':'eb1'}" title="Earnings ${p.diff===0?'TODAY':'tomorrow'} \u00b7 ${earnSessLbl(p.e.s)}${eps} \u00b7 ${p.e.d} (ET calendar day)">E</i>`;
 }
-function openEarnings(){ renderEarnings(); if(Date.now()-_earnLast>60*1000) loadEarnings(); }
-export { _earnLast, _newsLast, _sigLast, earnBadge, earnDiffC, earnFilingHtml, earnNext, earnSessLbl, etDayStrC, loadEarnings, loadNews, loadSignals, loadTgChannels, macroDayLbl, macroList, macroNextC, macroRangeFmt, macroRowHtml, macroStatFmt, macroStateC, macroTimeLbl, openEarnings, openNews, openSignals, renderMacroStrip, saveTgChannels, scopeGuard, secShort, setSigTabBadge, tgChans };
+function openEarnings(){ renderEarnings(); if(Date.now()-_earnLast>60*1000) loadEarnings(); if(Date.now()-_setupLast>60*1000) loadEarnSetups(); }
+export { _earnLast, _newsLast, _setupLast, _sigLast, earnBadge, earnDiffC, earnFilingHtml, earnNext, earnSessLbl, etDayStrC, loadEarnSetups, loadEarnings, loadNews, loadSignals, loadTgChannels, macroDayLbl, macroList, macroNextC, macroRangeFmt, macroRowHtml, macroStatFmt, macroStateC, macroTimeLbl, openEarnings, openNews, openSignals, renderMacroStrip, saveTgChannels, scopeGuard, secShort, setSigTabBadge, tgChans };

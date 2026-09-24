@@ -5,13 +5,13 @@
 import { accWire, admDmWire, admFoldApply, admFoldWire, loadAccess, loadAdmDm, renderAccess, renderAdmDm } from "./access.js";
 import { HASH_VIEWS, pushToast, schedDaysClient } from "./alerts.js";
 import { showView } from "./backtest.js";
-import { clamp, el, esc, fmtUsd, lerp, state } from "./core.js";
+import { clamp, el, esc, fmtUsd, lazyCall, lerp, state } from "./core.js";
 import { _lastHealth, fetchJSON, renderAdmLoop, updateFreshTray } from "./data.js";
 import { openDetail } from "./drawer.js";
 import { FOC, focFetch } from "./focus.js";
 import { homeWallToEtMin, sessEx } from "./markets.js";
 import { TAB_GROUPS, applyTabVisibility, buildTabGroups, wireTabDrag } from "./nav.js";
-import { drawSessions } from "./positioning.js";
+import { shPanel } from "./share.js";
 import { termFind } from "./terminal.js";
 import { loadPush, pushAct, pushState } from "./triggers.js";
 
@@ -20,6 +20,9 @@ import { loadPush, pushAct, pushState } from "./triggers.js";
 // rolls back on failure — a batch write would make a partial failure ambiguous, and there is no save
 // button because a draft state is another way for the panel and the server to disagree.
 let _adm=null, _admVap=false, _admBusy='';
+// (build 2026.09.24-110) Each tab's 30-day reach from the Usage aggregates (GET /api/features
+// carries it; a flag write's response does not, so it is kept apart from _adm).
+let _admReach=null;
 async function openAdmin(){ if(!IS_ADMIN) return;
   admFoldWire();
   renderAdmLoop(_lastHealth); updateFreshTray(); renderAdmin(); renderAudit(); loadAudit();
@@ -30,7 +33,7 @@ async function openAdmin(){ if(!IS_ADMIN) return;
   await loadAdmin();
   admFoldApply(); }
 async function loadAdmin(){
-  try{ _adm=await fetchJSON('/api/features'); }
+  try{ _adm=await fetchJSON('/api/features'); _admReach=_adm&&_adm.usage||null; }
   catch(e){ _adm={error:String(e&&e.message||e)}; }
   renderAdmin(); }
 // ===== admin panel: weekly classification audit =================================================
@@ -512,8 +515,12 @@ function renderAdmin(){
       ? '<span class="adm-lock" title="'+(m.pin?'Always public — this is the fallback every gated view falls through to':'Always admin — this is the panel that controls every other flag')+'">'+esc(admLabel(m.state))+' · locked</span>'
       : ['public','admin','off'].map(v=>'<button type="button" class="adm-b'+(m.state===v?' on '+v:'')+'" data-k="'+esc(m.key)+'" data-v="'+v+'"'+(_admBusy===m.key?' disabled':'')+'>'+v+'</button>').join('');
     const dim=_admVap && m.state!=='public';
+    // (build 2026.09.24-110) "quiet": fewer than 10% of the members active in the last 30 days opened
+    // this tab at all — the Usage fold's reach column, here where the gate decision is made.
+    const ru=!scope&&m.kind==='tab'&&_admReach&&_admReach.tabs?_admReach.tabs[m.key]:null;
+    const quiet=ru&&ru.quiet?' <span class="acc-chip warn adm-quiet" title="reached '+Math.round((ru.reach||0)*100)+'% of the '+(+_admReach.active||0)+' members active in the last 30 days (Usage fold)">quiet · '+Math.round((ru.reach||0)*100)+'%</span>':'';
     return '<div class="adm-row'+(scope?' adm-scope':'')+(dim?' dim':'')+'">'
-      +'<div class="adm-meta"><div class="adm-lab">'+esc(m.label)+'</div>'
+      +'<div class="adm-meta"><div class="adm-lab">'+esc(m.label)+quiet+'</div>'
       +'<div class="adm-key">'+esc(m.key)+(scope?' · filters payload rows · no route of its own':(m.routes&&m.routes.length?' · '+esc(m.routes.join(', ')):' · no route'))+'</div></div>'
       +'<div class="adm-seg">'+seg+'</div></div>';
   };
@@ -618,7 +625,7 @@ function applyHash(){ let h; try{ h=decodeURIComponent(location.hash.replace(/^#
   // showView re-checks anyway, but stopping here keeps a gated #hash from clearing the active view.
   if(HASH_VIEWS.has(h) && tabVisible(h)) showView(h); }
 let _analyticsInflight=false;
-function renderSessions(){ drawSessions(); loadAnalytics(); }
+function renderSessions(){ lazyCall('positioning','drawSessions'); loadAnalytics(); }
 async function loadAnalytics(){
   if(_analyticsInflight) return; _analyticsInflight=true;
   const cr=state.scope==='crypto';
@@ -631,7 +638,7 @@ async function loadAnalytics(){
   }
   catch(e){ if(cr){ state.analyticsCrypto=Object.assign(state.analyticsCrypto||{},{err:e.message||String(e)}); } else { state.analyticsStocks=Object.assign(state.analyticsStocks||{},{err:e.message||String(e)}); } syncAnalyticsSlot(); }
   finally{ _analyticsInflight=false; }
-  if(state.view==='sessions') drawSessions();
+  if(state.view==='sessions') lazyCall('positioning','drawSessions');
 }
 // Point state.analytics.{data,err,ts} at the slot for the live scope — preserves the many existing
 // call sites that read state.analytics.* while keeping per-universe payloads isolated.
@@ -903,8 +910,8 @@ function renderClocks(hc){
   return sHead('Hour-of-day clocks',`the robust timing layer — range volatility, volume and funding by ${_tz} hour`)+controls+twin+sCap(cap);
 }
 function attachClockControls(){
-  const sel=el('clocksel'); if(sel) sel.addEventListener('change',()=>{ state.analytics.clock.sel=sel.value; drawSessions(); });
-  document.querySelectorAll('.clockmetric').forEach(b=>b.addEventListener('click',()=>{ state.analytics.clock.metric=b.dataset.m; drawSessions(); }));
+  const sel=el('clocksel'); if(sel) sel.addEventListener('change',()=>{ state.analytics.clock.sel=sel.value; lazyCall('positioning','drawSessions'); });
+  document.querySelectorAll('.clockmetric').forEach(b=>b.addEventListener('click',()=>{ state.analytics.clock.metric=b.dataset.m; lazyCall('positioning','drawSessions'); }));
 }
 
 // ---- asset-class composite overlays (pooled hour-of-day curves, from the Slice-3 hourClock data) ----
@@ -950,7 +957,7 @@ function renderClassOverlay(hc){
     : `Each class's pooled hour-of-day shape, normalized so 1× is its own daily average — this compares <b>timing</b>, not absolute size.${_szCash()?' Blue band = US cash session.':''} <b>Hover</b> for values.`;
   return sHead('Asset-class overlays','pooled hour-of-day shapes, one line per class')+controls+legend+sCard(overlayLineSvg(series, st.metric))+sCap(cap);
 }
-function attachOverlayControls(){ document.querySelectorAll('.ovmetric').forEach(b=>b.addEventListener('click',()=>{ state.analytics.overlay.metric=b.dataset.m; drawSessions(); })); }
+function attachOverlayControls(){ document.querySelectorAll('.ovmetric').forEach(b=>b.addEventListener('click',()=>{ state.analytics.overlay.metric=b.dataset.m; lazyCall('positioning','drawSessions'); })); }
 
 // ---- day-of-week 7x24 heatmap ----
 const WD_NAMES=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
@@ -995,8 +1002,8 @@ function renderDow(dow){
   return sHead('Day-of-week × hour heatmap','the weekend-gap and Friday→Monday risk map')+controls+legend+`<div class="s-card" style="overflow-x:auto">${dowHeatSvg(r.grid, st.metric)}</div>`+sCap(cap);
 }
 function attachDowControls(){
-  const sel=el('dowsel'); if(sel) sel.addEventListener('change',()=>{ state.analytics.dow.sel=sel.value; drawSessions(); });
-  document.querySelectorAll('.dowmetric').forEach(b=>b.addEventListener('click',()=>{ state.analytics.dow.metric=b.dataset.m; drawSessions(); }));
+  const sel=el('dowsel'); if(sel) sel.addEventListener('change',()=>{ state.analytics.dow.sel=sel.value; lazyCall('positioning','drawSessions'); });
+  document.querySelectorAll('.dowmetric').forEach(b=>b.addEventListener('click',()=>{ state.analytics.dow.metric=b.dataset.m; lazyCall('positioning','drawSessions'); }));
 }
 
 // ---- funding heatmap: every market's carry, at 1h / 8h / 24h ----
@@ -1154,7 +1161,7 @@ function fhHeatSvg(fh,rows,tf){
     `<text x="${W-4}" y="13" text-anchor="end" class="fh-hd"><title>${esc(nowTip)}</title>${apr?'now APR':'now / '+esc(tf)}</text>`;
   rows.forEach((r,ri)=>{
     const y=pt+ri*ch, cells=fhCells(fh,r,tf), mraw=fhMean(r,tf), mean=mraw==null?null:mraw*(apr?ann:1);
-    s+=`<text x="${lx-7}" y="${(y+ch/2+3.3).toFixed(1)}" text-anchor="end" class="fh-tk">${esc(r.ticker)}</text>`;
+    s+=`<text x="${lx-7}" y="${(y+ch/2+3.3).toFixed(1)}" text-anchor="end" class="fh-tk" data-coin="${esc(r.coin||'')}">${esc(r.ticker)}</text>`;   // data-coin: the share glyph's handle (build 2026.09.24-98)
     for(let i=0;i<nb;i++){
       const x=lx+i*cw, v=cells[i], col=fhColor(v,cap);
       const t0=ax.t0+i*ax.width, when=f.d.format(t0)+(ax.bucketHours>=24?'':' '+f.h.format(t0));
@@ -1228,6 +1235,24 @@ function renderFundHeat(fh){
   // No sHead: the board IS the tab now, so the tab's own title carries the name. A section header
   // here would print the same sentence twice, one line apart.
   return controls+legend+`<div class="s-card" style="overflow-x:auto">${fhHeatSvg(fh,shown,tf)}</div>`+sCap(capTxt);
+}
+// A heatmap row as a card (build 2026.09.24-98): the grid is a picture (SVG), so the row is read from
+// the payload that drew it, in the unit on screen — the window mean, the live now, the window, and
+// the row's cells as the card's spark (zero-lined: the sign is the reading). Same numbers, same
+// formatter, same "flat wears no colour" rule as the row's own labels.
+function fhShareCard(coin){
+  const fh=((state.funding&&state.funding.view)||{}).data; if(!fh||!Array.isArray(fh.rows)) return null;
+  const row=fh.rows.find(r=>r.coin===coin); if(!row) return null;
+  const tf=fhTf(fh), ax=(fh.axis||{})[tf]; if(!ax) return null;
+  const apr=fhUnit()==='apr', cap=fhCap(fh,tf), dp=fhDpU(cap), zero=0.5*Math.pow(10,-dp)/100;
+  const cells=fhCells(fh,row,tf), mraw=fhMean(row,tf), mean=mraw==null?null:mraw*(apr?fhAnn(fh,tf):1);
+  const fnow=fhNowOf(row), now=fnow==null?null:fnow*(apr?FH_HPY:ax.bucketHours);
+  const cls=v=>v==null||Math.abs(v)<zero?'sec':(v>0?'neg':'pos');   // red = longs pay, as on the grid
+  const L=(t,v,c)=>({t,c:[{s:v,c:c||''}]});
+  return shPanel({ view:'funding', coin, title:'Funding heat \u00b7 '+tf+(apr?' \u00b7 APR':' \u00b7 per bucket'),
+    rows:[L(apr?'mean APR':'mean / '+tf,fhPct(mean,dp),cls(mean)), L(apr?'now APR':'now / '+tf,fhPct(now,dp),cls(now)),
+      L('window',ax.buckets+' \u00d7 '+ax.bucketHours+'h buckets','sec'), L('reads','+ = longs pay \u00b7 \u2212 = longs receive','sec')],
+    spark:{ v:cells.map(v=>v==null?null:v*100), l:'funding '+fhUnitTag(tf)+' per bucket, oldest left (%)', z:true } });
 }
 function attachFundHeatControls(){
   document.querySelectorAll('.fhunit').forEach(b=>b.addEventListener('click',()=>{ state.analytics.fheat.unit=b.dataset.u==='bucket'?'bucket':'apr';
@@ -1396,5 +1421,5 @@ function renderSeasonality(se){
   const cap = `Bar height = mean return in basis points; whiskers = ±1 standard error across ${isTS?"this name's trading days":'the cross-section'}. Grey bars are noise; green/red bars cleared |t|≥2. Blue band = US cash session. <b>Hover</b> a bar for its mean, t-stat and sample size.`;
   return sHead('Return seasonality by hour','quarantined — pick all, a sector or one name; grey is noise, colored cleared significance')+controls+banner+sCard(seasonBarSvg(v.hours))+sCap(cap);
 }
-function attachSeasonControls(){ const sel=el('seasonsel'); if(sel) sel.addEventListener('change',()=>{ state.analytics.season.sel=sel.value; drawSessions(); }); }
-export { IS_ADMIN, WD_NAMES, _hoverReg, _szCash, applyHash, attachClockControls, attachDowControls, attachLineHover, attachOverlayControls, attachSeasonControls, covPct, featureOn, fhLiveRefresh, fp, hoverChart, lcGrid, lcTicks, loadAnalytics, loadFunding, openAdmin, openFunding, renderClassOverlay, renderClocks, renderClusters, renderDow, renderFunding, renderSeasonality, renderSessionDecomp, renderSessions, sCap, sCard, sHead, sLeg, sessDate, syncAnalyticsSlot, syncFundingSlot, tabVisible, toggleViewAsPublic };
+function attachSeasonControls(){ const sel=el('seasonsel'); if(sel) sel.addEventListener('change',()=>{ state.analytics.season.sel=sel.value; lazyCall('positioning','drawSessions'); }); }
+export { IS_ADMIN, WD_NAMES, _hoverReg, _szCash, applyHash, attachClockControls, attachDowControls, attachLineHover, attachOverlayControls, attachSeasonControls, covPct, featureOn, fhLiveRefresh, fhShareCard, fp, hoverChart, lcGrid, lcTicks, loadAnalytics, loadFunding, openAdmin, openFunding, renderClassOverlay, renderClocks, renderClusters, renderDow, renderFunding, renderSeasonality, renderSessionDecomp, renderSessions, sCap, sCard, sHead, sLeg, sessDate, syncAnalyticsSlot, syncFundingSlot, tabVisible, toggleViewAsPublic };

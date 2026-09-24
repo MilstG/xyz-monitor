@@ -6,15 +6,19 @@ const zlib = require("zlib");
 const gzipAsync = require("util").promisify(zlib.gzip);   // -08: threadpool gzip for the cached-serve path
 const Fastify = require("fastify");
 const { openStore } = require("./src/store");
+const { createUsageGate } = require("./src/usage-gate");
 const { createPoller } = require("./src/poller");
 const { openAccounts, PW_MIN: ACCOUNT_PW_MIN, DM_MAX_LEN: ACCOUNT_DM_MAX,
   FILE_MAX: ACCOUNT_DM_FILE_MAX } = require("./src/accounts");
-const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HELP, RULE_OP_LABEL, validateCard, cardText } = require("./src/compute");
+const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HELP, RULE_OP_LABEL, validateCard, cardText, tgReactOut, tgReactIn } = require("./src/compute");
 
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.23-94";
+const VERSION = "2026.09.24-110";
+// (build 2026.09.24-107) Distinguishes this process from the last one in ETags built on
+// per-process counters (a restart must never 304 a client onto a different body).
+const BOOT_NONCE = Date.now().toString(36) + crypto.randomBytes(3).toString("hex");
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -141,6 +145,9 @@ const store = openStore(DATA_DIR);
 // this is market data, none of it is on the 15s path, and all of it wants transactions rather
 // than the whole-file tmp+rename discipline the JSON caches use.
 const ACCOUNTS = openAccounts(DATA_DIR, { sessionDays: SESSION_DAYS });
+// (build 2026.09.24-110 follow-up) This deployment serves VERSION: it joins the short known-builds
+// list (the current build + the 3 before it) a usage beacon's build stamp is checked against.
+try { ACCOUNTS.usageBuildSeen(VERSION); } catch (_) {}
 // The legacy-door secrets, keyed by the accounts' random secret so they are never guessable. The
 // old derivation hashed `xyzmon-session|user|password` directly: with SITE_PASSWORD unset (the
 // documented open posture) that was a constant anyone could recompute, and a forged legacy token
@@ -206,6 +213,7 @@ let poller = null;
 // inside buildServer before this, which made the shutdown loop a swallowed ReferenceError: streams
 // were never closed on SIGTERM and the deploy notice they carry never went out.
 let SSE_REGISTRY = null;
+let USAGE_SWEEP = null;   // (build 2026.09.24-110 follow-up) buildServer's usage sweep, for main() and shutdown
 
 // Weak ETag from the payload's data version so an unchanged snapshot revalidates to 304
 // (browsers polling every 30s get a tiny empty response instead of the full table).
@@ -274,17 +282,79 @@ function sendCachedBody(req, reply, body, tag) {
 // cache holds the built object under that key, giving the serialize+gzip memo a stable reference
 // to hit on the tf-toggle spam these routes actually see. A new content version yields a new key,
 // so a stale body is never served — the map just accumulates a superseded entry, pruned by size.
-const keyedCache = new Map();   // etagKey -> built payload object (stable identity for the memos)
-function serveKeyed(req, reply, etagKey, build, fallback) {
+//
+// Byte-bounded LRU (build 2026.09.24-102). The cap used to be 800 ENTRIES with insertion-order
+// eviction, whatever their size — 800 deep-candle payloads is hundreds of MB — and each entry held
+// the built object while the WeakMap memos held its string and gzip Buffer beside it. An entry is
+// now just what is served: the serialized string (built once, the object is then dropped) and its
+// gzip Buffer once compressed, both counted against KEYED_MAX_BYTES; a hit moves the entry to the
+// most-recent end; eviction takes the least-recently used until both caps hold. An optional `slot`
+// names the payload a key is a VERSION of (one chart, one coin's series): a new version replaces
+// the previous one instead of piling up next to it — the tf-candle key folds a ~0.1% price bucket
+// (the forming bar's live close) and would otherwise mint a fresh entry on every small move.
+const KEYED_MAX_BYTES = 64 * 1024 * 1024, KEYED_MAX_ENTRIES = 800;
+function makeKeyedCache(maxBytes, maxEntries) {
+  const map = new Map(), slots = new Map();   // key -> { key, s, gz, bytes, slot, live }; slot -> key
+  let bytes = 0;
+  const drop = (k) => {
+    const e = map.get(k); if (!e) return;
+    map.delete(k); bytes -= e.bytes; e.live = false;
+    if (e.slot != null && slots.get(e.slot) === k) slots.delete(e.slot);
+  };
+  const evict = () => { for (const k of map.keys()) { if (bytes <= maxBytes && map.size <= maxEntries) break; drop(k); } };
+  return {
+    get(k) { const e = map.get(k); if (e) { map.delete(k); map.set(k, e); } return e; },   // LRU touch
+    put(k, s, slot) {
+      drop(k);
+      if (slot != null) { const prev = slots.get(slot); if (prev !== undefined) drop(prev); slots.set(slot, k); }
+      const e = { key: k, s, gz: null, bytes: s.length, slot: slot == null ? null : slot, live: true };
+      map.set(k, e); bytes += e.bytes; evict();
+      return e;
+    },
+    // The compressed Buffer joins the entry's account when it lands (if the entry is still live).
+    addGz(e, buf) { e.gz = buf; if (e.live && map.get(e.key) === e) { e.bytes += buf.length; bytes += buf.length; evict(); } },
+    stats: () => ({ entries: map.size, bytes, slots: slots.size }),
+    keys: () => [...map.keys()],
+  };
+}
+const keyedCache = makeKeyedCache(KEYED_MAX_BYTES, KEYED_MAX_ENTRIES);
+function serveKeyed(req, reply, etagKey, build, fallback, slot) {
   const tag = 'W/"' + etagKey + '"';
   if (req.headers["if-none-match"] === tag) { reply.header("etag", tag).header("cache-control", "no-cache").code(304).send(); return; }
-  let body = keyedCache.get(etagKey);
-  if (body === undefined) {
-    body = build() || fallback;
-    keyedCache.set(etagKey, body);
-    if (keyedCache.size > 800) { let i = 0; for (const k of keyedCache.keys()) { keyedCache.delete(k); if (++i >= 400) break; } }
+  let e = keyedCache.get(etagKey);
+  if (e === undefined) e = keyedCache.put(etagKey, JSON.stringify(build() || fallback), slot);
+  // Same response as sendCachedBody gives for the object: headers, the >=1KB gzip rule, threadpool
+  // compression shared by concurrent first requests, then the Buffer on the synchronous path.
+  reply.header("cache-control", "no-cache");
+  reply.header("etag", tag);
+  reply.header("content-type", "application/json; charset=utf-8");
+  if (e.s.length >= 1024 && /\bgzip\b/.test(req.headers["accept-encoding"] || "")) {
+    let gz = e.gz;
+    if (gz === null) { const ent = e; gz = e.gz = gzipAsync(e.s).then((buf) => { keyedCache.addGz(ent, buf); return buf; }); }
+    reply.header("content-encoding", "gzip");
+    reply.header("vary", "accept-encoding");
+    return Buffer.isBuffer(gz) ? reply.send(gz) : gz.then((buf) => reply.send(buf));
   }
-  return sendCachedBody(req, reply, body, tag);
+  return reply.send(e.s);
+}
+
+// SSE write with backpressure (build 2026.09.24-101). Every frame used to be written blind: a
+// client that stopped reading (a phone asleep on a half-dead connection, a stalled proxy) kept its
+// socket "open" while Node buffered every snapshot poke, DM and heartbeat for it in memory, without
+// bound, for as long as the TCP connection lingered. Now a stream whose unflushed buffer is past
+// SSE_MAX_BUFFERED is dropped — detached and destroyed; EventSource reconnects on its own and the
+// hello frame resyncs it — and a destroyed or ended socket is detached instead of written to.
+// Returns true when the frame was queued.
+const SSE_MAX_BUFFERED = 64 * 1024;
+function sseWriteTo(entry, frame, detach) {
+  const res = entry && entry.res;
+  if (!res || res.destroyed || res.writableEnded) { if (detach) detach(entry); return false; }
+  if ((res.writableLength || 0) > SSE_MAX_BUFFERED) {
+    if (detach) detach(entry);
+    try { res.destroy(); } catch (_) {}
+    return false;
+  }
+  try { res.write(frame); return true; } catch (_) { return false; }
 }
 
 // Constant-time credential check: hash both sides to equal length, then timingSafeEqual.
@@ -739,7 +809,12 @@ async function buildServer() {
   // The calls scoreboard's fixed horizons read the poller's daily spine; the desk digest reads
   // the member's own calls record. Both injected here — neither module reaches into the other.
   ACCOUNTS.setPxHistory((coin, atTs) => (poller.dailyCloseAt ? poller.dailyCloseAt(coin, atTs) : null));
+  // Call targets (build 2026.09.24-95): a target's hit or stop is decided on the same 5-minute
+  // archive the level scanner and the sweep detector read — injected, so accounts.js never opens it.
+  ACCOUNTS.setBarSource((coin, from, to) => (store.readCandles ? store.readCandles(coin, from, to) : []));
   // The digest's record is the last 30 days of CLOSED calls; the board reads the lifetime.
+  // (build 2026.09.24-110) A Telegram linked through /start CODE counts once for its account (usage funnel).
+  if (poller.setPushLinkHook) poller.setPushLinkHook((owner) => ACCOUNTS.usageAct(owner, "telegram-link"));
   if (poller.setDeskSource) poller.setDeskSource((uid) => ACCOUNTS.calls(uid, { limit: 100, windowMs: 30 * 86400e3 }));
 
   // ---- tweet preview cards ---------------------------------------------------------------------
@@ -938,7 +1013,12 @@ async function buildServer() {
   fastify.get("/api/features", (req, reply) => {
     reply.header("cache-control", "no-store");
     if (!isAdmin(req)) return reply.code(403).send({ error: "forbidden" });
-    return poller.getFeatures(true);
+    // (build 2026.09.24-110) Each tab's 30-day reach from the Usage aggregates, for the "quiet" flag
+    // on these rows: the same numbers the Usage fold's tab table shows at 30d. Best-effort — a
+    // failure here must never cost the operator the switchboard.
+    let usage;
+    try { usage = usageReach(); } catch (_) { usage = null; }
+    return Object.assign({}, poller.getFeatures(true), { usage });
   });
   // 8 KB cap — the payload is { key, state }; anything larger is malformed or hostile (413).
   fastify.post("/api/features", { bodyLimit: 8 * 1024 }, async (req, reply) => {
@@ -1441,6 +1521,195 @@ async function buildServer() {
     }
     return r;
   });
+  // ===== usage beacon + "Your usage" (build 2026.09.24-109) ======================================
+  // First-party, members only: which tab is on screen and for how long, rolled into daily
+  // aggregates (accounts.js usage_day). The beacon carries {tabs:{view -> visible ms}, pwa} and
+  // nothing else — no tickers, no search text, no filters, and the device class is derived HERE
+  // from the User-Agent and stored as one of three words; the UA itself is never kept.
+  // Public (signed-out) tracking is a server flag, OFF by default, and even on it only acknowledges:
+  // the anonymous-visitor bucket is deliberately NOT built (the owner decided: off; build -110 kept
+  // it that way rather than ship an id path nobody switched on).
+  const USAGE_PUBLIC = process.env.USAGE_PUBLIC === "1";
+  const USAGE_MIN_GAP_MS = 30000;          // one accepted beacon per member PAGE SESSION per 30s; earlier ones are held (-110 follow-up)
+  const USAGE_MAX_FLUSH_MS = 120000;       // a beacon never claims more than 2 min of screen time
+  const USAGE_TABS = () => require("./src/compute").FEATURES.filter((f) => f.kind === "tab").map((f) => {
+    const g = require("./src/compute").featureState(poller.getFlags(), f.key);
+    return { key: f.key, label: f.label, gate: f.key === "dm" && g === "public" ? "members" : g };   // Messages needs an account whatever its flag
+  });
+  const USAGE_TAB_KEYS = new Set(require("./src/compute").FEATURES.filter((f) => f.kind === "tab").map((f) => f.key));
+  // (build 2026.09.24-110 follow-up) The rate gate, per (member, page session): an early beacon is
+  // HELD and merged into the session's next accepted one (or released by the 60s flush), never
+  // dropped; accepted time is clamped to the session's wall time and a per-member budget of 2×
+  // wall time. The whole design and its bounds: src/usage-gate.js.
+  const usageGate = createUsageGate({ minGapMs: USAGE_MIN_GAP_MS, maxFlushMs: USAGE_MAX_FLUSH_MS });
+  function usageDevice(ua, pwa) {
+    const s = String(ua || "");
+    const cls = /iPad|Tablet|PlayBook|Silk|Android(?!.*Mobile)/i.test(s) ? "tablet" : /Mobi|iPhone|iPod|Android/i.test(s) ? "mobile" : "desktop";
+    return cls + (pwa === true ? "-pwa" : "");
+  }
+  // (build 2026.09.24-110) The beacon's other fields, all optional, all validated here:
+  //   acts  {csv|drawer-open -> n}: the two actions that happen only in the browser. Every other
+  //         counter is incremented server-side at its own authenticated call, so the beacon may
+  //         not claim them; each count is clamped to USAGE_MAX_ACTS.
+  //   b     the build this tab runs (its first snapshot's stamp) — the stale-build count reads it.
+  //         (-110 follow-up) perf and errs are kept only when b is a build this deployment served.
+  //   s     (-110 follow-up) a random id minted once per page load: the rate gate's session key.
+  //   perf  ms from navigation start to the first markets-table paint, once per page load.
+  //   errs  [{m, f, l, c}]: deduped client-side by message + file:line; the message is cut to 200
+  //         characters, the file to a same-site path (never a query string), c = hits (clamped).
+  //         Browser-supplied text: stored as data, escaped by every reader, never interpreted.
+  const USAGE_BEACON_ACTS = new Set(["csv", "drawer-open"]);
+  const USAGE_MAX_ACTS = 50, USAGE_MAX_ERRS = 5, USAGE_ERR_MSG = 200, USAGE_ERR_LOC = 120;
+  const usageBuild = new Map();            // uid -> {build, at}: the last beacon's build (in memory: an hour is the window)
+  const USAGE_STALE_MS = 3600 * 1000;
+  // Strip control characters (and the bidi/zero-width ones a hostile message would use to lie about
+  // what it says) — the text still goes through esc() everywhere it is shown.
+  // Cut by code point, not UTF-16 unit, so an emoji at the boundary is never left half a pair.
+  const usageClean = (x, n) => Array.from(String(x == null ? "" : x).slice(0, n * 2).replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, " ").replace(/\s+/g, " ").trim()).slice(0, n).join("");
+  function usageLoc(f, l) {
+    let s = String(f == null ? "" : f);
+    s = s.replace(/[?#].*$/, "").replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*/i, "");   // no query, no hash, no origin
+    s = s.replace(/[^\w\-./@~+]/g, "_").slice(-USAGE_ERR_LOC + 8) || "?";
+    const line = Math.trunc(Number(l));
+    return s + ":" + (Number.isFinite(line) && line > 0 && line < 1e7 ? line : 0);
+  }
+  // (build 2026.09.24-110 follow-up) Quoted text in an error message is often the user's data (a
+  // JSON.parse of a pasted value, a selector built from input): each '…', "…" or `…` run is replaced
+  // by its quotes around an ellipsis, and an unclosed quote hides everything after it. The browser
+  // does the same before sending (public/js/usage.js usUnquote); this is the one that counts.
+  function usageUnquote(m) {
+    const s = String(m == null ? "" : m);
+    let out = "";
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (c !== "'" && c !== '"' && c !== "`") { out += c; continue; }
+      if (c === "'" && /\w/.test(s[i - 1] || "") && /\w/.test(s[i + 1] || "")) { out += c; continue; }   // don't, can't
+      const j = s.indexOf(c, i + 1);
+      if (j < 0) { out += c + "\u2026"; break; }                                                          // unclosed: hide the rest
+      out += c + "\u2026" + c; i = j;
+    }
+    return out;
+  }
+  // Validate one beacon body. Returns {tabs, pwa, acts, build, rawBuild, sid, perf, errs} (any
+  // possibly empty) or {error}; the wall-time clamp is the gate's (usage-gate.js). text/plain is
+  // what sendBeacon sends a string as.
+  function usageClamp(body) {
+    let b = body;
+    if (typeof b === "string") { try { b = JSON.parse(b); } catch (_) { return { error: "bad json" }; } }
+    if (!b || typeof b !== "object" || Array.isArray(b)) return { error: "bad body" };
+    if (b.tabs != null && (typeof b.tabs !== "object" || Array.isArray(b.tabs))) return { error: "bad body" };
+    const tabs = {};
+    let tot = 0;
+    for (const [k, v] of Object.entries(b.tabs || {})) {
+      if (!USAGE_TAB_KEYS.has(k)) continue;                 // unknown view names are dropped, never stored
+      const ms = Math.round(Number(v));
+      if (!Number.isFinite(ms) || ms <= 0) continue;
+      tabs[k] = ms; tot += ms;
+    }
+    // (-110 follow-up) No claim above the 2-minute ceiling even before the gate's wall-time clamp.
+    if (tot > USAGE_MAX_FLUSH_MS) { const f = USAGE_MAX_FLUSH_MS / tot; for (const k of Object.keys(tabs)) tabs[k] = Math.floor(tabs[k] * f); }
+    const acts = {};
+    if (b.acts && typeof b.acts === "object" && !Array.isArray(b.acts)) {
+      for (const [k, v] of Object.entries(b.acts)) {
+        if (!USAGE_BEACON_ACTS.has(k)) continue;            // server-side counters cannot be claimed by a beacon
+        const n = Math.trunc(Number(v));
+        if (Number.isFinite(n) && n > 0) acts[k] = Math.min(USAGE_MAX_ACTS, n);
+      }
+    }
+    // (-110 follow-up) The stamp is BELIEVED (perf and errors kept under it) only when it is a build
+    // this deployment served; otherwise the beacon keeps its screen time and counters, and loses
+    // those two. The well-formed raw stamp still feeds the in-memory stale-build count.
+    const rawBuild = typeof b.b === "string" && /^[0-9A-Za-z.\-]{1,32}$/.test(b.b) ? b.b : null;
+    const build = rawBuild && ACCOUNTS.usageBuildKnown(rawBuild) ? rawBuild : null;
+    const sid = typeof b.s === "string" && /^[0-9A-Za-z]{8,24}$/.test(b.s) ? b.s : "";
+    const pv = Math.round(Number(b.perf));
+    const perf = build && Number.isFinite(pv) && pv > 0 && pv <= 120000 ? pv : null;
+    const errs = [];
+    if (Array.isArray(b.errs)) {
+      const seen = new Set();
+      for (const e of b.errs.slice(0, USAGE_MAX_ERRS * 4)) {   // dedupe first, then keep the first five
+        if (errs.length >= USAGE_MAX_ERRS) break;
+        if (!e || typeof e !== "object") continue;
+        const msg = usageClean(usageUnquote(String(e.m == null ? "" : e.m).slice(0, 4 * USAGE_ERR_MSG)), USAGE_ERR_MSG) || "(no message)";
+        const loc = usageLoc(e.f, e.l);
+        const c = Math.trunc(Number(e.c));
+        const k = loc + "\u0001" + msg;
+        if (seen.has(k)) continue; seen.add(k);
+        errs.push({ msg, loc, c: Number.isFinite(c) && c > 0 ? Math.min(USAGE_MAX_ACTS, c) : 1 });
+      }
+    }
+    return { tabs, pwa: b.pwa === true, acts, build, rawBuild, sid, perf, errs: build ? errs : [] };
+  }
+  function usageStore(uid, p, now) {
+    const r = ACCOUNTS.usageRecord(uid, p.tabs, p.dev, now, { acts: p.acts, build: p.build, perf: p.perf, errs: p.errs });
+    if (r.stored) ACCOUNTS.touch(uid);
+    return r;
+  }
+  fastify.post("/api/usage", { bodyLimit: 4 * 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = meOf(req);
+    if (!me) return reply.code(204).send();                 // signed out: nothing is collected (public tracking is OFF; the visitor id is deliberately not built)
+    if (ACCOUNTS.usagePaused(me.uid)) return reply.code(204).send();
+    const now = Date.now();
+    const c = usageClamp(req.body);
+    if (c.error) return reply.code(400).send({ ok: false, error: c.error });
+    if (c.rawBuild) usageBuild.set(me.uid, { build: c.rawBuild, at: now });
+    c.dev = usageDevice(req.headers["user-agent"], c.pwa);
+    // (-110 follow-up) held early beacons get the same 204: sendBeacon never sees the answer anyway
+    const g = usageGate.offer(me.uid, c.sid, c, now, (uid, p) => usageStore(uid, p, now));
+    if (g.busy) return reply.code(429).header("retry-after", String(Math.ceil(USAGE_MIN_GAP_MS / 1000))).send();
+    if (g.accept) usageStore(me.uid, g.accept, now);
+    return reply.code(204).send();
+  });
+  // Members whose last beacon inside the hour came from a build other than this one: tabs still
+  // running an old bundle after a deploy (the reload toast is what fixes them).
+  function usageStale(now) {
+    const t = now != null ? now : Date.now();
+    let n = 0;
+    for (const [uid, x] of usageBuild) {
+      if (t - x.at > USAGE_STALE_MS) { usageBuild.delete(uid); continue; }
+      if (x.build !== VERSION && !ACCOUNTS.usagePaused(uid)) n++;
+    }
+    return n;
+  }
+  // Reach per tab over the full 30-day window, for Admin → Feature visibility (build 2026.09.24-110).
+  // quiet = under 10% of the members active in the window opened it at all.
+  // (-110 follow-up) GET /api/features calls this on every read: memoized on the flush generation,
+  // the tab list (gates move with the flags) and the hour (the 30-day window rolls), and computed
+  // with the summary's lite mode (no cohorts, no error texts).
+  let usageReachMemo = null;
+  function usageReach() {
+    if (ACCOUNTS.usagePending()) ACCOUNTS.usageFlush();
+    const tl = USAGE_TABS();
+    const key = [ACCOUNTS.usageGen(), JSON.stringify(tl), Math.floor(Date.now() / 3600000)].join("|");
+    if (usageReachMemo && usageReachMemo.key === key) return usageReachMemo.val;
+    const s = ACCOUNTS.usageSummary({ r: ACCOUNTS.USAGE_KEEP_DAYS, tabs: tl, lite: true });
+    const tabs = {};
+    for (const t of s.tabs) tabs[t.key] = { users: t.users, reach: t.reach, quiet: t.reach != null && t.reach < 0.1 && s.kpi.activeRange > 0 };
+    const val = { r: s.r, active: s.kpi.activeRange, tabs };
+    usageReachMemo = { key, val };
+    return val;
+  }
+  // (-110 follow-up) Held early beacons whose page never sent a follow-up land on the regular flush.
+  // `all` (shutdown) releases every held payload, past its gap or not — clamped all the same.
+  function usageSweep(now, all) { const t = now != null ? now : Date.now(); usageGate.sweep(t, (uid, p) => usageStore(uid, p, t), all); }
+  USAGE_SWEEP = usageSweep;   // main()'s 60s flush and shutdown reach it here (buildServer's scope)
+  fastify.decorate("usageSweep", usageSweep);
+  // Server-side action counters (build 2026.09.24-110): one call per authenticated action, a no-op
+  // for a signed-out caller, a paused member or a word outside the allowlist (accounts.js decides).
+  const usageActFor = (uid, key) => { try { if (uid) ACCOUNTS.usageAct(uid, key); } catch (_) {} };
+  fastify.get("/api/usage/me", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    return ACCOUNTS.usageMine(me.uid, USAGE_TABS());
+  });
+  fastify.post("/api/usage/pause", { bodyLimit: 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    const r = ACCOUNTS.setUsagePaused(me.uid, !!(req.body || {}).paused);
+    if (r.ok && r.paused) usageGate.forget(me.uid);
+    return r;
+  });
   fastify.get("/api/dm/sync", (req, reply) => {
     reply.header("cache-control", "no-store");
     const me = dmMe(req, reply); if (!me) return;
@@ -1488,6 +1757,7 @@ async function buildServer() {
     const r = ACCOUNTS.webPushAdd(me.uid, b.sub, String(req.headers["user-agent"] || ""));
     if (!r.ok) return reply.code(400).send(r);
     log("browser push subscription registered for " + me.handle);
+    usageActFor(me.uid, "push-enable");   // (build 2026.09.24-110)
     return r;
   });
   // One digest to every live subscription of a member; endpoints the push service has declared
@@ -1550,6 +1820,27 @@ async function buildServer() {
     // An operator can read the whole desk's record; everyone else sees the calls made in the
     // conversations they are actually in.
     return ACCOUNTS.calls(me.uid, { by: str(q.by) || null, limit: one(q.limit), all: isAdmin(req) && one(q.all) === "1" });
+  });
+  // Call targets (build 2026.09.24-95): the same record, narrowed to the calls that named a price and
+  // a date — open ones with how far along they are, resolved ones with how they resolved — and the
+  // binary record per person. A read over ACCOUNTS.calls, so the scope (your conversations; the
+  // operator's all-view) and the cleared-history floor are exactly the board's.
+  fastify.get("/api/dm/targets", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    const q = req.query || {};
+    const r = ACCOUNTS.calls(me.uid, { by: str(q.by) || null, limit: 500, all: isAdmin(req) && one(q.all) === "1" });
+    const tg = r.calls.filter((c) => c.tg);
+    return { ok: true, open: tg.filter((c) => !c.tg.res && !c.closed), resolved: tg.filter((c) => c.tg.res || c.closed),
+      summary: r.summary.filter((e) => e.tg).map((e) => ({ uid: e.uid, who: e.who, tg: e.tg })) };
+  });
+  // The operator's "resolve now": the same sweep the minute timer runs, on demand. Admin-only — it
+  // posts into conversations under their authors' names, which is not a member's button to press.
+  fastify.post("/api/dm/targets", { bodyLimit: 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "forbidden" });
+    return { ok: true, resolved: targetTick() };
   });
   fastify.get("/api/dm/export/:id", (req, reply) => {
     reply.header("cache-control", "no-store");
@@ -1614,7 +1905,7 @@ async function buildServer() {
     else if (b.close != null) r = ACCOUNTS.closeThread(me.uid, b.close);
     else if (b.reopen != null) r = ACCOUNTS.reopenThread(me.uid, b.reopen);
     else if (b.clearHistory != null) r = ACCOUNTS.clearHistory(me.uid, b.clearHistory);
-    else if (b.react) r = ACCOUNTS.react(me.uid, b.id, String(b.emoji || ""));
+    else if (b.react) { r = ACCOUNTS.react(me.uid, b.id, String(b.emoji || "")); if (r.ok) dmTgReact(r.message.id); }
     else if (b.read != null || b.markRead) r = ACCOUNTS.markRead(me.uid, b.thread, b.read);
     else if (b.mute != null) r = ACCOUNTS.setMuted(me.uid, b.thread, !!b.mute);
     else if (b.boardNotify != null) r = ACCOUNTS.setBoardNotify(me.uid, b.thread, !!b.boardNotify);
@@ -1646,8 +1937,14 @@ async function buildServer() {
       // quotable — and its failure never un-sends the card.
       const v = validateCard(b.card);
       if (!v.ok) return reply.code(400).send({ ok: false, error: "that card can't be shared (" + v.error + ")" });
+      // A chart card (build 2026.09.24-98) is the caption of a picture: the PNG was uploaded into
+      // this thread first (the /ratio road), and send() holds it to the same thread-and-owner rule
+      // as any attachment. No picture, no chart card; the screener kinds never carry one.
+      if (v.card.kind === "chart" && !b.fileId) return reply.code(400).send({ ok: false, error: "that card can't be shared (no-image)" });
       r = ACCOUNTS.send(me.uid, String(b.to || ""), cardText(v.card), coinForSymbol,
-        { thread: b.thread || null, card: v.card, stampSym: b.call && v.card.t ? v.card.t : null });
+        { thread: b.thread || null, card: v.card, stampSym: b.call && v.card.t ? v.card.t : null,
+          fileId: v.card.kind === "chart" ? String(b.fileId) : null });
+      if (r.ok) usageActFor(me.uid, "share");   // (build 2026.09.24-110) the count, never the card
       if (r.ok && typeof b.body === "string" && b.body.trim()) {
         const note = ACCOUNTS.send(me.uid, null, b.body, coinForSymbol, { thread: r.thread });
         r.note = note.ok ? note.message : null;
@@ -1670,10 +1967,12 @@ async function buildServer() {
     }
     else if (b.drop && b.id != null) {
       r = ACCOUNTS.drop(me.uid, b.id, isAdmin(req));
+      if (r.ok) dmTgRepaint(r.message.id);   // Telegram sync (build 2026.09.24-99): the mirrored copy goes too
       if (r.ok && r.moderated) { log("operator " + me.handle + " deleted message " + r.message.id + " by " + r.message.sender); dmPoke(r.thread, { refresh: Number(r.thread) }); }
     }
     else if (b.id != null) {
       r = ACCOUNTS.edit(me.uid, b.id, b.body, isAdmin(req));
+      if (r.ok) dmTgRepaint(r.message.id);   // Telegram sync (build 2026.09.24-99): the mirrored copy is rewritten, moderation included
       if (r.ok && r.moderated) { log("operator " + me.handle + " edited message " + r.message.id + " by " + r.message.sender); dmPoke(r.thread, { refresh: Number(r.thread) }); }
     }
     else {
@@ -1769,7 +2068,8 @@ async function buildServer() {
     const o = opts || {};
     const owner = poller.pushOwnerOf ? poller.pushOwnerOf(String(chat)) : "";
     const me = owner && ACCOUNTS.getUser(owner);
-    if (!me) return { ok: false, error: "This chat is not linked to an account." };
+    // (build 2026.09.24-107) A disabled account is not linked: no post, edit, reaction or /alert.
+    if (!me || me.disabledAt) return { ok: false, error: "This chat is not linked to an account." };
     // /alert from the phone: bound to the conversation this chat mirrors, if any; otherwise a
     // plain personal rule that reaches the phone through the rule class like one set in the panel.
     // Everything returned from here rides pushReply with parse_mode HTML: the help text has
@@ -1778,17 +2078,44 @@ async function buildServer() {
     if (o.alert) { const a = dmAlertCmd(me, text, ACCOUNTS.tgSyncThread(me.uid), { tg: true }); return a.ok ? { ok: true, text: tgEsc(a.text) } : { ok: false, error: tgEsc(a.error) }; }
     // Bare text (build 2026.09.21-83): into the synced conversation, or nowhere. `silent` rides
     // back so the wire spends no reply on a chat that never opted in.
-    if (o.bare) {
-      const r = ACCOUNTS.bridgeSyncText(me.uid, text);
-      if (r.ok && r.thread) { dmPoke(r.thread); dmMirror(r.thread); dmReplyTarget.set(String(chat), { thread: r.thread, at: Date.now() }); }
+    // The line's own Telegram id rides in (build 2026.09.24-99) and is mapped to the row it became,
+    // so an edit made to it in Telegram, or a delete made to the row here, can find the other side.
+    if (o.bare || o.file) {
+      const r = o.file ? ACCOUNTS.bridgeSyncFile(me.uid, o.file.name, o.file.bytes, text) : ACCOUNTS.bridgeSyncText(me.uid, text);
+      if (r.ok && r.thread) {
+        if (o.tgId) ACCOUNTS.tgMapAdd(String(chat), o.tgId, [r.id], me.uid, "in", o.file ? 1 : 0);
+        dmPoke(r.thread); dmMirror(r.thread); dmReplyTarget.set(String(chat), { thread: r.thread, at: Date.now() });
+      }
       return r.ok ? { ok: true, thread: r.thread } : { ok: false, error: tgEsc(r.error), silent: !!r.silent };
+    }
+    // An edit made in Telegram to a line that came in over the bridge: the row is rewritten under
+    // the same rules as an edit in the composer, the room repaints it, and every OTHER synced chat
+    // carrying it is repainted too. An edit to anything unmapped is silently inert.
+    if (o.edit) {
+      const r = ACCOUNTS.bridgeEdit(me.uid, String(chat), o.tgId, text);
+      if (r.ok) { dmPoke(r.thread, { refresh: Number(r.thread) }); dmTgRepaint(r.message.id); return { ok: true, thread: r.thread }; }
+      return { ok: false, error: tgEsc(r.error), silent: !!r.silent };
+    }
+    // A reaction changed in Telegram. Only on a Telegram message that carries exactly ONE row (a
+    // packed burst is ambiguous about which line was meant), and only reactions with a meaning in
+    // the site's vocabulary; the rest are ignored without a word.
+    if (o.reaction) {
+      const pack = ACCOUNTS.tgMapPack(String(chat), o.reaction.tgId);
+      const ids = [...new Set(pack.map((x) => x.msg))];
+      if (ids.length !== 1) return { ok: false, error: "not-mapped", silent: true };
+      const add = (o.reaction.added || []).map(tgReactIn).filter(Boolean), drop = (o.reaction.removed || []).map(tgReactIn).filter(Boolean);
+      if (!add.length && !drop.length) return { ok: false, error: "no-meaning", silent: true };
+      const r = ACCOUNTS.reactApply(me.uid, ids[0], add, drop);
+      if (!r.ok) return { ok: false, error: tgEsc(r.error), silent: true };
+      if (r.changed) { dmPoke(r.thread, { refresh: Number(r.thread) }); dmTgReact(ids[0], String(chat)); }
+      return { ok: true, thread: r.thread };
     }
     const ctx = dmReplyTarget.get(String(chat));
     const thread = (ctx && Date.now() - ctx.at < DM_REPLY_CONTEXT_MS) ? ctx.thread : 0;
     const r = ACCOUNTS.bridgeReply(me.uid, text, thread);
     if (r.ok && r.thread) { dmPoke(r.thread); dmMirror(r.thread); dmReplyTarget.set(String(chat), { thread: r.thread, at: Date.now() }); }
     return r.ok ? { ok: true, text: "Sent." } : { ok: false, error: tgEsc(r.error) };
-  });
+  }, { fileMax: ACCOUNT_DM_FILE_MAX });
 
   // ===== Telegram sync: the outbound mirror (build 2026.09.21-83) ================================
   // A member who ticked "sync to Telegram" on a conversation gets every message in it on their
@@ -1806,29 +2133,102 @@ async function buildServer() {
   //     live conversation for an hour. Telegram's own per-chat pacing still applies in the drain.
   const DM_MIRROR_MAX = 10;
   const DM_MIRROR_CHARS = 3500;
-  const dmMirrorLine = (r) => {
+  const DM_MIRROR_CAPTION = 700;    // Telegram caps a caption at 1024 visible characters; name + quote fit in the rest
+  // `caption` (build 2026.09.24-99): the line under an uploaded photo or document, so it drops
+  // the paperclip stub (the file is right there) and bounds the words to Telegram's caption size.
+  const dmMirrorLine = (r0, caption) => {
+    const r = caption && r0.body && r0.body.length > DM_MIRROR_CAPTION ? Object.assign({}, r0, { body: r0.body.slice(0, DM_MIRROR_CAPTION) + "\u2026" }) : r0;
     if (r.sys) return "<i>" + tgEsc(r.sys) + "</i>";
     let out = "<b>" + tgEsc(r.mine ? "you" : r.who) + "</b>";
+    if (r.edited) out += " <i>\u00b7 edited" + (r.editedBy ? " by " + tgEsc(r.editedBy) : "") + "</i>";
     if (r.reply && r.reply.sender) out += "\n<i>\u21a9 " + tgEsc(r.reply.sender) + ": " + tgEsc(String(r.reply.body || "").slice(0, 80)) + "</i>";
     if (r.cmd) out += "\n\u25b8 " + tgEsc(r.cmd) + (r.body ? "\n<pre>" + tgEsc(r.body.slice(0, 1500)) + (r.body.length > 1500 ? "\u2026" : "") + "</pre>" : "");
     // A shared card: its header line as prose, the rest as the padded block the terminal drew.
     else if (r.card && r.body) { const nl = r.body.indexOf("\n"); out += "\n" + tgEsc(nl >= 0 ? r.body.slice(0, nl) : r.body) + (nl >= 0 ? "\n<pre>" + tgEsc(r.body.slice(nl + 1, nl + 1500)) + "</pre>" : ""); }
     else if (r.body) out += "\n" + tgEsc(r.body);
-    if (r.file) out += "\n\ud83d\udcce " + tgEsc(r.file);
+    if (r.file && !caption) out += "\n\ud83d\udcce " + tgEsc(r.file);
     return out;
   };
-  function dmMirrorText(m) {
-    const parts = [];
+  // The tick's rows as SENDS, in order (build 2026.09.24-99): consecutive text rows pack into one
+  // message as before, and a row carrying an attachment breaks the pack and goes as its own photo
+  // or document with its line as the caption. Every part names the row ids it carries — the sync
+  // map is written from them once Telegram answers with a message_id.
+  function dmMirrorParts(m) {
+    const kept = [];
     let used = 0, cut = 0;
     // Newest first for the budget, then back into order: the freshest lines are the ones a phone
     // must not lose to a long command dump above them.
     for (let i = m.rows.length - 1; i >= 0; i--) {
       const line = dmMirrorLine(m.rows[i]);
-      if (used + line.length > DM_MIRROR_CHARS && parts.length) { cut = i + 1; break; }
-      parts.unshift(line); used += line.length + 2;
+      if (used + line.length > DM_MIRROR_CHARS && kept.length) { cut = i + 1; break; }
+      kept.unshift({ row: m.rows[i], line }); used += line.length + 2;
     }
     const skipped = m.skipped + cut;
-    return (skipped ? "<i>+" + skipped + " earlier message" + (skipped === 1 ? "" : "s") + " not mirrored \u2014 open Messages</i>\n\n" : "") + parts.join("\n\n");
+    const parts = [];
+    let cur = null;
+    for (const k of kept) {
+      if (k.row.fileId && !k.row.sys) { cur = null; parts.push({ file: k.row, text: dmMirrorLine(k.row, true), fallback: k.line, ids: [k.row.id] }); continue; }
+      if (!cur) { cur = { lines: [], ids: [] }; parts.push(cur); }
+      cur.lines.push(k.line); cur.ids.push(k.row.id);
+    }
+    for (const p of parts) if (p.lines) p.text = p.lines.join("\n\n");
+    if (skipped) {
+      const head = "<i>+" + skipped + " earlier message" + (skipped === 1 ? "" : "s") + " not mirrored \u2014 open Messages</i>";
+      if (parts[0] && parts[0].lines) { parts[0].head = head; parts[0].text = head + "\n\n" + parts[0].text; } else parts.unshift({ text: head, ids: [] });
+    }
+    return parts;
+  }
+  // One part onto the outbox for one chat. A file goes as sendPhoto (the four raster types the
+  // store verified, minus gif, which Telegram would flatten to a still) or sendDocument; if
+  // Telegram refuses the upload the wire falls back to the plain line with the file's name.
+  // (build 2026.09.24-107) The map row exists only once Telegram answers, so an edit or a delete
+  // made here while the part still sat in the outbox found nothing to repaint and the phone got
+  // the words as they were at enqueue. The part now carries its row ids and is rebuilt from the
+  // CURRENT rows when the drain reaches it: every row deleted -> the send is dropped; edited ->
+  // it goes out in its current wording. null = drop.
+  function dmMirrorRebuild(uid, part) {
+    let rows;
+    try { rows = ACCOUNTS.mirrorRowsById(uid, part.ids); } catch (_) { return null; }
+    const live = rows.filter((r) => !r.deleted && !(r.mine && r.via === "telegram"));
+    if (!live.length) return null;
+    if (part.file) return { caption: dmMirrorLine(live[0], true), fallback: dmMirrorLine(live[0]) };
+    return { text: dmMirrorFit(live, part.head) };
+  }
+  // (build 2026.09.24-108 follow-up) The pack was sized at enqueue (<= DM_MIRROR_CHARS) but an edit
+  // made while it sat in the outbox can grow a line to a 4000-character body (more once escaped), and
+  // Telegram refuses anything over 4096 with a 400 — which dropped the WHOLE pack. The rebuilt text is
+  // held to DM_MIRROR_CHARS: the longest bodies are shortened (cut in the raw words, before escaping,
+  // so the HTML stays whole) and marked with an ellipsis; if the names/quotes alone still overflow,
+  // the oldest lines give way to a count. Never dropped for length.
+  function dmMirrorFit(rows, head) {
+    const cap = DM_MIRROR_CHARS, keep = rows.map((r) => String(r.body || "").length);
+    const lineOf = (r, i) => (keep[i] < String(r.body || "").length ? dmMirrorLine(Object.assign({}, r, { body: String(r.body).slice(0, keep[i]) + "\u2026" })) : dmMirrorLine(r));
+    const join = (lines) => (head ? head + "\n\n" : "") + lines.join("\n\n");
+    for (let k = 0; k < 64; k++) {
+      const lines = rows.map(lineOf), text = join(lines);
+      if (text.length <= cap) return text;
+      let j = -1;
+      for (let i = 0; i < rows.length; i++) if (keep[i] > 0 && (j < 0 || lines[i].length > lines[j].length)) j = i;
+      if (j < 0) break;
+      // Shrink in proportion: the escaped line is longer than the raw words ("&" -> "&amp;").
+      keep[j] = Math.max(0, Math.min(keep[j] - 1, Math.floor(keep[j] * (lines[j].length - (text.length - cap) - 1) / lines[j].length)));
+    }
+    const lines = rows.map(lineOf);
+    let n = 0;
+    while (n < lines.length - 1 && join([
+      "<i>+" + (n + 1) + " earlier line" + (n ? "s" : "") + " trimmed \u2014 open Messages</i>"].concat(lines.slice(n + 1))).length > cap) n++;
+    const text = join(["<i>+" + (n + 1) + " earlier line" + (n ? "s" : "") + " trimmed \u2014 open Messages</i>"].concat(lines.slice(n + 1)));
+    return text.length <= cap ? text : "<i>" + lines.length + " line" + (lines.length === 1 ? "" : "s") + " too long to mirror \u2014 open Messages</i>";
+  }
+  function dmMirrorSend(chat, uid, part) {
+    const onSent = part.ids.length ? (res, it) => ACCOUNTS.tgMapAdd(chat, res && res.message_id, part.ids, uid, "out", it && it.file ? 1 : 0) : null;
+    const rebuild = part.ids.length ? () => dmMirrorRebuild(uid, part) : null;
+    if (!part.file) { poller.pushSyncNow(chat, part.text, { onSent, rebuild }); return; }
+    const f = part.file, photo = f.fileInline && f.fileMime !== "image/gif";
+    poller.pushSyncNow(chat, part.fallback, {
+      method: photo ? "sendPhoto" : "sendDocument", payload: { caption: part.text, parse_mode: "HTML" }, onSent, fallback: part.fallback, rebuild,
+      file: { field: photo ? "photo" : "document", name: f.file, mime: f.fileMime,
+        load: () => { const rf = ACCOUNTS.readFile(uid, f.fileId); return rf.ok ? fs.readFileSync(rf.path) : null; } } });
   }
   function dmMirror(threadId, uidOnly) {
     if (!poller.pushEnqueueNow || !poller.pushRecipientsFor) return 0;
@@ -1848,14 +2248,80 @@ async function buildServer() {
       // What you typed at the phone is already on the phone.
       const rows = m.rows.filter((r) => !(r.mine && r.via === "telegram"));
       if (rows.length) {
-        const text = dmMirrorText(Object.assign({}, m, { rows }));
+        const parts = dmMirrorParts(Object.assign({}, m, { rows }));
         for (const chat of targets) {
-          poller.pushEnqueueNow(chat, text, true);
+          for (const part of parts) {
+            if (poller.pushSyncNow) dmMirrorSend(chat, uid, part);
+            else poller.pushEnqueueNow(chat, part.fallback || part.text, true);
+          }
           dmReplyTarget.set(String(chat), { thread: +threadId, at: Date.now() });
         }
         n++;
       }
       ACCOUNTS.markEscalated(uid, threadId, m.upTo);
+    }
+    return n;
+  }
+  // ===== Telegram sync: edits, deletions and reactions (build 2026.09.24-99) =====================
+  // Everything already mirrored is found through the sync map (site row <-> Telegram message, per
+  // chat) and changed in place: an edit here repaints the Telegram message carrying it; a delete
+  // shrinks a packed message, or deletes it when nothing live is left; a reaction here sets the
+  // bot's one reaction on it. Each is a queued outbox call like any send — same pacing, same 429
+  // backoff — and a refusal from Telegram is logged and skipped, never retried into a wedge.
+  // Limits that are Telegram's, not ours: a bot cannot edit a line the MEMBER typed (only delete
+  // it, in a private chat), deleting a message older than 48 hours is refused, and a bot holds
+  // ONE reaction per message — so the chat shows the conversation's most-used reaction.
+  function dmTgTargets(msgId, skipChat) {
+    let maps;
+    try { maps = ACCOUNTS.tgMapFor(msgId); } catch (e) { log("tg sync map read failed (isolated): " + (e && e.message)); return []; }
+    const seen = new Set(), out = [];
+    for (const mp of maps) {
+      const key = mp.chat + ":" + mp.tgId;
+      if (seen.has(key) || mp.chat === skipChat) continue;
+      seen.add(key);
+      // A chat since unlinked or blocked has nothing to repaint into.
+      if (!(poller.pushRecipientsFor ? poller.pushRecipientsFor(mp.uid) : []).includes(mp.chat)) continue;
+      out.push(mp);
+    }
+    return out;
+  }
+  function dmTgRepaint(msgId) {
+    if (!poller.pushSyncNow) return 0;
+    let n = 0;
+    for (const mp of dmTgTargets(msgId)) {
+      try {
+        if (mp.dir === "in") {
+          // The member's own line: gone here means gone there (bots may delete incoming messages
+          // in a private chat). An edit here to a line typed in Telegram cannot be carried back.
+          const row = ACCOUNTS.mirrorRowsById(mp.uid, [mp.msg])[0];
+          if (row && row.deleted) { poller.pushSyncNow(mp.chat, "", { method: "deleteMessage", payload: { message_id: mp.tgId } }); n++; }
+          continue;
+        }
+        const ids = ACCOUNTS.tgMapPack(mp.chat, mp.tgId).filter((x) => x.dir === "out").map((x) => x.msg);
+        const rows = ACCOUNTS.mirrorRowsById(mp.uid, ids);
+        if (!rows.length) continue;          // no longer a member: their old chat is left as it was
+        const live = rows.filter((r) => !r.deleted);
+        if (!live.length) poller.pushSyncNow(mp.chat, "", { method: "deleteMessage", payload: { message_id: mp.tgId } });
+        else if (mp.media) poller.pushSyncNow(mp.chat, "", { method: "editMessageCaption", payload: { message_id: mp.tgId, caption: dmMirrorLine(live[0], true), parse_mode: "HTML" } });
+        else poller.pushSyncNow(mp.chat, "", { method: "editMessageText",
+          payload: { message_id: mp.tgId, text: live.map((r) => dmMirrorLine(r)).join("\n\n"), parse_mode: "HTML", disable_web_page_preview: true } });
+        n++;
+      } catch (e) { log("tg sync repaint failed (isolated): " + (e && e.message)); }
+    }
+    return n;
+  }
+  function dmTgReact(msgId, skipChat) {
+    if (!poller.pushSyncNow) return 0;
+    let top;
+    try { top = ACCOUNTS.reactTop(msgId); } catch (_) { return 0; }
+    const tg = top ? tgReactOut(top) : null;
+    let n = 0;
+    for (const mp of dmTgTargets(msgId, skipChat)) {
+      // A packed message is several lines in one bubble: a reaction on it would claim all of them.
+      if (new Set(ACCOUNTS.tgMapPack(mp.chat, mp.tgId).map((x) => x.msg)).size !== 1) continue;
+      poller.pushSyncNow(mp.chat, "", { method: "setMessageReaction",
+        payload: { message_id: mp.tgId, reaction: tg ? [{ type: "emoji", emoji: tg }] : [] } });
+      n++;
     }
     return n;
   }
@@ -1865,6 +2331,36 @@ async function buildServer() {
     for (const t of new Set(pairs.map((x) => x.thread))) { try { dmMirror(t); } catch (e) { log("dm mirror sweep failed (isolated): " + (e && e.message)); } }
   }, 30 * 1000).unref();
 
+  // ===== usage, the operator's side (build 2026.09.24-109) =======================================
+  // Beside the read-through, not inside it: adminOnly / adminUid are that block's gates, reused.
+  // The sitewide panel is aggregates and is NOT logged; one member's drill-in IS (dm_audit
+  // 'view-usage', shown in the All messages read log beside every message read). The panel body is
+  // cached per range and keyed on the flush generation, the member count and who is online, so an
+  // unchanged minute revalidates to a 304 like every other admin payload.
+  const usageBodies = new Map();
+  fastify.get("/api/admin/usage", (req, reply) => {
+    if (!adminOnly(req, reply)) return;
+    const r = Math.max(1, Math.min(ACCOUNTS.USAGE_KEEP_DAYS, Math.trunc(+one((req.query || {}).r) || 7)));
+    if (ACCOUNTS.usagePending()) ACCOUNTS.usageFlush();
+    const online = dmOnline();
+    const stale = usageStale();   // (build 2026.09.24-110) in memory, so it joins the cache key
+    const key = [BOOT_NONCE, ACCOUNTS.usageGen(), r, ACCOUNTS.countUsers(), [...online].sort().join(","), stale, Math.floor(Date.now() / 60000)].join(".");
+    let hit = usageBodies.get(r);
+    if (!hit || hit.key !== key) {
+      const body = ACCOUNTS.usageSummary({ r, online, tabs: USAGE_TABS(), build: VERSION, stale });
+      body.publicOn = USAGE_PUBLIC; body.beacon = true;
+      hit = { key, body, tag: 'W/"u' + crypto.createHash("sha1").update(key).digest("base64url").slice(0, 16) + '"' };
+      usageBodies.set(r, hit);
+    }
+    return sendCachedBody(req, reply, hit.body, hit.tag);
+  });
+  fastify.get("/api/admin/usage/member", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    if (!adminOnly(req, reply)) return;
+    const r = ACCOUNTS.usageMember(adminUid(req), str((req.query || {}).h) || "", USAGE_TABS());
+    if (!r.ok) return reply.code(404).send(r);
+    return r;
+  });
   // ===== /alert: threshold rules written in a conversation (build 2026.09.21-83) ==================
   // The same line works in a chat's composer and at the Telegram bot. A rule written IN a
   // conversation is bound to it: when it fires, the fire posts there under its author's name
@@ -1905,6 +2401,7 @@ async function buildServer() {
     rule.thread = thread;
     const r = poller.addRule(rule, me.uid);
     if (!r.ok) return { ok: false, error: r.error === "cap" ? "you already have the maximum number of alerts \u2014 /alert off one first" : "could not set that alert (" + r.error + ")" };
+    usageActFor(me.uid, "alert");   // (build 2026.09.24-110) a rule created — from a chat, the bot or the panel below
     const line = "\ud83d\udd14 alert #" + r.rule.id + " \u00b7 " + r.rule.text + (r.rule.note ? " \u2014 " + r.rule.note : "") + " \u2192 fires " + where(thread);
     const out = { ok: true, text: line, rule: r.rule };
     if (thread) {
@@ -1956,6 +2453,27 @@ async function buildServer() {
     if (!ruleFireArmed) { ruleFireArmed = true; setImmediate(() => { try { ruleFireFlush(); } catch (e) { log("rule fire flush failed (isolated): " + (e && e.message)); } }); }
   });
 
+  // ===== call targets: the resolver (build 2026.09.24-95) ============================================
+  // Once a minute, every open target is checked against the 5m archive, the live mark and (past its
+  // deadline) the deadline's daily close; ACCOUNTS.targetSweep writes each resolution once and hands
+  // back the line to post. The post takes the road a bound /alert fire takes: a command result under
+  // the AUTHOR's name, in the conversation the call was made in — so the room sees it, a synced phone
+  // mirrors it and the offline digest nudges the rest. Nothing new on the wire. The stamped row is
+  // re-pulled too (the `refresh` hint), so every open copy of the call repaints resolved. An author
+  // who has left the room (or is over the burst cap) gets no post; the resolution stands on the row.
+  function targetTick(now) {
+    let done;
+    try { done = ACCOUNTS.targetSweep(now); } catch (e) { log("target sweep failed (isolated): " + (e && e.message)); return 0; }
+    for (const r of done) {
+      dmPoke(r.thread, { refresh: Number(r.thread) });
+      const post = ACCOUNTS.send(r.sender, null, r.text, null, { thread: r.thread, cmd: "target $" + String(r.ref).replace(/^xyz:/, "") + " " + r.res });
+      if (!post.ok) { log("target post failed (message " + r.id + ", " + r.res + "): " + post.error); continue; }
+      dmPoke(post.thread); dmMirror(post.thread);
+    }
+    return done.length;
+  }
+  setInterval(() => { try { targetTick(); } catch (e) { log("target tick failed (isolated): " + (e && e.message)); } }, 60 * 1000).unref();
+
   // Sign-out is a state change, so it answers POST. GET stays for the nav button's plain
   // navigation (location.href='/logout') — but only when the browser says the navigation came
   // from this origin or from nowhere (typed URL, bookmark): a cross-site <img src="/logout"> or
@@ -1989,7 +2507,10 @@ async function buildServer() {
   // The worker grew push handlers (build -66) and moved to its own file; the inline string
   // survives only as the fallback if the file ever goes missing — installability must not break.
   const PWA_SW = (() => {
-    try { return fs.readFileSync(path.join(__dirname, "public", "sw.js"), "utf8"); }
+    // The "{{build}}" slot names the ONLY asset stamp the worker may cache (build 2026.09.24-103) —
+    // and makes every deploy's sw.js byte-different, so the browser installs the new worker and its
+    // activate purges last build's asset cache.
+    try { return fs.readFileSync(path.join(__dirname, "public", "sw.js"), "utf8").split("{{build}}").join(VERSION); }
     catch (_) { return "self.addEventListener('install',()=>self.skipWaiting());self.addEventListener('activate',e=>e.waitUntil(self.clients.claim()));self.addEventListener('fetch',()=>{});"; }
   })();
   fastify.get("/manifest.webmanifest", async (req, reply) => reply.type("application/manifest+json").header("cache-control", "no-cache").send(PWA_MANIFEST));
@@ -2063,7 +2584,27 @@ async function buildServer() {
   // is as immutable as the entry's — a browser can never pair this build's entry with last build's
   // module, and every module rides the immutable-cache tier below. The files on disk stay
   // unstamped: tests and editors read plain modules.
-  const stampImports = (js) => js.replace(/((?:^|[\s;])import\s*(?:[^'"]*?\s*from\s*)?["'])(\.{1,2}\/[^'"?]+\.js)(["'])/g, (m, a, spec, q) => a + spec + "?v=" + VERSION + q);
+  // Dynamic import("./x.js") is stamped too (build 2026.09.24-103): core.js lazy-loads the tab-only
+  // modules by literal specifier, and an unstamped lazy URL would be a SECOND module instance of a
+  // file its eager neighbours import stamped — two copies of its state, and no immutable caching.
+  const stampImports = (js) => js.replace(/((?:^|[\s;>(])import\s*(?:\(\s*|[^'"(]*?\s*from\s*)?["'])(\.{1,2}\/[^'"?]+\.js)(["'])/g, (m, a, spec, q) => a + spec + "?v=" + VERSION + q);
+  // (build 2026.09.24-108) A stamped asset request from ANOTHER build is refused, not answered with
+  // this build's bytes. The routes above ignore the query, so a tab open across a deploy that lazily
+  // imported ./charts.js?v=<old> got THIS build's charts.js, whose stamped imports name
+  // ./core.js?v=<new> — a second core.js instance with an empty state, and a tab that renders
+  // nothing. 409 (no-store: never cached, by the browser or the service worker, which keeps 200s only)
+  // makes the import fail; the client's lazy loader then offers the reload. Only when `v` is present
+  // and different: unstamped and current-stamp requests are exactly as before.
+  const STAMPED_ASSET = /^\/(?:app\.js|styles\.css|js\/[a-z0-9_-]+\.js)$/;
+  fastify.addHook("onRequest", async (req, reply) => {
+    const u = req.url, q = u.indexOf("?");
+    if (q < 0 || !STAMPED_ASSET.test(u.slice(0, q))) return;
+    const v = new URLSearchParams(u.slice(q + 1)).getAll("v");
+    if (!v.length || (v.length === 1 && v[0] === VERSION)) return;
+    reply.code(409).header("cache-control", "no-store").type("text/plain; charset=utf-8")
+      .send("stale build: this server is on " + VERSION + " \u2014 reload the page");
+    return reply;
+  });
   const CLIENT_MODULES = (() => { try { return fs.readdirSync(path.join(__dirname, "public", "js")).filter((f) => /^[a-z0-9_-]+\.js$/.test(f)).sort(); } catch (_) { return []; } })();
   const PRECOMP = (() => {
     const out = {};
@@ -2115,6 +2656,9 @@ async function buildServer() {
     let h = fs.readFileSync(path.join(__dirname, "public", "index.html"), "utf8");
     const a = h.includes('src="/app.js"'), c = h.includes('href="/styles.css"');
     h = h.replace('src="/app.js"', `src="/app.js?v=${VERSION}"`).replace('href="/styles.css"', `href="/styles.css?v=${VERSION}"`);
+    // modulepreload hints (build 2026.09.24-103) carry the same stamp, or the preload would warm a
+    // URL the entry's stamped imports never ask for.
+    h = h.replace(/(<link rel="modulepreload" href="\/js\/[a-z0-9_-]+\.js)(")/g, (m, a, q) => a + "?v=" + VERSION + q);
     h = h.split("<script>").join(`<script nonce="${CSP_NONCE_SLOT}">`);   // inline scripts only: the src= tag never matches
     if (!a || !c) log("WARN: index.html asset tags drifted — version stamp incomplete (cache-busting degraded, app still serves)");
     const i = h.indexOf(FLAG_SLOT);
@@ -2131,7 +2675,7 @@ async function buildServer() {
     "window.__FLAGS=" + jsonForScript(resolveFeatures(poller.getFlags(), admin)) +
     ";window.__ADMIN=" + (admin ? "true" : "false") +
     ";window.__NAVGROUPS=" + jsonForScript(poller.getNavGroups()) +
-    ";window.__ME=" + jsonForScript(me ? ACCOUNTS.pub(me) : null) + ";";
+    ";window.__ME=" + jsonForScript(me ? Object.assign(ACCOUNTS.pub(me), { usagePaused: ACCOUNTS.usagePaused(me.uid) }) : null) + ";";   // -109: the beacon starts paused when the member paused it
   const serveIndex = (req, reply) => {
     const admin = isAdmin(req);
     const boot = bootScript(admin, meOf(req));
@@ -2210,15 +2754,15 @@ async function buildServer() {
     // can coincide to the millisecond at boot, which would let the browser 304 a crypto request with a
     // cached stocks body (or vice-versa) — both tabs then read a payload for the wrong universe. Prefix
     // the scope so the two URLs can never share a validator. (-17 fix.)
-    reply.header("cache-control", "no-cache");
     // The empty fallback always carries dataTs 0, so without mixing the error text into the validator
     // a freshly-recorded failure reason would sit behind a 304 and never reach the tab.
     const errKey = built ? "" : "-e" + (buildErr ? buildErr.length : 0);
     const tag = 'W/"' + scope + "-" + (body.dataTs != null ? body.dataTs : (body.ts || 0)) + errKey + '"';
-    reply.header("etag", tag);
-    if (req.headers["if-none-match"] === tag) { return reply.code(304).send(); }
-    reply.header("content-type", "application/json; charset=utf-8");
-    return reply.send(JSON.stringify(body));
+    // Through the shared memoized serialize + threadpool gzip (build 2026.09.24-101), like
+    // /api/funding: this route used to JSON.stringify the full analytics body on every non-304
+    // request and leave compression to the per-response path. The built payload is one stable
+    // object per rebuild, so the WeakMap memo hits for every client until the next build.
+    return sendCachedBody(req, reply, body, tag);
   });
   // Funding heatmap board — every market's carry over calendar time, at 1h / 8h / 24h.
   // Scope-prefixed ETag, for the same reason /api/analytics carries one: the two universes' dataTs
@@ -2236,6 +2780,18 @@ async function buildServer() {
   // so serveCached's dataTs ETag makes this a 304 for nearly every poll.
   fastify.get("/api/duel", (req, reply) =>
     serveCached(req, reply, poller.getDuel(), { ts: 0, dataTs: 0, minN: 60, scopes: {} }));
+  // D1 retest study (build 2026.09.24-96): the Trend board's D1 RETEST replayed over every name's
+  // closed daily history vs the same names' stacked-but-not-retesting bars. Gated with the
+  // Backtest tab (its manifest routes), admin while it soaks. ?u= scope, ?def= board|touch,
+  // ?cd= cooldown bars — anything else normalises to the defaults server-side. The ETag is the
+  // poller's walk signature (scope, definition, cooldown and every contributing name's walk
+  // version), so a poll is a 304 until a closed bar actually changed what the study reads.
+  fastify.get("/api/retest-study", (req, reply) => {
+    const q = req.query || {};
+    const body = poller.getD1Retest(q.u === "crypto" ? "crypto" : "stocks", String(q.def || ""), q.cd);
+    // (build 2026.09.24-107) the build and this boot are in the tag, never only a per-process counter
+    return sendCachedBody(req, reply, body, 'W/"rt-' + VERSION + "-" + BOOT_NONCE + "-" + body.key + '"');
+  });
   // EMA 13/21 trend ladder (D1 · H12 · H4 · H1) — ranked long/short leaderboards per universe.
   fastify.get("/api/trend", (req, reply) => {
     const q = req.query || {};
@@ -2310,7 +2866,7 @@ async function buildServer() {
       return reply.code(400).send({ ok: false, error: "that chat cannot be claimed" });
     if (b.code != null) {
       const r = poller.pushAdoptVerify(chat, me.uid, String(b.code || ""));
-      if (r.ok) log(`push: ${me.handle} adopted a linked Telegram (code-verified)`);
+      if (r.ok) { log(`push: ${me.handle} adopted a linked Telegram (code-verified)`); usageActFor(me.uid, "telegram-link"); }   // (build 2026.09.24-110)
       return reply.code(r.ok ? 200 : 400).send(r);
     }
     const r = poller.pushAdoptRequest(chat, me.uid);
@@ -2383,6 +2939,7 @@ async function buildServer() {
       if (!me || !ACCOUNTS.isMember(b.thread, me.uid)) return reply.code(400).send({ ok: false, error: "no such conversation" });
     }
     const r = b.del != null ? poller.deleteRule(b.del, own, isAdmin(req)) : poller.addRule(b, own);
+    if (r.ok && b.del == null) { const me = meOf(req); if (me) usageActFor(me.uid, "alert"); }   // (build 2026.09.24-110)
     return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : 400)).send(r);
   });
 
@@ -2396,6 +2953,12 @@ async function buildServer() {
   // dataTs like the other cached payloads, so an unchanged calendar revalidates to a 304.
   fastify.get("/api/earnings", (req, reply) =>
     serveCached(req, reply, poller.getEarnings(), { ts: 0, dataTs: 0, asOf: null, windowDays: 14, source: "finnhub", error: "not fetched yet", entries: [], recent: [], eligible: 0 }));
+  // Pre-earnings setup cards (build 2026.09.24-100): names reporting within ~5 sessions — reaction
+  // study + positioning into the print + implied-vs-typical + a rule-composed verdict line. Its
+  // own route so live positioning never busts the calendar's 304; the poller keeps the payload
+  // object (and so the ETag) while the content signature holds, rebuilding at most once a minute.
+  fastify.get("/api/earnings/setups", (req, reply) =>
+    serveCached(req, reply, poller.getEarnSetups(), { ts: 0, dataTs: 0, sessions: 5, runupD: 7, error: "not built yet", cards: [], count: 0 }));
   // Housing / MBS board — FRED-fed, 6h server refresh. ETag rides dataTs like the other cached
   // payloads, so an unchanged board revalidates to a 304.
   fastify.get("/api/housing", (req, reply) =>
@@ -2432,7 +2995,7 @@ async function buildServer() {
     serveKeyed(req, reply, "series|" + coin + "|" + poller.getCoinStamp(coin).st,
       () => { const s = poller.getSeries(coin) || { oi: [], funding: [] };
         return { coin, oi: downsampleSeries(s.oi, SERIES_CAP), funding: downsampleSeries(s.funding, SERIES_CAP) }; },
-      { coin, oi: [], funding: [] });
+      { coin, oi: [], funding: [] }, "series|" + coin);   // slot: a new stamp replaces the old version (build 2026.09.24-102)
   });
   // Crypto intraday correlation matrix (Correlation tab, crypto scope). w = 4h | 1d | 7d selects
   // the window (and its base bar: 5m / 15m / 1h). The poller builds it over the 5m archive and
@@ -2621,17 +3184,18 @@ async function buildServer() {
     // key, and the forming bar can never freeze against the tape (the one-code-path rule). The
     // legacy `days` hourly payload does no live-mark substitution client-side, so it keys on the
     // spine stamp alone.
-    let key;
+    let key, slot;
     const cfast = req.query && req.query.fast, cslow = req.query && req.query.slow;
     const cpair = (cfast != null || cslow != null) ? `|ma:${cfast || ""}-${cslow || ""}` : "";
     if (tf) { const cs = poller.getCoinStamp(coin);
       const bucket = cs.px > 0 ? Math.round(Math.log(cs.px) * 1000) : 0;   // ~0.1% granularity, scale-free
-      key = "candles|" + coin + "|tf:" + String(tf).toLowerCase() + cpair + "|" + cs.st + "|" + bucket; }
-    else key = "candles|" + coin + "|d:" + (days || 14) + "|" + poller.getCoinStamp(coin).st;
+      slot = "candles|" + coin + "|tf:" + String(tf).toLowerCase() + cpair;   // one live version per chart: a new price bucket or stamp replaces it (build 2026.09.24-102)
+      key = slot + "|" + cs.st + "|" + bucket; }
+    else { slot = "candles|" + coin + "|d:" + (days || 14); key = slot + "|" + poller.getCoinStamp(coin).st; }
     serveKeyed(req, reply, key, () => {
       if (tf) { const r = poller.getTfCandles(coin, tf, cfast, cslow); if (r) return r; }
       return { coin, candles: poller.getCandles(coin, days) };
-    }, { coin, candles: [] });
+    }, { coin, candles: [] }, slot);
   });
   // AI analyst report: everything this server holds on one ticker, compiled and sent to the
   // Anthropic API (Fable, Opus fallback), validated, and cached for the whole group. GET serves
@@ -2820,6 +3384,7 @@ async function buildServer() {
     // b.coin may be a single name OR a group key (grp:sec:<sector> / grp:bkt:<T1+T2+...>) —
     // the poller routes on the prefix; caps and cooldown apply identically.
     const r = await poller.generateAiReport(String(b.coin || ""), aiWho(req, reply));
+    if (r && r.ok) { const me = meOf(req); if (me) usageActFor(me.uid, "ai-report"); }   // (build 2026.09.24-110)
     const capped = r.error === "cooldown" || r.error === "daily-cap" || r.error === "user-day-cap" || r.error === "user-month-cap";
     return reply.code(r.ok ? 200 : (capped ? 429 : 400)).send(r);
   });
@@ -2905,7 +3470,9 @@ async function buildServer() {
     // spend, that one refuses the post; an honest client is stopped here before either costs.
     if (b.ctx && b.ctx.via === "dm" && !featureVisible(poller.getFlags(), "dm.ask", isAdmin(req)))
       return reply.code(403).send({ ok: false, error: "feature-gated", feature: "dm.ask" });
-    return poller.askBoard(b.q || "", b.ctx || {}, aiWho(req, reply));
+    const r = await poller.askBoard(b.q || "", b.ctx || {}, aiWho(req, reply));
+    if (r && r.ok) { const me = meOf(req); if (me) usageActFor(me.uid, "ask"); }   // (build 2026.09.24-110) answered asks only
+    return r;
   });
   // On-demand external fundamentals for the ask terminal. Both endpoints are pull-through
   // caches over SEC EDGAR (24h TTL, 5-min error TTL) — the first ask for a name does the
@@ -2980,7 +3547,7 @@ async function buildServer() {
     return "data: " + JSON.stringify({ dataTs: s ? s.dataTs : 0, alertVer: s ? s.alertVer : 0,
       v: VERSION, dm: me ? { seq: ACCOUNTS.msgSeq() } : undefined }) + "\n\n";
   }
-  const sseWrite = (entry, frame) => { try { entry.res.write(frame); } catch (_) {} };
+  const sseWrite = (entry, frame) => sseWriteTo(entry, frame, sseDetach);
   let sseLastTs = -1, sseLastAlert = -1;
   setInterval(() => {
     if (!sseClients.size) return;
@@ -3128,6 +3695,14 @@ async function buildServer() {
     return reply.code(204).header("cache-control", "no-store").send();
   });
   fastify.get("/api/health", (req) => {
+    // Railway's healthcheck (and any anonymous prober) is answered BEFORE the full picture is
+    // built (build 2026.09.24-101): poller.stats() walks every lane, limiter and per-coin failure
+    // map, and the anonymous body below never carried any of it. Same fields, same values.
+    const admin = isAdmin(req);
+    if (!admin && !reqAuthed(req)) {
+      const lp = poller.lastPollAt();
+      return { ok: true, version: VERSION, stale: lp > 0 && Date.now() - lp > STALE_MS, ts: Date.now() };
+    }
     const full = { ok: true, version: VERSION,
       stale: poller.lastPollAt() > 0 && Date.now() - poller.lastPollAt() > STALE_MS, lastPollAgoMs: poller.lastPollAt() > 0 ? Date.now() - poller.lastPollAt() : null,
       volume: { boots: HEARTBEAT.boots, firstBoot: HEARTBEAT.firstBoot, dataDir: DATA_DIR },
@@ -3141,8 +3716,7 @@ async function buildServer() {
     // counts, earnings/news/filings stamps, loop, ticks) and the ask-budget chip (ai.askDayLeft).
     // Explicit allow-list, never a delete-list, so a field added to stats() later is admin-only
     // until somebody decides otherwise here.
-    if (isAdmin(req)) return full;
-    if (!reqAuthed(req)) return { ok: full.ok, version: full.version, stale: full.stale, ts: full.ts };
+    if (admin) return full;
     const e = full.earnings || {}, n = full.news || {}, ff = (n.filings && n.filings.fetch) || {}, ai = full.ai || {};
     return { ok: full.ok, version: full.version, stale: full.stale, lastPollAgoMs: full.lastPollAgoMs, loop: full.loop,
       lastPoll: full.lastPoll, active: full.active, failing: full.failing, ticks: full.ticks,
@@ -3161,16 +3735,27 @@ async function main() {
   log(`Listening on ${HOST}:${PORT} (dex=${DEX}, data=${DATA_DIR}, build=${VERSION})`);
   // accounts.db backup: shortly after boot (a deploy is the moment a bad migration would show),
   // then daily. Seven rotated copies beside the database, or in ACCOUNTS_BACKUP_DIR.
-  const accountsBackup = () => {
-    const r = ACCOUNTS.backup(process.env.ACCOUNTS_BACKUP_DIR || null, 7);
-    log(r.ok ? `accounts backup: ${r.file} (${(r.bytes / 1024).toFixed(0)} KB, ${r.kept} kept)` : `accounts backup FAILED: ${r.error}`);
-  };
+  // Off the event loop since build 2026.09.24-101: backupAsync runs the VACUUM INTO in a worker
+  // thread on its own connection (falls back to the in-process copy if a worker cannot start).
+  const accountsBackup = () => ACCOUNTS.backupAsync(process.env.ACCOUNTS_BACKUP_DIR || null, 7).then((r) =>
+    log(r.ok ? `accounts backup: ${r.file} (${(r.bytes / 1024).toFixed(0)} KB, ${r.kept} kept)` : `accounts backup FAILED: ${r.error}`))
+    .catch((e) => log("accounts backup FAILED (isolated): " + (e && e.message)));
   setTimeout(accountsBackup, 5 * 60 * 1000).unref();
   setInterval(accountsBackup, 24 * 3600 * 1000).unref();
+  // (build 2026.09.24-109) Usage: the pending beacon minutes land every 60s in one transaction
+  // (and once more from ACCOUNTS.close() at shutdown); once a day, rows past the 30-day window
+  // fold into the sitewide bucket and the per-member rows go.
+  setInterval(() => { try { if (USAGE_SWEEP) USAGE_SWEEP(); } catch (e) { log("usage sweep FAILED: " + (e && e.message)); } try { ACCOUNTS.usageFlush(); } catch (e) { log("usage flush FAILED: " + (e && e.message)); } }, 60 * 1000).unref();
+  const usageRetain = () => { try { const r = ACCOUNTS.usageRetain(); if (r.dropped) log(`usage retention: ${r.dropped} per-member row(s) before ${r.cut} folded into sitewide totals`); } catch (e) { log("usage retention FAILED: " + (e && e.message)); } };
+  setTimeout(usageRetain, 2 * 60 * 1000).unref();
+  setInterval(usageRetain, 24 * 3600 * 1000).unref();
   poller.start().catch((e) => log("poller start error: " + (e && e.message)));
 }
 
-module.exports = { buildServer, VERSION };
+// _poller is a testing seam (build 2026.09.24-99): the Telegram sync suite binds chats and drains
+// the outbox against a stubbed Bot API through it. Nothing in the app reads it.
+module.exports = { buildServer, VERSION, _poller: () => poller, _sseWriteTo: sseWriteTo, SSE_MAX_BUFFERED,
+  _makeKeyedCache: makeKeyedCache, _keyedStats: () => keyedCache.stats(), KEYED_MAX_BYTES, KEYED_MAX_ENTRIES };   // build 2026.09.24-102: LRU seams for the tests
 if (require.main === module) main().catch((e) => { console.error(e); process.exit(1); });
 
 // Graceful stop: flush EVERYTHING that persists on a timer, not just features + ledger — the
@@ -3181,6 +3766,9 @@ let shuttingDown = false;
 async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
+  // Let in-flight async features/ledger writes settle first (build 2026.09.24-102), so the final
+  // synchronous saves below are the last writes of those files; bounded, never holds the exit.
+  try { if (store.drainWrites) await store.drainWrites(5000); } catch (_) {}
   try { poller.persistFeatures(); } catch (_) {}
   try { poller.persistLedger(); } catch (_) {}
   try { poller.persistTriggers(); } catch (_) {}
@@ -3194,6 +3782,9 @@ async function shutdown() {
   const sseClients = SSE_REGISTRY || new Set();   // buildServer's registry; block-scoped there, so it has to be handed out
   try { for (const e of sseClients) { try { e.res.end(); } catch (_) {} } sseClients.clear(); } catch (_) {}   // entries are {res, uid}: res.end() on the entry was a swallowed TypeError
   try { store.close(); } catch (_) {}
+  // (build 2026.09.24-107) a backup mid-VACUUM gets a moment to land; past it, close() drops its .tmp
+  try { if (ACCOUNTS.backupDrain) await ACCOUNTS.backupDrain(3000); } catch (_) {}
+  try { if (USAGE_SWEEP) USAGE_SWEEP(null, true); } catch (_) {}   // (build 2026.09.24-110 follow-up) held beacons land first
   try { ACCOUNTS.close(); } catch (_) {}   // checkpoints the WAL so a redeploy never leaves -wal/-shm behind
   process.exit(0);
 }

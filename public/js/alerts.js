@@ -59,6 +59,7 @@ function pushToast(text, opts){ const w=el('toastwrap'); const t=document.create
 // dismissed for that version — the next deploy raises a fresh one.
 let _buildToastFor=null;
 function notifyNewBuild(v){
+  state.newBuild=v;   // (build 2026.09.24-108) read by core.js lazyFailToast: a lazy import failing after a deploy is a reload, not a retry
   if(_buildToastFor===v) return; _buildToastFor=v;
   const w=el('toastwrap'); if(!w) return;
   const t=document.createElement('div'); t.className='toast toast-trig';

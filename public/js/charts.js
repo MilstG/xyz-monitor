@@ -4,6 +4,7 @@
 // on G (core.js).
 import { activeRows, el, esc, fmtPrice, state } from "./core.js";
 import { fetchJSON } from "./data.js";
+import { shCanvasPng, shChartCard, shareOpen } from "./share.js";
 
 
 // ===== CHARTS tab (build 2026.08.21-01) ========================================================
@@ -169,6 +170,7 @@ function chBuild(){
       +(CH.mode==='mtf'
         ?'<span class="chtflock">'+esc((CH_TFS.find(t=>t.k===sp.tf)||{}).l||sp.tf)+'</span>'
         :'<span class="chtfs">'+CH_TFS.map(t=>'<button type="button" data-tf="'+t.k+'"'+(t.k===sp.tf?' class="on"':'')+'>'+t.l+'</button>').join('')+'</span>')
+      +'<button type="button" class="chshr" title="share this chart to chat \u2014 the pane as a picture, the window\u2019s facts as its caption">\u2934</button>'
       +'</div>'
       +'<div class="chrd"><span class="chk">hover for OHLC \u00b7 V \u00b7 bar \u0394</span></div>'
       +'<div class="chcw"><canvas></canvas><span class="chcov"></span></div>';
@@ -179,6 +181,7 @@ function chBuild(){
     p.ctx=p.canvas.getContext('2d');
     CH.panes.push(p);
     chWire(p);
+    d.querySelector('.chshr').addEventListener('click',()=>shareOpen(chShareCard(p)));
     chLoad(p,seq);
   });
 }
@@ -359,6 +362,27 @@ function chDraw(p){
   if(covTxt&&CH.ema.on&&series&&series.length&&series.length<CH.ema.p2)
     covTxt+=' \u00b7 EMA'+CH.ema.p2+' needs '+CH.ema.p2+' bars ('+series.length+' held)';
   p.covEl.textContent=covTxt;
+}
+// ---- share (build 2026.09.24-98) -------------------------------------------------------------
+// The pane as it is drawn — its zoom, its pan, its EMA ribbon — minus the crosshair, which is a
+// pointer and not the chart: redrawn once without the hover, copied onto a panel-coloured floor,
+// then redrawn as it was. The caption is the visible window's facts.
+async function chShareCard(p){
+  const s=chSeries(p); if(!s||!s.length||!p.view) return null;
+  const hv=p.hover; p.hover=null; chDraw(p);
+  const png=await shCanvasPng(p.canvas);
+  p.hover=hv; chDraw(p);
+  if(!png) return null;
+  const wMs=p.tf*60000, bars=s.filter(b=>b[0]+wMs>=p.view.from&&b[0]<=p.view.to);
+  if(!bars.length) return null;
+  const a=bars[0], z=bars[bars.length-1], tfl=(CH_TFS.find(t=>t.k===p.tf)||{}).l||String(p.tf);
+  let lo=Infinity,hi=-Infinity; for(const b of bars){ if(+b[3]<lo)lo=+b[3]; if(+b[2]>hi)hi=+b[2]; }
+  const chg=+a[1]>0?(+z[4]/+a[1]-1)*100:null;
+  return shChartCard({ view:'charts', coin:p.coin, tf:tfl, title:tfl+' candles \u00b7 '+bars.length+' bars', name:'chart-'+chTick(p.coin)+'-'+tfl+'.png', png,
+    rows:[{t:'last',c:[{s:chPx(+z[4]),c:''}]},
+      ...(chg!=null?[{t:'window',c:[{s:(chg>=0?'+':'')+chg.toFixed(2)+'%',c:chg>0?'pos':chg<0?'neg':'sec'}]}]:[]),
+      {t:'range',c:[{s:chPx(lo)+' \u2013 '+chPx(hi),c:''}]},
+      {t:'from',c:[{s:chFmtT(a[0],p.tf)+' \u2192 '+chFmtT(z[0],p.tf),c:'sec'}]}] });
 }
 // ---- interaction -------------------------------------------------------------------------------
 function chWire(p){

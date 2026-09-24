@@ -5,7 +5,7 @@
 import { IS_ADMIN, attachLineHover, featureOn, hoverChart, lcGrid, lcTicks, sLeg } from "./admin.js";
 import { showView } from "./backtest.js";
 import { earnDiffC, earnFilingHtml, earnNext, earnSessLbl, loadEarnings, macroDayLbl, macroList, macroRangeFmt, macroRowHtml, macroStateC } from "./calendar.js";
-import { DAY, G, el, esc, fmtPrice, fmtUsd, state } from "./core.js";
+import { DAY, G, el, esc, fmtPrice, fmtUsd, sessOffFor, state } from "./core.js";
 import { fetchJSON } from "./data.js";
 import { closeDetail, openDetail } from "./drawer.js";
 import { render } from "./markets.js";
@@ -76,12 +76,19 @@ function noteBadge(r){
   return `<span class="pit ${cls}" tabindex="0" role="button" data-pit="${esc(r.coin)}" title="${esc(t)}">`
     + NOTE_PIT_SVG + (d.n>1?`<i class="pn">${d.n}</i>`:'') + '</span>';
 }
+// (build 2026.09.24-108) A viewer without the notes feature (anonymous, a member the gate leaves
+// out) used to GET /api/notes on every snapshot render and every drawer open: state.notes stays null
+// on a 403, so notesStale() said "stale" forever and each one was another 403. Now the feature check
+// comes first, and a 403 is remembered for the page's life (the gate is decided per session).
+let _notesDenied=false;
+function notesAllowed(){ return !_notesDenied && featureOn('notes'); }
 async function loadNotes(force){
+  if(!notesAllowed()) return;
   if(_notesLoading) return _notesLoading;
   _notesLoading = (async()=>{
     try{ const d = await fetchJSON('/api/notes');
       if(d&&Array.isArray(d.notes)){ state.notes = d.notes; state.notesRev = d.rev; _notesLast = Date.now(); }
-    }catch(_){}
+    }catch(e){ if(e&&/HTTP 403/.test(e.message)) _notesDenied=true; }
     finally{ _notesLoading = null; }
   })();
   return _notesLoading;
@@ -90,6 +97,7 @@ async function loadNotes(force){
 // disagree with what we hold, a write happened somewhere (another browser, another admin) and the
 // bodies are refetched. Cheap: one comparison per render, one fetch only when they diverge.
 function notesStale(){
+  if(!notesAllowed()) return false;   // (-108) nothing to reconcile against a book this viewer may not read
   if(!state.notes||!state.rows) return true;
   for(const r of state.rows.values()) if(r.nt&&r.nt.n){
     if(notesFor(r.coin).length!==r.nt.n) return true;
@@ -576,19 +584,31 @@ function earnLiveHtml(e){
 // Per-ticker reaction study chip. History = this name's own past prints measured on the perp's
 // daily closes (UTC — trades through weekends); n is whatever the feed's depth plus accrual
 // honestly provides. Never a prediction — a base rate for sizing expectations.
+// (build 2026.09.24-106) The study's honesty strings, one place for tab, drawer, card and share:
+// the bootstrap 90% CI of the median |move| (n ≥ 4; under that the thin warning stands), the share
+// of reactions read off session-bar closes instead of the exact cash anchors, and the gap coverage.
+function earnCiTxt(ci){ return Array.isArray(ci)&&ci.length===2?`${(+ci[0]).toFixed(1)}–${(+ci[1]).toFixed(1)}%`:null; }
+function earnSrcTxt(st){ return st&&st.dailyN>0?`${st.dailyN} of ${st.n} from daily closes`:null; }
+function earnGapTxt(st){
+  if(!st) return null;
+  const of=st.gapOf!=null?st.gapOf:st.gapN;
+  if(!(st.gapN>0)) return of>0?`no cash-session gap yet (0 of ${of} timed prints have intraday coverage)`:null;
+  return `gapped ${st.gapUp}/${st.gapN} up, ${st.gapHeld}/${st.gapN} held to the cash close (gap n=${st.gapN} of ${of})`;
+}
 function earnStudyHtml(t){
   const st=state.earnPayload&&state.earnPayload.study&&state.earnPayload.study[t];
   if(!st) return '<span class="earn-study sec" data-tip="no reaction history yet — the study needs past print dates matched to retained daily candles; it accrues automatically as prints pass">no history</span>';
-  const gap=st.gapN>0?` · gapped ${st.gapUp}/${st.gapN} up, ${st.gapHeld}/${st.gapN} held to close`:'';
+  const gt=earnGapTxt(st), gap=gt?` · ${gt}`:'';
+  const ci=earnCiTxt(st.medCI), src=earnSrcTxt(st);
   const x=st.xMed!=null?` · median ${st.xMed}x the usual daily move (n=${st.xN})`:'';
   // Reaction curve: the move from the print anchor itself (16:00 ET for AMC, 06:00 for BMO, read
   // off the hourly spine) to +1h / +4h / +24h — the intraday shape the daily bar cannot show.
   const cv=st.curve&&st.curve.agg, cvH=(k)=>cv&&cv[k]&&cv[k].n>0?`+${k.slice(1)}h |${cv[k].medAbs}%| (${cv[k].up}/${cv[k].n} up)`:null;
   const curveParts=cv?['h1','h4','h24'].map(cvH).filter(Boolean):[];
   const curve=curveParts.length?` · from the print anchor: ${curveParts.join(', ')}${st.curve.approx?' (some anchors read off an hourly close)':''}`:'';
-  const tip=`this name's own earnings reaction base rate over ${st.n} print(s): avg |${st.avgAbs}%| next-session move (median |${st.medAbs}%|), ${st.up}/${st.n} up${gap}${x}${curve}. Reaction = the print day's own bar (BMO/DMH prints against the prior close, AMC prints against the pre-print reference; with the hourly spine the AMC leg is anchored at 16:00 ET, +24h). Gap stats need opens — they cover the live-fetched candle window only. A base rate, not a prediction.`;
+  const tip=`this name's own earnings reaction base rate over ${st.n} print(s): avg |${st.avgAbs}%| cash-close-to-cash-close move (median |${st.medAbs}%|${ci?`, 90% CI ${ci}`:st.n<4?', n<4 — too thin for an interval':''}), ${st.up}/${st.n} up${gap}${x}${curve}. Reaction = the last cash close before the print to the first cash close after it (BMO: prior close → print-day close; AMC: print-day close → next session's close; holidays and 13:00 half days on the exchange calendar), read at the exact 16:00 ET anchors off the hourly spine / 5m archive${src?` — ${src} (a session bar closes 20:00 ET, the labelled fallback where intraday data does not reach)`:''}${st.tbdN>0?`; ${st.tbdN} untimed (TBD) print${st.tbdN===1?'':'s'} excluded`:''}${st.amcWideN>0?`; ${st.amcWideN} after-close print${st.amcWideN===1?'':'s'} with no intraday data excluded (a daily bar cannot place the print-day close)`:''}. Gap = the reaction session's 09:30 ET open vs that reference close; held = its cash close beyond the gap-open. A base rate, not a prediction.`;
   const cv24=cv&&cv.h24&&cv.h24.n>0?` · +24h |${cv.h24.medAbs}%|`:'';
-  return `<span class="earn-study" data-tip="${esc(tip)}">${st.n} print${st.n===1?'':'s'} · avg |${st.avgAbs}%| · ${st.up}↑${st.n-st.up}↓${st.xMed!=null?' · '+st.xMed+'x':''}${cv24}</span>`;
+  return `<span class="earn-study" data-tip="${esc(tip)}">${st.n} print${st.n===1?'':'s'} · avg |${st.avgAbs}%|${ci?` · med ${ci}`:''} · ${st.up}↑${st.n-st.up}↓${st.xMed!=null?' · '+st.xMed+'x':''}${cv24}</span>`;
 }
 // Drawer line: upcoming print inside the window + the study one-liner.
 function earnDrawerHtml(r){
@@ -597,8 +617,94 @@ function earnDrawerHtml(r){
   const st=state.earnPayload&&state.earnPayload.study&&state.earnPayload.study[r.ticker];
   if(!p&&!st) return '';
   const up=p?`Earnings ${p.diff===0?'<b style="color:var(--accent)">TODAY</b>':p.diff===1?'<b style="color:var(--accent)">tomorrow</b>':'in '+p.diff+'d'} · ${esc(earnSessLbl(p.e.s))}${p.e.eps!=null?' · EPS est '+epsFmt(p.e.eps):''}`:'';
-  const hist=st?`${up?' · ':''}<span class="sec" data-tip="own reaction base rate — hover the Earnings tab row for the full breakdown">${st.n} print${st.n===1?'':'s'}, avg |${st.avgAbs}%|</span>`:'';
-  return `<div class="dsub" style="margin-top:2px">${up}${hist}</div>`;
+  const ci=st?earnCiTxt(st.medCI):null;
+  const hist=st?`${up?' · ':''}<span class="sec" data-tip="own reaction base rate (last cash close before the print → first cash close after) — hover the Earnings tab row for the full breakdown">${st.n} print${st.n===1?'':'s'}, avg |${st.avgAbs}%|${st.medAbs!=null?`, median |${st.medAbs}%|${ci?` (90% CI ${ci})`:st.n<4?' (n<4, thin)':''}`:''}</span>`:'';
+  return `<div class="dsub" style="margin-top:2px" data-shsec="earn" data-shlabel="Earnings reaction">${up}${hist}</div>`;
+}
+// ===== pre-earnings setup card (build 2026.09.24-100) =====
+// Server-built (/api/earnings/setups): every number and the verdict line arrive computed — the
+// client formats, it never re-derives. A block the server could not fill arrives with its reason
+// and renders as "n/a — why", never as a dash that could be read as zero.
+function setupNa(why){ return `<span class="na" data-tip="${esc(why||'not computable')}">n/a — ${esc(why||'not computable')}</span>`; }
+function setupPct(x,dp){ return x==null||!isFinite(x)?null:`<b class="${x>0?'pos':x<0?'neg':'sec'}">${x>=0?'+':'−'}${Math.abs(x).toFixed(dp==null?1:dp)}%</b>`; }
+function setupWhen(c){ return c.sessions===0?'reports today':c.sessions===1?'next session':'in '+c.sessions+' sessions'; }
+function earnSetupBodyHtml(c){
+  if(!c) return '';
+  if(c.missing) return `<div class="setup-grid"><div class="setup-blk">${setupNa(c.missing)}</div></div>`;
+  const k=(l,v)=>`<div class="setup-kv"><span class="sec">${l}</span><span>${v}</span></div>`;
+  const rx=c.react, p=c.pos||{}, dr=c.drift||{}, im=c.implied||{};
+  const react=rx?[
+      k('typical |move|',`<b>±${rx.medAbs.toFixed(1)}%</b> <span class="sec">median${earnCiTxt(rx.medCI)?` · 90% CI ${earnCiTxt(rx.medCI)}`:''} · avg ${rx.avgAbs.toFixed(1)}%${rx.dailyN>0?` · ${rx.dailyN} of ${rx.n} from daily closes`:''}</span>`),
+      k('direction',`${rx.up}↑ ${rx.n-rx.up}↓ <span class="sec">of ${rx.n}${rx.thin?' · thin sample (n<4, no interval)':''}</span>`),
+      k('gaps',rx.gapN>0?`${rx.gapUp}/${rx.gapN} up · held ${rx.gapHeld}/${rx.gapN}${rx.gapRead?` <span class="sec">(${rx.gapRead==='holds'?'gaps hold':'gaps fade'})</span>`:''} <span class="sec">· gap n=${rx.gapN} of ${rx.gapOf!=null?rx.gapOf:rx.gapN}</span>`:setupNa(`no cash-session gap history — the gap needs the 09:30 ET open and both cash closes off intraday data (hourly spine ~180d, 5m archive ~370d)${rx.gapOf>0?`; 0 of ${rx.gapOf} timed prints covered`:''}`)),
+      rx.h24!=null?k('+24h from anchor',`|${rx.h24}%| <span class="sec">median</span>`):''].join('')
+    :setupNa(c.reactWhy);
+  const pos=[
+    k('funding',p.fundApr!=null?`${p.fundApr>=0?'+':''}${p.fundApr.toFixed(1)}% APR${p.fundPct!=null?` · <b${p.fundPct>=90||p.fundPct<=10?' style="color:var(--accent)"':''}>p${p.fundPct}</b> <span class="sec">vs own 31d</span>`:` · ${setupNa(p.fundWhy)}`}`:setupNa(p.fundWhy)),
+    k('OI, 5 sessions',p.oiChg!=null?setupPct(p.oiChg):setupNa(p.oiWhy)),
+    k('premium',p.premBp!=null?`${p.premBp>=0?'+':''}${p.premBp.toFixed(1)}bp${p.premZ!=null?` <span class="sec">(${p.premZ>=0?'+':''}${p.premZ.toFixed(1)}σ vs 7d)</span>`:''}`:setupNa(p.premWhy))].join('');
+  const drift=[
+    k('run-up so far',dr.now!=null?setupPct(dr.now)+' <span class="sec">last 7d (5 sessions)</span>':setupNa(dr.nowWhy)),
+    k('usual run-up',dr.usual?`${setupPct(dr.usual.med)} <span class="sec">median of ${dr.usual.n} · ${dr.usual.up}/${dr.usual.n} up</span>`:setupNa(dr.usualWhy))].join('');
+  const impl=im.ratio!=null
+    ?[k('typical / daily',`<b>${im.ratio.toFixed(1)}x</b> <span class="sec">±${im.typ.toFixed(1)}% vs ${im.day.toFixed(2)}%/day now</span>`),
+      k('past prints',im.histX!=null?`${im.histX.toFixed(1)}x${im.read&&im.read!=='usual'?` <span style="color:var(--accent)">· vol ${im.read} now</span>`:''}`:setupNa('the study has no expansion ratio yet (needs 8+ candles before each print)'))].join('')
+    :setupNa(im.why);
+  const blk=(h,tip,body)=>`<div class="setup-blk"><div class="setup-h" data-tip="${esc(tip)}">${h}</div>${body}</div>`;
+  return `<div class="setup-grid">`
+    +blk('Reaction study','this name’s own past prints: last cash close before each print → first cash close after it (exact 16:00 ET anchors off intraday data, session-bar closes where it does not reach — counted), median |move| with a bootstrap 90% CI — a base rate, not a prediction',react)
+    +blk('Positioning into the print','live funding and its percentile vs the name’s own 31d hourly history, OI change over the last 7 calendar days (~5 sessions), mark vs oracle premium',pos)
+    +blk('Run-up','drift into the print so far vs this name’s median drift over the same 7-day window before its past prints',drift)
+    +blk('Implied vs typical','the typical print move divided by the CURRENT usual daily move (mean |close-to-close| over 20 days) — next to the same ratio measured at past prints. Higher than usual = the print is big relative to how quiet the tape is now',impl)
+    +`</div>`;
+}
+function earnSetupCardHtml(c,open){
+  return `<details class="earn-setup" data-t="${esc(c.t)}"${open?' open':''}><summary><span class="earn-tk">${esc(c.t)}</span>`
+    +`<span class="earn-sess ${c.s==='BMO'?'bmo':c.s==='AMC'?'amc':''}">${esc(setupWhen(c))} · ${esc(earnSessLbl(c.s))}</span>`
+    +`<span class="setup-verdict">${esc(c.verdict||c.missing||'')}</span></summary>${earnSetupBodyHtml(c)}</details>`;
+}
+// The Setups strip on the Earnings tab: collapsed cards, one per name inside the window. Which
+// cards are expanded survives the tab's re-renders (every payload pull repaints the whole body).
+const _setupOpen=new Set();
+function wireEarnSetups(box){
+  box.querySelectorAll('details.earn-setup').forEach(dt=>dt.addEventListener('toggle',()=>{ if(dt.open) _setupOpen.add(dt.dataset.t); else _setupOpen.delete(dt.dataset.t); }));
+}
+function earnSetupStripHtml(){
+  const d=state.earnSetups; if(!d) return '';
+  const cards=d.cards||[];
+  const tip=`names reporting within the next ${d.sessions||5} US sessions (weekends and US exchange holidays skipped). Each card: the reaction study, positioning going into the print, the run-up vs its usual, and the typical move vs the CURRENT daily range — composed into one rule-based verdict line (fixed thresholds: crowded = funding ≥ p90 / ≤ p10 of its own history with OI up ≥ 5% over 5 sessions). No AI; a read of the setup, never a call.`;
+  let h=`<div class="earn-day" data-tip="${esc(tip)}">PRE-EARNINGS SETUPS<span class="sec" style="margin-left:8px;text-transform:none;letter-spacing:0">next ${d.sessions||5} sessions · ${cards.length} name${cards.length===1?'':'s'}</span></div>`;
+  if(d.error&&!cards.length) return h+`<div class="sec" style="font-size:var(--fs-xs);margin-bottom:10px">n/a — ${esc(d.error)}</div>`;
+  if(!cards.length) return h+`<div class="sec" style="font-size:var(--fs-xs);margin-bottom:10px">No name on the calendar reports within the next ${d.sessions||5} sessions.</div>`;
+  return h+cards.map(c=>earnSetupCardHtml(c,_setupOpen.has(c.t))).join('')+'<div style="height:8px"></div>';
+}
+// Drawer section: only when this name has a print inside the window. Wrapped in #dsetup so a
+// setups pull that lands after the drawer opened can fill it in place (loadEarnSetups).
+function earnSetupDrawerHtml(r){
+  const c=r&&r.uni==='xyz'&&state.earnSetupMap?state.earnSetupMap.get(r.ticker):null;
+  if(!c) return '<div id="dsetup"></div>';
+  return `<div id="dsetup"><div class="dsec">Pre-earnings setup <span class="sec" style="font-weight:400;text-transform:none;letter-spacing:0">· ${esc(setupWhen(c))} · ${esc(earnSessLbl(c.s))}</span></div>`
+    +`<div class="setup-verdict" style="margin-bottom:6px">${esc(c.verdict||c.missing||'')}</div>${earnSetupBodyHtml(c)}</div>`;
+}
+// The earnings line as a card (build 2026.09.24-98): the next print and this name's own reaction
+// base rate, as label/value lines — the fields the line and its hover already print, no new math.
+function earnShareRows(r){
+  if(!r||r.uni!=='xyz') return [];
+  const p=state.earn?earnNext(r.ticker):null;
+  const st=state.earnPayload&&state.earnPayload.study&&state.earnPayload.study[r.ticker];
+  const L=(t,s,c)=>({t,c:[{s:String(s),c:c||''}]}), out=[];
+  if(p){ out.push(L('next print',p.diff===0?'today':p.diff===1?'tomorrow':'in '+p.diff+'d',p.diff<=1?'pos':''));
+    out.push(L('session',earnSessLbl(p.e.s)));
+    if(p.e.eps!=null) out.push(L('EPS est',epsFmt(p.e.eps))); }
+  if(st){ out.push(L('prints',st.n)); out.push(L('avg |move|',st.avgAbs+'%'));
+    if(st.medAbs!=null) out.push(L('median |move|',st.medAbs+'%'));
+    if(st.up!=null) out.push(L('up / down',st.up+' \u2191 '+(st.n-st.up)+' \u2193',st.up*2>st.n?'pos':st.up*2<st.n?'neg':'sec'));
+    if(st.xMed!=null) out.push(L('vs usual day',st.xMed+'x median'));
+    const ci=earnCiTxt(st.medCI); if(ci) out.push(L('median 90% CI',ci));
+    if(st.gapN>0) out.push(L('gapped up',st.gapUp+' / '+st.gapN+' (of '+(st.gapOf!=null?st.gapOf:st.gapN)+')'));
+    const c24=st.curve&&st.curve.agg&&st.curve.agg.h24;
+    if(c24&&c24.n>0) out.push(L('+24h |move|',c24.medAbs+'% median')); }
+  return out;
 }
 // Reported window for the tab: the server's `recent` (past 2 ET days, derived from the persisted
 // print history) MERGED with any upcoming entries that rolled past ET midnight since the last
@@ -616,26 +722,44 @@ function earnRecentList(){
   return [...m.values()];
 }
 // Per-print reaction move for a reported row, computed from the daily closes already in the
-// browser and mirroring the reaction study's convention EXACTLY: BMO/DMH prints score their own
-// UTC daily candle, AMC prints the next one (the perp trades through weekends, so a Friday AMC
-// print lands on Saturday's candle). The live day-move column would be WRONG here — that is
-// today's move, not the reaction to a print one or two days old. Null-honest: a reaction candle
-// still forming reads "so far"; one not opened or not retained yet is stated, never zeroed.
+// browser with the SERVER's rule (compute.earnPrintReaction's daily branch, earnReactDaily — build
+// 2026.09.24-106; a parity test runs both on the same fixtures). ONE window for every print: the
+// last cash close before it -> the first cash close after it. BMO/DMH: the last session bar dated
+// before the print day -> the print day's session bar; AMC: the same reference -> the NEXT session's
+// bar (a Friday AMC reads Monday's close, never Saturday's). The browser has no intraday spine, so
+// this is the session-bar tier (UTC bar D closes 20:00 ET D) and the tip says so; the server's
+// study and brief resolve the exact 16:00 ET anchors where intraday data reaches. `off` = the
+// server's calendar (sessOffFor); before /api/daily has shipped it, weekends only. A TBD print
+// has no side of the session to anchor on and reads "—". A reaction bar still forming (or not on
+// the spine yet) reads "so far" against the live mark; no usable reference is stated, never zeroed.
+function earnReactPct(e, cl, px, now, off){
+  if(!e||typeof e.d!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(e.d)||!Array.isArray(cl)||!cl.length) return null;
+  if(e.s!=='AMC'&&e.s!=='BMO'&&e.s!=='DMH') return null;
+  const isOff=typeof off==='function'?off:(d=>{ const w=new Date(d*DAY).getUTCDay(); return w===0||w===6; });
+  const pD=Math.floor(Date.UTC(+e.d.slice(0,4),+e.d.slice(5,7)-1,+e.d.slice(8,10))/DAY);
+  let rsD=e.s==='AMC'?pD+1:pD; for(let g=0;g<15&&isOff(rsD);g++) rsD++;
+  const live=Number.isFinite(px)&&px>0?px:null;
+  let ref=null, pb=null;
+  for(const k of cl){ if(!k) continue; const t=+k.t, c=k.c==null||k.c===''?NaN:parseFloat(k.c); if(!Number.isFinite(t)||!Number.isFinite(c)) continue;
+    const d=Math.floor(t/DAY); if(d<pD){ if(!isOff(d)&&c>0) ref={t,c}; } else if(d===rsD){ pb={t,c}; break; } else if(d>rsD) break; }
+  if(!ref) return null;
+  const pct=(a,b)=>+(((a-b)/b)*100).toFixed(1);
+  if(pD*DAY>now) return null;
+  const wide=e.s==='AMC'?{wide:true}:null;   // (-107) AMC on session bars spans two sessions: labelled, as the server does
+  if(pb&&pb.t+DAY<=now) return Object.assign({ pct:pct(pb.c,ref.c), state:'final', src:'daily' },wide);
+  if(live!=null) return Object.assign({ pct:pct(live,ref.c), state:'forming', src:'daily' },wide);
+  return null;
+}
 function earnReactHtml(e){
   const r=state.rows.get(e.coin), cl=r&&r.daily;
   const dash=(why)=>`<span class="earn-live sec" data-tip="${esc(why)}">reaction —</span>`;
   if(!cl||cl.length<2) return dash('reaction pending — daily candles for this name are not loaded in the browser yet');
-  const dayOf=(t)=>{ const x=new Date(t); return x.getUTCFullYear()+'-'+String(x.getUTCMonth()+1).padStart(2,'0')+'-'+String(x.getUTCDate()).padStart(2,'0'); };
-  let pi=-1; for(let i=0;i<cl.length;i++){ if(dayOf(cl[i].t)===e.d){ pi=i; break; } }
-  if(pi<0) return dash('the print date is outside the retained daily candle window');
-  const ri=e.s==='AMC'?pi+1:pi;
-  if(ri<=0||ri>=cl.length) return dash('the reaction candle (the session after an AMC print) has not opened yet');
-  const c1=parseFloat(cl[ri].c), c0=parseFloat(cl[ri-1].c);
-  if(!isFinite(c1)||!isFinite(c0)||c0<=0) return dash('reaction candle retained but its closes are not usable yet');
-  const mv=(c1-c0)/c0*100;
-  const live=ri===cl.length-1&&dayOf(cl[ri].t)===dayOf(Date.now());
-  const tip=`the print's own reaction move — ${e.s==='AMC'?'the daily candle AFTER the report (AMC prints land after the close)':'the report day\u2019s own daily candle'} vs the prior close, same convention as the reaction study (UTC candles; the perp trades through weekends)${live?'. That candle is STILL OPEN \u2014 this is the move so far, not a settled print':''}`;
-  return `<span class="earn-live" data-tip="${esc(tip)}"><b class="${mv>=0?'pos':'neg'}">${mv>=0?'+':''}${mv.toFixed(1)}%</b><span class="sec"> reaction${live?' so far':''}</span></span>`;
+  if(e.s!=='AMC'&&e.s!=='BMO'&&e.s!=='DMH') return dash('print time unknown (TBD) — the reaction window anchors on which side of the cash session the print fell, so an untimed print is not measured');
+  const rx=earnReactPct(e, cl, r&&parseFloat(r.px), Date.now(), sessOffFor(r));
+  if(!rx) return dash('no usable close before the print in the retained daily candle window, or no live mark yet');
+  const mv=rx.pct, live=rx.state==='forming';
+  const tip=`the print's reaction — the last cash close before the print to the first cash close after it (${e.s==='AMC'?'AMC: the print day’s close to the next session’s close, a Friday print reads Monday':'pre-market / intraday print: the prior session’s close to the print day’s close'}), the same window as the reaction study and the server brief. Read here off session daily bars (a bar closes 20:00 ET, four hours after the cash close) — the study resolves the exact 16:00 ET anchors where intraday data reaches${rx.wide?'. AMC on daily bars: the print day’s bar closes after the print, so this reads the day BEFORE’s close to the next session’s close — two sessions, wider than the study’s window (which excludes it)':''}${live?'. The reaction session has NOT closed yet — this is the move so far against the live mark, not a settled print':''}`;
+  return `<span class="earn-live" data-tip="${esc(tip)}"><b class="${mv>=0?'pos':'neg'}">${mv>=0?'+':''}${mv.toFixed(1)}%</b><span class="sec"> reaction${rx.wide?' (2 sessions)':''}${live?' so far':''}</span></span>`;
 }
 // Void-control wiring for reported rows: confirm, POST the tombstone, reload the payload (the
 // server bumps the ETag so the repaint is immediate). stopPropagation keeps the row's
@@ -716,13 +840,13 @@ function renderEarnings(){
     if(e.k==='FOMC'&&e.d1&&macroStateC(e)==='upcoming'){ const d1f=earnDiffC(e.d1);
       if(d1f!=null&&d1f>=0){ let g1=mgroups.get(e.d1); if(!g1){g1=[];mgroups.set(e.d1,g1);}
         g1.push({_fomc1:true,e}); } } }
-  if(!groups.size&&!mgroups.size&&!repHtml){ box.innerHTML=head+cov+'<div class="msg">No upcoming events in the next '+(d.windowDays||14)+' days for this universe.</div>'; return; }
-  let html=head+cov+repHtml;
+  if(!groups.size&&!mgroups.size&&!repHtml){ box.innerHTML=head+cov+earnSetupStripHtml()+'<div class="msg">No upcoming events in the next '+(d.windowDays||14)+' days for this universe.</div>'; wireEarnSetups(box); return; }
+  let html=head+cov+earnSetupStripHtml()+repHtml;
   if(!groups.size&&!mgroups.size){
     html+='<div class="msg">No upcoming reports in the next '+(d.windowDays||14)+' days for this universe.</div>';
     box.innerHTML=html;
     box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',(ev)=>{ if(ev.target.closest('a,button')) return; const c=rw.dataset.coin; if(state.rows.has(c)) openDetail(c); }));   // in-place drawer — no tab switch
-  wireEarnVoid(box);
+  wireEarnVoid(box); wireEarnSetups(box);
     return;
   }
   const allDates=[...new Set([...groups.keys(),...mgroups.keys()])].sort();
@@ -757,6 +881,6 @@ function renderEarnings(){
   html+=`<div class="sec" style="font-size:var(--fs-xs);margin-top:14px;line-height:1.5">Dates and sessions are the feed\u2019s scheduled values and can move \u2014 companies reschedule. Session-spanning signals (breakout, gap, overnight drift) on names reporting \u2264 1 day out carry an <i>earnings</i> flag on the Signals tab and have their evidence contribution capped: the base rates weren\u2019t sampled around a known binary catalyst. Macro rows work the same way universe-wide \u2014 an FOMC/CPI/NFP print \u2264 1 day out flags session-spanning signals on <b>both</b> universes with the same cap, and events inside an open setup\u2019s horizon are flagged on the Actionable board (\u25c6) and in AI reports. Macro dates come from the Fed\u2019s published schedule and FRED; prior values are the previous print (labeled by month), never consensus \u2014 no street-estimate feed exists here, so there is no beat/miss verdict, only prior \u2192 actual and the tape.</div>`;
   box.innerHTML=html;
   box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',(ev)=>{ if(ev.target.closest('a,button')) return; const c=rw.dataset.coin; if(state.rows.has(c)) openDetail(c); }));   // in-place drawer — no tab switch
-  wireEarnVoid(box);
+  wireEarnVoid(box); wireEarnSetups(box);
 }
-export { _hsgLast, _liqLast, _notesLoading, earnDrawerHtml, epsFmt, epsPairFmt, loadHousing, loadLiquidity, loadNotes, noteBadge, noteDrawerHtml, notesStale, openHousing, openLiquidity, openNotes, renderDrawerNotes, renderEarnings, renderHousing, renderLiquidity, renderNotes, wireDrawerNotes };
+export { _hsgLast, _liqLast, _notesLoading, earnDrawerHtml, earnSetupBodyHtml, earnSetupCardHtml, earnSetupDrawerHtml, earnSetupStripHtml, earnShareRows, epsFmt, epsPairFmt, loadHousing, loadLiquidity, loadNotes, noteBadge, noteDrawerHtml, notesStale, openHousing, openLiquidity, openNotes, renderDrawerNotes, renderEarnings, renderHousing, renderLiquidity, renderNotes, wireDrawerNotes };

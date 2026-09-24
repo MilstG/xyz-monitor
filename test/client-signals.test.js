@@ -279,7 +279,7 @@ test("backtest v2 manifest: seventeen-signal roster, scope seam, data gates, sec
   assert.ok(s.includes("if((r.uni==='main')!==cr) return false;"), "scope-aware universe filter missing");
   assert.ok(s.includes("const bC=scopeBench(), bench=bC?state.rows.get(bC):null;"), "scoped benchmark missing from btMatrix");
   assert.ok(s.includes("p.holdWindow==='on' && state.scope!=='crypto'"), "crypto must not run the overnight hold");
-  assert.ok(s.includes("function btAnn()") && s.includes("state.scope==='crypto'?365:BT_ANN"), "scope-aware annualization missing");
+  assert.ok(s.includes("function btAnn(days){ if(state.scope==='crypto') return 365;"), "scope-aware annualization missing (crypto 365, equities by observed periods/yr — build 2026.09.24-104)");
   assert.ok(s.includes("if(state.view==='backtest') drawBacktest();"), "scope flip must re-run the open tab");
   // the tab is un-gated for crypto in BOTH gates (visibility + navigation)
   assert.equal((s.match(/const CRYPTO_VIEWS=new Set\(/g) || []).length, 1, "exactly one crypto scope list may exist (it replaced showView's inline gate in -05)");
@@ -1273,6 +1273,88 @@ test("backtest render: the picker is always offered, and one pick disables exact
     assert.ok(/Thin book/.test(set), "a picked set must state the thin-book arithmetic");
     restore();
   } catch (e) { restore(); throw e; }
+});
+
+// ===== build 2026.09.24-97: Backtest target mode — the mock's last pieces ============================
+// The 2026.08.22 build shipped the picker, single-asset mode and the custom universe; the mock's ★
+// watchlist pill, its "avg trade" row and its universe-mode banner never landed, and the dimmed
+// controls' "reason on hover" was dead under pointer-events:none. These run the engine on the same
+// fixtures, so the pill's resolve and the row's arithmetic are recomputed here, not read back.
+test("backtest target mode (-97): ★ watchlist resolves to this scope's testable stars, avg trade is the mean round trip, the mode is always named", () => {
+  const { api, state, restore } = _btHarness();
+  try {
+    // a star in the other universe, a star with a stub history, a star that never existed, and a
+    // delisted star must all sit out; the survivors keep their starring order
+    const nv = state.rows.get("NVDA");
+    state.rows.set("BTC", Object.assign({}, nv, { coin: "BTC", ticker: "BTC", uni: "main" }));
+    state.rows.set("STUB", Object.assign({}, nv, { coin: "STUB", ticker: "STUB", daily: nv.daily.slice(0, 10), dailyFund: nv.dailyFund.slice(0, 10) }));
+    state.rows.get("OXY").delisted = true;
+    state.watch = new Set(["AMD", "BTC", "STUB", "GHOST", "OXY", "NVDA"]);
+    assert.deepEqual(api.btWatchPicks(), ["AMD", "NVDA"], "only in-scope, listed stars with ≥25d of history resolve, in starring order");
+    let html = api.renderBacktest();
+    assert.ok(/id="btWatchPick"(?! disabled)/.test(html) && /the 2 starred names in this scope/.test(html),
+      "the pill is live and says how many stars it will load");
+    // the pill's load is exactly the resolved list; two stars is a set under the floor, one is single-asset
+    state.backtest.picks = api.btWatchPicks();
+    assert.equal(api.btMode(), "set");
+    state.watch = new Set(["NVDA"]);
+    state.backtest.picks = api.btWatchPicks();
+    assert.equal(api.btMode(), "single", "one testable star lands in single-asset mode");
+    // crypto scope sees only the crypto star — the Set is shared, the resolve is not
+    state.watch = new Set(["AMD", "BTC"]);
+    state.scope = "crypto";
+    assert.deepEqual(api.btWatchPicks(), ["BTC"], "the watchlist load is scope-local");
+    state.scope = "stocks";
+    // no qualifying star: the pill is dead with the reason on hover, not hidden
+    state.watch = new Set(["BTC", "STUB"]);
+    state.backtest.picks = [];
+    html = api.renderBacktest();
+    assert.ok(/id="btWatchPick" disabled title="no ★ starred name in this scope has the 25d/.test(html),
+      "an empty resolve disables the pill and says why");
+
+    // universe mode names itself and points at the picker; the other two modes keep their own banners
+    assert.ok(/<b>Universe mode<\/b>/.test(html) && /Pick a name in <b>target<\/b>/.test(html), "universe mode is named");
+    assert.ok(!html.includes("bt-na"), "the banner must not dim anything in universe mode");
+
+    // avg trade: the mean of the trade log's own returns (open leg at its mark), rendered signed
+    state.backtest.picks = ["NVDA"];
+    const r = api.btRun();
+    assert.ok(r.ok && r.trades.length > 0);
+    const mean = r.trades.reduce((a, t) => a + t.ret, 0) / r.trades.length;
+    assert.ok(Math.abs(r.avgTrade - mean) < 1e-15, "avg trade must be the mean round-trip return");
+    const single = api.renderBacktest();
+    const want = (mean > 0 ? "+" : "") + (mean * 100).toFixed(2) + "%";
+    assert.ok(single.includes(">avg trade</span><b class=\"" + (mean >= 0 ? "pos" : "neg") + "\">" + want + "</b>"),
+      "the trades box prints avg trade signed, to 2dp, coloured by sign");
+    assert.ok(!/<b>Universe mode<\/b>/.test(single) && /Single-asset mode/.test(single), "single mode keeps its own banner");
+    // costs move the average trade down, never the decisions
+    state.backtest.cost = 0; const free = api.btRun();
+    state.backtest.cost = 20; const dear = api.btRun();
+    assert.equal(free.trades.length, dear.trades.length);
+    assert.ok(dear.avgTrade < free.avgTrade, "a costlier run must have a worse average trade");
+    // a universe run carries no avgTrade — the field is single-asset only
+    state.backtest.picks = [];
+    assert.equal(api.btRun().avgTrade, undefined);
+    restore();
+  } catch (e) { restore(); throw e; }
+});
+
+test("backtest target mode (-97) manifest: the dimmed controls' reason is hoverable, the pill is wired, help and docs say built", () => {
+  const fs = require("fs"), path = require("path");
+  const root = path.join(__dirname, "..");
+  const s = require("./_client").clientSource();
+  const css = fs.readFileSync(path.join(root, "public", "styles.css"), "utf8");
+  const naRule = css.slice(css.indexOf(".bt-na{"), css.indexOf("}", css.indexOf(".bt-na{")));
+  assert.ok(!/pointer-events:none/.test(naRule), "the dimmed wrapper must keep pointer events, or its title never shows");
+  assert.ok(css.includes(".bt-na *{pointer-events:none}"), "the controls inside a dimmed group must still be dead");
+  assert.ok(s.includes("const wp=el('btWatchPick');") && s.includes("state.backtest.picks=w; drawBacktest();"),
+    "the ★ watchlist pill must replace the picks with the resolved stars");
+  const help = s.slice(s.indexOf("backtest:`")); const helpBlock = help.slice(0, help.indexOf("report:`"));
+  assert.ok(/★ watchlist/.test(helpBlock) && /avg trade/.test(helpBlock), "the tab help documents the pill and the row");
+  const mock = fs.readFileSync(path.join(root, "docs", "xyz-monitor-backtest-target-mock.html"), "utf8");
+  assert.ok(mock.includes("backtest tab · built") && !mock.includes("backtest tab · proposal"), "the mock is marked built");
+  const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
+  assert.ok(readme.includes("**Backtest target mode** (built 2026.08.22, completed in build 2026.09.24-97)"), "README entry");
 });
 
 test("backtest single-asset manifest: precedence, no lookahead in the entry scale, scope hygiene, help", () => {

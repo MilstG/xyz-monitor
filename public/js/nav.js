@@ -2,7 +2,7 @@
 // declarations; side-effecting top-level statements run from __boot_* in the original source
 // order once every module has evaluated (see app.js). Shared cross-module mutable state lives
 // on G (core.js).
-import { tabVisible, toggleViewAsPublic } from "./admin.js";
+import { fhShareCard, tabVisible, toggleViewAsPublic } from "./admin.js";
 import { alertMarkRead, buildAlertsPanel, loadAlerts, notifyNewBuild, updateBell } from "./alerts.js";
 import { applyScope, setScope, showView, syncTabNav, syncTabScroll } from "./backtest.js";
 import { COLS } from "./base.js";
@@ -10,15 +10,15 @@ import { COL_BY_KEY, DEFAULT_HIDDEN, DEFAULT_ORDER, G, PKEY, activeRows, el, esc
 import { exportCorr, exportMarkets, openCorr, renderCorr, renderCorrPairs } from "./corr.js";
 import { loadDaily, loadSnapshot, updateFreshness } from "./data.js";
 import { closeDetail, openDetail, runSigHist, toggleWatch } from "./drawer.js";
-import { buildHead, clearDrill, render, renderActionLists, renderRegimeStrip, scheduleRender, setGrp, sortedRows, syncGrpSeg, visibleCols } from "./markets.js";
+import { buildHead, clearDrill, paintMarkets, render, renderActionLists, renderRegimeStrip, scheduleRender, setGrp, sortedRows, syncGrpSeg, visibleCols } from "./markets.js";
 import { dmKeys, dmLoad, dmRefreshOpen, dmRender, dmState, dmSync, dmTypingFrame } from "./messages.js";
 import { renderHousing, renderLiquidity } from "./notes.js";
-import { shareSetSource, shareWireTable } from "./share.js";
+import { shareSetSource, shareWireBoard, shareWireDrawer, shareWireTable } from "./share.js";
 import { buildLayoutMenu, loadLayouts, loadPositions, loadPrefs, posLink, posStatText, prefsRemoteFrame, saveLayouts, savePrefs, updateLayoutBtn } from "./prefs.js";
 import { aiMatches, openAiReport } from "./report.js";
 import { exportSectors, renderSectors } from "./sectors.js";
 import { EV_LABELS } from "./trend.js";
-import { loadPush, loadRules } from "./triggers.js";
+import { loadPush, loadRules, loadTriggers } from "./triggers.js";
 
 
 // ===== polling cycle + countdown =====
@@ -37,7 +37,7 @@ function dailyWarm(){
 }
 function scheduleDaily(){
   clearTimeout(dailyTimer);
-  dailyTimer=setTimeout(async()=>{ await loadDaily(); scheduleDaily(); }, dailyWarm()? 20*1000 : 15*60*1000);
+  dailyTimer=setTimeout(async()=>{ if(document.hidden) _dailyDirty=true; else await loadDaily(); scheduleDaily(); }, dailyWarm()? 20*1000 : 15*60*1000);
 }
 // Live warmup annotation for placeholder panels, fed by the snapshot's server-side counts.
 function warmCount(){
@@ -68,7 +68,13 @@ function startEvents(){ if(typeof EventSource==='undefined'||_sseSrc) return;
     // A pushed dataTs we already hold is a no-op (the initial sync frame, typically). A new one —
     // including the new `v` a redeploy pushes via the reconnect's first frame — pulls immediately;
     // applySnapshot's own short-circuit and alertVer handling then do exactly what they do on a poll.
-    if(d&&d.dataTs&&d.dataTs!==state.dataTs){ loadSnapshot(); nextCycle=Date.now()+_cycleMs(); }
+    if(d&&d.dataTs&&d.dataTs!==state.dataTs){ pullSnapshot(); nextCycle=Date.now()+_cycleMs(); }
+    // (build 2026.09.24-108) The frame already carries alertVer: a moved one pulls the trigger log
+    // DIRECTLY, visible or hidden. Since -103 a hidden tab pulls no snapshot (unless it holds an
+    // in-browser rule), and the snapshot was the only road to loadTriggers — so server triggers
+    // stopped raising desktop Notifications in background tabs, which is exactly where they matter.
+    // Setting alertVer here first makes applySnapshot's own check a no-op for this version.
+    frameAlertVer(d);
     // The reconnect's first frame after a redeploy is the fastest new-build signal there is —
     // dataTs is a restarted counter that can coincide with the one this tab already holds, so
     // the version notice must not depend on that comparison triggering a pull.
@@ -89,8 +95,48 @@ function startEvents(){ if(typeof EventSource==='undefined'||_sseSrc) return;
       if(typeof d.dm.seq==='number'&&d.dm.seq>dmState.cursor) dmSync();
     } };
 }
+function frameAlertVer(d){
+  const A=state.alerts;
+  if(!d||d.alertVer==null||!A||d.alertVer===A.alertVer) return false;
+  A.alertVer=d.alertVer; loadTriggers(); return true;
+}
 function _cycleMs(){ return _sseOk?Math.max(state.refreshMs,120000):state.refreshMs; }
-function startCycle(){ clearInterval(cycleTimer); const ms=_cycleMs(); cycleTimer=setInterval(()=>{ loadSnapshot(); nextCycle=Date.now()+_cycleMs(); }, ms); nextCycle=Date.now()+ms; }
+// ===== hidden tabs idle (build 2026.09.24-103) ================================================
+// A background tab used to pull /api/snapshot on every poke and poll, and applySnapshot then ran
+// the whole derive + table rebuild for a page nobody was looking at — dozens of forgotten tabs
+// were dozens of full client pipelines per server cycle. Now the poke/poll path goes through
+// pullSnapshot: visible = pull exactly as before; hidden = remember that something moved
+// (_hiddenDirty) and pull ONCE on the visibilitychange back to visible.
+// The one exception is the in-browser alert evaluator (alerts.js: sqz/mom/beta rules, which fire
+// desktop Notifications and exist nowhere server-side — Telegram and web push are the SERVER's
+// escalation sweep and never needed this tab). While this browser holds at least one such rule a
+// hidden tab keeps a SLOW background pull (at most one per BG_PULL_MS) so those rules still fire
+// off-screen; the pull evaluates alerts but paints nothing (render()'s paint gate, markets.js).
+const BG_PULL_MS=60000;
+let _hiddenDirty=false, _bgPullAt=0, _dailyDirty=false;
+function pullSnapshot(){
+  if(document.hidden){
+    _hiddenDirty=true;
+    const rules=state.alerts&&state.alerts.rules;
+    if(!(rules&&rules.length)||Date.now()-_bgPullAt<BG_PULL_MS) return false;
+    _bgPullAt=Date.now();
+  }
+  loadSnapshot(); return true;
+}
+// Foregrounding catch-up: one pull if anything was skipped while hidden (poke, poll or daily
+// timer), and a paint if the markets table was left dirty by a background alert pull.
+function visibleCatchUp(){
+  if(document.hidden) return;
+  // (build 2026.09.24-108) The catch-up pull can land with a dataTs this tab already holds (a
+  // background alert pull applied it), and applySnapshot then short-circuits without painting — the
+  // table stayed at its pre-hide state with G.mktDirty set. So the deferred paint runs after the
+  // pull too, whenever it is still owed.
+  const owed=()=>{ if(!document.hidden&&G.mktDirty&&state.view==='markets') paintMarkets(); };
+  if(_hiddenDirty){ _hiddenDirty=false; Promise.resolve(loadSnapshot()).then(owed,owed); nextCycle=Date.now()+_cycleMs(); }
+  else owed();
+  if(_dailyDirty){ _dailyDirty=false; loadDaily(); }
+}
+function startCycle(){ clearInterval(cycleTimer); const ms=_cycleMs(); cycleTimer=setInterval(()=>{ pullSnapshot(); nextCycle=Date.now()+_cycleMs(); }, ms); nextCycle=Date.now()+ms; }
 function setRefresh(ms){ state.refreshMs=ms; startCycle(); }
 function forceRefresh(){ loadSnapshot(); nextCycle=Date.now()+state.refreshMs; }
 // The countdown is honest about the push stream: while SSE is healthy the poll is only a
@@ -178,7 +224,8 @@ el('refresh').addEventListener('click', forceRefresh);
 // Foregrounding the tab: reopen a dead stream and pull messages once, whatever tab is showing.
 document.addEventListener('visibilitychange',()=>{ if(document.hidden) return;
   if(!_sseSrc) startEvents();
-  if(typeof dmSync==='function'&&dmState&&dmState.me){ try{ dmSync(); }catch(_){} } });
+  if(typeof dmSync==='function'&&dmState&&dmState.me){ try{ dmSync(); }catch(_){} }
+  visibleCatchUp(); });   // (build 2026.09.24-103) the one pull a hidden tab skipped, plus any deferred markets paint
 // Search-as-you-type re-rendered the whole table synchronously per keystroke; one frame is plenty.
 el('filter').addEventListener('input', e=>{ state.filter=e.target.value; scheduleRender(); savePrefs(); });
 el('body').addEventListener('click', e=>{ const star=e.target.closest('.star');
@@ -194,6 +241,15 @@ el('body').addEventListener('keydown', e=>{ const pit=e.target.closest&&e.target
 // columns, and the table grows the floating glyph, the right-click menu and the `s` key.
 shareSetSource(()=>({rows:sortedRows(),cols:visibleCols()}));
 shareWireTable(el('body'), visibleCols);
+// ...and every other surface (build 2026.09.24-98): the same glyph on the boards' rows, with the row
+// and the whole board in the right-click menu, and on every section header of the drawer. The boards
+// are read from what they drew; the funding heatmap is an SVG, so its row comes from the payload.
+shareWireBoard(el('trend-body'), {view:'trend', title:'Trend ladder', rowSel:'tr[data-coin]'});
+shareWireBoard(el('act-body'), {view:'actionable', title:'Actionable', rowSel:'tr.act-row'});
+shareWireBoard(el('sect-board'), {view:'sectors', title:()=>state.sect&&state.sect.grp==='ind'&&state.scope!=='crypto'?'Industry rotation':'Sector rotation', rowSel:'tr[data-sect]'});
+shareWireBoard(el('rvd-wrap'), {view:'drawdown', title:'Drawdown', rowSel:'tr[data-coin]'});
+shareWireBoard(el('funding-body'), {view:'funding', title:'Funding heat', rowSel:'text.fh-tk[data-coin]', capture:n=>fhShareCard(n.getAttribute('data-coin'))});
+shareWireDrawer(el('drawer'));
 el('watchOnly').addEventListener('click',()=>{ state.watchOnly=!state.watchOnly; el('watchOnly').classList.toggle('on', state.watchOnly); updateFilterChip(); render(); savePrefs(); });
 // Deliberately NOT part of a saved layout, unlike ★-only: adding a field to the layout signature
 // would mark every layout the operator has already saved as dirty. Per browser, in prefs.
@@ -603,7 +659,7 @@ trend:`
 <div class="hlp-h">Width — ribbon thickness</div>
 <p><b>Width</b> is the average EMA13–EMA21 spread across the rungs aligned with this side, as a percent — how far apart the ribbon actually is. It exists to disambiguate equal scores: two 4/4s are not the same trade when one holds a 0.08% ribbon (a stack one bad bar unwinds) and the other a 2% ribbon (established separation that takes real selling to flip). Per-rung, so it's comparable across scores; always positive by construction (it only measures aligned rungs). Pairs with age: young + thin = a breakout still proving itself, old + wide = the established trend you're late to.</p>
 <div class="hlp-h">Sourcing & ranking</div>
-<p>H1 is the hourly spine; H4/H12 are UTC-aligned aggregations of it; D1 is the daily series with the live mark driving the forming bar — the board moves with price between candle refreshes. EMAs are SMA-seeded and require 26+ bars per rung; a market missing any rung is <b>excluded and counted</b> in the header line, never guessed at. Crypto's 31-day retention means its D1 EMA21 is young — converged enough to classify, but treat fresh listings' D1 rung with appropriate suspicion. Ranked by score, then <b>fresh-first</b>: within a score, the youngest D1 stack ranks highest — a day-3 trend is the entry, a day-40 trend is the chase. <b>Age</b> is an exact per-bar EMA walk counting consecutive D1 days the ribbon has been stacked this side (N+ means "at least" — the stack extends past available history, most common on crypto's 31d retention; a dash means the D1 rung itself isn't aligned). <b>Δ21</b> is the live distance from the H1 EMA21 — the proximity-to-entry number: a 4/4 at +0.4% is at the zone, at +6% it's extended. Ticker badges carry per-scope context from the machinery the Markets table already uses: crypto shows the ▴/▾ funding-percentile flag when the crowd's payment is at a monthly extreme (a 4/4 uptrend on a ▴ is a consensus trade), stocks show the earnings badge when a report is imminent (a retest two days before earnings is a different trade). Only names with ≥2/4 alignment on that side appear, top 10. This is a <i>screener lens</i>, not a ledger signal: nothing here carries frozen entry/stop/target geometry.</p>
+<p>H1 is the hourly spine; H4/H12 are UTC-aligned aggregations of it; D1 is the daily series with the live mark driving the forming bar — the board moves with price between candle refreshes; on a US (or foreign-home) name it is the <b>session</b> series: a weekend or exchange holiday folds into the next session's bar, so EMA13/21 count trading sessions, not UTC days (crypto: calendar days). EMAs are SMA-seeded and require 26+ bars per rung; a market missing any rung is <b>excluded and counted</b> in the header line, never guessed at. Crypto's 31-day retention means its D1 EMA21 is young — converged enough to classify, but treat fresh listings' D1 rung with appropriate suspicion. Ranked by score, then <b>fresh-first</b>: within a score, the youngest D1 stack ranks highest — a day-3 trend is the entry, a day-40 trend is the chase. <b>Age</b> is an exact per-bar EMA walk counting consecutive D1 days the ribbon has been stacked this side (N+ means "at least" — the stack extends past available history, most common on crypto's 31d retention; a dash means the D1 rung itself isn't aligned). <b>Δ21</b> is the live distance from the H1 EMA21 — the proximity-to-entry number: a 4/4 at +0.4% is at the zone, at +6% it's extended. Ticker badges carry per-scope context from the machinery the Markets table already uses: crypto shows the ▴/▾ funding-percentile flag when the crowd's payment is at a monthly extreme (a 4/4 uptrend on a ▴ is a consensus trade), stocks show the earnings badge when a report is imminent (a retest two days before earnings is a different trade). Only names with ≥2/4 alignment on that side appear, top 10. This is a <i>screener lens</i>, not a ledger signal: nothing here carries frozen entry/stop/target geometry.</p>
 <p><b>Chart button</b> (row end) opens a candlestick chart of any rung (1H · 4H · 12H · 1D) with the EMA 13/21 ribbon plotted, the retest zone banded at the ladder's own levels, and a crosshair OHLC + EMA readout. One-code-path honesty: every annotation — state badge, retest flag, zone levels, Δ21, the read — is the board's own payload restated, and the candles are the exact series the ladder consumed for that rung, so the plotted ribbon reproduces the board's EMAs to the last bit. Bars inside the EMA seed window (before EMA21 exists) render dimmed with no ribbon — real candles, no half-converged lines — which on crypto's 31-day retention is most visible on the D1 view. Closes-only daily bars (warm-cache restores, the forming day) draw as close ticks, never fabricated flat candles.</p>`,
 sectors:`
 <div class="hlp-h">Flow map (default)</div>
@@ -682,7 +738,7 @@ earnings:`
 <div class="hlp-h">Reported rows — beat/miss, kept for 48h</div>
 <p>Once a company reports, the same feed row fills in the <b>actual</b>: the tab shows "EPS 5.71 vs 5.62 est · <b>beat</b> +1.6%" and the E badge flips to a scoreboard (verdict + the live day move). The verdict is EPS-only — the tape's verdict is the move next to it, and they disagree often enough to be interesting. Reports don't vanish at midnight: a <b>Reported</b> section at the top keeps the two prior ET days on the tab with their beat/miss and a <b>reaction</b> move — the print's own reaction candle per the study convention (BMO/DMH scores its own UTC daily candle, AMC the next one), never today's unrelated move. A reaction candle still forming reads "so far"; one not opened yet says so instead of showing zero. Rows come from the persisted print history, so a late-landing actual upgrades the row in place and the section survives redeploys. Two hygiene rules run against every (chunked, complete) fetch: a print the feed retracted from the refetched 5-day back window is dropped, and a past print whose ticker is still scheduled ahead for the same fiscal quarter is a placeholder-date phantom, dropped. For garbage neither rule can reach — a feed asserting a report that never happened, with no corrected row anywhere — the <b>×</b> on a reported row voids the print permanently (tombstoned; no future fetch can re-add it). The verdict is beat / miss / <b>in line</b> vs the feed's own estimate. The pair's display precision expands in lockstep — both numbers always at the same decimals — until two things hold: actual and estimate read as different numbers whenever they are, AND the pair reconciles with the surprise % printed beside it. The surprise is computed on the feed's stored 4dp values and is never rounded to match the display, so it is the NUMBERS that expand to explain it (“EPS 0.31 vs 0.3 beat +3.9%” reads as +3.3%, and that contradiction is what the rule prevents). An estimate with no actual beside it prints at two decimals — four only when two would round a sub-cent estimate away entirely — with the feed's exact value in the row's tooltip.</p>
 <div class="hlp-h">The reaction study</div>
-<p>Each name's <b>own earnings base rate</b>, measured on the perp's daily closes (UTC — it trades through weekends, so a Friday AMC print scores Saturday's candle): number of prints, average and median |next-session move|, up/down split, gap behavior where opens are retained, and the move as a multiple of that name's usual daily range. History starts from a one-time ~1y feed backfill (depth = whatever the free tier honestly returns) and <b>self-accrues</b> from there — every print that passes is persisted like the OI log. n is shown always; "no history" means exactly that, never a hidden zero.</p>
+<p>Each name's <b>own earnings base rate</b>, measured as the move from the <b>last cash close before the print to the first cash close after it</b> (BMO: prior close → print-day close; AMC: print-day close → next session's close, so a Friday AMC reads Monday; holidays and 13:00 half days on the exchange calendar — build 2026.09.24-106), read at the exact 16:00 ET anchors off the hourly spine / 5m archive, with session daily closes as a labelled fallback (the share is shown): number of prints, average and median |move| with a bootstrap 90% interval (n ≥ 4), up/down split, the <b>cash-session gap</b> (the reaction session's 09:30 ET open vs that reference close, and whether the session's close held beyond it — intraday-only, with "gap n=X of Y" when prints lack coverage), and the move as a multiple of that name's usual daily range. Untimed (TBD) prints are excluded. History starts from a one-time ~1y feed backfill (depth = whatever the free tier honestly returns) and <b>self-accrues</b> from there — every print that passes is persisted like the OI log. n is shown always; "no history" means exactly that, never a hidden zero.</p>
 <div class="hlp-h">Live context columns</div>
 <p>Day move, 24h volume and ADR on each row come from the live snapshot already in your browser — so a Thursday with eight prints reads at a glance as one that matters and seven that don't. ★ watchlist names float to the top of each day.</p>
 <div class="hlp-h">Interaction with Signals</div>
@@ -701,13 +757,17 @@ backtest:`
 <div class="hlp-h">Testing one name — the target picker</div>
 <p>The <b>target</b> box takes a ticker from the live universe (typeahead, not a dropdown — the roster is too long to scroll, and free text never resolves). Pick <b>one</b> name and the tab switches to <b>single-asset mode</b>: a rank of one name isn't a rank, so the same signal runs as a <i>timing rule</i> — the score's own sign decides the position, and <b>entry</b> decides how far from zero it has to sit first (sign only, ±0.5σ or ±1σ of that name's own trailing score scale, measured through that day only, never with hindsight). The controls that exist purely to slice a cross-section — the book quantile and the rank gate — are dimmed with the reason on hover rather than silently ignored; <b>weighting</b> becomes position <b>sizing</b> (flat 1×, scaled by conviction, or sized to a 20% annualized vol target); <b>structure</b> keeps its three options as long/short, long-or-flat, short-or-flat. Costs, funding, the hold window and the IS/OOS split are the identical accounting the cross-sectional path uses — that is what makes the two modes comparable.</p>
 <p>The curve gains two things: <b>buy &amp; hold that name</b> as the dashed line — the only benchmark a one-name rule actually has to beat — and a <b>position ribbon</b> under the axis showing when the rule was long, short or flat. The book panel becomes the current position plus every round trip it took. Read the round-trip count first: one name over the history this server ships is a few dozen decisions at most, there is no cross-sectional diversification to average the luck out, and a Sharpe on under ten round trips is an anecdote with a decimal point — the stat flags itself, shown rather than hidden. Sector-relative momentum still demeans against the name's live sector peers; with fewer than three of them the tab refuses the run instead of quietly serving plain momentum under the wrong label.</p>
-<p>Pick <b>several</b> names and it stays cross-sectional, ranked only among those — a custom universe, with the thin-book arithmetic stated up front (a 20% book of five names is one name per side). Picks belong to one universe: flipping Stocks/Crypto clears them.</p>
+<p>Pick <b>several</b> names and it stays cross-sectional, ranked only among those — a custom universe, with the thin-book arithmetic stated up front (a 20% book of five names is one name per side); a picked set needs at least four names to run. The <b>★ watchlist</b> pill replaces the picks with your starred names from this scope that carry enough daily history — one star runs single-asset, several a custom universe; it sits dead, with the reason on hover, when none qualify. The trades box reads round trips, <b>avg trade</b> (the mean round trip on the net curve, the open one at its mark), win rate, funding and fees. Picks belong to one universe: flipping Stocks/Crypto clears them.</p>
 <div class="hlp-h">Crypto scope</div>
 <p>The tab follows the Stocks/Crypto switcher: crypto runs the top-60 Hyperliquid perps against a <b>BTC benchmark</b> with 365-day annualization, no overnight hold (24/7 markets have no boundary), and funding carry at home. The two universes never mix in one run.</p>
 <div class="hlp-h">How to read the curve</div>
 <p>Four lines: <b>net</b> (after funding), <b>gross</b>, <b>benchmark</b>, <b>equal-weight universe</b>. The shaded split is <b>in-sample | out-of-sample</b>: a strategy that only works left of the line was curve-fit by your eyeballs. Judge on OOS net vs equal-weight — beating the benchmark with a long/short book is table stakes; beating naive equal-weight is the actual bar.</p>
+<div class="hlp-h">Fills, costs and error bars</div>
+<p>(build 2026.09.24-106) The signal reads bar <i>d</i>'s close, so by default the book <b>fills at the next bar's close</b> and earns from the bar after — <b>fill: same close (as before)</b> restores the older, optimistic fill at the very close the signal was computed from. Every fill pays the <b>taker bps</b> plus <b>slip bps</b> per side on turnover (overnight: twice a night). Each Sharpe carries <b>± its standard error</b> (Lo 2002, √((1+½SR²)/T) per period, annualized) and a ⚠ when the 95% band includes zero. <b>Survivorship:</b> the history is current listings only — delisted names' daily history is not shipped, so a rule never held the names that died.</p>
 <div class="hlp-h">Score duel</div>
-<p>Below the curve: the head-to-head between the board's <b>Momentum</b> and the <b>MOM+</b> candidate (same core; OI term regime-qualified so covering flow doesn't amplify like new money, plus a funding-crowding haircut at the crowd's own monthly extreme). Once per UTC day the server snapshots both scores for every name and, when the next day's prices land, computes each column's <b>rank IC</b> — the Spearman correlation between that day's ordering and the realized next-day return. Forward, out of sample, accruing from deploy; the record persists on the volume across redeploys. The <b>verdict gate</b> refuses to call a winner before 60 days or |t| ≥ 2 on the daily IC difference — the same anti-eyeball doctrine as the IS/OOS split, applied to the score itself. The live-disagreements list underneath shows which names the two columns argue about right now and <i>why</i>, so you can spot-check that MOM+ diverges for the stated mechanisms rather than just measuring that it diverges. On a locked verdict the winner keeps the column and the loser gets deleted.</p>`,
+<p>Below the curve: the head-to-head between the board's <b>Momentum</b> and the <b>MOM+</b> candidate (same core; OI term regime-qualified so covering flow doesn't amplify like new money, plus a funding-crowding haircut at the crowd's own monthly extreme). Once per UTC day the server snapshots both scores for every name and, when the next day's prices land, computes each column's <b>rank IC</b> — the Spearman correlation between that day's ordering and the realized next-day return. Forward, out of sample, accruing from deploy; the record persists on the volume across redeploys. The <b>verdict gate</b> refuses to call a winner before 60 days or |t| ≥ 2 on the daily IC difference — the same anti-eyeball doctrine as the IS/OOS split, applied to the score itself. The live-disagreements list underneath shows which names the two columns argue about right now and <i>why</i>, so you can spot-check that MOM+ diverges for the stated mechanisms rather than just measuring that it diverges. On a locked verdict the winner keeps the column and the loser gets deleted.</p>
+<div class="hlp-h">D1 retest study</div>
+<p>Under the duel (build 2026.09.24-96): the Trend board's <b>D1 RETEST</b> — a stacked daily ribbon whose low probed the 13/21 zone while the close held EMA21, or the short mirror — replayed over every <b>closed</b> day the server holds, with the EMAs walked bar by bar exactly as the ladder builds them. The <b>control</b> is every stacked bar of the same side on the same names whose probe did <i>not</i> hold, so the <b>excess σ</b> column answers the real question: does the pullback beat simply being in the trend? Two choices are yours: the <b>event</b> (<i>board</i> is ladder-verbatim — the last 3 bars' extreme — so one probe fires up to three days running; <i>first touch</i> fires once per pullback) and the <b>cooldown</b> (bars before the same name and side may fire again; what it suppresses is counted). Per horizon: hit, mean, median, σ-mean, the void rate (price back to the event bar's own EMA21 — the tretest stop), the control and the excess; cells under 30 events show only their n. Daily lows exist only where the hourly spine covers (~180d equities, ~90d crypto); older bars read the close as the low, which can only under-count, and the status line prints the true-extreme share. D1 rung only — the board's other three rungs aren't replayed. Nothing here trades: the live claim is still tretest / tretestdn in the ledger. ↓ CSV exports the events.</p>`,
 report:`
 <div class="hlp-h">What this is</div>
 <p>Everything the server already holds on one name — price structure, positioning, funding, the signal ledger's own base rates, earnings context — compiled into one prompt and synthesized by <b>Claude</b> into a plain-language read. It is a <i>reading of the board</i>, not an oracle: every number it cites is the same number the other tabs show, and the machinery around the model exists to keep it honest rather than fluent. The search box takes any ticker in either universe; a <b>focused ticker</b> or the drawer's "AI report →" deep-link opens straight to that name.</p>
@@ -761,12 +821,12 @@ export function __boot_nav_10624() {
 Object.assign(HELP,{
   dm:`<div class="hlp-h">What it is</div><p>Direct messages and topic boards between account holders. Type <b>$TICKER</b> and the message carries the mark it was sent at — read later it says "sent at 113.90 · +4.0%". <b>short / sell / fade</b> before the ticker (or <b>short / puts</b> after) makes it a short; everything else is a long. Editing rewrites the words, never the stamp.</p><div class="hlp-h">Commands</div><p>Type <b>/</b> and a terminal verb — <b>/top funding 5</b>, <b>/nvda</b>, <b>/screen rvol>2</b> — and the result posts into the conversation under your name, badged <b>computed</b>. <b>/help</b> lists what runs here (only you see it); the <b>?</b> beside the message box opens the full guide, and <b>Tab</b> completes verbs, fields and tickers. <b>/ratio A/B</b> posts the pair chart as an image. A plain-English question after the slash goes to the AI only where the operator has opened that in Admin › Features; it is admin-only by default. <b>//</b> sends a message that really starts with a slash.</p><div class="hlp-h">Calls</div><p><b>calls ↗</b> in the rail is every stamped message in one place, scored live and at fixed 1d / 7d horizons, with a per-person record. Deleting a call removes the words, never the score.</p><div class="hlp-h">Who can read this</div><p>The operator of this terminal can read every message, including conversations they are not in; every read is logged in Admin.</p>`,
   notes:`<div class="hlp-h">What it is</div><p>Your written notes, per ticker, written in the ticker drawer. Each note is stamped with the mark it was written at, so every later read carries the move since. <b>#tags</b> in the body filter the tab.</p><div class="hlp-h">Markers on Markets</div><p>A post-it in the ticker cell means a note exists: solid within 7 days, dimmed to 30, hollow after. Hover for the first line; click to open.</p>`,
-  drawdown:`<div class="hlp-h">What it is</div><p>One dot per market, two numbers that every other tab shows one of but never side by side. <b>Up</b> is the <b>return since the anchor</b>: the live mark over the first daily close on or after the anchor date. <b>Right</b> is <b>less pain</b>: the max drawdown the name took in the same window — the deepest close-to-close fall from any running peak — with zero drawdown at the right edge. <b>Up and to the right is better</b>: more return for less pain.</p>
+  drawdown:`<div class="hlp-h">What it is</div><p>One dot per market, two numbers that every other tab shows one of but never side by side. <b>Up</b> is the <b>return since the anchor</b>: the live mark over the <b>prior close</b> — the last daily close before the anchor date, so the anchor day's own move counts. <b>Right</b> is <b>less pain</b>: the max drawdown the name took in the same window — by default <b>intraday</b>, the deepest fall from the running peak of daily highs to a later daily low; the <b>drawdown</b> toggle switches to close-to-close — with zero drawdown at the right edge. <b>Up and to the right is better</b>: more return for less pain.</p>
 <div class="hlp-h">The references</div><p>The benchmarks are dashed horizontal lines at their own return — <b>BTC</b> (gold) and <b>ETH</b> (violet) in crypto scope, the <b>S&amp;P</b> and the <b>XYZ100</b> index in stocks scope — so "beat the market" and "beat it without the hole" read at once. Their dots wear the same colour.</p>
-<div class="hlp-h">Return: now or best</div><p><b>now</b> (the default) is where the name sits today. <b>best</b> is the highest daily close it printed since the anchor, over the anchor close — the amplitude of the excursion, which never goes below zero. The table carries both, plus <b>gave back</b> (best minus now) and <b>Best / DD</b>: above 1 the name made more than it ever gave back.</p>
+<div class="hlp-h">Return: now or best</div><p><b>now</b> (the default) is where the name sits today. <b>best</b> is the highest daily close it printed since the anchor, over the prior close — the amplitude of the excursion, which never goes below zero. The table carries both, plus <b>gave back</b> (best minus now) and <b>Best / DD</b>: above 1 the name made more than it ever gave back.</p>
 <div class="hlp-h">Show top N</div><p>The chart draws the top 10, 20, 30 or 50 names by the return axis, or everyone; the references always stay. The table underneath always has the whole universe, 25 rows a page, sortable on every column — the cut is what the eye can read, not the study.</p>
-<div class="hlp-h">Anchor</div><p>The presets count back from today's UTC midnight (YTD is January 1); the date box takes any day in the last year. Bars are UTC days, so a weekend anchor starts on the Monday. A name whose first close is well after the anchor is drawn with a dashed ring and marked <b>late</b>: it starts at its own first close, which is not the same race.</p>
-<div class="hlp-h">What it is not</div><p>Closes only — the daily feed carries no intraday low, so a wick below the close is not a drawdown here. Crypto history on the wire is about 90 days, so an older anchor starts every coin late and the header says how many.</p>`,
+<div class="hlp-h">Anchor</div><p>The presets count back from today's UTC midnight (YTD is January 1); the date box takes any day in the last year. A US name reads <b>US sessions</b>: its UTC bars are folded so a weekend or exchange holiday belongs to the next session's bar (its high, low and close), and a weekend anchor starts from Friday's close. Crypto reads calendar days. A name whose first close is well after the anchor is drawn with a dashed ring and marked <b>late</b>: it starts at its own first close, which is not the same race.</p>
+<div class="hlp-h">What it is not</div><p>Tick-exact: the lows are daily candle lows, and a bar's own high never counts against its own low (the order inside a day is unknown), so a same-day spike-and-flush is under-read. Older history restored without a low reads on the close there, and the caption counts those names. Crypto history on the wire is about 90 days, so an older anchor starts every coin late and the header says how many.</p>`,
   charts:`<div class="hlp-h">What it is</div><p>Up to eight names side by side on the same timeframe. Pick tickers in the bar above; each chart shares the ladder the drawer uses.</p>`,
   treemap:`<div class="hlp-h">What it is</div><p>The universe by sector, tile area = the size measure you pick, colour = the move over the window. Click a tile to open the name.</p>`,
   funds:`<div class="hlp-h">What it is</div><p>Fund and ETF holdings from SEC filings (N-PORT, 13F) for the names in the universe — who holds what, and how that changed quarter over quarter. Filings are quarterly and lag by up to 45 days; the tab says when each was filed.</p>`,

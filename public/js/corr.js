@@ -5,14 +5,15 @@
 import { IS_ADMIN, featureOn } from "./admin.js";
 import { pushToast } from "./alerts.js";
 import { drawBacktest } from "./backtest.js";
-import { DAY, SCROLL_B, TF_MAP, activeRows, clamp, el, esc, lerp, mktGrp, state, stdev } from "./core.js";
+import { DAY, SCROLL_B, TF_MAP, activeRows, clamp, closedDaily, el, esc, lerp, mktGrp, sessCalOf, sessDaily, sessOffFor, sessionFold, state, stdev } from "./core.js";
 import { fetchJSON } from "./data.js";
 import { buildHead, groupRowsSorted, pctInner, render, shade, sortedRows, visibleCols } from "./markets.js";
 import { openAiReport } from "./report.js";
+import { usageAct } from "./usage.js";
 
 
 // ===== correlation tab =====
-const CORR={ _rows:null, _C:null, _N:null, _ord:null, _intraday:false, _bars:null, _times:null, _win:null, _minOv:0, _readout:'Hover a cell to read a pair · click a ticker for its co-movers &amp; hedges' };
+const CORR={ _rows:null, _C:null, _N:null, _NS:null, _ord:null, _intraday:false, _bars:null, _times:null, _win:null, _minOv:0, _readout:'Hover a cell to read a pair · click a ticker for its co-movers &amp; hedges' };
 function corrScope(){
   let rows=activeRows().filter(r=>r.vol!=null);
   const s=state.corr.search.trim();
@@ -25,6 +26,25 @@ function dailyReturns(r){ if(r._dret) return r._dret; const c=r.daily; if(!c||c.
   const m=new Map(); let prev=null;
   for(const k of c){ const cl=parseFloat(k.c), day=Math.floor(k.t/DAY); if(isFinite(cl)){ if(prev!=null&&prev>0) m.set(day, Math.log(cl/prev)); prev=cl; } }
   r._dret=m; return m; }
+// Session-day log returns (build 2026.09.24-105): the row's daily bars in their SESSION view
+// (core.js sessionFold — a US name's weekend/holiday folded into the next session; crypto calendar
+// days), the forming bar dropped (t + DAY > now — the server's meanPairwiseCorr / dailyBeta rule:
+// a partial day's return is not a return), keyed by the UTC day of the later bar. `cal` overrides the
+// row's own calendar: a crypto row paired with sessions is folded onto the US calendar so both
+// returns span the same interval (Fri close -> Mon close), then the pair aligns on those days.
+// Memoized per row on (daily identity, calendar version, UTC day, cal). The correlation matrix, the
+// board's β, co-movers and the pair view read this; the backtest keeps its calendar dailyReturns.
+function sessReturns(r, cal){ const src=r&&r.daily; if(!src||src.length<2) return null;
+  const today=Math.floor(Date.now()/DAY), ck=cal===undefined?'':String(cal), m0=r._sret;
+  if(m0&&m0.src===src&&m0.v===state.sessOffV&&m0.day===today&&m0.cal===ck) return m0.m;
+  const bars=closedDaily(sessBarsFor(r, cal));
+  const m=new Map(); let prev=null;
+  for(const k of bars){ const cl=parseFloat(k.c), day=Math.floor(k.t/DAY); if(isFinite(cl)){ if(prev!=null&&prev>0) m.set(day, Math.log(cl/prev)); prev=cl; } }
+  r._sret={src, v:state.sessOffV, day:today, cal:ck, m}; return m; }
+// The row's bars on calendar `cal` (undefined = its own: the memoized sessDaily view).
+function sessBarsFor(r, cal){ if(cal===undefined) return sessDaily(r); const off=sessOffFor(r, cal); return off?sessionFold(r.daily, off):r.daily; }
+// A matrix mixing session rows with calendar (crypto) rows folds the crypto rows onto the US calendar.
+function corrCalFor(r, mixed){ return mixed&&!sessCalOf(r)?'US':undefined; }
 function dailyFunding(r){ if(r._dfund!==undefined && r._dfund!==null) return r._dfund; const c=r.dailyFund; if(!c||!c.length){ r._dfund=null; return null; }
   const m=new Map(); for(const k of c){ const f=parseFloat(k.f); if(isFinite(f)) m.set(Math.floor(k.t/DAY), f); } r._dfund=m; return m; }
 function overnightReturns(r){ if(r._dov!==undefined && r._dov!==null) return r._dov; const c=r.overnight; if(!c||!c.length){ r._dov=null; return null; }
@@ -38,32 +58,112 @@ function dailyOI(r){ if(r._doi!==undefined && r._doi!==null) return r._doi; cons
 function pearson(a,b){ const n=a.length; if(n<3) return null; let sa=0,sb=0; for(let i=0;i<n;i++){sa+=a[i];sb+=b[i];}
   const ma=sa/n, mb=sb/n; let cov=0,va=0,vb=0; for(let i=0;i<n;i++){ const da=a[i]-ma, db=b[i]-mb; cov+=da*db; va+=da*da; vb+=db*db; }
   if(va<=0||vb<=0) return null; return cov/Math.sqrt(va*vb); }
+// ===== correlation engine: memoized, dense typed arrays (build 2026.09.24-103) =================
+// buildCorr used to be O(N²·days) of Map lookups with two fresh JS arrays per pair, re-run from
+// scratch on every renderCorr, every applyDaily and every renderSectors (which needs the full N×N
+// for its sector×sector panel, not just intra-sector pairs), and clusterOrder was O(N³) over
+// string-keyed Maps. Now:
+//  - the returns are aligned ONCE per build into a dense N×W Float64Array (W = the window's days,
+//    NaN where a name has no return that day), and Pearson runs over that matrix with exactly the
+//    old pearson()'s arithmetic in exactly the old order (ascending day, same two-pass sums), so the
+//    numbers are identical, not just close (test: client-perf corr equivalence, 1e-12);
+//  - the result is memoized on (lookback, UTC day, the row list, and each row's daily-array
+//    IDENTITY). applyDaily replaces r.daily arrays only when a new daily version lands (and now
+//    skips unchanged bodies outright), basket virtual rows are rev-cached — so identity is the
+//    honest "these closes changed" signal and no version counter can drift from it;
+//  - clusterOrder is the same average-linkage merge over a numeric-indexed Float64Array distance
+//    table, memoized per C.
+// Consumers read C[i][j] / N[i][j] as before — the result shape did not change.
+let _corrSerSeq=0;
+const _corrSerIds=new WeakMap(), _corrMemo=new Map(), CORR_MEMO_MAX=6;
+function corrSerId(arr){ if(!arr||typeof arr!=='object') return 0; let id=_corrSerIds.get(arr); if(!id){ id=++_corrSerSeq; _corrSerIds.set(arr,id); } return id; }
 function buildCorr(rows, Ldays){
   // Overlap floor scales with the window: a 7d lookback only has ~5 trading days of returns, so a
   // flat 15-day minimum greyed the entire 7d matrix (every cell fell under the floor). Require
   // roughly half the window's expected return-days, hard-floored at 4 so a correlation still rests
   // on enough points to mean something. (Was max(15, Ldays*0.5) — the 15 was the bug.)
-  const cutoff=Math.floor(Date.now()/DAY)-Ldays, minOv=Math.max(4, Math.floor(Math.min(Ldays,90)*0.4));
-  const series=rows.map(r=>{ const m=dailyReturns(r); if(!m) return null; const f=new Map(); for(const [d,v] of m) if(d>=cutoff) f.set(d,v); return f; });
-  const N=rows.length, C=Array.from({length:N},()=>new Array(N).fill(null)), OV=Array.from({length:N},()=>new Array(N).fill(0));
-  for(let i=0;i<N;i++){ C[i][i]=1; const si=series[i]; if(!si) continue;
-    for(let j=i+1;j<N;j++){ const sj=series[j]; if(!sj) continue;
-      const small=si.size<sj.size?si:sj, other=small===si?sj:si, a=[],b=[];
-      for(const [d,v] of small){ const w=other.get(d); if(w!==undefined){ a.push(v); b.push(w); } }
-      const c=a.length>=minOv?pearson(a,b):null; C[i][j]=c; C[j][i]=c; OV[i][j]=a.length; OV[j][i]=a.length; } }
-  return {C, N:OV};
+  const today=Math.floor(Date.now()/DAY), cutoff=today-Ldays;
+  let key=Ldays+'|'+today+'|'+state.sessOffV; for(const r of rows) key+='|'+r.coin+':'+corrSerId(r.daily);
+  const hit=_corrMemo.get(key);
+  if(hit){ _corrMemo.delete(key); _corrMemo.set(key,hit); return hit; }   // LRU touch
+  const res=buildCorrDense(rows, Ldays, cutoff);
+  _corrMemo.set(key,res); if(_corrMemo.size>CORR_MEMO_MAX) _corrMemo.delete(_corrMemo.keys().next().value);
+  return res;
 }
+// (build 2026.09.24-105) Session returns (sessReturns: weekends/holidays folded, forming bar
+// dropped), and a HARD overlap floor of CORR_MIN_OV returns: a correlation on fewer points is
+// noise wearing two decimals, so the cell stays empty and reads "n<10" (the old floor of 4 was a
+// fix for calendar-day 7d windows; in sessions a 7d window holds ~5 returns and honestly greys).
+const CORR_MIN_OV=10;
+function buildCorrDense(rows, Ldays, cutoff){
+  const minOv=Math.max(CORR_MIN_OV, Math.floor(Math.min(Ldays,90)*0.4));
+  const N=rows.length, C=Array.from({length:N},()=>new Array(N).fill(null)), OV=Array.from({length:N},()=>new Array(N).fill(0));
+  // Align: one pass per row over its (memoized) day->log-return map, days >= cutoff only.
+  let dmax=cutoff; const maps=new Array(N);
+  let anyS=false, anyC=false; for(const r of rows){ if(sessCalOf(r)) anyS=true; else anyC=true; }
+  const mixed=anyS&&anyC;
+  for(let i=0;i<N;i++){ const m=sessReturns(rows[i], corrCalFor(rows[i], mixed)); maps[i]=m; if(m) for(const d of m.keys()) if(d>dmax) dmax=d; }
+  // X holds the values, P marks presence (a separate mask, not a NaN sentinel: a non-finite return
+  // is data to the old path — it poisoned the pair's r — so it must stay data here too).
+  const W=dmax-cutoff+1, X=new Float64Array(N*W), P=new Uint8Array(N*W), has=new Uint8Array(N);
+  for(let i=0;i<N;i++){ const m=maps[i]; if(!m) continue; has[i]=1; const o=i*W;
+    for(const [d,v] of m) if(d>=cutoff){ X[o+d-cutoff]=v; P[o+d-cutoff]=1; } }
+  for(let i=0;i<N;i++){ C[i][i]=1; if(!has[i]) continue; const oi=i*W;
+    for(let j=i+1;j<N;j++){ if(!has[j]) continue; const oj=j*W;
+      // pass 1: overlap count + sums (the old a/b push loop + pearson's first loop, same order)
+      let n=0, sa=0, sb=0;
+      for(let k=0;k<W;k++){ if(P[oi+k]&P[oj+k]){ n++; sa+=X[oi+k]; sb+=X[oj+k]; } }
+      let c=null;
+      if(n>=minOv&&n>=3){ const ma=sa/n, mb=sb/n; let cov=0,va=0,vb=0;
+        for(let k=0;k<W;k++){ if(P[oi+k]&P[oj+k]){ const da=X[oi+k]-ma, db=X[oj+k]-mb; cov+=da*db; va+=da*da; vb+=db*db; } }
+        c=(va<=0||vb<=0)?null:cov/Math.sqrt(va*vb); }
+      C[i][j]=c; C[j][i]=c; OV[i][j]=n; OV[j][i]=n; } }
+  return Object.assign({C, N:OV, minOv}, corrSig(C, OV));
+}
+// Significance + the clustering matrix (build 2026.09.24-105), from the raw C and its overlaps:
+//  NS[i][j] = 1 when the Fisher-z 95% CI of r contains 0 — |atanh r|·√(n−3) < 1.96 — the cell is
+//    painted faded: a real number, but not distinguishable from no correlation at this n.
+//  Cs = C shrunk toward the average off-diagonal correlation r̄ with a Ledoit-Wolf-style intensity
+//    δ = Σ var(r_ij) / (Σ var(r_ij) + Σ (r_ij − r̄)²), var(r) ≈ (1 − r²)² / (n − 1), clamped [0, 1]:
+//    thin, noisy pairs pull toward the tape instead of dragging a name into a spurious cluster.
+//    Cs ONLY orders the heatmap (corrOrder); every displayed value, hover and pair list is raw C.
+function corrSig(C, OV){ const N=C.length, NS=Array.from({length:N},()=>new Array(N).fill(0));
+  let sr=0, nr=0;
+  for(let i=0;i<N;i++) for(let j=i+1;j<N;j++){ const c=C[i][j], n=OV[i][j]; if(c==null||!isFinite(c)) continue;
+    sr+=c; nr++;
+    const z=Math.atanh(Math.max(-0.999999,Math.min(0.999999,c)));
+    if(!(n>3)||Math.abs(z)*Math.sqrt(n-3)<1.959964){ NS[i][j]=1; NS[j][i]=1; } }
+  if(!nr) return {NS, Cs:C, delta:0};
+  const rb=sr/nr; let sv=0, sd=0;
+  for(let i=0;i<N;i++) for(let j=i+1;j<N;j++){ const c=C[i][j], n=OV[i][j]; if(c==null||!isFinite(c)) continue;
+    sv+=(1-c*c)*(1-c*c)/Math.max(1,n-1); sd+=(c-rb)*(c-rb); }
+  const delta=sv+sd>0?Math.min(1,Math.max(0,sv/(sv+sd))):0;
+  const Cs=C.map((row,i)=>row.map((c,j)=>i===j?1:(c==null||!isFinite(c)?c:(1-delta)*c+delta*rb)));
+  return {NS, Cs, delta}; }
+// Fisher-z 95% CI of r at n pairs: [lo, hi], null under 4 pairs.
+function corrCI(r, n){ if(r==null||!isFinite(r)||!(n>3)) return null; const z=Math.atanh(Math.max(-0.999999,Math.min(0.999999,r))), h=1.959964/Math.sqrt(n-3);
+  return [Math.tanh(z-h), Math.tanh(z+h)]; }
+// Average-linkage agglomerative order over a distance matrix D (n×n). Same merge rule, same scan
+// order and the same strict-< tie-break as the string-keyed version it replaces — only the storage
+// changed: cluster ids (0..2n-2) index a Float64Array instead of "a,b" Map keys.
+const _clusterMemo=new WeakMap();
 function clusterOrder(D){ const n=D.length; if(n<=2) return D.map((_,i)=>i);
-  const key=(a,b)=>a<b?a+','+b:b+','+a, dmap=new Map();
-  for(let i=0;i<n;i++) for(let j=i+1;j<n;j++) dmap.set(key(i,j), D[i][j]);
+  const cap=2*n-1, dm=new Float64Array(cap*cap);
+  for(let i=0;i<n;i++) for(let j=i+1;j<n;j++){ const v=D[i][j]; dm[i*cap+j]=v; dm[j*cap+i]=v; }
   let clusters=[]; for(let i=0;i<n;i++) clusters.push({id:i,size:1,order:[i]}); let nid=n;
   while(clusters.length>1){ let bi=0,bj=1,bd=Infinity;
-    for(let i=0;i<clusters.length;i++) for(let j=i+1;j<clusters.length;j++){ const d=dmap.get(key(clusters[i].id,clusters[j].id)); if(d<bd){bd=d;bi=i;bj=j;} }
+    for(let i=0;i<clusters.length;i++){ const ro=clusters[i].id*cap;
+      for(let j=i+1;j<clusters.length;j++){ const d=dm[ro+clusters[j].id]; if(d<bd){bd=d;bi=i;bj=j;} } }
     const A=clusters[bi], B=clusters[bj], id=nid++;
-    for(const C of clusters){ if(C===A||C===B) continue; const dA=dmap.get(key(A.id,C.id)), dB=dmap.get(key(B.id,C.id));
-      dmap.set(key(id,C.id), (A.size*dA+B.size*dB)/(A.size+B.size)); }
+    for(const C of clusters){ if(C===A||C===B) continue; const dA=dm[A.id*cap+C.id], dB=dm[B.id*cap+C.id];
+      const v=(A.size*dA+B.size*dB)/(A.size+B.size); dm[id*cap+C.id]=v; dm[C.id*cap+id]=v; }
     clusters=clusters.filter(c=>c!==A&&c!==B); clusters.push({id, size:A.size+B.size, order:A.order.concat(B.order)}); }
   return clusters[0].order; }
+// paintCorr's entry: the distance transform + clustering, memoized on the (memoized) C object.
+// `Cs` (optional, build -105): the shrunk matrix to cluster on; the memo stays keyed on C (Cs is a
+// pure function of C and its overlaps, built alongside it).
+function corrOrder(C, Cs){ let o=_clusterMemo.get(C); if(o) return o;
+  o=clusterOrder((Cs||C).map(row=>row.map(v=>v==null?1:1-v))); _clusterMemo.set(C,o); return o; }
 function corrColor(c){ if(c==null||!isFinite(c)) return 'var(--panel2)';
   const t=clamp(Math.abs(c),0,1), mid=[20,26,33], tg=c>=0?[70,185,126]:[229,96,77];
   return `rgb(${lerp(mid[0],tg[0],t)},${lerp(mid[1],tg[1],t)},${lerp(mid[2],tg[2],t)})`; }
@@ -91,6 +191,10 @@ function corrTipHtml(ri,ci){ const rows=CORR._rows; if(!rows||!CORR._C) return '
   const v=CORR._C[ri][ci], n=CORR._N[ri][ci]||0, rb=corrRet(b);
   let s=`<div class="hd"><span class="tk">${esc(a.ticker)}</span> <span class="mut">×</span> <span class="tk">${esc(b.ticker)}</span></div>`;
   s+=`<div>r = ${v==null?'<span class="na">n/a</span>':`<span class="${v>=0?'pos':'neg'}">${v>=0?'+':''}${v.toFixed(2)}</span>`} <span class="mut">· ${n}${corrOvUnit()} overlap</span></div>`;
+  // (-105) the daily matrix: the 95% CI (Fisher z) and why a cell is empty or faded
+  if(!CORR._intraday){ const ci=v!=null?corrCI(v,n):null;
+    if(ci) s+=`<div class="mut">95% CI ${ci[0]>=0?'+':''}${ci[0].toFixed(2)} … ${ci[1]>=0?'+':''}${ci[1].toFixed(2)}${ci[0]<=0&&ci[1]>=0?' · spans 0: not significant at this n (faded)':''}</div>`;
+    else if(v==null&&n>0&&CORR._minOv&&n<CORR._minOv) s+=`<div class="mut">n&lt;${CORR._minOv}: too few overlapping session returns to report a correlation</div>`; }
   if(ra!=null&&rb!=null){ const d=ra-rb;
     s+=`<div class="mut" style="margin-top:3px">${tfLabel()} performance</div>`;
     s+=`<div>${esc(a.ticker)} ${sret(ra)} · ${esc(b.ticker)} ${sret(rb)}</div>`;
@@ -107,7 +211,7 @@ function syncCorrLookback(){ const seg=el('corrtf'); if(!seg) return;
   const opts = cr ? [['4h','4h'],['1d','1d'],['7d','7d']] : [['7','7d'],['30','30d'],['90','90d']];
   let cur = cr ? (state.corr.ctf||'1d') : state.corr.tf;
   if(!cr && !['7','30','90'].includes(cur)) cur=state.corr.tf='30';
-  const ttl = cr ? 'intraday corr on the 5m archive' : 'daily-return corr';
+  const ttl = cr ? 'intraday corr on the 5m archive' : 'session-day return correlation: US sessions (weekends and holidays fold into the next session), the still-open day dropped · a cell under 10 overlapping returns reads n<10 · faded = its 95% CI spans 0 · the order clusters a matrix shrunk toward the average correlation, the values shown are raw';
   seg.innerHTML='<span class="seglbl" title="'+ttl+'">lookback</span>'
     + opts.map(([d,l])=>`<button type="button" data-d="${d}"${d===cur?' class="active"':''}>${l}</button>`).join('');
   seg.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{
@@ -134,7 +238,7 @@ function renderCorr(){
   const rows=corrScope().concat(corrBasketRows());   // -09: baskets ride the same daily-return pearson path as every ticker
   if(rows.length<2){ el('corrwrap').innerHTML='<div class="msg"><span class="big">Not enough markets</span>Widen the focus search or pick a larger set.</div>'; el('corrpairs').innerHTML=''; el('corrpanel').hidden=true; return; }
   const L=+state.corr.tf, res=buildCorr(rows,L);
-  paintCorr(rows, res.C, res.N, {});
+  paintCorr(rows, res.C, res.N, { ns:res.NS, shr:res.Cs, minOv:res.minOv });
 }
 // Crypto scope: the matrix is built server-side over the 5m archive (equities keep ~31d of daily,
 // crypto keeps 370d of 5m), so we fetch the window's matrix + per-name close series and paint the
@@ -158,40 +262,63 @@ async function renderCorrCrypto(){
   paintCorr(rows, C, OV, { intraday:true, bars, times:d.times, win, minOv:d.minOv, gridLen:d.gridLen });
   setCorrSync('ready · '+win, true);
 }
+// A matrix cell's coordinates from any node inside it: display row/col (dr/dc) and the matrix
+// indices they stand for (ri/ci via CORR._ord). Null for headers and anything outside a body cell.
+function corrCellAt(t){ const td=t&&t.closest?t.closest('td'):null; if(!td) return null;
+  const tr=td.parentNode, ord=CORR._ord; if(!tr||!ord||tr.dataset.dr==null) return null;
+  const dr=+tr.dataset.dr, dc=td.cellIndex-1; if(!(dc>=0&&dc<ord.length&&dr>=0&&dr<ord.length)) return null;
+  return {dr, dc, ri:ord[dr], ci:ord[dc]}; }
+// The readout line for a cell, read straight from the cached matrix (it used to parse the value back
+// out of data-v / data-n strings the painter had just written into every cell).
+function corrReadoutAt(ri,ci){ const rows=CORR._rows, v=CORR._C[ri][ci];
+  return readoutHtml(rows[ri].ticker, rows[ci].ticker, v==null?'na':String(v), CORR._N[ri][ci]||0); }
 function paintCorr(rows, C, OV, opts){
   opts=opts||{};
-  const D=C.map(row=>row.map(v=>v==null?1:1-v));
-  const ord=clusterOrder(D);
+  const ord=corrOrder(C, opts.shr), NS=opts.ns||null, minOv=opts.minOv||0;
   const cell=rows.length<=20?30:rows.length<=40?20:15, showVal=rows.length<=20;
   let h=`<table class="cmx" style="--cell:${cell}px"><thead><tr><th class="corner"></th>`;
   ord.forEach(i=>{ const r0=rows[i];
-    h+=`<th class="cl${r0._basket?' bk':''}" data-i="${i}" ${r0._basket?`data-tip="${esc(basketTip(r0._basket))}"`:`title="${esc(r0.ticker)}"`}><span>${r0._basket?'<span class="bkg">\u2b12</span>':''}${esc(r0.ticker)}</span></th>`; });
+    h+=`<th class="cl${r0._basket?' bk':''}" data-i="${i}" ${r0._basket?`data-tip="${esc(basketTip(r0._basket))}"`:`title="${esc(r0.ticker)}"`}><span>${r0._basket?'<span class="bkg">⬒</span>':''}${esc(r0.ticker)}</span></th>`; });
   h+='</tr></thead><tbody>';
+  // Cells carry NO per-cell data attributes (build 2026.09.24-103): at 140 names that was ~20k
+  // cells × 8 attributes of markup to build, parse and hold. A cell's identity is its position —
+  // row dr (the <tr>'s data-dr) and column dc (cellIndex-1, the row header being cell 0) — and
+  // ord[] maps those display positions back to matrix indices; value and overlap are read from the
+  // cached C / OV (CORR._C / CORR._N) on demand.
   ord.forEach((ri,dr)=>{ const rr=rows[ri];
-    h+=`<tr data-dr="${dr}"><th class="rl${rr._basket?' bk':''}" data-i="${ri}" ${rr._basket?`data-tip="${esc(basketTip(rr._basket))}"`:`title="${esc(rr.coin)}"`}>${rr._basket?'<span class="bkg">\u2b12</span>':''}${esc(rr.ticker)}</th>`;
-    ord.forEach((ci,dc)=>{ const v=C[ri][ci], self=ri===ci;
-      const cls=self?'diag':(v==null?'nodata':'');
-      const vs=(v==null)?'na':String(v);
-      const txt=(showVal&&v!=null&&!self)?`${v<0?'−':''}${Math.abs(v).toFixed(1).replace(/^0/,'')}`:'';
-      h+=`<td class="${cls}" data-ri="${ri}" data-ci="${ci}" data-dc="${dc}" data-rt="${esc(rows[ri].ticker)}" data-ct="${esc(rows[ci].ticker)}" data-v="${vs}" data-n="${OV[ri][ci]||0}" style="${self||v==null?'':'background:'+corrColor(v)}">${txt}</td>`; });
+    h+=`<tr data-dr="${dr}"><th class="rl${rr._basket?' bk':''}" data-i="${ri}" ${rr._basket?`data-tip="${esc(basketTip(rr._basket))}"`:`title="${esc(rr.coin)}"`}>${rr._basket?'<span class="bkg">⬒</span>':''}${esc(rr.ticker)}</th>`;
+    ord.forEach((ci)=>{ const v=C[ri][ci], self=ri===ci;
+      // (-105) under the overlap floor: empty with "n<10"; CI spans 0: faded (the value still shows)
+      const low=!self&&v==null&&minOv>0&&(OV[ri][ci]||0)>0&&OV[ri][ci]<minOv, ns=!self&&v!=null&&NS&&NS[ri][ci];
+      const cls=self?'diag':(v==null?(low?'nodata lown':'nodata'):(ns?'ns':''));
+      const txt=(showVal&&v!=null&&!self)?`${v<0?'−':''}${Math.abs(v).toFixed(1).replace(/^0/,'')}`:(showVal&&low?`n&lt;${minOv}`:'');
+      h+=`<td${cls?` class="${cls}"`:''}${self||v==null?'':` style="background:${corrColor(v)}"`}>${txt}</td>`; });
     h+='</tr>'; });
   h+='</tbody></table>';
   el('corrwrap').innerHTML=h;
   CORR._rows=rows; CORR._C=C; CORR._N=OV; CORR._ord=ord;
-  CORR._intraday=!!opts.intraday; CORR._bars=opts.bars||null; CORR._times=opts.times||null; CORR._win=opts.win||null; CORR._minOv=opts.minOv||0;
+  CORR._intraday=!!opts.intraday; CORR._bars=opts.bars||null; CORR._times=opts.times||null; CORR._win=opts.win||null; CORR._minOv=opts.minOv||0; CORR._NS=NS;
   const tbl=el('corrwrap').querySelector('table.cmx');
   const cols=[...tbl.querySelectorAll('thead th.cl')], rls=[...tbl.querySelectorAll('tbody th.rl')];
-  tbl.addEventListener('mouseover', e=>{ const td=e.target.closest('td'); if(!td) return;
-    const dc=+td.dataset.dc, dr=+td.closest('tr').dataset.dr;
-    cols.forEach((t,i)=>t.classList.toggle('hl',i===dc)); rls.forEach((t,i)=>t.classList.toggle('hl',i===dr));
-    el('corr-readout').innerHTML=readoutHtml(td.dataset.rt, td.dataset.ct, td.dataset.v, td.dataset.n); });
-  tbl.addEventListener('mousemove', e=>{ const td=e.target.closest('td'); const tip=el('corrtip');
-    if(!td){ tip.hidden=true; return; }
-    tip.innerHTML=corrTipHtml(+td.dataset.ri, +td.dataset.ci); tip.hidden=false; positionTip(tip,e); });
-  tbl.addEventListener('mouseleave', ()=>{ cols.forEach(t=>t.classList.remove('hl')); rls.forEach(t=>t.classList.remove('hl')); el('corr-readout').innerHTML=CORR._readout; el('corrtip').hidden=true; });
+  // Hover state: the cell under the pointer as display coords. Header highlight, the readout and
+  // the tooltip body are rebuilt only when THAT changes; a mousemove inside the same cell only
+  // repositions the tooltip. (Each used to run per event: two N-long classList sweeps per
+  // mouseover, a full tooltip innerHTML per mousemove.)
+  const hov={dr:-1, dc:-1, hc:-1, hr:-1};
+  const setHl=(dc,dr)=>{ if(hov.hc>=0&&cols[hov.hc]) cols[hov.hc].classList.remove('hl'); if(hov.hr>=0&&rls[hov.hr]) rls[hov.hr].classList.remove('hl');
+    hov.hc=dc; hov.hr=dr; if(dc>=0&&cols[dc]) cols[dc].classList.add('hl'); if(dr>=0&&rls[dr]) rls[dr].classList.add('hl'); };
+  tbl.addEventListener('mouseover', e=>{ const p=corrCellAt(e.target); if(!p) return;
+    if(p.dr===hov.dr&&p.dc===hov.dc) return;
+    hov.dr=p.dr; hov.dc=p.dc; hov.tip=false; setHl(p.dc,p.dr);
+    el('corr-readout').innerHTML=corrReadoutAt(p.ri,p.ci); });
+  tbl.addEventListener('mousemove', e=>{ const p=corrCellAt(e.target); const tip=el('corrtip');
+    if(!p){ tip.hidden=true; hov.tip=false; return; }
+    if(!hov.tip||p.dr!==hov.tdr||p.dc!==hov.tdc){ hov.tdr=p.dr; hov.tdc=p.dc; hov.tip=true; tip.innerHTML=corrTipHtml(p.ri, p.ci); }
+    tip.hidden=false; positionTip(tip,e); });
+  tbl.addEventListener('mouseleave', ()=>{ setHl(-1,-1); hov.dr=hov.dc=-1; hov.tip=false; el('corr-readout').innerHTML=CORR._readout; el('corrtip').hidden=true; });
   tbl.querySelectorAll('.cl,.rl').forEach(n=>n.addEventListener('click',()=>{ state.corr.selected=+n.dataset.i; state.corr.pair=null; renderPairPanel(); renderCorrPanel(); }));
-  tbl.addEventListener('click', e=>{ const td=e.target.closest('td'); if(!td||td.dataset.ri==null) return;
-    const ri=+td.dataset.ri, ci=+td.dataset.ci; if(ri!==ci && CORR._C[ri][ci]!=null) openPair(ri,ci); });
+  tbl.addEventListener('click', e=>{ const p=corrCellAt(e.target); if(!p) return;
+    const ri=p.ri, ci=p.ci; if(ri!==ci && CORR._C[ri][ci]!=null) openPair(ri,ci); });
   renderCorrPanel(); renderPairPanel(); renderCorrPairs();
 }
 function renderCorrPanel(){
@@ -236,7 +363,11 @@ function renderCorrPairs(){
   </div>`;
   box.querySelectorAll('tbody tr[data-i]').forEach(tr=>tr.addEventListener('click',()=>{ openPair(+tr.dataset.i, +tr.dataset.j); }));
 }
-function alignedDaily(a,b,Ldays){ const ca=a.daily, cb=b.daily; if(!ca||!cb) return null;
+// (-105) the pair view aligns the same bars the matrix correlated: the session view, forming bar
+// dropped, a crypto leg folded onto the US calendar when the other leg keeps sessions.
+function alignedDaily(a,b,Ldays){ if(!a.daily||!b.daily) return null;
+  const mixed=!!sessCalOf(a)!==!!sessCalOf(b), ca=closedDaily(sessBarsFor(a, corrCalFor(a,mixed))), cb=closedDaily(sessBarsFor(b, corrCalFor(b,mixed)));
+  if(!ca||!cb) return null;
   const cutoff=Math.floor(Date.now()/DAY)-Ldays, ma=new Map(), mb=new Map();
   for(const k of ca){ const cl=parseFloat(k.c), d=Math.floor(k.t/DAY); if(isFinite(cl)&&d>=cutoff) ma.set(d,cl); }
   for(const k of cb){ const cl=parseFloat(k.c), d=Math.floor(k.t/DAY); if(isFinite(cl)&&d>=cutoff) mb.set(d,cl); }
@@ -1133,6 +1264,7 @@ function downloadCSV(name, matrix){
   const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}), url=URL.createObjectURL(blob);
   const a=document.createElement('a'); a.href=url; a.download=name; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(()=>URL.revokeObjectURL(url),1500);
+  usageAct('csv');   // (build 2026.09.24-110) the usage counter: that an export happened, never what it held
 }
 function csvCell(k,r){ switch(k){
   case 'ticker': return r.ticker; case 'px': return r.px;
@@ -1164,4 +1296,4 @@ function exportCorr(){ const rows=CORR._rows, C=CORR._C, ord=CORR._ord; if(!rows
   const head=['',...ord.map(i=>rows[i].ticker)];
   const body=ord.map(ri=>[rows[ri].ticker, ...ord.map(ci=>{ const v=C[ri][ci]; return v==null?'':v.toFixed(4); })]);
   downloadCSV(`xyz-correlation-${tfLabel()}.csv`,[head,...body]); }
-export { BASKETS, COMPG, RATIO, basketByName, basketMutate, basketScopeList, basketVirtualRow, buildCorr, compgAuto, computeDvb, corrColor, dailyFunding, dailyLevels, dailyOI, dailyReturns, downloadCSV, dvbBasketDef, dvbCell, dvbPickOpts, exportCorr, exportMarkets, isBasketName, loadBaskets, openCompg, openCorr, openRatio, overnightReturns, pearson, ratioImageSvg, renderCompg, renderCorr, renderCorrPairs, sparkline, syncCorrLookback, tfLabel };
+export { BASKETS, COMPG, RATIO, basketByName, basketMutate, basketScopeList, basketVirtualRow, buildCorr, compgAuto, computeDvb, corrCI, corrColor, dailyFunding, dailyLevels, dailyOI, dailyReturns, downloadCSV, dvbBasketDef, dvbCell, dvbPickOpts, exportCorr, exportMarkets, isBasketName, loadBaskets, openCompg, openCorr, openRatio, overnightReturns, pearson, ratioImageSvg, renderCompg, renderCorr, renderCorrPairs, sessReturns, sparkline, syncCorrLookback, tfLabel };

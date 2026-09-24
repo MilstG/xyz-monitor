@@ -6,28 +6,30 @@ import { openActionable, renderActionable } from "./actionable.js";
 import { IS_ADMIN, attachLineHover, featureOn, hoverChart, lcGrid, lcTicks, loadAnalytics, loadFunding, openAdmin, openFunding, renderFunding, renderSessions, sCap, sCard, sHead, sLeg, sessDate, syncAnalyticsSlot, syncFundingSlot, tabVisible } from "./admin.js";
 import { pushToast, setHash } from "./alerts.js";
 import { openEarnings, openNews, openSignals, setSigTabBadge } from "./calendar.js";
-import { openCharts } from "./charts.js";
-import { DAY, activeRows, clamp, el, esc, inScope, momColor, overlayCloseAll, scopeBench, state } from "./core.js";
+import { DAY, G, activeRows, clamp, el, esc, inScope, lazyCall, momColor, overlayCloseAll, scopeBench, state } from "./core.js";
 import { BASKETS, basketScopeList, basketVirtualRow, compgAuto, dailyFunding, dailyLevels, dailyOI, dailyReturns, loadBaskets, openCorr, overnightReturns, renderCorr, syncCorrLookback } from "./corr.js";
 import { fetchJSON, loadDaily, updateAggregates } from "./data.js";
 import { openFocus } from "./focus.js";
-import { openFunds } from "./funds.js";
-import { openCongress, openInsiders } from "./insiders.js";
-import { buildHead, render, renderRegimeStrip, syncGrpSeg, updateDrillChip, updateMovers } from "./markets.js";
+import { buildHead, paintMarkets, render, renderRegimeStrip, syncGrpSeg, updateDrillChip, updateMovers } from "./markets.js";
 import { openDM } from "./messages.js";
 import { applyTabVisibility, closeHelp, closeTabMenus, syncTabGroups } from "./nav.js";
 import { openHousing, openLiquidity, openNotes } from "./notes.js";
-import { drawSessions } from "./positioning.js";
 import { openReportView } from "./report.js";
 import { renderSectors } from "./sectors.js";
-import { openDrawdown, renderDrawdown } from "./drawdown.js";
+import { attachRetestControls, loadRetestStudy, renderRetestSection } from "./retest.js";
+import { usageView } from "./usage.js";
 import { openTrend, renderSignals, renderTrend } from "./trend.js";
 
 // ===== Strategy backtest — client-side, cross-sectional long/short on the daily returns already loaded =====
 // Everything runs in-browser off state.rows[*].daily (shipped via /api/daily) + the SP500 benchmark, so
 // parameter tweaks are instant and add no server load. Non-fitted ranking rules: the honest overfitting
 // risk is the user picking params by eye, which the in-sample/out-of-sample split is there to expose.
-const BT_MIN_DAYS=25, BT_ANN=252;
+// (build 2026.09.24-106) execution lag + slippage: 'next' = the book fills at the NEXT bar's close
+// after the signal's (the default — no fill at the very close the signal was computed from);
+// slippage is bps PER SIDE on turnover, charged beside the taker fee (and twice a night overnight).
+function btLag(p){ return p&&p.lag==='same'?0:1; }
+function btSlipR(p){ const b=p?+p.slip:0; return Number.isFinite(b)&&b>0? b/1e4 : 0; }
+const BT_MIN_DAYS=25, BT_ANN_UTC=365;   // (build 2026.09.24-104) fallback periods/yr: the spine is UTC days, weekends included
 const BT_SIGNALS={ mom:'Momentum', smom:'Sector-relative momentum', rev:'Short-term reversion', res:'Residual momentum (β-neutral)',
   lowvol:'Low volatility', ivol:'Low idiosyncratic vol', beta:'Low beta (BAB)', max:'Anti-lottery (low MAX)',
   carry:'Funding carry', hprox:'High proximity', volt:'Volume trend', oid:'OI change',
@@ -38,7 +40,13 @@ const BT_SIGNALS={ mom:'Momentum', smom:'Sector-relative momentum', rev:'Short-t
 const BT_MVAR={ m0:1, mres:1, moi:1, mfund:1, mpart:1 };
 // signals that need payload columns beyond closes — btRun reports an honest "not shipped" instead of an empty rank
 const BT_NEEDS={ carry:'fundCov', hprox:'hiCov', volt:'voCov', oid:'oiCov', moi:'oiCov', mfund:'fundCov', mpart:'voCov' };
-function btAnn(){ return state.scope==='crypto'?365:BT_ANN; }   // crypto trades every day; equities ~252 sessions
+// Annualization = the periods per year the return series ACTUALLY has (build 2026.09.24-104). The
+// spine is UTC-day candles and the xyz perps trade weekends too, so an equity portR carries ~365
+// entries a year, not 252 sessions: √252 on a 365/yr series understated Sharpe ~1.2× and the √252
+// vol target read a daily σ as a smaller annual one and OVERSIZED the book. Observed = (bars-1)
+// over the day span of the spine; <3 bars or a zero span falls back to 365. Crypto stays 365.
+function btPeriodsPerYear(days){ const m=days?days.length:0; if(m<3) return null; const span=days[m-1]-days[0]; return span>0?(m-1)*365.25/span:null; }
+function btAnn(days){ if(state.scope==='crypto') return 365; const ppy=btPeriodsPerYear(days); return ppy>0?ppy:BT_ANN_UTC; }
 // ===== Target picks — the cross-section is a choice, not a given =====================
 // picks[] holds coins the user typed into the target box. Zero picks is the tab's original
 // behaviour (rank the whole universe). ONE pick collapses the cross-section entirely: a rank of
@@ -55,6 +63,20 @@ function btPickRows(){     // picked rows that exist, carry daily history and be
     const r=state.rows.get(c); if(!r||r.delisted||!inScope(r)||!r.daily) continue;
     const m=dailyReturns(r); if(!m||m.size<BT_MIN_DAYS) continue;
     out.push(r); }
+  return out;
+}
+// ★ watchlist → target (build 2026.09.24-97): the mock's third pill, the one that shipped last. The
+// stars are ONE Set across both universes, so the load is filtered to the live scope and to names
+// that clear the history floor — the same resolve btAddPick applies one name at a time, so a star
+// can never smuggle in a row the typeahead would have refused. It REPLACES the picks rather than
+// appending: "test my watchlist" is its own question, not an addendum to whatever was typed. One
+// star lands in single-asset mode, several in a custom universe — the count decides, as always.
+function btWatchPicks(){
+  const out=[];
+  for(const c of state.watch){ if(out.includes(c)) continue;
+    const r=state.rows.get(c); if(!r||r.delisted||!inScope(r)||!r.daily) continue;
+    const m=dailyReturns(r); if(!m||m.size<BT_MIN_DAYS) continue;
+    out.push(c); }
   return out;
 }
 function btMode(){ const n=btPickRows().length; return n===0?'universe':(n===1?'single':'set'); }
@@ -107,8 +129,9 @@ function btMatrix(rowsIn){
 // shipped blend (risk-adjusted 1/7/30d returns at .40/.40/.20, cross-horizon coherence, range tilt;
 // the intraday h1/h4 terms are untestable at daily granularity and carry over unchanged regardless).
 // V1–V4 are M0 plus exactly ONE candidate term each, so an OOS delta vs M0 measures that term and
-// nothing else. Honest limits, stated not hidden: the range tilt runs on closes for BOTH rails (the
-// daily tuple ships no low, and one high-only rail would skew the tilt); names missing a modulation
+// nothing else. Honest limits, stated not hidden: the range tilt runs on closes for BOTH rails (it
+// was built when the daily tuple shipped no low — lows ride it since build 2026.09.24-105 but older
+// history can lack them, and one high-only rail would skew the tilt); names missing a modulation
 // column (OI / funding / volume) fall back to the unmodulated core so the ranked universe stays
 // identical to the control and the comparison measures the term, not universe drift.
 function btMomVariant(sig, a, bench, di, ex){
@@ -228,15 +251,27 @@ function btRun(){
   const { rows, days, series, benchSeries, fund, fundCov, ovG, ovF, ovCov, pxm, him, vom, oim, hiCov, voCov, oiCov }=mx, coins=rows.map(r=>r.coin);
   const covOf={ fundCov, hiCov, voCov, oiCov };
   if(BT_NEEDS[p.signal] && !(covOf[BT_NEEDS[p.signal]]>0)) return { ok:false, nodata:BT_SIGNALS[p.signal] };   // the column this rule ranks on isn't in the payload yet — say so instead of ranking nothing
-  const L=p.lookback, cad=Math.max(1,p.cadence), q=p.quantile, costR=p.cost/1e4, start=warmN, on=p.holdWindow==='on' && state.scope!=='crypto';   // 24/7 markets have no overnight boundary
-  let weights=new Map(), lastBook=null, feeCum=0, fundCum=0;
+  const L=p.lookback, cad=Math.max(1,p.cadence), q=p.quantile, costR=p.cost/1e4, slipR=btSlipR(p), lag=btLag(p), start=warmN, on=p.holdWindow==='on' && state.scope!=='crypto';   // 24/7 markets have no overnight boundary
+  let weights=new Map(), lastBook=null, feeCum=0, fundCum=0, slipCum=0, pend=null;
   const tkOf=new Map(rows.map(r=>[r.coin, r.ticker]));
   const secOf=new Map(rows.map(r=>[r.coin, r.sector||r.assetClass||'—']));           // smom demean groups; unsectored names pool together
   const exOf=(c)=>({ f:fund.get(c)||null, px:pxm.get(c)||null, hi:him.get(c)||null, vo:vom.get(c)||null, oi:oim.get(c)||null });
   const base=p.signal==='smom'?'mom':p.signal;
   const portR=[], eq=[1], eqg=[1], eqb=[1], eqew=[1], curveDays=[days[start]];
   let turnoverSum=0, rebalances=0, posSum=0, posCount=0;
+  // (build 2026.09.24-106) execution lag. The signal at di reads the close of bar di; 'same' fills
+  // at that same close (the pre-106 behaviour — a close you cannot trade on after computing a signal
+  // from it), 'next' (default) holds the new book as PENDING and fills it at the NEXT bar's close,
+  // so its first return is bar di+2's. Turnover, taker fee and slippage are charged at the fill.
+  const fill=(nw)=>{
+    let to=0; const keys=new Set([...weights.keys(),...nw.keys()]);
+    for(const c of keys) to+=Math.abs((nw.get(c)||0)-(weights.get(c)||0));
+    turnoverSum+=to; rebalances++;
+    if(!on){ feeCum+=to*costR; slipCum+=to*slipR; eq[eq.length-1]*=(1-to*(costR+slipR)); }      // close-to-close: taker fee + slippage on turnover; overnight charges a nightly round-trip instead
+    weights=nw;
+  };
   for(let di=start; di<days.length-1; di++){
+    if(pend){ fill(pend); pend=null; }                               // next-bar: yesterday's decision fills at this bar's close
     if((di-start)%cad===0){                                          // rebalance
       const scored=[];
       for(const c of coins){ const raw=btScore(base, series.get(c), benchSeries, di, L, exOf(c));
@@ -263,11 +298,7 @@ function btRun(){
       const bk={ longs:[], shorts:[] };                              // snapshot the book for the "what it holds now" panel
       for(const [c,w] of nw){ const s=scored.find(z=>z.c===c); (w>=0?bk.longs:bk.shorts).push({ coin:c, ticker:tkOf.get(c)||c, w, score:s?s.raw:null }); }
       bk.longs.sort((a,b)=>b.w-a.w); bk.shorts.sort((a,b)=>a.w-b.w); lastBook=bk;
-      let to=0; const keys=new Set([...weights.keys(),...nw.keys()]);
-      for(const c of keys) to+=Math.abs((nw.get(c)||0)-(weights.get(c)||0));
-      turnoverSum+=to; rebalances++;
-      if(!on){ feeCum+=to*costR; eq[eq.length-1]*=(1-to*costR); }      // close-to-close: taker fee on turnover; overnight charges a nightly round-trip instead
-      weights=nw;
+      if(lag) pend=nw; else fill(nw);
     }
     const fd=di+1; let pr=0, fpay=0, ok=false, gb=0;
     if(on){                                                            // overnight: capture the close->open (+weekend) hold, flat during the cash session
@@ -278,8 +309,8 @@ function btRun(){
       for(const [c,w] of weights){ const x=series.get(c)[fd]; if(Number.isFinite(x)){ pr+=w*(Math.exp(x)-1); ok=true; } const fa=fund.get(c); if(fa) fpay+=w*fa[fd]; }
     }
     pr=ok?pr:0; const fRet=-fpay;                                    // a position pays w*rate: a long pays when funding>0, a short receives
-    const feeDay=on? gb*2*costR : 0;                                 // overnight round-trips the whole book every night (exit at open + enter at close)
-    if(on) feeCum+=feeDay;
+    const feeDay=on? gb*2*(costR+slipR) : 0;                         // overnight round-trips the whole book every night (exit at open + enter at close), fee + slippage per side
+    if(on){ feeCum+=gb*2*costR; slipCum+=gb*2*slipR; }
     fundCum+=fRet; portR.push(pr+fRet-feeDay);                        // net return incl. funding and (overnight) the nightly fee
     eq.push(eq[eq.length-1]*(1+pr+fRet-feeDay)); eqg.push(eqg[eqg.length-1]*(1+pr));   // gross = price only; net = price + funding − fees
     const bx=benchSeries?benchSeries[fd]:NaN; eqb.push(eqb[eqb.length-1]*(1+(Number.isFinite(bx)?Math.exp(bx)-1:0)));
@@ -288,7 +319,7 @@ function btRun(){
   }
   return { ok:true, days:curveDays, eq, eqg, eqb, eqew, portR,
     turnover:rebalances?turnoverSum/rebalances:0, avgPos:posCount?posSum/posCount:0, universeN:rows.length, book:lastBook,
-    fundCov, fundCum, feeCum, ovCov, on };
+    fundCov, fundCum, feeCum, slipCum, ovCov, on, lag };
 }
 // ===== Single-asset mode — the same signal, run as a timing rule on one name ==================
 // What changes: the score stops being a RANK and becomes a LEVEL, so the position comes from the
@@ -301,7 +332,7 @@ function btRun(){
 // on the same axis, which they wouldn't if the scale were demeaned.
 function btRunOne(p){
   const tgt=btPickRows()[0]; if(!tgt) return { ok:false, have:0, days:0, need:1 };
-  const cr=state.scope==='crypto', L=p.lookback, cad=Math.max(1,p.cadence), costR=p.cost/1e4;
+  const cr=state.scope==='crypto', L=p.lookback, cad=Math.max(1,p.cadence), costR=p.cost/1e4, slipR=btSlipR(p), lag=btLag(p);
   const warmN=BT_MVAR[p.signal]?Math.max(L,31):L;
   // Sector-relative momentum is a demean against peers, so on one name the peers have to come
   // along — otherwise the rule silently degrades to plain momentum under a label that promises
@@ -338,8 +369,21 @@ function btRunOne(p){
   const on=p.holdWindow==='on' && !cr;
   const start=warmN;
   const eq=[1], eqg=[1], eqb=[1], eqbh=[1], curveDays=[days[start]], portR=[], pos=[], trades=[];
-  let w=0, feeCum=0, fundCum=0, inMkt=0, open=null, flips=0;
+  let w=0, feeCum=0, fundCum=0, slipCum=0, inMkt=0, open=null, flips=0, pend=null, held=null;   // held (-107): the decision the filled position came from
+  // (-106) the fill: at the decision bar's close ('same') or the next bar's ('next', default — the
+  // trade log's "in"/"out" dates are the FILL bars, so they move one bar later with the lag)
+  const fill=(nw, fi, meta)=>{
+    held=meta;
+    if(nw===w) return;
+    const to=Math.abs(nw-w);
+    if(!on){ feeCum+=to*costR; slipCum+=to*slipR; eq[eq.length-1]*=(1-to*(costR+slipR)); }   // overnight charges its nightly round-trip below instead
+    flips++;
+    if(open){ open.exit=days[fi]; open.ret=eq[eq.length-1]/open.eq0-1; trades.push(open); open=null; }
+    if(nw!==0) open={ side:nw>0?'LONG':'SHORT', size:Math.abs(nw), entry:days[fi], eq0:eq[eq.length-1], score:meta.score, z:meta.z };
+    w=nw;
+  };
   for(let di=start; di<N-1; di++){
+    if(pend){ fill(pend.nw, di, pend); pend=null; }       // next-bar: yesterday's decision fills at this close
     if((di-start)%cad===0){                               // re-decide the position
       let nw=0; const s=raw[di], sig=(p.direction==='low'? -s : s);   // sig = the quantity we go long on
       if(Number.isFinite(sig) && sig!==0){
@@ -350,17 +394,11 @@ function btRunOne(p){
         if(p.structure==='short'&&nw>0) nw=0;
         if(nw!==0){
           if(p.weighting==='sig'){ nw*=(Number.isFinite(sc)&&sc>0)? clamp(Math.abs(sig)/sc,0.25,2) : 1; }        // size with conviction
-          else if(p.weighting==='vol'){ const v=btVol(a,di,Math.max(20,L)); nw*= v>0? clamp(BT_VOLTGT/(v*Math.sqrt(btAnn())),0.25,2) : 1; }   // size to a 20% annualized vol target
+          else if(p.weighting==='vol'){ const v=btVol(a,di,Math.max(20,L)); nw*= v>0? clamp(BT_VOLTGT/(v*Math.sqrt(btAnn(days))),0.25,2) : 1; }   // size to a 20% annualized vol target
         }
       }
-      if(nw!==w){
-        const to=Math.abs(nw-w);
-        if(!on){ feeCum+=to*costR; eq[eq.length-1]*=(1-to*costR); }   // overnight charges its nightly round-trip below instead
-        flips++;
-        if(open){ open.exit=days[di]; open.ret=eq[eq.length-1]/open.eq0-1; trades.push(open); open=null; }
-        if(nw!==0) open={ side:nw>0?'LONG':'SHORT', size:Math.abs(nw), entry:days[di], eq0:eq[eq.length-1], score:raw[di], z:(Number.isFinite(scale[di])&&scale[di]>0)?raw[di]/scale[di]:null };
-        w=nw;
-      }
+      const meta={ nw, score:raw[di], z:(Number.isFinite(scale[di])&&scale[di]>0)?raw[di]/scale[di]:null };
+      if(lag) pend=meta; else fill(nw, di, meta);
     }
     const fd=di+1; let pr=0, fpay=0;
     if(on){ const ga=ovG.get(c), g=ga?ga[fd]:NaN;         // overnight: hold the close→open gap, flat through the cash session
@@ -370,8 +408,8 @@ function btRunOne(p){
       const x=a[fd]; if(Number.isFinite(x)) pr=w*(Math.exp(x)-1);
       const fa=fund.get(c); if(fa) fpay=w*fa[fd];
     }
-    const fRet=-fpay, feeDay=on? Math.abs(w)*2*costR : 0;  // a long pays funding, a short receives it
-    if(on) feeCum+=feeDay;
+    const fRet=-fpay, feeDay=on? Math.abs(w)*2*(costR+slipR) : 0;  // a long pays funding, a short receives it; overnight = fee + slippage per side, twice a night
+    if(on){ feeCum+=Math.abs(w)*2*costR; slipCum+=Math.abs(w)*2*slipR; }
     fundCum+=fRet; if(w!==0) inMkt++;
     portR.push(pr+fRet-feeDay);
     eq.push(eq[eq.length-1]*(1+pr+fRet-feeDay));
@@ -383,14 +421,27 @@ function btRunOne(p){
     pos.push(w); curveDays.push(days[fd]);
   }
   if(open){ open.exit=days[N-1]; open.ret=eq[eq.length-1]/open.eq0-1; open.live=true; trades.push(open); }
-  return { ok:true, single:true, row:tgt, days:curveDays, eq, eqg, eqb, eqew:eqbh, eqbh, portR, pos, trades,
+  // -97: the mean round trip — the mock's "avg trade" row. Read off the same net curve the trade
+  // log is, so the entry fee sits in the previous leg and the exit fee in this one; the open
+  // position counts at its mark, exactly as the log prints it. null (not 0) when nothing traded.
+  let tSum=0; for(const t of trades) tSum+=t.ret;
+  const avgTrade=trades.length? tSum/trades.length : null;
+  return { ok:true, single:true, avgTrade, row:tgt, days:curveDays, eq, eqg, eqb, eqew:eqbh, eqbh, portR, pos, trades,
     turnover:0, avgPos:inMkt?1:0, universeN:1, book:null, peers:peers.length,
-    fundCov, fundCum, feeCum, ovCov, on, flips, exposure:pos.length?inMkt/pos.length:0,
-    curW:w, curScore:raw[N-2], curZ:(Number.isFinite(scale[N-2])&&scale[N-2]>0)?raw[N-2]/scale[N-2]:null };
+    fundCov, fundCum, feeCum, slipCum, ovCov, on, lag, flips, exposure:pos.length?inMkt/pos.length:0,
+    // (build 2026.09.24-107) curW/curScore/curZ describe the SAME decision — the one the held
+    // position filled from; under next-bar fills the last decision has not filled yet and rides
+    // apart as `pending` (the panel says "fills at next close") instead of labelling curW with its score.
+    curW:w, curScore:held?held.score:null, curZ:held?held.z:null,
+    pending:pend?{ w:pend.nw, score:pend.score, z:pend.z }:null };
 }
 function btVol(a, di, L){ const lo=di-L+1; if(lo<0) return 0; let s=0,sq=0,n=0;
   for(let i=lo;i<=di;i++){ const x=a[i]; if(Number.isFinite(x)){ s+=x; sq+=x*x; n++; } }
   if(n<3) return 0; const m=s/n; return Math.sqrt(Math.max(0,(sq-n*m*m)/(n-1))); }
+// (build 2026.09.24-106) Sharpe's standard error, Lo (2002) under iid returns: in per-period units
+// SE(SR) ≈ √((1 + ½·SR²)/T), annualized by the same √(periods/yr) as the ratio itself. A Sharpe
+// whose ±1.96·SE band spans 0 is not distinguishable from no edge at 95%, and the box says so.
+function btSharpeSE(srPer, T, ann){ return T>1&&Number.isFinite(srPer)? Math.sqrt((1+0.5*srPer*srPer)/T)*Math.sqrt(ann||BT_ANN_UTC) : null; }
 function btStats(portR, eqSeg, ann){
   const n=portR.length; if(!n||eqSeg.length<2) return null;
   let mean=0; for(const x of portR) mean+=x; mean/=n;
@@ -398,7 +449,8 @@ function btStats(portR, eqSeg, ann){
   let hit=0; for(const x of portR) if(x>0) hit++;
   const total=eqSeg[eqSeg.length-1]/eqSeg[0]-1;
   let peak=eqSeg[0], mdd=0; for(const e of eqSeg){ if(e>peak) peak=e; const dd=e/peak-1; if(dd<mdd) mdd=dd; }
-  return { total, sharpe: sd>0? mean/sd*Math.sqrt(ann||BT_ANN):0, hit:hit/n, mdd, n };
+  const srPer=sd>0? mean/sd : 0, sharpe=srPer*Math.sqrt(ann||BT_ANN_UTC), sharpeSE=btSharpeSE(srPer, n, ann);
+  return { total, sharpe, sharpeSE, sharpeZero: sharpeSE!=null&&Math.abs(sharpe)<1.96*sharpeSE, hit:hit/n, mdd, n };
 }
 // equity curve: net (accent) / gross (blue) / benchmark (muted) / equal-weight (faint); IS|OOS split shaded; crosshair hover
 function btCurveSvg(res, splitIdx){
@@ -461,7 +513,8 @@ function btStatBox(label, st, accent){
   const f=(x,d,pct)=>(x>0?'+':'')+(x*(pct?100:1)).toFixed(d)+(pct?'%':'');
   return `<div class="s-stat"><div class="s-k">${label} · ${st.n}d</div>`+
     `<div class="s-row"><span>return</span><b class="${st.total>=0?'pos':'neg'}">${f(st.total,1,true)}</b></div>`+
-    `<div class="s-row"><span>Sharpe</span><b style="color:${accent}">${st.sharpe.toFixed(2)}</b></div>`+
+    `<div class="s-row"><span title="annualized Sharpe ± its standard error (Lo 2002: √((1+½SR²)/T) per period, annualized)">Sharpe</span><b style="color:${accent}">${st.sharpe.toFixed(2)}${st.sharpeSE!=null?` <span class="sec" style="font-weight:400">± ${st.sharpeSE.toFixed(2)}</span>`:''}</b></div>`+
+    (st.sharpeZero?`<div class="s-row"><span class="sec" style="font-size:var(--fs-2xs)" title="the 95% interval (Sharpe ± 1.96·SE) includes zero — this sample cannot tell the rule from no edge">95% CI includes 0</span><b class="sec">⚠</b></div>`:'')+
     `<div class="s-row"><span>hit</span><b>${(st.hit*100).toFixed(0)}%</b></div>`+
     `<div class="s-row"><span>max DD</span><b class="neg">${(st.mdd*100).toFixed(1)}%</b></div></div>`;
 }
@@ -496,8 +549,11 @@ function btPositionPanel(res){
       `<span class="r ${t.ret>=0?'pos':'neg'}">${(t.ret>0?'+':'')+(t.ret*100).toFixed(2)}%</span></div>`).join('')
     : `<div class="bt-trow"><span class="sec" style="grid-column:1/-1">No position ever cleared the entry threshold — loosen it, shorten the lookback, or pick a longer history.</span></div>`;
   const wins=res.trades.filter(t=>t.ret>0).length;
+  // (-107) next-bar fills: the latest decision fills at the next close — said, not silently folded into "now"
+  const pd=res.pending, pw=pd?pd.w||0:0;
+  const pendTxt=pd&&pw!==w?` <span class="bt-now ${pw>0?'pos':pw<0?'neg':'flat'}" title="decided at the last close (score ${pd.score!=null&&isFinite(pd.score)?(pd.score>0?'+':'')+pd.score.toFixed(3):'—'}); under next-bar fills it trades at the next close">→ ${pw>0?'LONG '+pw.toFixed(2)+'×':pw<0?'SHORT '+Math.abs(pw).toFixed(2)+'×':'FLAT'} · fills at next close</span>`:'';
   return sCard(`<div class="s-cap" style="margin:0 0 9px">Where the rule stands on ${esc(tk)} right now, and every round trip that got it here</div>`+
-    `<div class="bt-nowrow">${tag}<span class="sec">score ${res.curScore!=null&&isFinite(res.curScore)?(res.curScore>0?'+':'')+res.curScore.toFixed(3):'—'}`+
+    `<div class="bt-nowrow">${tag}${pendTxt}<span class="sec">score ${res.curScore!=null&&isFinite(res.curScore)?(res.curScore>0?'+':'')+res.curScore.toFixed(3):'—'}`+
       `${res.curZ!=null&&isFinite(res.curZ)?` · ${(res.curZ>0?'+':'')+res.curZ.toFixed(2)}σ`:''} · entry ${state.backtest.entry>0?'±'+state.backtest.entry+'σ':'sign only'}`+
       ` · ${res.trades.length} round trip${res.trades.length===1?'':'s'}${res.trades.length?`, ${Math.round(wins/res.trades.length*100)}% green`:''}</span></div>`+
     `<div class="bt-ttbl"><div class="bt-trow bt-thd"><span>side</span><span>in</span><span>out</span><span class="r">size</span><span class="r">return</span></div>${rows}</div>`+
@@ -512,6 +568,11 @@ function btPickerHtml(){
     return `<span class="cg-chip bt-tgt${off?' off':''}" title="${esc(off?tk+' — no daily history in this scope, so it sits out of the run':(tk+' · '+((r&&(r.sector||r.assetClass))||'—')))}">${esc(tk)}<span class="cg-x" data-btx="${esc(c)}" title="remove">×</span></span>`; }).join('');
   return `<span class="lbl">target</span>`+
     `<span class="bt-pick"><input id="btFind" autocomplete="off" spellcheck="false" placeholder="${cr?'search a coin — e.g. BTC, HYPE':'search a name — e.g. NVDA, OPENAI'}" title="type a name from the live ${cr?'crypto':'xyz'} universe to test the rule on it alone; pick several to rank only those"><div id="btSugg" class="cg-sugg" hidden></div></span>`+
+    // -97: ★ watchlist pill — dead (not hidden) when no star resolves in this scope, with the reason on hover
+    (()=>{ const wn=btWatchPicks().length;
+      return `<button class="cg-pill" id="btWatchPick"${wn?'':' disabled'} title="${wn
+        ?`test your ★ watchlist: the ${wn} starred ${cr?'coin':'name'}${wn===1?'':'s'} in this scope with enough daily history replace the picks — one star runs single-asset, several a custom universe`
+        :`no ★ starred ${cr?'coin':'name'} in this scope has the ${BT_MIN_DAYS}d of daily history a test needs — star names on Markets first`}">★ watchlist</button>`; })()+
     (picks.length?`<span class="bt-chips">${chips}<button class="cg-pill" id="btClearPick" title="back to the whole universe">clear</button></span>`:'');
 }
 function btSuggest(){
@@ -577,7 +638,10 @@ function renderBacktest(){
     : mode==='set'
       ? `<div class="bt-mode"><b>Custom universe</b> · ${picked.length} names — cross-sectional as usual, ranked only among what you picked. `+
         `<span class="sec">Thin book: at ${(p.quantile*100).toFixed(0)}% that's ${Math.max(1,Math.floor(picked.length*p.quantile))} name per side, so treat the stats as a sketch. Remove all but one to run a single-asset timing test instead.</span></div>`
-      : '';
+      // -97: universe mode says what the picker is for, so the one control that changes the tab's
+      // shape isn't discovered by accident — the mode is always named, in all three states.
+      : `<div class="bt-mode"><b>Universe mode</b> — ranks the whole ${cr?'crypto':'xyz'} universe, as the tab always has. `+
+        `<span class="sec">Pick a name in <b>target</b> to test the signal on it alone; pick several (or load the ★ watchlist) to rank only those.</span></div>`;
   const controls=
     `<div class="s-ctrls">${btPickerHtml()}</div>`+
     `<div class="s-ctrls"><span class="lbl">signal</span>${sigSel}<span${uniWrap}><span class="lbl">universe</span>${uniSel}</span>${vbSel}`+
@@ -590,6 +654,8 @@ function renderBacktest(){
       ? `<span class="lbl" title="how far from zero the score must sit before a position is taken — the single-name replacement for the book quantile. σ is that name's own trailing score scale (RMS about zero), measured through that day only.">entry</span>${seg('btEntry',p.entry,[[0,'sign only'],[0.5,'±0.5σ'],[1,'±1σ']])}`
       : `<span class="lbl">book</span>${seg('btQ',p.quantile,[[0.1,'10%'],[0.2,'20%'],[0.33,'33%'],[1,'all']])}`)+
     `<span class="lbl">taker bps</span>${seg('btCost',p.cost,[[0,'0'],[5,'5'],[10,'10'],[20,'20']])}`+
+    `<span class="lbl" title="slippage in bps PER SIDE, charged on turnover at every fill beside the taker fee (build 2026.09.24-106)">slip bps</span>${seg('btSlip',p.slip,[[0,'0'],[5,'5'],[10,'10'],[25,'25']])}`+
+    `<span class="lbl" title="when the book fills: at the NEXT bar's close after the signal (default — the signal reads a close you cannot also trade at), or at the same close the signal was computed from (the pre-106 behaviour, optimistic)">fill</span>${seg('btLag',btLag(p)?'next':'same',[['next','next bar'],['same','same close (as before)']])}`+
     `<span class="lbl">in-sample</span>${seg('btSplit',p.split,[[0.5,'50%'],[0.6,'60%'],[0.7,'70%']])}</div>`+
     `<div class="s-ctrls"><span class="lbl">direction</span>${seg('btDir',p.direction,[['high','long strong'],['low','long weak']])}`+
     `<span class="lbl">structure</span>${single
@@ -625,10 +691,11 @@ function renderBacktest(){
   const m=res.days.length, splitIdx=Math.max(1,Math.min(m-2,Math.floor(m*p.split)));
   const isR=res.portR.slice(0,splitIdx), oosR=res.portR.slice(splitIdx);
   const isE=res.eq.slice(0,splitIdx+1), oosE=res.eq.slice(splitIdx);
-  const ann=btAnn();
+  const ann=btAnn(res.days);   // (-104) the curve's own periods/yr, not 252
   const full=btStats(res.portR,res.eq,ann), is=btStats(isR,isE,ann), oos=btStats(oosR,oosE,ann);
   const fundRow=`<div class="s-row"><span>funding</span>${res.fundCov>0?`<b class="${res.fundCum>=0?'pos':'neg'}">${(res.fundCum>0?'+':'')+(res.fundCum*100).toFixed(1)}%</b>`:`<b class="sec" title="funding not loaded — update the server">—</b>`}</div>`;
-  const feeRow=`<div class="s-row"><span>fees</span><b class="neg">−${(res.feeCum*100).toFixed(1)}%</b></div>`;
+  const feeRow=`<div class="s-row"><span>fees</span><b class="neg">−${(res.feeCum*100).toFixed(1)}%</b></div>`
+    +`<div class="s-row"><span title="${p.slip||0}bp per side on turnover">slippage</span><b class="${res.slipCum>0?'neg':'sec'}">${res.slipCum>0?'−'+(res.slipCum*100).toFixed(1)+'%':'0'}</b></div>`;
   // Single-asset mode replaces the universe/turnover box with the two numbers that actually decide
   // whether a one-name rule was worth running: what it made against simply holding the thing, and
   // how many independent decisions that verdict rests on.
@@ -645,6 +712,7 @@ function renderBacktest(){
         `<div class="s-row"><span title="share of days the rule held any position at all">exposure</span><b>${(res.exposure*100).toFixed(0)}%</b></div></div>`+
       `<div class="s-stat"><div class="s-k">Trades &amp; frictions</div>`+
         `<div class="s-row"><span>round trips</span><b class="${thin?'neg':''}"${thin?` title="under ${BT_TRADE_MIN} round trips the Sharpe above is an anecdote with a decimal point — it is shown, not trusted"`:''}>${res.trades.length}${thin?' ⚠':''}</b></div>`+
+        `<div class="s-row"><span title="mean return per round trip on the net curve — the open position counts at its mark">avg trade</span>${res.avgTrade!=null?`<b class="${res.avgTrade>=0?'pos':'neg'}">${pn(res.avgTrade,2)}</b>`:`<b class="sec">—</b>`}</div>`+
         `<div class="s-row"><span>win rate</span><b>${res.trades.length?Math.round(wins/res.trades.length*100)+'%':'—'}</b></div>`+
         fundRow+feeRow+`</div>`
     : `<div class="s-stat"><div class="s-k">Frictions</div>`+
@@ -666,8 +734,13 @@ function renderBacktest(){
   const wtTxt = p.weighting==='sig'?'signal-weighted':p.weighting==='vol'?'inverse-vol weighted':'equal-weight';
   const mvarCol={moi:'OI',mfund:'funding',mpart:'volume'}[p.signal];
   const mvarNote = BT_MVAR[p.signal]
-    ? ` <b>Live-score variant:</b> fixed 1/7/30d risk-adjusted horizons mirroring the Markets-tab momentum blend — the lookback control does not apply. Judge it against <i>Blend M0 — live-score analogue</i> on out-of-sample net: only a term that beats the control there earns promotion into the live column. Daily granularity can only mirror the ≥1d structure of the live score (weights renormalized to .40/.40/.20; the intraday terms carry over untested either way), and the range tilt runs on closes — the daily tuple ships no low${mvarCol?`. Names missing the ${mvarCol} column fall back to the unmodulated core, so the ranked universe matches the control and the OOS gap measures the term itself`:''}.`
+    ? ` <b>Live-score variant:</b> fixed 1/7/30d risk-adjusted horizons mirroring the Markets-tab momentum blend — the lookback control does not apply. Judge it against <i>Blend M0 — live-score analogue</i> on out-of-sample net: only a term that beats the control there earns promotion into the live column. Daily granularity can only mirror the ≥1d structure of the live score (weights renormalized to .40/.40/.20; the intraday terms carry over untested either way), and the range tilt runs on closes on both rails (older daily history carries no low)${mvarCol?`. Names missing the ${mvarCol} column fall back to the unmodulated core, so the ranked universe matches the control and the OOS gap measures the term itself`:''}.`
     : '';
+  // (build 2026.09.24-106) execution, slippage and survivorship, stated on every caption. Delisted
+  // names' daily history is not shipped (/api/daily serves live listings; the server frees a delisted
+  // market's history after 7d), so the universe is today's survivors — said, not silently assumed.
+  const execTxt=`${res.lag?`Fills at the <b>next bar's close</b> after the signal (no trade at the close the signal was computed from)`:`Fills at the <b>same close</b> the signal reads (as before -106 — optimistic: that close is not tradable once the signal is known)`}; ${p.slip||0}bp slippage per side on turnover${res.on?' (twice a night overnight)':''} on top of the fee. Sharpe ± its standard error (Lo 2002); ⚠ where the 95% band includes 0.`;
+  const survTxt=` <b>Survivorship: current listings only</b> — names delisted from the venue drop out of the history this server ships, so the rule never held the ones that died.`;
   // ---- single-asset caption: what the rule did, and the two things that make a one-name result
   // easier to fool yourself with than a cross-sectional one (no diversification, few decisions).
   const oneTk=res.single?esc(res.row.ticker||res.row.coin):'';
@@ -683,12 +756,12 @@ function renderBacktest(){
     (p.signal==='smom'?`Sector-relative momentum is demeaned against ${res.peers} live peers in the same sector, so the rule keeps its meaning on one name${res.peers<3?' — under three peers there is no sector mean and the run stays flat':''}. `:'')+
     `<b>One name is one bet:</b> there is no cross-sectional diversification here, and this run rests on ${res.trades.length} round trip${res.trades.length===1?'':'s'}`+
     `${res.trades.length<BT_TRADE_MIN?` — under ${BT_TRADE_MIN}, so read the Sharpe as an anecdote and the out-of-sample half as the only honest part`:''}. `+
-    `Shaded region is out-of-sample. Slippage not modeled.${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`;
+    `Shaded region is out-of-sample. ${execTxt}${survTxt}${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`;
   const cap = res.single ? capOne : res.on
-    ? `<b>Overnight hold.</b> Each night buy the book at the 16:00 ET close and sell at the next 09:30 ET open (Fri→Mon over the weekend), flat during the cash session — ${structTxt}${mode==='set'?` of the ${picked.length} picked names`:''}, ${wtTxt}. The book round-trips every night, so it pays the ${p.cost}bp taker fee twice a night (that's the big drag here), plus the funding accrued over each hold. Gross is price-only; the gross↔net gap is fees + funding. Uses the close→open boundary holds from the hourly spine${res.ovCov>0?'':' — not loaded yet, so this is empty until the server ships them'}. Shaded = out-of-sample. Slippage not modeled.${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`
-    : `Each rebalance, rank ${mode==='set'?`the ${picked.length} picked names`:'the universe'} by ${BT_SIGNALS[p.signal].toLowerCase()} and go ${structTxt}, ${wtTxt}, held to the next rebalance. Net of a ${p.cost}bp market-order taker fee on turnover and the actual funding each position pays or earns while held${res.fundCov>0?'':' — funding not loaded yet, so this is price-only until the server ships it'}. Gross line is price-only; the gross↔net gap is your funding + fee drag. Shaded region is out-of-sample. In-sample-selected, slippage not yet modeled — the test runs on exactly the daily history this server ships${cr?' (crypto: ~90d, BTC benchmark, 365d annualization)':''}.${mvarNote}${mode==='set'?` <b>Custom universe:</b> ranks run only among the ${picked.length} names you picked, so the tails are ${Math.max(1,Math.floor(picked.length*p.quantile))} name per side — a sketch, not a cross-section.`:''} <b>Hover</b> the curve. Not a live trade signal.`;
+    ? `<b>Overnight hold.</b> Each night buy the book at the 16:00 ET close and sell at the next 09:30 ET open (Fri→Mon over the weekend), flat during the cash session — ${structTxt}${mode==='set'?` of the ${picked.length} picked names`:''}, ${wtTxt}. The book round-trips every night, so it pays the ${p.cost}bp taker fee twice a night (that's the big drag here), plus the funding accrued over each hold. Gross is price-only; the gross↔net gap is fees + funding. Uses the close→open boundary holds from the hourly spine${res.ovCov>0?'':' — not loaded yet, so this is empty until the server ships them'}. Shaded = out-of-sample. ${execTxt}${survTxt}${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`
+    : `Each rebalance, rank ${mode==='set'?`the ${picked.length} picked names`:'the universe'} by ${BT_SIGNALS[p.signal].toLowerCase()} and go ${structTxt}, ${wtTxt}, held to the next rebalance. Net of a ${p.cost}bp market-order taker fee on turnover and the actual funding each position pays or earns while held${res.fundCov>0?'':' — funding not loaded yet, so this is price-only until the server ships it'}. Gross line is price-only; the gross↔net gap is your funding + fee drag. Shaded region is out-of-sample. ${execTxt}${survTxt} In-sample-selected — the test runs on exactly the daily history this server ships${cr?' (crypto: ~90d, BTC benchmark, 365d annualization)':` Sharpe and the vol target annualize at the series' own ${Math.round(ann)} periods/yr — UTC-day candles, weekends included, not 252 sessions`}.${mvarNote}${mode==='set'?` <b>Custom universe:</b> ranks run only among the ${picked.length} names you picked, so the tails are ${Math.max(1,Math.floor(picked.length*p.quantile))} name per side — a sketch, not a cross-section.`:''} <b>Hover</b> the curve. Not a live trade signal.`;
   const vbCap=res.eqvb?` The dashed <b>\u2b12 ${esc(res.vbName)}</b> line is that basket's price-only EW daily index over the same days \u2014 no costs, no funding, a comparison yardstick that never enters the stats; basket gap days (sub-floor coverage) compound flat.`:'';
-  return head+controls+stats+(res.single?btPositionPanel(res):btBookPanel(res.book))+leg+sCard(btCurveSvg(res,splitIdx))+sCap(cap+vbCap)+renderDuelSection();
+  return head+controls+stats+(res.single?btPositionPanel(res):btBookPanel(res.book))+leg+sCard(btCurveSvg(res,splitIdx))+sCap(cap+vbCap)+renderDuelSection()+renderRetestSection();   // -96: the D1 retest study under the duel
 }
 // ===== Score duel — MOM vs MOM+ on daily forward rank IC (build 2026.07.24-07) =====
 // The adjudicator for the candidate column. Server-computed record (/api/duel): once per UTC
@@ -770,6 +843,7 @@ function attachBtControls(){
   const vbs=el('btVsB'); if(vbs) vbs.addEventListener('change',()=>{ state.backtest.vsBasket=vbs.value; drawBacktest(); });
   const segWire=(id,key,num)=>{ const g=el(id); if(!g) return; g.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{ state.backtest[key]=num?parseFloat(b.dataset.v):b.dataset.v; drawBacktest(); })); };
   segWire('btLb','lookback',true); segWire('btCad','cadence',true); segWire('btQ','quantile',true); segWire('btCost','cost',true); segWire('btSplit','split',true);
+  segWire('btSlip','slip',true); segWire('btLag','lag',false);   // (-106) slippage bps per side; fill at the next bar or the same close
   segWire('btDir','direction',false); segWire('btStruct','structure',false); segWire('btWt','weighting',false); segWire('btHold','holdWindow',false);
   const rq=el('btReq'); if(rq) rq.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{ state.backtest.reqSign=(b.dataset.v==='sign'); drawBacktest(); }));
   segWire('btEntry','entry',true);
@@ -795,9 +869,12 @@ function attachBtControls(){
   }
   document.querySelectorAll('#backtest-body [data-btx]').forEach(x=>x.addEventListener('click',()=>{
     state.backtest.picks=state.backtest.picks.filter(c=>c!==x.dataset.btx); drawBacktest(); }));
+  const wp=el('btWatchPick'); if(wp) wp.addEventListener('click',()=>{ const w=btWatchPicks();
+    if(!w.length) return pushToast(`No ★ starred ${state.scope==='crypto'?'coin':'name'} in this scope has enough daily history to test`);
+    state.backtest.picks=w; drawBacktest(); });
   const cp=el('btClearPick'); if(cp) cp.addEventListener('click',()=>{ state.backtest.picks=[]; drawBacktest(); });
 }
-function drawBacktest(){ const host=el('backtest-body'); if(!host) return; host.innerHTML=renderBacktest(); attachBtControls(); attachLineHover(); loadDuelData(); }
+function drawBacktest(){ const host=el('backtest-body'); if(!host) return; host.innerHTML=renderBacktest(); attachBtControls(); attachRetestControls(); attachLineHover(); loadDuelData(); loadRetestStudy(); }
 async function renderBacktest_load(){ drawBacktest(); if(![...state.rows.values()].some(r=>r.daily)){ await loadDaily(); if(state.view==='backtest') drawBacktest(); } }
 
 function updateBenchNote(){ const bn=el('benchnote'); if(!bn) return;
@@ -834,10 +911,10 @@ function applyScope(){
   syncGrpSeg();   // markets group lens: hide the industries button on crypto (coerced to sectors), relabel names 'stocks'/'coins'
   if(state.view==='corr' && !el('view-corr').hidden){ state.corr.pair=null; state.corr.selected=null; renderCorr(); setTimeout(compgAuto,60); }   // repaint the matrix for the new universe/data source, then auto-open COMP/G for it
   if(state.view==='trend') renderTrend();   // scope flip repaints the board for the new universe
-  if(state.view==='drawdown') renderDrawdown();   // same study, the other universe's closes
+  if(state.view==='drawdown') lazyCall('drawdown','renderDrawdown');   // same study, the other universe's closes
   state.backtest.picks=[];   // a backtest target belongs to one universe: xyz names don't exist in the crypto scope and vice versa
   if(state.view==='backtest') drawBacktest();   // scope flip re-runs the test on the new universe + benchmark
-  if(state.view==='sessions'){ syncAnalyticsSlot(); drawSessions(); loadAnalytics(); }   // -17: repaint sessions for the new universe (its own analytics payload)
+  if(state.view==='sessions'){ syncAnalyticsSlot(); lazyCall('positioning','drawSessions'); loadAnalytics(); }   // -17: repaint sessions for the new universe (its own analytics payload)
   if(state.view==='funding'){ syncFundingSlot(); renderFunding(); loadFunding(); }   // same contract: repaint from this universe's slot, then refresh it
   if(state.view==='signals') renderSignals();       // scope flip re-filters the cards to the new universe
   if(state.view==='actionable') renderActionable();  // ...and the actionable board with them
@@ -886,6 +963,7 @@ function showView(v){
   const switching=v!==state.view;
   state.view=v;
   if(switching) overlayCloseAll();
+  usageView(v);   // (build 2026.09.24-109) the usage accumulator's one hook: every switch passes here
   // Where the ← button returns to: the tab you were actually on. A fallback bounce (a view whose
   // section is missing from this build) sets state.view before landing here again, so a view
   // with no section was never a place you were and must not become the Back target.
@@ -918,11 +996,14 @@ function showView(v){
   setHidden('view-admin', v!=='admin');
   setHidden('view-housing', v!=='housing');
   setHidden('view-liquidity', v!=='liquidity');
-  { const tm=el('view-treemap'); if(tm) tm.hidden=v!=='treemap'; }   // the runtime-injected treemap (no static section): ← / ⌂ and the palette leave it the same way a tab click does
+  { const tm=el('view-treemap'); if(tm) tm.hidden=v!=='treemap'; }
+  // Snapshots that landed while another tab was on top derived + evaluated alerts but deferred the
+  // markets DOM (render()'s paint gate) — pay that one paint now, on the way in (build 2026.09.24-103).
+  if(v==='markets'&&G.mktDirty) paintMarkets();   // the runtime-injected treemap (no static section): ← / ⌂ and the palette leave it the same way a tab click does
   if(v==='focus'){ if(el('view-focus')) openFocus(); else { showView('markets'); return; } }
-  if(v==='funds'){ if(el('view-funds')) openFunds(); else { showView('markets'); return; } }
+  if(v==='funds'){ if(el('view-funds')) lazyCall('funds','openFunds'); else { showView('markets'); return; } }
   if(v==='trend'){ if(el('view-trend')) openTrend(); else { showView('markets'); return; } }
-  if(v==='charts'){ if(el('view-charts')) openCharts(); else { showView('markets'); return; } }
+  if(v==='charts'){ if(el('view-charts')) lazyCall('charts','openCharts'); else { showView('markets'); return; } }
   if(v==='corr'){ openCorr(); setTimeout(compgAuto,60); }   // COMP/G auto-opens with the tab — no launcher button
   if(v==='funding'){ if(el('view-funding')) openFunding(); else { showView('markets'); return; } }
   if(v==='sessions') renderSessions();
@@ -932,13 +1013,13 @@ function showView(v){
   if(v==='news'){ if(el('view-news')) openNews(); else { showView('markets'); return; } }
   if(v==='notes'){ if(el('view-notes')) openNotes(); else { showView('markets'); return; } }
   if(v==='dm'){ if(el('view-dm')) openDM(); else { showView('markets'); return; } }
-  if(v==='congress'){ if(el('view-congress')) openCongress(); else { showView('markets'); return; } }
-  if(v==='insiders'){ if(el('view-insiders')) openInsiders(); else { showView('markets'); return; } }
+  if(v==='congress'){ if(el('view-congress')) lazyCall('insiders','openCongress'); else { showView('markets'); return; } }
+  if(v==='insiders'){ if(el('view-insiders')) lazyCall('insiders','openInsiders'); else { showView('markets'); return; } }
   if(v==='backtest'){ if(el('view-backtest')) renderBacktest_load(); else { showView('markets'); return; } }
   if(v==='report'){ if(el('view-report')) openReportView(); else { showView('markets'); return; } }
   if(v==='admin'){ if(el('view-admin')&&IS_ADMIN) openAdmin(); else { showView('markets'); return; } }
   if(v==='sectors') renderSectors();
-  if(v==='drawdown'){ if(el('view-drawdown')) openDrawdown(); else { showView('markets'); return; } }
+  if(v==='drawdown'){ if(el('view-drawdown')) lazyCall('drawdown','openDrawdown'); else { showView('markets'); return; } }
   if(v==='housing'){ if(el('view-housing')) openHousing(); else { showView('markets'); return; } }
   if(v==='liquidity'){ if(el('view-liquidity')) openLiquidity(); else { showView('markets'); return; } }
   if(!state.detail) setHash(v==='markets'?'':v);
