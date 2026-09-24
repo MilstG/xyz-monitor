@@ -28,14 +28,16 @@ test("audit 2/A: earnReactionCurve anchors at the ET print time; earnReactionsFo
   assert.equal(early.agg.h24.n, 0);
   assert.equal(C.earnReactionCurve(prints, hs.map(([t, o, h, l, c, v]) => ({ t, o, h, l, c, v })), { now }).rows[0].mv.h24, 25, "object rows accepted");
   assert.equal(C.earnReactionCurve(prints, hs, { now: t16 - HOUR }), null, "a print that has not happened yet is no row");
-  // earnReactionsFor: with hourly the +24h move replaces the daily read (hN says how many); without
-  // it, the print day's OWN bar vs the bar before — never the next day's drift.
+  // earnReactionsFor (re-pinned -106): ONE window — the last cash close before the print (09-02
+  // 16:00 ET) -> the first cash close after it (09-03 16:00 ET), read off the hourly spine (hN =
+  // cashN says how many); without intraday data, the session-bar fallback of the SAME window: the
+  // last session bar before the print day (09-01) -> the reaction session's bar (09-03).
   const T0 = Date.UTC(2026, 8, 1);
   const daily = [{ t: T0 - DAY, c: 100 }, { t: T0, c: 100 }, { t: T0 + DAY, c: 120 }, { t: T0 + 2 * DAY, c: 125 }, { t: T0 + 3 * DAY, c: 125 }];
   const st = C.earnReactionsFor(prints.slice(0, 1), daily, now, hs);
   assert.equal(st.n, 1); assert.equal(st.avgAbs, 25); assert.equal(st.hN, 1);
   const stD = C.earnReactionsFor(prints.slice(0, 1), daily, now);
-  assert.equal(stD.avgAbs, 20, "daily-only: 09-02's own bar (post-print 00:00Z close) vs 09-01's close"); assert.equal(stD.hN, 0);
+  assert.equal(stD.avgAbs, 25, "daily-only: 09-01's session bar -> 09-03's (the reaction session), not 09-02's post-print 20:00 ET close"); assert.equal(stD.hN, 0); assert.equal(stD.dailyN, 1);
   // anchors: AMC 16:00 ET, BMO 06:00 ET (before essentially every pre-market print), others none
   assert.equal(C.earnPrintUtc({ d: "2026-09-02", s: "AMC" }), t16);
   assert.equal(C.earnPrintUtc({ d: "2026-09-02", s: "BMO" }), C.etWallToUtc(2026, 9, 2, 6, 0));

@@ -1866,9 +1866,11 @@ function regime200(closes, px) {
 // Post-earnings drift (xyz only): a reaction bigger than 1.5x the name's own daily σ tends to
 // keep drifting its own way for weeks — entered AFTER the reaction session is complete (there
 // is at least one bar past the reaction index), within 3 sessions of it, drifting WITH the
-// move. Same print->reaction-bar convention as earnReactionsFor: on UTC-day bars the print day's
+// move. Its print->reaction-bar convention is the -104 one: on UTC-day bars the print day's
 // OWN bar is the reaction bar for BMO and AMC alike (its 00:00Z close sits hours after a 16:05
-// ET print — see the timing note above earnPrintUtc); the reference is the bar before it.
+// ET print — see the timing note above earnPrintUtc); the reference is the bar before it. (The
+// reaction STUDY moved to earnReactWindow's cash-close window in build 2026.09.24-106; this live
+// ledger event keeps its own trigger definition, which its accrued out-of-sample record is pinned to.)
 // `hourly` (optional, packed or object rows) + `now` anchor a BMO/AMC print at its ET time and
 // take the +24h close as the reaction close once it has printed, the daily bars otherwise.
 // Stop = 1σ back through the reaction close against the drift; target = half the reaction
@@ -4589,62 +4591,101 @@ function parseEarningsCalendar(json, symMap) {
 // order within a day, ticker as tiebreak. Pure — the poller derives this from the persisted
 // print history at cache-build time, so a report keeps its beat/miss on the tab for two full
 // days after the print instead of vanishing at the ET midnight rollover.
-// Reaction to a single print, using the SAME definition the reaction study uses (earnReactionsFor,
-// timing note above earnPrintUtc): the last close BEFORE the print against the first close AFTER
-// it. On UTC-day bars that is daily[pi-1].c -> daily[pi].c for BMO and AMC alike — the print day's
-// own bar closes at 00:00Z, hours after a 16:05 ET print, so it already carries the after-hours
-// reaction. The old rule booked AMC one bar later, i.e. measured "the reaction" from a reference
-// close that was itself post-print (a +20% AMC pop read as the next day's +0.8% drift).
-// Extracted so the brief and the study can never disagree about what "the market reaction" means.
-//
-//   final   — the print day's bar has CLOSED (t + DAY <= now). Closed-bar arithmetic, the number
-//             is done.
-//   forming — the print day's bar is still open, or has not reached the spine yet (a series ending
-//             yesterday, read the afternoon of an AMC print): the live mark against the last close
-//             before the print. Honest and non-null; the renderer says "so far".
-//
-// `hourly` (optional, packed or object rows) anchors a BMO/AMC print at its ET time instead: the
-// reference is the spine's close at the anchor and the reaction the +24h close once it exists
-// (else forming against the mark). `now` defaults to the wall clock.
-// Returns { pct, state } or null when the spine has no close before the print at all.
-function earnPrintReaction(print, daily, px, hourly, now) {
+// ---- ONE earnings reaction definition (build 2026.09.24-106) ----------------------------------
+// reaction = the LAST CASH CLOSE BEFORE the print -> the FIRST CASH CLOSE AFTER it, on the US
+// exchange calendar (usDayStatus: weekends + holidays skipped, 13:00 ET on a half day):
+//   BMO / DMH on day D  : the prior session's close -> D's close (D not a session: the next one's)
+//   AMC on day D        : D's close -> the NEXT session's close (a Friday AMC -> Monday's close,
+//                         a Wednesday-before-Thanksgiving AMC -> Friday's 13:00 half-day close)
+//   TBD (no known time) : no window — the print could sit on either side of D's session, so it is
+//                         excluded (counted as `tbdN`), never booked on a guessed side.
+// Before -106 four windows were pooled under one "next-session move" label: AMC 16:00 ET -> +24h,
+// BMO 06:00 -> 06:00, the daily fallback 20:00 -> 20:00 ET, and a Friday AMC's +24h landing on a
+// Saturday. Intraday data (the hourly spine ~180d, the 5m archive ~370d) resolves the exact
+// 16:00/13:00 anchors; where it does not reach, the SESSION-bar close stands in (UTC bar D closes
+// 20:00 ET D, four hours after D's cash close) — a labelled fallback whose share is reported
+// (`dailyN`), with the reference taken from the last session bar dated BEFORE the print day (the
+// print day's own bar closes after an AMC print, so it can never be the reference).
+// Returns null for TBD/malformed, else { s, pD (UTC day index of the print date), preD, rsD
+// (the reference and reaction sessions, UTC day indexes), pre / open / post (ms: the reference
+// close, the reaction session's 09:30 open and its close), half (the reaction session closes 13:00) }.
+function earnReactWindow(print) {
   if (!print || typeof print.d !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(print.d)) return null;
+  const s = print.s === "AMC" ? "AMC" : print.s === "BMO" || print.s === "DMH" ? print.s : null;
+  if (!s) return null;
+  const pD = Math.floor(Date.UTC(+print.d.slice(0, 4), +print.d.slice(5, 7) - 1, +print.d.slice(8, 10)) / DAY);
+  const st = (d) => { const x = new Date(d * DAY); return usDayStatus(x.getUTCFullYear(), x.getUTCMonth() + 1, x.getUTCDate()); };
+  const next = (d) => { let k = d + 1; for (let g = 0; g < 15 && st(k) === 2; g++) k++; return k; };
+  const prev = (d) => { let k = d - 1; for (let g = 0; g < 15 && st(k) === 2; g++) k--; return k; };
+  let preD, rsD;
+  if (s === "AMC") { rsD = next(pD); preD = st(pD) !== 2 ? pD : prev(pD); }
+  else { rsD = st(pD) !== 2 ? pD : next(pD); preD = prev(rsD); }
+  const wall = (d, h, m) => { const x = new Date(d * DAY); return etWallToUtc(x.getUTCFullYear(), x.getUTCMonth() + 1, x.getUTCDate(), h, m); };
+  const closeOf = (d) => wall(d, st(d) === 1 ? EARN_EARLY_CLOSE_H : EARN_ANCHOR_H.AMC, 0);
+  return { s, pD, preD, rsD, pre: closeOf(preD), open: wall(rsD, 9, 30), post: closeOf(rsD), half: st(rsD) === 1 };
+}
+// The daily-close fallback of the same window over UTC-day bars ([{t, c}], strings tolerated):
+// reference = the last bar dated before the print day that is a session on `off` (sessOffFn —
+// a weekend/holiday bar is folded into the next session, so its close is not a session close);
+// reaction = the bar dated at the reaction session (on `off`: BMO/DMH D or the next session, AMC
+// the session after D). Returns { ref, post: {t, c} | null } or null when no reference exists.
+// Keep in lock-step with public/js/notes.js earnReactPct (parity test).
+function earnReactDaily(print, daily, off) {
+  if (!Array.isArray(daily) || !daily.length || typeof print.d !== "string") return null;
+  const isOff = typeof off === "function" ? off : sessOffFn("US");
+  const pD = Math.floor(Date.UTC(+print.d.slice(0, 4), +print.d.slice(5, 7) - 1, +print.d.slice(8, 10)) / DAY);
+  let rsD = print.s === "AMC" ? pD + 1 : pD;
+  for (let g = 0; g < 15 && isOff(rsD); g++) rsD++;
+  let ref = null, post = null;
+  for (const k of daily) {
+    if (!k) continue;
+    const t = +k.t, c = k.c == null || k.c === "" ? NaN : +k.c;
+    if (!Number.isFinite(t) || !Number.isFinite(c)) continue;
+    const d = Math.floor(t / DAY);
+    if (d < pD) { if (!isOff(d) && c > 0) ref = { t, c }; }
+    else if (d === rsD) { post = { t, c }; break; }
+    else if (d > rsD) break;
+  }
+  return ref ? { ref, post, rsD } : null;
+}
+// Reaction to a single print (the brief's printed rows; the Earnings tab's client port
+// earnReactPct runs the daily branch): the definition above.
+//   final   — the reaction session's close has printed: closed arithmetic, the number is done.
+//   forming — it has not (or its bar is not on the spine yet): the live mark against the
+//             reference close. Honest and non-null; the renderer says "so far".
+// `hourly` (packed or object rows) and opts.fine (5m rows) resolve the exact cash anchors; else
+// the daily fallback. opts.off = the market's sessOffFn (default: the US calendar). `src` says
+// which: "cash" (intraday anchors) or "daily" (session-bar closes, the labelled fallback).
+// Returns { pct, state, src } or null (TBD print, no reference close, not printed yet).
+function earnPrintReaction(print, daily, px, hourly, now, opts) {
+  const w = earnReactWindow(print);
+  if (!w) return null;
+  const o = opts || {};
   const nowMs = now == null ? Date.now() : now;
   const live = Number.isFinite(px) && px > 0 ? px : null;
-  if (hourly) {
-    const t0 = earnPrintUtc(print);
-    const hs = t0 != null && t0 < nowMs ? packedRows(hourly) : [];
-    const p0 = hs.length ? priceAsOf(hs, t0, 3 * HOUR) : null;
-    if (p0 > 0) {
-      const t1 = t0 + 24 * HOUR;
-      const p1 = t1 <= nowMs ? priceAsOf(hs, t1, 3 * HOUR) : null;
-      if (p1 > 0) return { pct: +(((p1 - p0) / p0) * 100).toFixed(1), state: "final" };
-      if (live != null) return { pct: +(((live - p0) / p0) * 100).toFixed(1), state: "forming" };
-      return null;
+  const pct = (a, b) => +(((a - b) / b) * 100).toFixed(1);
+  const hs = hourly ? packedRows(hourly) : [], fine = Array.isArray(o.fine) && o.fine.length ? packedRows(o.fine) : null;
+  if ((hs.length || fine) && w.pre < nowMs) {
+    const a0 = anchorPrice(hs, fine, w.pre, 3 * HOUR);
+    if (a0.px > 0) {
+      if (w.post <= nowMs) {
+        const a1 = anchorPrice(hs, fine, w.post, 3 * HOUR);
+        if (a1.px > 0) return { pct: pct(a1.px, a0.px), state: "final", src: "cash" };
+      } else if (live != null) return { pct: pct(live, a0.px), state: "forming", src: "cash" };
     }
   }
-  if (!Array.isArray(daily) || daily.length < 1) return null;
-  const dayOf = (t) => { const x = new Date(t); return x.getUTCFullYear() + "-" + String(x.getUTCMonth() + 1).padStart(2, "0") + "-" + String(x.getUTCDate()).padStart(2, "0"); };
-  // Reference = the last bar whose UTC day precedes the print day; reaction bar = the print day's
-  // own bar when it exists. Locating the reference by day (not by index of the print bar) is what
-  // keeps a print whose bar has not reached the spine yet measurable against yesterday's close.
-  let ref = null, pb = null;
-  for (let i = 0; i < daily.length; i++) {
-    const k = daily[i]; if (!k || !Number.isFinite(k.c)) continue;
-    const d = dayOf(k.t);
-    if (d < print.d) ref = k; else if (d === print.d) { pb = k; break; } else break;
-  }
-  if (!ref || !(ref.c > 0)) return null;
-  if (Date.UTC(+print.d.slice(0, 4), +print.d.slice(5, 7) - 1, +print.d.slice(8, 10)) > nowMs) return null;   // not printed yet
-  if (pb && Number.isFinite(+pb.t) && +pb.t + DAY <= nowMs) return { pct: +(((pb.c - ref.c) / ref.c) * 100).toFixed(1), state: "final" };
-  if (live != null) return { pct: +(((live - ref.c) / ref.c) * 100).toFixed(1), state: "forming" };
+  const dd = earnReactDaily(print, daily, o.off);
+  if (!dd) return null;
+  if (w.pD * DAY > nowMs) return null;   // not printed yet
+  if (dd.post && dd.post.t + DAY <= nowMs) return { pct: pct(dd.post.c, dd.ref.c), state: "final", src: "daily" };
+  if (live != null) return { pct: pct(live, dd.ref.c), state: "forming", src: "daily" };
   return null;
 }
 // One print, fully dressed: what was expected, what printed, whether that beat, by how much, and
 // what the tape did about it. Every field independently nullable — a feed that shipped the date but
-// not the estimate yields a row that says so rather than a row that guesses. `hourly`/`now` pass
-// through to earnPrintReaction.
-function earnPrintRow(print, daily, px, hourly, now) {
+// not the estimate yields a row that says so rather than a row that guesses. `hourly`/`now`/`opts`
+// pass through to earnPrintReaction.
+function earnPrintRow(print, daily, px, hourly, now, opts) {
   if (!print) return null;
   // `+null` is 0 and `+""` is 0, so a bare Number.isFinite(+x) turns a MISSING estimate into a
   // zero one — and a zero estimate makes every actual a "beat" with an undefined surprise. That is
@@ -4658,12 +4699,14 @@ function earnPrintRow(print, daily, px, hourly, now) {
     ? +(((epsA - eps) / Math.abs(eps)) * 100).toFixed(1) : null;
   // The reaction is a {pct,state} pair, flattened onto the row so the renderer can label a
   // still-developing move instead of showing it as settled.
-  const rx = earnPrintReaction(print, daily, px, hourly, now);
+  const rx = earnPrintReaction(print, daily, px, hourly, now, opts);
   return { t: String(print.t || "").toUpperCase(), s: print.s || "TBD", d: print.d || null,
     eps, epsA, verdict, surprisePct,
-    reactionPct: rx ? rx.pct : null, reactionState: rx ? rx.state : null };
+    reactionPct: rx ? rx.pct : null, reactionState: rx ? rx.state : null, reactionSrc: rx ? rx.src : null };
 }
 module.exports.earnPrintReaction = earnPrintReaction;
+module.exports.earnReactWindow = earnReactWindow;
+module.exports.earnReactDaily = earnReactDaily;
 module.exports.earnPrintRow = earnPrintRow;
 
 function recentEarnPrints(prints, nowMs, backDays) {
@@ -4802,7 +4845,11 @@ function mergeEarnPrints(prev, incoming, nowMs, maxAgeDays) {
   out.sort((a, b) => a.d < b.d ? -1 : a.d > b.d ? 1 : (a.t < b.t ? -1 : 1));
   return out;
 }
-// ---- earnings print timing (the convention every reaction reader shares) -----------------------
+// ---- earnings print timing (the print-anchor curve; the REACTION is earnReactWindow's) ---------
+// (build 2026.09.24-106) What follows is the anchor of the +1h/+4h/+24h curve below (and PEAD's
+// print anchor). The reaction the study, the brief and the Earnings tab publish is no longer read
+// off these anchors or the print day's UTC bar: it is earnReactWindow's cash-close -> cash-close
+// window (see above earnPrintReaction). The history below explains why the anchors sit where they do.
 // The daily spine is UTC days: a bar opens 00:00Z (20:00 ET the previous evening in EDT, 19:00 in
 // EST) and CLOSES 00:00Z the next day. Both a BMO print (~06:00-08:30 ET) and an AMC print
 // (~16:05 ET) therefore fall INSIDE the print day's own UTC bar: the last close BEFORE either is
@@ -4879,57 +4926,71 @@ function earnReactionCurve(prints, hourly, opts) {
   }
   return { n: rows.length, rows, agg, approx };
 }
-// Per-ticker earnings reaction study, computed on the perp's OWN daily closes (UTC days — the
-// perp trades through weekends, so a Friday AMC print's after-hours reaction is inside Friday's
-// own UTC bar, which closes Saturday 00:00Z). Reaction bar: the print day's OWN candle vs the
-// prior close for EVERY session — see the timing note above earnPrintUtc for why AMC is no
-// exception at UTC-day resolution. Candles may be warm-cache [{t,c}] without opens — the gap
-// metrics (open vs prior close, held-to-close) compute only where opens exist and report their
-// own n. Expansion = |reaction| / mean |daily move| over the 20 candles before the print (>=8).
-// `hourly` (optional, packed or object rows) anchors BMO/AMC prints at their ET print time and
-// takes the +24h move from earnReactionCurve as the reaction; prints the spine does not reach
-// fall back to the daily bar. `hN` reports how many reactions came off the hourly anchor.
+// Per-ticker earnings reaction study (build 2026.09.24-106: ONE window for every print — see
+// earnReactWindow): each timed print's move from the last cash close before it to the first cash
+// close after it, read off intraday data at the exact 16:00 / 13:00 ET anchors where the hourly
+// spine (packed or object rows) or opts.fine (5m rows, ~370d) reaches, else the labelled session-bar
+// fallback (earnReactDaily). `cashN` / `dailyN` count which (hN = cashN, kept for older readers);
+// `tbdN` counts prints with no known time, excluded. A reaction session whose close is still ahead
+// is not a reaction yet. medCI = a bootstrap 90% CI of median |move| (earnBootMedianCI), n >= 4.
+// Expansion = |reaction| / mean |session move| over the 20 sessions before the print day (>= 8).
+// GAP (-106): gap = the reaction session's 09:30 ET open vs the reference cash close (BMO: the
+// prior close -> the print day's open; AMC: the print day's close -> the next session's open), and
+// "held" = the reaction session's cash close sits beyond the gap-open in the gap's direction. The
+// old gap compared a 24/7 perp's 00:00Z open with the 00:00Z close before it — the same price a
+// second apart — and its |g| > 0.05% filter dropped most prints. Intraday only: a timed BMO/AMC
+// print without all three anchors is EXCLUDED, counted in gapOf ("gap n=7 of 12"), never
+// approximated from daily bars. gapApprox = gaps whose 09:30 anchor read the 09:00 hourly close
+// (no 5m bar) — on a 24/7 perp the pre-open is already priced, so it is labelled, not dropped.
 function earnReactionsFor(prints, daily, now, hourly, opts) {
   if (!Array.isArray(prints) || !prints.length || !Array.isArray(daily) || daily.length < 3) return null;
+  const o = opts || {};
   const nowMs = now == null ? Date.now() : now;
   const dayOf = (t) => { const x = new Date(t); return x.getUTCFullYear() + "-" + String(x.getUTCMonth() + 1).padStart(2, "0") + "-" + String(x.getUTCDate()).padStart(2, "0"); };
   const idxByDay = new Map();
   for (let i = 0; i < daily.length; i++) if (daily[i] && Number.isFinite(daily[i].c)) idxByDay.set(dayOf(daily[i].t), i);
-  const curve = hourly ? earnReactionCurve(prints, hourly, Object.assign({}, opts || {}, { now: nowMs, horizons: [24] })) : null;
-  const h24 = new Map();
-  if (curve) for (const r of curve.rows) if (Number.isFinite(r.mv.h24)) h24.set(r.t + "|" + r.d, r.mv.h24);
+  const hs = hourly ? packedRows(hourly) : [], fine = Array.isArray(o.fine) && o.fine.length ? packedRows(o.fine) : null;
+  const intra = hs.length > 0 || !!fine;
   const moves = [], exps = [], gaps = [];
-  const sessOff = opts && opts.off;   // sessOffFn of the market's calendar (build 2026.09.24-105); absent = UTC bars
-  let hN = 0;
+  const sessOff = o.off;   // sessOffFn of the market's calendar (build 2026.09.24-105); absent = UTC bars for the baseline
+  let cashN = 0, dailyN = 0, tbdN = 0, gapOf = 0, gapApprox = 0;
   for (const p of prints) {
-    const pi = idxByDay.get(p.d);
-    if (pi == null) continue;                                    // print predates the retained daily window
-    const ri = pi;                                               // the print day's own bar carries the reaction (BMO and AMC alike)
-    if (ri <= 0 || ri >= daily.length) continue;
-    const fromH = h24.get(p.t + "|" + p.d);
-    if (fromH == null && Number.isFinite(+daily[ri].t) && +daily[ri].t + DAY > nowMs) continue;   // the reaction candle is still forming: not a reaction yet
-    const c1 = daily[ri].c, c0 = daily[ri - 1].c;
-    if (fromH == null && (!Number.isFinite(c1) || !Number.isFinite(c0) || c0 <= 0)) continue;
-    const mv = fromH != null ? fromH : (c1 - c0) / c0 * 100;
-    if (fromH != null) hN++;
+    const w = earnReactWindow(p);
+    if (!w) { if (p && typeof p.d === "string") tbdN++; continue; }
+    if (!(w.post <= nowMs)) continue;                            // the reaction session has not closed: not a reaction yet
+    let mv = null, a0 = null, a1 = null;
+    if (intra) {
+      a0 = anchorPrice(hs, fine, w.pre, 3 * HOUR); a1 = anchorPrice(hs, fine, w.post, 3 * HOUR);
+      if (a0.px > 0 && a1.px > 0) { mv = (a1.px / a0.px - 1) * 100; cashN++; }
+    }
+    if (mv == null) {
+      const dd = earnReactDaily(p, daily, sessOff);
+      if (!dd || !dd.post || !(dd.ref.c > 0) || !Number.isFinite(dd.post.c) || dd.post.t + DAY > nowMs) continue;
+      mv = (dd.post.c - dd.ref.c) / dd.ref.c * 100; dailyN++;
+    }
     moves.push(mv);
+    if (w.s === "BMO" || w.s === "AMC") {
+      gapOf++;
+      const ag = intra && a0 && a0.px > 0 && a1 && a1.px > 0 ? anchorPrice(hs, fine, w.open, 3 * HOUR) : null;
+      if (ag && ag.px > 0) {
+        const g = ag.px / a0.px - 1;
+        if (g !== 0) { gaps.push({ up: g > 0, held: (a1.px - ag.px) * g > 0 }); if (ag.approx) gapApprox++; }
+      }
+    }
+    const pi = idxByDay.get(p.d);
+    if (pi == null || pi <= 0) continue;                         // the baseline needs the print day on the daily spine
     let base = 0, bn = 0;
     if (typeof sessOff === "function") {
       // (build 2026.09.24-105) the baseline is 20 SESSION moves: the pre-print UTC bars folded on
       // the market's calendar (a pending weekend fold before a Monday print is forming, dropped).
       // Twenty UTC bars carried ~6 near-flat weekend days that deflated it and inflated xMed.
-      const sb = sessionFold(daily.slice(0, ri), sessOff).filter((b) => !b.f), s0 = Math.max(1, sb.length - 20);
+      const sb = sessionFold(daily.slice(0, pi), sessOff).filter((b) => !b.f), s0 = Math.max(1, sb.length - 20);
       for (let k = s0; k < sb.length; k++) { const a = sb[k].c, b = sb[k - 1].c; if (b > 0) { base += Math.abs((a - b) / b * 100); bn++; } }
-    } else for (let k = Math.max(1, ri - 20); k < ri; k++) {
+    } else for (let k = Math.max(1, pi - 20); k < pi; k++) {
       const a = daily[k].c, b = daily[k - 1].c;
       if (Number.isFinite(a) && Number.isFinite(b) && b > 0) { base += Math.abs((a - b) / b * 100); bn++; }
     }
     if (bn >= 8 && base > 0) exps.push(Math.abs(mv) / (base / bn));
-    const o = daily[ri].o;
-    if (Number.isFinite(o) && o > 0 && Number.isFinite(c0) && c0 > 0 && Number.isFinite(c1)) {
-      const g = (o - c0) / c0 * 100;
-      if (Math.abs(g) > 0.05) gaps.push({ up: g > 0, held: (c1 - o) * g > 0 });
-    }
   }
   if (!moves.length) return null;
   const abs = moves.map(Math.abs);
@@ -4937,15 +4998,46 @@ function earnReactionsFor(prints, daily, now, hourly, opts) {
     n: moves.length,
     avgAbs: +(abs.reduce((a, b) => a + b, 0) / abs.length).toFixed(2),
     medAbs: +median(abs).toFixed(2),
+    medCI: earnBootMedianCI(abs),
     up: moves.filter((m) => m > 0).length,
     xMed: exps.length ? +median(exps).toFixed(1) : null, xN: exps.length,
-    gapN: gaps.length, gapUp: gaps.filter((g) => g.up).length, gapHeld: gaps.filter((g) => g.held).length,
-    hN,
+    gapN: gaps.length, gapOf, gapUp: gaps.filter((g) => g.up).length, gapHeld: gaps.filter((g) => g.held).length, gapApprox,
+    cashN, dailyN, tbdN, hN: cashN,
   };
+}
+// Bootstrap 90% CI of the median of `xs` (build 2026.09.24-106): 1000 resamples with replacement
+// drawn from a FIXED-SEED mulberry32, so the same prints always publish the same range (a CI that
+// jittered on every rebuild would bust the payload's ETag and read as news). Percentile interval
+// (5th / 95th of the resampled medians). null under 4 values — the "thin" warning covers those.
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const EARN_BOOT_B = 1000, EARN_BOOT_SEED = 0x5EED106;
+function earnBootMedianCI(xs, opts) {
+  const o = opts || {};
+  const v = (Array.isArray(xs) ? xs : []).filter(Number.isFinite), n = v.length;
+  if (n < 4) return null;
+  const B = o.B || EARN_BOOT_B, rnd = mulberry32(o.seed == null ? EARN_BOOT_SEED : o.seed);
+  const meds = new Float64Array(B), buf = new Array(n);
+  for (let b = 0; b < B; b++) {
+    for (let i = 0; i < n; i++) buf[i] = v[Math.floor(rnd() * n)];
+    meds[b] = median(buf);
+  }
+  meds.sort();
+  return [+meds[Math.floor(0.05 * B)].toFixed(2), +meds[Math.ceil(0.95 * B) - 1].toFixed(2)];
 }
 module.exports.mergeEarnPrints = mergeEarnPrints;
 module.exports.scrubPlaceholderActuals = scrubPlaceholderActuals;
 module.exports.earnReactionsFor = earnReactionsFor;
+module.exports.earnBootMedianCI = earnBootMedianCI;
+module.exports.mulberry32 = mulberry32;
 module.exports.earnReactionCurve = earnReactionCurve;
 module.exports.earnPrintUtc = earnPrintUtc;
 module.exports.EARN_ANCHOR_H = EARN_ANCHOR_H;
@@ -5032,7 +5124,10 @@ const earnSgn = (x, dp) => (x >= 0 ? "+" : "−") + Math.abs(x).toFixed(dp == nu
 //   crowded short = funding <= p10 AND OI up >= 5%   (shorts paying to hold a growing book)
 //   longs / shorts paying = the funding extreme without the OI build; OI building / coming off =
 //   |OI| >= 10% with funding in between; otherwise "positioning neutral".
-//   direction skew = >= 70% of prints one way; gap read = >= 3 gaps and >= 60% held or faded.
+//   direction skew = >= 70% of prints one way; gap read = >= 3 gaps and >= 60% held or faded
+//   (-106: cash-session gaps read intraday — 09:30 ET open vs the reference cash close, held =
+//   the reaction session's close beyond the gap-open — with the coverage "gap n=X of Y" appended
+//   when prints without intraday anchors were excluded; the typical move carries its 90% CI).
 //   drift clause = |run-up| >= 3%; implied clause = typ/day, flagged "compressed" when it runs
 //   >= 1.3x the study's historical ratio, "elevated" when <= 1/1.3 of it.
 function earnSetupVerdict(c) {
@@ -5051,10 +5146,15 @@ function earnSetupVerdict(c) {
   if (!r) parts.push("no reaction history");
   else {
     let s = "typical move ±" + r.medAbs.toFixed(1) + "%";
+    // (build 2026.09.24-106) the bootstrap 90% CI of that median rides with it when n >= 4
+    if (Array.isArray(r.medCI)) s += " (90% CI " + r.medCI[0].toFixed(1) + "–" + r.medCI[1].toFixed(1) + "%)";
     if (r.up / r.n >= 0.7) s += ", up " + r.up + "/" + r.n;
     else if (r.up / r.n <= 0.3) s += ", down " + (r.n - r.up) + "/" + r.n;
-    if (r.gapRead === "fades") s += ", gaps and fades " + (r.gapN - r.gapHeld) + "/" + r.gapN;
-    else if (r.gapRead === "holds") s += ", gaps and holds " + r.gapHeld + "/" + r.gapN;
+    // (-106) gaps are cash-session gaps read intraday; prints without intraday coverage are excluded
+    // and the clause says how many of the timed prints it rests on
+    const gCov = r.gapOf > r.gapN ? " (gap n=" + r.gapN + " of " + r.gapOf + ")" : "";
+    if (r.gapRead === "fades") s += ", gaps and fades " + (r.gapN - r.gapHeld) + "/" + r.gapN + gCov;
+    else if (r.gapRead === "holds") s += ", gaps and holds " + r.gapHeld + "/" + r.gapN + gCov;
     if (r.thin) s += " (thin: n=" + r.n + ")";
     parts.push(s);
   }
@@ -5077,7 +5177,9 @@ function earnSetup(inp) {
   const i = inp || {}, st = i.study, ru = i.runup || {};
   const react = st && st.n > 0 ? {
     n: st.n, avgAbs: st.avgAbs, medAbs: st.medAbs, up: st.up, xMed: st.xMed != null ? st.xMed : null,
-    gapN: st.gapN || 0, gapUp: st.gapUp || 0, gapHeld: st.gapHeld || 0,
+    medCI: Array.isArray(st.medCI) ? st.medCI : null,
+    gapN: st.gapN || 0, gapOf: st.gapOf != null ? st.gapOf : (st.gapN || 0), gapUp: st.gapUp || 0, gapHeld: st.gapHeld || 0,
+    cashN: st.cashN != null ? st.cashN : null, dailyN: st.dailyN != null ? st.dailyN : null,
     gapRead: st.gapN >= 3 ? (st.gapHeld / st.gapN >= 0.6 ? "holds" : (st.gapN - st.gapHeld) / st.gapN >= 0.6 ? "fades" : null) : null,
     h24: st.curve && st.curve.agg && st.curve.agg.h24 && st.curve.agg.h24.n > 0 ? st.curve.agg.h24.medAbs : null,
     thin: st.n < 4,
@@ -10038,8 +10140,25 @@ function d1RetestCooldown(cand, cd) {
   return { kept, suppressed };
 }
 
+// Date-clustered standard error of a mean (build 2026.09.24-106). Retest events on the SAME day
+// across names are not independent draws — one market-wide flush fires a dozen longs whose forward
+// returns share that day's tape — so the iid SE (sd/√n) overstates the precision. Cluster-robust
+// (Liang-Zeger / CR1): SE² = G/(G−1) · Σ_g (Σ_{i∈g} (x_i − x̄))² / n², clusters = event UTC days.
+// Returns { mean, se, G } (G = the effective number of independent dates); se null under 2 dates.
+function clusterMeanSE(xs, keys) {
+  const n = Array.isArray(xs) ? xs.length : 0;
+  if (!n) return { mean: null, se: null, G: 0 };
+  let m = 0; for (const x of xs) m += x; m /= n;
+  const S = new Map();
+  for (let i = 0; i < n; i++) { const k = keys[i]; S.set(k, (S.get(k) || 0) + (xs[i] - m)); }
+  const G = S.size;
+  if (G < 2) return { mean: m, se: null, G };
+  let q = 0; for (const v of S.values()) q += v * v;
+  return { mean: m, se: Math.sqrt((G / (G - 1)) * q) / n, G };
+}
 // Pool the per-name walks into the published study. names: [{coin, ticker, cand, ctl}] (from
-// d1RetestEvents). Per side and horizon: event n / hit / mean / median / σ-mean / void rate, the
+// d1RetestEvents). Per side and horizon: event n / distinct event dates / hit / mean (+ its
+// date-clustered SE, -106) / median / σ-mean / void rate, the
 // control's n / hit / mean / σ-mean, and the excess of each — rates under the floor are null.
 function d1RetestStudy(names, opts) {
   opts = opts || {};
@@ -10073,7 +10192,9 @@ function d1RetestStudy(names, opts) {
   for (const sd of ["long", "short"]) {
     const ev = all.filter((e) => e.side === sd), cells = {};
     H.forEach((h, k) => {
-      const f = ev.map((e) => e.f[k]).filter((v) => v != null);
+      const evK = ev.filter((e) => e.f[k] != null), f = evK.map((e) => e.f[k]);
+      // (-106) clustered by event date: the mean's SE and the number of distinct dates behind it
+      const cl = clusterMeanSE(f, evK.map((e) => Math.floor(e.t / DAY)));
       const fs = ev.filter((e) => e.f[k] != null && e.sd > 0).map((e) => e.f[k] / e.sd);
       const vd = ev.map((e) => e.v[k]).filter((v) => v != null);
       const c = ctl[sd][k], on = f.length >= floor, con = c.n >= floor;
@@ -10081,7 +10202,7 @@ function d1RetestStudy(names, opts) {
       const meanSd = on && fs.length ? fs.reduce((a, b) => a + b, 0) / fs.length : null;
       const hit = on ? f.filter((v) => v > 0).length / f.length : null;
       const cMean = con ? c.sum / c.n : null, cHit = con ? c.hit / c.n : null, cSd = con && c.nSd ? c.sumSd / c.nSd : null;
-      cells[h] = { n: f.length, hit: r3(hit), mean: r3(mean), med: on ? r3(median(f)) : null, meanSd: r3(meanSd),
+      cells[h] = { n: f.length, dates: cl.G, hit: r3(hit), mean: r3(mean), se: on ? r3(cl.se) : null, med: on ? r3(median(f)) : null, meanSd: r3(meanSd),
         void: on && vd.length ? r3(vd.filter(Boolean).length / vd.length) : null,
         ctl: { n: c.n, hit: r3(cHit), mean: r3(cMean), meanSd: r3(cSd) },
         exHit: hit != null && cHit != null ? r3(hit - cHit) : null,
@@ -10105,3 +10226,4 @@ module.exports.D1_RT_CELL_FLOOR = D1_RT_CELL_FLOOR;
 module.exports.d1RetestEvents = d1RetestEvents;
 module.exports.d1RetestCooldown = d1RetestCooldown;
 module.exports.d1RetestStudy = d1RetestStudy;
+module.exports.clusterMeanSE = clusterMeanSE;

@@ -2758,7 +2758,7 @@ test("retest panel -96: renders the server's cells as served — floor, control,
   assert.ok(html.includes("through the 2026-09-21 UTC close"), "the data edge is a UTC day");
   assert.ok(html.includes('<td class="pos">+6pp</td><td class="pos">+0.43%</td><td class="pos">+0.12σ</td>'), "excess columns render as served");
   assert.ok(html.includes('<td class="neg">-0.05σ</td>'), "a negative excess reads red");
-  assert.ok(/<td>\+10d<\/td><td>20<\/td><td class="dim2" colspan="5"[^>]*>under floor<\/td>/.test(html), "a sub-floor cell publishes its n and nothing else");
+  assert.ok(/<td>\+10 sess<\/td><td>20<\/td><td class="dim2" colspan="5"[^>]*>under floor<\/td>/.test(html), "a sub-floor cell publishes its n and nothing else (stocks horizons are sessions, -106)");
   assert.ok(html.includes('<span class="sec">open</span>'), "an unresolved horizon says open, not zero");
   assert.ok(html.includes("&lt;b&gt;") && !html.includes("<td><b></td>"), "tickers are escaped");
   assert.ok(html.includes('data-rtd="touch"') && html.includes('data-rtc="20"') && html.includes('data-rts="short"') && html.includes('id="rtCsv"'), "controls from the payload's own option lists");

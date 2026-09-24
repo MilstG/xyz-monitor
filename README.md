@@ -28,7 +28,8 @@ instant, and the per-IP rate limit stops being a per-user problem.
   Earnings tab and the E badge on the markets table (solid = reports today, hollow = tomorrow).
   Reported rows carry EPS actual vs estimate (beat/miss + surprise); past print dates persist
   to the volume (one-time ~1y backfill, then self-accruing) and feed a per-ticker earnings
-  reaction study — avg |next-session move|, up/down split, gap behavior, expansion vs the
+  reaction study — avg / median |cash-close → cash-close move| (90% bootstrap CI from n ≥ 4), up/down
+  split, cash-session gap behavior (intraday-only, coverage shown), expansion vs the
   name's usual range — shown on the tab and in the drawer. Session-spanning ledger claims in
   force within 1 day of a print are tagged (E in claim history) so the earnings-conditioned
   base-rate split accrues out of sample.
@@ -805,7 +806,9 @@ definitions:
   AFTER the print day (a +20% pop read as the next day's +0.8%); it now runs a port of the
   server's `earnPrintReaction` rule — the print day's own UTC bar (it closes 00:00Z, hours after a
   16:05 ET print) vs the last close before it, "so far" against the mark while that bar is open —
-  held to the server by a parity test (BMO, AMC, Friday AMC, forming, missing bar).
+  held to the server by a parity test (BMO, AMC, Friday AMC, forming, missing bar). *Superseded in
+  -106*: the print-day UTC bar was itself a 20:00 ET → 20:00 ET window pooled with other windows;
+  every reader now shares one cash-close → cash-close definition (below).
 - **Backtest annualization.** Sharpe and the vol target annualized equities at √252 while the
   return series has one entry per UTC day, weekends included (~365/yr): Sharpe was understated
   ~1.2× and the vol target oversized the book. Both now use the series' own observed periods per
@@ -882,6 +885,41 @@ to it by a parity test):
 Not moved: the backtest keeps its calendar-day return series (its annualization already observes
 periods/yr), and the level map's structure and volume profile keep every UTC bar's prints (its
 σ and EMA50/200 are session-based).
+
+**Accuracy (build 2026.09.24-106): earnings windows, backtest fills, error bars.**
+- **One earnings reaction.** The study pooled four windows under one "next-session move": AMC
+  16:00 ET → +24h, BMO 06:00 → 06:00, the daily fallback 20:00 → 20:00 ET, and a Friday AMC's +24h
+  landing on Saturday. Now every reader (`earnReactionsFor`, the brief's `earnPrintReaction`, the
+  Earnings tab's `earnReactPct`, parity-tested) uses `compute.earnReactWindow`: the **last cash
+  close before the print → the first cash close after it** on the exchange calendar — BMO/DMH the
+  prior close → the print day's close, AMC the print day's close → the next session's (Friday →
+  Monday; the Wednesday before Thanksgiving → Friday's 13:00 half-day close). The hourly spine
+  (~180d) and the 5m archive (~370d, read only around each print's anchors) resolve the exact
+  16:00/13:00 closes; beyond them the session daily bar's close (20:00 ET) is a labelled fallback,
+  counted (`dailyN`, "3 of 12 from daily closes"). Untimed (TBD) prints are excluded (`tbdN`), not
+  booked on a guessed side. The median |move| carries a **bootstrap 90% CI** (1000 resamples,
+  fixed-seed mulberry32 so the range is stable across rebuilds) from n ≥ 4 on the tab, the drawer,
+  the setup card and its verdict; under 4 the thin warning stands. The browser, having no intraday
+  spine, runs the daily tier and says so.
+- **Cash-session earnings gap.** The gap compared a 24/7 perp's 00:00Z open with the 00:00Z close
+  a moment before it (the same price) and a |g| > 0.05% filter dropped most prints. Gap is now the
+  reaction session's 09:30 ET price vs the reference cash close; *held* = that session's cash close
+  beyond the gap-open in the gap's direction. Intraday only: a timed print without all three
+  anchors is excluded and counted (`gapOf`, shown "gap n=7 of 12"; the setup verdict appends it).
+  A 09:30 anchor read off the 09:00 hourly close (no 5m bar) is counted in `gapApprox`.
+- **Backtest fills, slippage, survivorship, Sharpe SE.** The signal read bar *d*'s close and the
+  book filled at that same close. A **fill** control now defaults to *next bar* (the decision fills
+  at the next bar's close and earns from the bar after; the trade log's in/out dates are fill
+  bars) with *same close (as before)* kept, labelled; **slip bps** (default 5, per side) is
+  charged on turnover beside the taker fee (twice a night on the overnight hold) and shown as its
+  own friction row. Delisted names' history is not available (`/api/daily` ships live listings;
+  a delisted market's history is freed after 7d), so every caption states **survivorship: current
+  listings only**. Each Sharpe shows **± its standard error** (Lo 2002: √((1 + ½SR²)/T) per
+  period, annualized) and a ⚠ when the ±1.96·SE band includes 0.
+- **D1 retest study: clustered errors.** Events on the same day across names share one tape, so
+  the pooled n overstated the sample. Each cell now ships `dates` (distinct event days, shown as
+  "n · Ndt") and the mean's **standard error clustered by event date** (CR1), shown as ±1.96·SE.
+  Horizons on stock scope are session bars since -105 and are labelled "+5 sess" (crypto "+5d").
 
 ## Optional: earnings calendar (Finnhub)
 

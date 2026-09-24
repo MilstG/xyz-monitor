@@ -24,7 +24,7 @@ const { featuresFromHourly, bucketOpens, oiDeltaPct, fundingAvg, fundingHeat, FU
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
 const { pdfTextRuns, ptrRows, parsePtr, pdfImages, ccittTiff, ocrPtrRows } = require("./compute");
-const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, scrubPlaceholderActuals, earnReactionsFor, earnReactionCurve, earnSetup, earnRunup, earnSessionsAhead, EARN_SETUP_SESSIONS, EARN_RUNUP_D, overnightSplit, FINE_TOL, etWallToUtc, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, topicHit, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings, pickXbrlFacts, parseNportHoldings } = require("./compute");
+const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, scrubPlaceholderActuals, earnReactionsFor, earnReactWindow, earnReactionCurve, earnSetup, earnRunup, earnSessionsAhead, EARN_SETUP_SESSIONS, EARN_RUNUP_D, overnightSplit, FINE_TOL, etWallToUtc, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, topicHit, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings, pickXbrlFacts, parseNportHoldings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
 const { closedBars, closedLadder, emaLast, emaCrossOutcomes, emaCrossStudy, emaAlertState } = require("./compute");
 const { momPair, spearmanIC, duelStats, epResolve, epScore } = require("./compute");
@@ -4711,7 +4711,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const ck = scope + "|" + def + "|" + cd, hit = d1rtCache.get(ck);
     if (hit && hit.key === key) return hit.body;
     const params = { def, cd, defs: D1_RT_DEFS, cooldowns: D1_RT_COOLDOWNS, horizons: D1_RT_HORIZONS,
-      fast: 13, slow: 21, win: 3, cellFloor: D1_RT_CELL_FLOOR, minNames: D1RT_MIN_NAMES };
+      fast: 13, slow: 21, win: 3, cellFloor: D1_RT_CELL_FLOOR, minNames: D1RT_MIN_NAMES,
+      // (-106) what a horizon step IS: session bars on a calendar market since -105 (weekends and
+      // holidays folded), calendar days on crypto — the panel labels "+5 sess" vs "+5d" off this
+      unit: scope === "crypto" ? "days" : "sessions" };
     let body;
     if (walked.length < D1RT_MIN_NAMES) body = { ts: now, dataTs: 0, key, scope, pending: true, count: walked.length, need: D1RT_MIN_NAMES, params };
     else {
@@ -4862,6 +4865,18 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // spines. Cheap (a few dozen tickers x <=40 prints), so it reruns on every earnings tick and
   // once ~10 min after boot when the daily backfill has had time to land opens. Bumps the ETag
   // only when the stats actually changed.
+  // The 5m-archive neighbourhoods one print's reaction and gap read (fineAround reads each window's
+  // enter and exit): reference close -> 09:30 open, 09:30 open -> reaction close. Prints whose
+  // window lies past the 5m retention simply find no bars (the hourly/daily tiers take over).
+  function earnFineWins(prints) {
+    const wins = [], cut = Date.now() - (M5_RETENTION_DAYS + 2) * DAY;
+    for (const p of prints || []) {
+      const w = earnReactWindow(p);
+      if (!w || w.post < cut || w.post > Date.now()) continue;
+      wins.push({ enter: w.pre, exit: w.open }, { enter: w.open, exit: w.post });
+    }
+    return wins;
+  }
   function refreshEarnStudy(bump) {
     const now = Date.now();
     const byTicker = new Map();
@@ -4871,9 +4886,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       let row = null;
       for (const r of rows.values()) if (r.uni === "xyz" && !r.delisted && r.ticker === tk) { row = r; break; }
       if (!row || !Array.isArray(row.dailyRaw) || row.dailyRaw.length < 3) continue;
-      // The hourly spine anchors AMC prints at 16:00 ET (the daily UTC bar's close is four hours
-      // after the print); the curve adds the +1h/+4h/+24h medians for the prints it covers.
-      const st = earnReactionsFor(prints, row.dailyRaw, now, row.hourlyRaw, { off: sessOffOf(row) });   // (-105) expansion baseline over 20 sessions
+      // (build 2026.09.24-106) One reaction window for every print: the last cash close before it
+      // -> the first cash close after it (compute.earnReactWindow). The hourly spine (~180d) and the
+      // 5m archive (~370d, read only in FINE_TOL neighbourhoods of each print's reference close,
+      // 09:30 open and reaction close) resolve the exact anchors and the cash-session gap; older
+      // prints fall back to session-bar closes, counted. The curve adds the +1h/+4h/+24h medians.
+      const fine = fineAround(row, earnFineWins(prints));
+      const st = earnReactionsFor(prints, row.dailyRaw, now, row.hourlyRaw, { off: sessOffOf(row), fine });   // (-105) expansion baseline over 20 sessions
       if (!st) continue;
       const cv = Array.isArray(row.hourlyRaw) && row.hourlyRaw.length ? earnReactionCurve(prints, row.hourlyRaw, { now }) : null;
       if (cv) st.curve = { n: cv.n, agg: cv.agg, approx: cv.approx };
@@ -14157,6 +14176,8 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
       // instead of a dash. This is the whole fix for "every AMC print dashes every morning".
       const pxFor = (tk) => { const r = byT.get(String(tk).toUpperCase()); return r && Number.isFinite(r.px) ? r.px : null; };
       const hourlyFor = (tk) => { const r = byT.get(String(tk).toUpperCase()); return r && Array.isArray(r.hourlyRaw) ? r.hourlyRaw : null; };
+      // (-106) the reaction's daily fallback reads session bars on the name's own calendar
+      const rxOpts = (tk) => { const r = byT.get(String(tk).toUpperCase()); return r ? { off: sessOffOf(r) } : undefined; };
       const e = { printed: [], today: [], tomorrow: [] };
       const seen = new Set();
       // Today's already-reported rows first — they are the freshest thing on the page.
@@ -14165,12 +14186,12 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
         if (d !== 0 || earnEntryState(en, t) !== "reported") continue;
         if (e.printed.length >= BRIEF_EARN_N) break;
         seen.add(en.t + "|" + en.d);
-        e.printed.push(earnPrintRow(en, dailyFor(en.t), pxFor(en.t), hourlyFor(en.t), t));
+        e.printed.push(earnPrintRow(en, dailyFor(en.t), pxFor(en.t), hourlyFor(en.t), t, rxOpts(en.t)));
       }
       for (const p of (earnCache && earnCache.recent) || []) {
         if (e.printed.length >= BRIEF_EARN_N) break;
         if (seen.has(p.t + "|" + p.d)) continue;
-        e.printed.push(earnPrintRow(p, dailyFor(p.t), pxFor(p.t), hourlyFor(p.t), t));
+        e.printed.push(earnPrintRow(p, dailyFor(p.t), pxFor(p.t), hourlyFor(p.t), t, rxOpts(p.t)));
       }
       for (const en of (earnCache && earnCache.entries) || []) {
         const d = earnDayDiff(en.d, t);

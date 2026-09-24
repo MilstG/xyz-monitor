@@ -148,7 +148,7 @@ test("setup client: strip, card body and drawer section render the server's numb
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const state = {};
   const api = new Function("esc", "state", "const _setupOpen=new Set();\n"
-    + ["earnSessLbl", "setupNa", "setupPct", "setupWhen", "earnSetupBodyHtml", "earnSetupCardHtml", "earnSetupStripHtml", "earnSetupDrawerHtml"].map(grab).join("\n")
+    + ["earnCiTxt", "earnSessLbl", "setupNa", "setupPct", "setupWhen", "earnSetupBodyHtml", "earnSetupCardHtml", "earnSetupStripHtml", "earnSetupDrawerHtml"].map(grab).join("\n")
     + "\nreturn { earnSetupStripHtml, earnSetupDrawerHtml, earnSetupBodyHtml, _setupOpen };")(esc, state);
   const full = earnSetup({ t: "NVDA", coin: "xyz:NVDA", d: "2026-09-28", s: "AMC", sessions: 2, study: STUDY,
     fund: 5e-5, fundPct: 92, oiChg: 18.2, premBp: 4.2, premZ: 1.3, runup: { now: 5.2, usual: { n: 5, med: 1.1, up: 3 }, day: 1.5 } });

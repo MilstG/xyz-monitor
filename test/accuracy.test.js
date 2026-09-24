@@ -25,46 +25,57 @@ function clientSessApi(sessOff) {
     + "; return { sessionFold, sessDaily, sessOffFor, closedDaily, yzVol, sessReturns, computeBeta };")(DAY, state);
 }
 
-// ---- 1. AMC reaction: the client scores the print day's own bar, exactly as the server does ----
-test("-104 earnings reaction: client earnReactPct == server earnPrintReaction (daily) on BMO, AMC, Friday AMC, forming, missing bar", () => {
+// ---- 1. Earnings reaction: the client runs the server's daily-tier rule (re-pinned -106) ----
+// (build 2026.09.24-106) ONE window: the last cash close before the print -> the first cash close
+// after it. At daily resolution: the last SESSION bar dated before the print day -> the reaction
+// session's bar (BMO: the print day; AMC: the next session — a Friday AMC reads Monday, never
+// Saturday). The -104 values this test used to pin (the print day's own UTC bar for AMC) measured
+// 20:00 ET -> 20:00 ET, a different window from the BMO rows it was pooled with.
+test("-106 earnings reaction: client earnReactPct == server earnPrintReaction (daily tier) on BMO, AMC, Friday AMC, Monday BMO, TBD, forming", () => {
   const src = clientSrc();
   const clientRx = new Function("DAY", grab(src, "earnReactPct") + "; return earnReactPct;")(DAY);
-  // A spine of UTC-day bars, weekends included (the perp trades 24/7): 2026-07-20 (Mon) .. 2026-08-02.
+  const off = C.sessOffFn("US");
+  // UTC-day bars, weekends included (the perp trades 24/7): 2026-07-20 (Mon) .. 2026-08-02 (Sun).
   const d0 = Date.UTC(2026, 6, 20);
-  const closes = [100, 101, 102, 103, 104, 124.8, 125, 126, 127, 128, 129, 130, 131, 132];   // the +20% sits on the 07-25 (Sat) bar
+  const closes = [100, 101, 104, 103, 124.8, 125, 126, 127, 128, 129, 130, 131, 132, 133];
   const daily = closes.map((c, i) => ({ t: d0 + i * DAY, c }));
   const dstr = (t) => new Date(t).toISOString().slice(0, 10);
   const now = d0 + 14 * DAY + 5 * HOUR;
   const cases = [
-    { t: "BMO", s: "BMO", d: dstr(d0 + 2 * DAY) },
-    { t: "AMC", s: "AMC", d: dstr(d0 + 5 * DAY) },       // Sat 07-25 carries the +20%: the print day's own bar
-    { t: "FRI", s: "AMC", d: dstr(d0 + 4 * DAY) },       // Friday 07-24 AMC: its own UTC bar (closes 00:00Z Sat) holds the reaction
-    { t: "TBD", s: "TBD", d: dstr(d0 + 9 * DAY) },
+    { t: "BMO", s: "BMO", d: dstr(d0 + 2 * DAY), want: 3 },        // Wed: Tue close 101 -> Wed close 104
+    { t: "AMC", s: "AMC", d: dstr(d0 + 3 * DAY), want: 20 },       // Thu AMC: Wed close 104 -> Fri close 124.8 (+20%)
+    { t: "FRI", s: "AMC", d: dstr(d0 + 4 * DAY), want: 23.3 },     // Fri AMC: Thu close 103 -> MONDAY close 127, not Saturday's 125
+    { t: "MON", s: "BMO", d: dstr(d0 + 7 * DAY), want: 1.8 },      // Mon BMO: FRIDAY's close 124.8 (not Sunday's 126) -> 127
+    { t: "DMH", s: "DMH", d: dstr(d0 + 8 * DAY), want: 0.8 },      // intraday print: prior close -> its own close
   ];
   for (const e of cases) {
-    const srv = C.earnPrintReaction(e, daily, 131.5, null, now), cli = clientRx(e, daily, 131.5, now);
+    const srv = C.earnPrintReaction(e, daily, 131.5, null, now, { off }), cli = clientRx(e, daily, 131.5, now, off);
     assert.deepEqual(cli, srv, "parity " + e.t + " " + JSON.stringify({ srv, cli }));
-    assert.equal(srv.state, "final");
+    assert.equal(srv.state, "final"); assert.equal(srv.src, "daily");
+    assert.equal(srv.pct, e.want, e.t);
   }
-  assert.equal(C.earnPrintReaction(cases[1], daily, 131.5, null, now).pct, 20, "the +20% AMC pop reads +20%, not the next day's drift");
-  // Forming: the print day's bar is still open -> live mark vs the last close before the print.
-  const nowF = d0 + 13 * DAY + 3 * HOUR, fe = { t: "F", s: "AMC", d: dstr(d0 + 13 * DAY) };
-  assert.deepEqual(clientRx(fe, daily, 135, nowF), C.earnPrintReaction(fe, daily, 135, null, nowF));
-  assert.equal(clientRx(fe, daily, 135, nowF).state, "forming");
-  // The print day's bar not on the spine yet (series ends yesterday): still measured, against the mark.
-  const short = daily.slice(0, 13), ne = { t: "N", s: "AMC", d: dstr(d0 + 13 * DAY) };
-  assert.deepEqual(clientRx(ne, short, 140, nowF), C.earnPrintReaction(ne, short, 140, null, nowF));
+  // the server's default calendar is the US one; the client's pre-calendar fallback is weekends only
+  assert.deepEqual(C.earnPrintReaction(cases[2], daily, 131.5, null, now), clientRx(cases[2], daily, 131.5, now));
+  const tbd = { t: "TBD", s: "TBD", d: dstr(d0 + 9 * DAY) };
+  assert.equal(C.earnPrintReaction(tbd, daily, 131.5, null, now, { off }), null, "an untimed print has no side of the session to anchor on");
+  assert.equal(clientRx(tbd, daily, 131.5, now, off), null);
+  // Forming: a Friday AMC whose Monday bar is not on the spine -> the live mark vs Thursday's close.
+  const fe = { t: "F", s: "AMC", d: dstr(d0 + 11 * DAY) };
+  const f = C.earnPrintReaction(fe, daily, 135, null, now, { off });
+  assert.deepEqual(clientRx(fe, daily, 135, now, off), f);
+  assert.deepEqual(f, { pct: 3.8, state: "forming", src: "daily" });
   // Client daily rows carry string closes on the wire; the port parses them.
   const strRows = daily.map((k) => ({ t: k.t, c: String(k.c) }));
-  assert.deepEqual(clientRx(cases[1], strRows, 131.5, now), C.earnPrintReaction(cases[1], daily, 131.5, null, now));
-  assert.ok(!/e\.s==='AMC'\?pi\+1:pi/.test(src), "the next-bar AMC rule is gone from the client");
+  assert.deepEqual(clientRx(cases[1], strRows, 131.5, now, off), C.earnPrintReaction(cases[1], daily, 131.5, null, now, { off }));
+  assert.ok(!/e\.s==='AMC'\?pi\+1:pi/.test(src), "the next-bar AMC rule stays gone from the client");
+  assert.ok(src.includes("earnReactPct(e, cl, r&&parseFloat(r.px), Date.now(), sessOffFor(r))"), "the tab passes the server's calendar");
 });
 
 // ---- 2. Backtest annualization: the series' own periods per year ----
 test("-104 backtest: annualization is the observed periods/yr of a UTC-day spine (≈365), crypto 365; Sharpe scales with it", () => {
   const src = clientSrc();
   const state = { scope: "stocks" };
-  const api = new Function("state", "const BT_ANN_UTC=365;\n" + grab(src, "btPeriodsPerYear") + "\n" + grab(src, "btAnn") + "\n" + grab(src, "btStats") + "; return {btPeriodsPerYear,btAnn,btStats};")(state);
+  const api = new Function("state", "const BT_ANN_UTC=365;\n" + grab(src, "btPeriodsPerYear") + "\n" + grab(src, "btAnn") + "\n" + grab(src, "btSharpeSE") + "\n" + grab(src, "btStats") + "; return {btPeriodsPerYear,btAnn,btStats};")(state);
   const days = Array.from({ length: 366 }, (_, i) => 20000 + i);             // a year of UTC days, weekends included
   assert.ok(Math.abs(api.btAnn(days) - 365.25) < 1e-9, "one bar a calendar day annualizes at ~365, not 252: " + api.btAnn(days));
   const wk = days.filter((d) => ((d + 4) % 7) !== 0 && ((d + 4) % 7) !== 6); // a weekday-only spine would read ~261
@@ -425,4 +436,176 @@ test("-105 earnings expansion baseline: 20 SESSION moves before the print, not 2
   assert.ok(cal.xMed > ses.xMed + 1, "the UTC-bar baseline (weekend zeros) inflated it: " + cal.xMed);
   const ru = C.earnRunup([], bars.slice(0, 44), 100, (d0 + 44) * DAY, off);
   assert.ok(Math.abs(ru.day - 1) < 0.02, "the usual daily move is per session: " + ru.day);
+});
+
+// ===== build 2026.09.24-106: earnings windows, backtest fills, error bars ==========================
+const ET = (y, mo, d, h, m) => C.etWallToUtc(y, mo, d, h, m || 0);
+// An hourly spine whose close at time T is the level of the last step at or before T — so a close
+// that lands exactly on an anchor reads the level in force there (packed [t,o,h,l,c,v], bar t closes t+1h).
+function stepSpine(t0, t1, steps) {
+  const st = [...steps].sort((a, b) => a[0] - b[0]), out = [];
+  const lvl = (T) => { let v = st[0][1]; for (const [t, x] of st) { if (t < T) v = x; else break; } return v; };
+  for (let t = t0; t < t1; t += HOUR) { const c = lvl(t + HOUR); out.push([t, c, c, c, c, 1]); }
+  return { rows: out, lvl };
+}
+
+test("-106 earnings window: one cash-close -> cash-close definition across BMO, AMC, Friday AMC, the half day and the day after a holiday", () => {
+  const w = (d, s) => C.earnReactWindow({ d, s });
+  // Wed AMC: Wed 16:00 -> Thu 16:00
+  let x = w("2026-09-16", "AMC");
+  assert.equal(x.pre, ET(2026, 9, 16, 16)); assert.equal(x.open, ET(2026, 9, 17, 9, 30)); assert.equal(x.post, ET(2026, 9, 17, 16));
+  // Friday AMC -> Monday's close, never Saturday
+  x = w("2026-09-11", "AMC"); assert.equal(x.post, ET(2026, 9, 14, 16), "a Friday AMC reacts in Monday's session");
+  // Friday AMC before Labor Day (Mon 2026-09-07 closed) -> Tuesday
+  x = w("2026-09-04", "AMC"); assert.equal(x.pre, ET(2026, 9, 4, 16)); assert.equal(x.post, ET(2026, 9, 8, 16), "the Monday holiday is skipped");
+  // Tuesday BMO after the holiday Monday: the reference is FRIDAY's close
+  x = w("2026-09-08", "BMO"); assert.equal(x.pre, ET(2026, 9, 4, 16)); assert.equal(x.open, ET(2026, 9, 8, 9, 30)); assert.equal(x.post, ET(2026, 9, 8, 16));
+  // Wednesday-before-Thanksgiving AMC: Thanksgiving closed, Friday is a 13:00 half day
+  x = w("2026-11-25", "AMC"); assert.equal(x.post, ET(2026, 11, 27, 13), "the half day closes 13:00 ET"); assert.equal(x.half, true);
+  // an AMC print ON the half day anchors at its 13:00 close
+  x = w("2026-11-27", "AMC"); assert.equal(x.pre, ET(2026, 11, 27, 13)); assert.equal(x.post, ET(2026, 11, 30, 16));
+  // DMH: prior close -> its own close; TBD: no window
+  x = w("2026-09-16", "DMH"); assert.equal(x.pre, ET(2026, 9, 15, 16)); assert.equal(x.post, ET(2026, 9, 16, 16));
+  assert.equal(w("2026-09-16", "TBD"), null, "an untimed print has no side of the session");
+});
+
+test("-106 earnings study: reactions and cash-session gaps off intraday anchors, the half day, the day after a holiday, excluded-coverage counts", () => {
+  const off = C.sessOffFn("US");
+  // P1 AMC Fri 09-04 (Labor Day follows): 100 -> gap 110 at Tue 09:30 -> 115 at Tue's close (held)
+  // P2 BMO Wed 09-16: 115 -> gap DOWN 109.25 at 09:30 -> 112 at the close (faded)
+  // P3 AMC Wed 11-25: 112 -> 120 at Fri 09:30 -> 126 at Fri's 13:00 half-day close (held); 90 after
+  //    13:00 — a 16:00 anchor would read a loss
+  // P4 BMO Tue 03-10: before the intraday spine -> the session-bar fallback, excluded from gaps
+  // P5 TBD: excluded, counted
+  const steps = [[0, 100],
+    [ET(2026, 9, 4, 16) + 1, 110], [ET(2026, 9, 8, 9, 30) + 1, 115],
+    [ET(2026, 9, 16, 9, 30) - 20 * HOUR, 115], [ET(2026, 9, 15, 16) + 1, 109.25], [ET(2026, 9, 16, 9, 30) + 1, 112],
+    [ET(2026, 11, 25, 16) + 1, 120], [ET(2026, 11, 27, 9, 30) + 1, 126], [ET(2026, 11, 27, 13) + 1, 90]];
+  const { rows: hs } = stepSpine(Date.UTC(2026, 7, 1), Date.UTC(2026, 11, 1), steps);
+  const daily = [];
+  for (let t = Date.UTC(2026, 2, 1); t < Date.UTC(2026, 11, 1); t += DAY) daily.push({ t, c: t === Date.UTC(2026, 2, 10) ? 55 : 50 });
+  const prints = [{ t: "X", d: "2026-09-04", s: "AMC" }, { t: "X", d: "2026-09-16", s: "BMO" }, { t: "X", d: "2026-11-25", s: "AMC" },
+    { t: "X", d: "2026-03-10", s: "BMO" }, { t: "X", d: "2026-10-01", s: "TBD" }];
+  const now = Date.UTC(2026, 11, 1);
+  const st = C.earnReactionsFor(prints, daily, now, hs, { off });
+  assert.equal(st.n, 4); assert.equal(st.cashN, 3); assert.equal(st.dailyN, 1, "one of four from daily closes"); assert.equal(st.tbdN, 1);
+  assert.equal(st.hN, st.cashN, "hN keeps its old meaning for older readers");
+  assert.equal(st.gapOf, 4, "every timed BMO/AMC print is eligible for the gap");
+  assert.equal(st.gapN, 3, "the print without intraday coverage is excluded, not approximated");
+  assert.equal(st.gapUp, 2); assert.equal(st.gapHeld, 2, "P1 and P3 held, P2 faded");
+  assert.equal(st.gapApprox, 3, "hourly alone reads 09:30 off the 09:00 close — counted");
+  // medAbs over |15|, |2.61|, |12.5|, |10| = 11.25; the half-day anchor is what makes P3 +12.5 and not −19.6
+  assert.equal(st.medAbs, 11.25);
+  assert.ok(Array.isArray(st.medCI) && st.medCI[0] <= st.medAbs && st.medAbs <= st.medCI[1], "the 90% CI brackets the median: " + st.medCI);
+  // a 16:00 anchor on the half day would have read 90: the reaction there is +12.5 exactly
+  const r3 = C.earnPrintReaction(prints[2], daily, null, hs, now, { off });
+  assert.deepEqual(r3, { pct: 12.5, state: "final", src: "cash" });
+  // 5m bars on the anchors make the 09:30 read exact (no approx); coverage counts are unchanged
+  const { lvl } = stepSpine(0, 1, steps);
+  const fine = [];
+  for (const p of prints.slice(0, 3)) { const x = C.earnReactWindow(p); for (const t of [x.pre, x.open, x.post]) { const c = lvl(t); fine.push([t - 5 * 60e3, c, c, c, c, 1]); } }
+  fine.sort((a, b) => a[0] - b[0]);
+  const stF = C.earnReactionsFor(prints, daily, now, hs, { off, fine });
+  assert.equal(stF.gapApprox, 0, "a 5m bar at 09:30 resolves the open exactly"); assert.equal(stF.gapN, 3); assert.equal(stF.medAbs, 11.25);
+  // a reaction session still ahead is not a reaction yet
+  const early = C.earnReactionsFor(prints, daily, ET(2026, 11, 27, 12), hs, { off });
+  assert.equal(early.n, 3, "P3's half-day close has not printed at 12:00 ET");
+  // the forming read: mark vs the reference cash close
+  assert.deepEqual(C.earnPrintReaction(prints[2], daily, 118, hs, ET(2026, 11, 26, 12), { off }), { pct: 5.4, state: "forming", src: "cash" });
+});
+
+test("-106 earnings: bootstrap CI of the median is deterministic, seeded, and absent under 4", () => {
+  const xs = [3.1, 7.4, 2.2, 9.8, 5.5, 4.1, 12.3, 6.6];
+  const a = C.earnBootMedianCI(xs), b = C.earnBootMedianCI(xs.slice());
+  assert.deepEqual(a, b, "same prints -> same range, every rebuild");
+  assert.ok(a[0] <= C.earnBootMedianCI(xs, { seed: 7 })[1], "a different seed is a different (overlapping) draw");
+  assert.ok(a[0] < 5.5 + 0.6 && a[1] > 5.5, "brackets the sample median (6.05): " + a);
+  assert.deepEqual(C.earnBootMedianCI([4, 4, 4, 4, 4]), [4, 4], "no spread, no interval width");
+  assert.equal(C.earnBootMedianCI([1, 2, 3]), null, "n<4: the thin warning covers it");
+  // the stream itself is pinned: mulberry32 is the published generator, not Math.random
+  const r = C.mulberry32(1); assert.equal(+r().toFixed(10), 0.6270739406);
+  // the setup verdict carries the CI and the gap coverage
+  const c = C.earnSetup({ t: "X", sessions: 1, study: { n: 12, avgAbs: 6, medAbs: 5.5, medCI: [3.9, 8.1], up: 6, xMed: 2, gapN: 7, gapOf: 12, gapUp: 5, gapHeld: 5, dailyN: 3, cashN: 9 },
+    fundPct: 50, oiChg: 0, runup: { now: 0, day: 2 } });
+  assert.match(c.verdict, /typical move ±5\.5% \(90% CI 3\.9–8\.1%\), gaps and holds 5\/7 \(gap n=7 of 12\)/);
+  assert.equal(c.react.dailyN, 3); assert.equal(c.react.gapOf, 12);
+  // client strings
+  const src = clientSrc();
+  const api = new Function(grab(src, "earnCiTxt") + "\n" + grab(src, "earnSrcTxt") + "\n" + grab(src, "earnGapTxt") + "; return {earnCiTxt, earnSrcTxt, earnGapTxt};")();
+  assert.equal(api.earnCiTxt([3.9, 8.1]), "3.9–8.1%");
+  assert.equal(api.earnSrcTxt({ n: 12, dailyN: 3 }), "3 of 12 from daily closes");
+  assert.match(api.earnGapTxt({ gapN: 7, gapOf: 12, gapUp: 5, gapHeld: 5 }), /\(gap n=7 of 12\)$/);
+  assert.match(api.earnGapTxt({ gapN: 0, gapOf: 4 }), /0 of 4 timed prints/);
+});
+
+test("-106 backtest: next-bar fills shift the position one bar, slippage is bps per side on turnover, Sharpe carries Lo's SE", () => {
+  const { _btHarness } = require("./_shared");
+  const { api, state, restore } = _btHarness();
+  try {
+    Object.assign(state.backtest, { picks: ["NVDA"], cadence: 1, cost: 0, slip: 0, entry: 0, weighting: "eq" });
+    state.backtest.lag = "same"; const same = api.btRun();
+    state.backtest.lag = "next"; const next = api.btRun();
+    assert.ok(same.ok && next.ok && same.lag === 0 && next.lag === 1);
+    assert.equal(next.pos[0], 0, "the first decision has not filled yet on its own bar");
+    assert.deepEqual(next.pos.slice(1), same.pos.slice(0, -1), "next-bar = the same decisions, one bar later");
+    assert.equal(next.trades.length > 0, true);
+    for (let k = 0; k < Math.min(next.trades.length, same.trades.length) - 1; k++)
+      assert.equal(next.trades[k].entry, same.trades[k].entry + 1, "trade-log entries are the fill bars");
+    // slippage: exactly slip/1e4 × Σ|Δw|, and the curve pays it
+    state.backtest.lag = "same"; state.backtest.slip = 10; const slp = api.btRun();
+    let to = 0, prev = 0; for (const w of slp.pos) { to += Math.abs(w - prev); prev = w; }
+    assert.ok(Math.abs(slp.slipCum - to * 10 / 1e4) < 1e-12, `slipCum ${slp.slipCum} = turnover ${to} × 10bp`);
+    assert.equal(slp.feeCum, 0, "slippage is its own friction, not the taker fee");
+    assert.deepEqual(slp.pos, same.pos, "slippage changes the P&L, never the decisions");
+    assert.ok(slp.eq[slp.eq.length - 1] < same.eq[same.eq.length - 1]);
+    // cross-sectional path: next-bar runs and charges slippage there too
+    Object.assign(state.backtest, { picks: [], lag: "next", slip: 5, cadence: 5 });
+    const cs = api.btRun(); assert.ok(cs.ok && cs.lag === 1 && cs.slipCum > 0);
+    restore();
+  } catch (e) { restore(); throw e; }
+  // Lo (2002) SE on a known series: alternating +1% / −0.5%, T = 100, annualized at 252
+  const src = clientSrc();
+  const S = new Function("const BT_ANN_UTC=365;\n" + grab(src, "btSharpeSE") + "\n" + grab(src, "btStats") + "; return {btStats, btSharpeSE};")();
+  const r = []; for (let i = 0; i < 100; i++) r.push(i % 2 ? -0.005 : 0.01);
+  const eq = [1]; for (const x of r) eq.push(eq[eq.length - 1] * (1 + x));
+  const st = S.btStats(r, eq, 252);
+  const sd = 0.0075 * Math.sqrt(100 / 99), sr = 0.0025 / sd;
+  assert.ok(Math.abs(st.sharpe - sr * Math.sqrt(252)) < 1e-9);
+  assert.ok(Math.abs(st.sharpeSE - Math.sqrt((1 + 0.5 * sr * sr) / 100) * Math.sqrt(252)) < 1e-9);
+  assert.equal(+st.sharpeSE.toFixed(3), 1.631, "≈ 1.63 annualized");
+  assert.equal(st.sharpeZero, false, "Sharpe 5.3 ± 1.6 excludes 0");
+  const noise = [0.01, -0.0102, 0.004, -0.0035, 0.002, -0.0021, 0.006, -0.0059, 0.001, -0.0012];
+  const eq2 = [1]; for (const x of noise) eq2.push(eq2[eq2.length - 1] * (1 + x));
+  assert.equal(S.btStats(noise, eq2, 252).sharpeZero, true, "a near-zero Sharpe on 10 bars is flagged");
+  assert.ok(src.includes("95% CI includes 0") && src.includes("Survivorship: current listings only"), "the flag and the survivorship caveat render");
+  assert.ok(!/Slippage not modeled|slippage not yet modeled/.test(src), "the stale caveat is gone");
+});
+
+test("-106 retest: the mean's standard error is clustered by event date and the dates ship beside n", () => {
+  // CR1 on a fixture: two dates, two events each
+  const cl = C.clusterMeanSE([1, 2, 3, 4], ["a", "a", "b", "b"]);
+  assert.equal(cl.mean, 2.5); assert.equal(cl.G, 2); assert.ok(Math.abs(cl.se - 1) < 1e-12, "G/(G−1)·Σ(S_g²)/n² = 2·8/16 = 1");
+  const iid = Math.sqrt(((1.5 ** 2 + 0.5 ** 2) * 2) / 3) / 2;
+  assert.ok(cl.se > iid, "same-day co-movement widens the error vs the iid " + iid.toFixed(3));
+  assert.equal(C.clusterMeanSE([1, 2], ["a", "a"]).se, null, "one date: no clustered error");
+  // pooled study: 12 dates × 4 names, events on the same day move together
+  const names = [];
+  for (let k = 0; k < 4; k++) {
+    const cand = [];
+    for (let d = 0; d < 12; d++) {
+      const v = (d % 3) - 1 + k * 0.01;   // the date sets the outcome; names barely differ
+      cand.push({ i: d * 30, t: Date.UTC(2026, 0, 5) + d * 30 * DAY, side: "long", c: 100, e13: 99, e21: 98, tl: true, sd: 1, f: [v, v, v, v, v], v: [false, false, false, false, false] });
+    }
+    names.push({ coin: "c" + k, ticker: "C" + k, cand, ctl: { long: [], short: [] } });
+  }
+  const st = C.d1RetestStudy(names, { cd: 5, cellFloor: 30 });
+  const cell = st.side.long.cells[5];
+  assert.equal(cell.n, 48); assert.equal(cell.dates, 12, "48 events on 12 dates");
+  const ev = []; const keys = [];
+  for (const nm of names) for (const e of nm.cand) { ev.push(e.f[2]); keys.push(Math.floor(e.t / DAY)); }
+  assert.equal(cell.se, +C.clusterMeanSE(ev, keys).se.toFixed(3));
+  const src = clientSrc();
+  assert.ok(src.includes("function rtN(c)") && src.includes("function rtMeanCi(c)") && src.includes("function rtUnit(p)"), "the panel shows dates, ±1.96·SE and the horizon unit");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes('unit: scope === "crypto" ? "days" : "sessions"'), "the payload says what a horizon step is");
 });

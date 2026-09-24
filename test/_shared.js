@@ -835,7 +835,8 @@ function _btHarness(){
     ["LLY", 111, "Health Care"], ["VST", 121, "Utilities"]]) state.rows.set(c, mkRow(c, sd, 150, sec));
   state.scope = "stocks"; state.view = "backtest";
   const reset = () => { Object.assign(state.backtest, { signal: "mom", lookback: 20, cadence: 5, quantile: 0.2, cost: 5,
-    universe: "all", split: 0.6, direction: "high", structure: "ls", weighting: "eq", reqSign: false, holdWindow: "cc", vsBasket: "", picks: [], entry: 0 }); };
+    universe: "all", split: 0.6, direction: "high", structure: "ls", weighting: "eq", reqSign: false, holdWindow: "cc", vsBasket: "", picks: [], entry: 0,
+    lag: "same", slip: 0 }); };   // (-106) the pre-106 fill (same close, no slippage) — the fixtures below pin that accounting; the -106 tests set lag/slip themselves
   reset();
   return { api, state, reset, restore };
 }

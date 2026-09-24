@@ -41,19 +41,26 @@ const rtRate=v=>v==null||!isFinite(v)?'·':Math.round(v*100)+'%';
 const rtPP=v=>v==null||!isFinite(v)?'·':(v>0?'+':'')+Math.round(v*100)+'pp';
 const rtCls=v=>v==null||!isFinite(v)?'':v>0?'pos':v<0?'neg':'';
 // One row per horizon: the event, its control, and the excess — the excess columns are the panel.
-function rtRow(h,c,floor){
+// (build 2026.09.24-106) horizon unit: session bars on a calendar market (the -105 session fold),
+// calendar days on crypto — from the payload, else from the scope.
+function rtUnit(p){ const u=p&&p.unit; return u?(u==='sessions'?' sess':'d'):(state.scope==='crypto'?'d':' sess'); }
+// n with the number of distinct event DATES behind it (same-day events across names share a tape,
+// so the dates are the effective sample), and the mean with ±1.96·SE clustered by event date.
+function rtN(c){ return c.dates!=null&&c.dates>0?`${c.n}<span class="sec" data-tip="${c.n} events on ${c.dates} distinct dates — same-day events across names share one tape, so the dates are the effective sample"> · ${c.dates}dt</span>`:`${c.n}`; }
+function rtMeanCi(c){ return c.se!=null&&isFinite(c.se)?`<span class="sec" data-tip="±1.96 × the standard error clustered by event date (events on the same day are not independent)${Math.abs(c.mean)<1.96*c.se?' — the interval includes 0':''}"> ±${(1.96*c.se).toFixed(2)}</span>`:''; }
+function rtRow(h,c,floor,unit){
   if(!c) return '';
   const under=c.hit==null;
   const ctl=c.ctl||{};
   const ev=under
-    ?`<td>${c.n}</td><td class="dim2" colspan="5" data-tip="n=${c.n} sits under the ${floor}-event floor — the cell publishes its n and nothing else">under floor</td>`
-    :`<td>${c.n}</td><td>${rtRate(c.hit)}</td><td class="${rtCls(c.mean)}">${rtPct(c.mean)}</td><td class="${rtCls(c.med)}">${rtPct(c.med)}</td><td class="${rtCls(c.meanSd)}">${rtSd(c.meanSd)}</td>`
+    ?`<td>${rtN(c)}</td><td class="dim2" colspan="5" data-tip="n=${c.n} sits under the ${floor}-event floor — the cell publishes its n and nothing else">under floor</td>`
+    :`<td>${rtN(c)}</td><td>${rtRate(c.hit)}</td><td class="${rtCls(c.mean)}">${rtPct(c.mean)}${rtMeanCi(c)}</td><td class="${rtCls(c.med)}">${rtPct(c.med)}</td><td class="${rtCls(c.meanSd)}">${rtSd(c.meanSd)}</td>`
       +`<td class="sec" data-tip="share of events whose price touched the event bar's own EMA21 — the tretest void — inside ${h} bar${h===1?'':'s'}">${rtRate(c.void)}</td>`;
   const cc=ctl.hit==null
     ?`<td class="sec">${ctl.n||0}</td><td class="dim2" colspan="2">under floor</td>`
     :`<td class="sec">${ctl.n}</td><td class="sec">${rtRate(ctl.hit)}</td><td class="sec">${rtPct(ctl.mean)}</td>`;
   const ex=`<td class="${rtCls(c.exHit)}">${rtPP(c.exHit)}</td><td class="${rtCls(c.exMean)}">${rtPct(c.exMean)}</td><td class="${rtCls(c.exSd)}">${rtSd(c.exSd)}</td>`;
-  return `<tr><td>+${h}d</td>${ev}${cc}${ex}</tr>`;
+  return `<tr><td>+${h}${unit||'d'}</td>${ev}${cc}${ex}</tr>`;
 }
 function rtControls(p){
   const seg=(id,lbl,attr,opts,cur)=>`<div class="seg" id="${id}" role="group" aria-label="${lbl}"><span class="seglbl">${lbl}</span>${opts.map(([v,l,tip])=>`<button type="button" data-${attr}="${esc(String(v))}"${String(cur)===String(v)?' class="active"':''}${tip?` data-tip="${esc(tip)}"`:''}>${l}</button>`).join('')}</div>`;
@@ -77,11 +84,12 @@ function renderRetestSection(){
     +` · <span data-tip="candidates the cooldown folded into an earlier event of the same name and side">${sd.suppressed} suppressed by the ${RT.cd}d cooldown</span>`
     +` · <span data-tip="share of events whose probe window carried TRUE daily lows/highs (the hourly spine overlays the daily history ~180d equities / ~90d crypto); older bars read the close as the low, which can only under-count probes and voids">${tlShare}% on true extremes</span>`
     +(d.dataTs?` · through the ${isoUtc(d.dataTs,0,10)} UTC close`:'')+`</div>`;
-  const rows=H.map(h=>rtRow(h,sd.cells&&sd.cells[h],floor)).join('');
+  const un=rtUnit(p);
+  const rows=H.map(h=>rtRow(h,sd.cells&&sd.cells[h],floor,un)).join('');
   const table=`<div class="s-card" style="overflow-x:auto"><table class="ptbl rt-tbl" style="min-width:760px"><thead>`
     +`<tr><th></th><th colspan="6">retest events</th><th colspan="3">control — stacked, no retest</th><th colspan="3">excess</th></tr><tr>`
-    +`<th data-tip="forward horizon, in closed daily bars from the event close">fwd</th>`
-    +`<th>n</th><th data-tip="share of events whose forward close went the side's way">hit</th><th data-tip="mean forward return, signed with the side (a short that falls reads positive)">mean</th><th>median</th>`
+    +`<th data-tip="forward horizon, in closed ${un===' sess'?'SESSION bars (weekends and exchange holidays folded into the next session)':'daily bars (calendar days — crypto trades 24/7)'} from the event close">fwd</th>`
+    +`<th>n</th><th data-tip="share of events whose forward close went the side's way">hit</th><th data-tip="mean forward return, signed with the side (a short that falls reads positive), ±1.96 × its standard error clustered by event date">mean</th><th>median</th>`
     +`<th data-tip="mean forward return in units of the name's trailing 60-bar daily σ at the event — comparable across names, walk-forward">σ</th><th data-tip="share of events that touched the event bar's EMA21 inside the horizon — the tretest void">void</th>`
     +`<th>n</th><th>hit</th><th>mean</th>`
     +`<th data-tip="hit − control hit, percentage points">hit</th><th data-tip="mean − control mean">mean</th><th data-tip="σ-mean − control σ-mean: the retest's edge over the trend it rides. The column that means anything.">σ</th>`
@@ -93,9 +101,9 @@ function renderRetestSection(){
   const evRows=ev.slice(0,RT_EVENTS_SHOWN).map(e=>{ const f=e.f&&e.f[fi], v=e.v&&e.v[fi];
     return `<tr data-coin="${esc(e.coin)}" style="cursor:pointer"><td>${esc(e.ticker)}</td><td>${isoUtc(e.t,0,10)}</td><td>${e.c}</td><td class="sec">${e.e13}</td><td class="sec">${e.e21}</td>`
       +`<td class="${rtCls(f)}">${f==null?'<span class="sec">open</span>':rtPct(f)}</td><td class="sec">${v==null?'·':v?'touched':'held'}</td><td class="sec">${e.tl?'true':'close'}</td></tr>`; }).join('');
-  const evTbl=ev.length?`<div class="s-card" style="overflow-x:auto"><table class="ptbl rt-ev"><thead><tr><th>name</th><th data-tip="the event bar's UTC day">close</th><th>close px</th><th>EMA13</th><th>EMA21</th><th data-tip="forward return at +${H[fi]}d, signed with the side · open = the horizon has not closed yet">+${H[fi]}d</th><th data-tip="the event bar's EMA21 at +${H[fi]}d: touched = the void was hit">void</th><th data-tip="true = the probe read true daily extremes; close = the close stood in for the low">low</th></tr></thead><tbody>${evRows}</tbody></table></div>`
+  const evTbl=ev.length?`<div class="s-card" style="overflow-x:auto"><table class="ptbl rt-ev"><thead><tr><th>name</th><th data-tip="the event bar's UTC day">close</th><th>close px</th><th>EMA13</th><th>EMA21</th><th data-tip="forward return at +${H[fi]}${un}, signed with the side · open = the horizon has not closed yet">+${H[fi]}${un}</th><th data-tip="the event bar's EMA21 at +${H[fi]}${un}: touched = the void was hit">void</th><th data-tip="true = the probe read true daily extremes; close = the close stood in for the low">low</th></tr></thead><tbody>${evRows}</tbody></table></div>`
     :`<div class="s-cap">No ${RT.side} events under this definition and cooldown.</div>`;
-  const cap=sCap(`<b>Reading it:</b> an event is the Trend board’s RETEST on the D1 rung alone, judged on <b>closed</b> daily bars with EMAs walked bar by bar (the ladder’s own construction) — ${RT.def==='touch'?'the <b>first touch</b>: this bar probed the zone and the one before did not':'<b>board</b>-verbatim: the last 3 bars’ extreme reached EMA13 while the close held EMA21'}, then a ${RT.cd}-bar cooldown per name and side. The control is every stacked ${RT.side==='long'?'up':'down'}trend bar on the same names whose probe did not hold, so the <b>excess σ</b> column is the retest’s edge over simply being in the trend — not over zero. Outcomes are signed with the side; cells under ${floor} events publish n only. The other three rungs of the board are not replayed (the hourly spine is a fraction of the daily depth), so this is the D1 badge, not the 3/4 score. The live claim remains tretest / tretestdn in the ledger; a definition that shows excess here earns nothing until it earns it there. Click a name or row for the drawer.${d.eventsTotal>(d.events||[]).length?` The CSV carries the newest ${(d.events||[]).length} of ${d.eventsTotal} events; the table above read all of them.`:''}`);
+  const cap=sCap(`<b>Reading it:</b> an event is the Trend board’s RETEST on the D1 rung alone, judged on <b>closed</b> daily bars with EMAs walked bar by bar (the ladder’s own construction) — ${RT.def==='touch'?'the <b>first touch</b>: this bar probed the zone and the one before did not':'<b>board</b>-verbatim: the last 3 bars’ extreme reached EMA13 while the close held EMA21'}, then a ${RT.cd}-bar cooldown per name and side. The control is every stacked ${RT.side==='long'?'up':'down'}trend bar on the same names whose probe did not hold, so the <b>excess σ</b> column is the retest’s edge over simply being in the trend — not over zero. Outcomes are signed with the side; cells under ${floor} events publish n only. Horizons count ${un===' sess'?'<b>sessions</b> (weekends and exchange holidays fold into the next session bar)':'calendar days'}. Events on the same day across names share one tape, so <b>n</b> is shown with its distinct event dates (<b>dt</b>, the effective sample) and the mean carries ±1.96 × its <b>date-clustered</b> standard error — a pooled n of 300 on 40 dates is closer to 40 observations than to 300. The other three rungs of the board are not replayed (the hourly spine is a fraction of the daily depth), so this is the D1 badge, not the 3/4 score. The live claim remains tretest / tretestdn in the ledger; a definition that shows excess here earns nothing until it earns it there. Click a name or row for the drawer.${d.eventsTotal>(d.events||[]).length?` The CSV carries the newest ${(d.events||[]).length} of ${d.eventsTotal} events; the table above read all of them.`:''}`);
   return head+rtControls(p)+status+table+chips+evTbl+cap;
 }
 function attachRetestControls(){

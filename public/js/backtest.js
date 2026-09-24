@@ -23,6 +23,11 @@ import { openTrend, renderSignals, renderTrend } from "./trend.js";
 // Everything runs in-browser off state.rows[*].daily (shipped via /api/daily) + the SP500 benchmark, so
 // parameter tweaks are instant and add no server load. Non-fitted ranking rules: the honest overfitting
 // risk is the user picking params by eye, which the in-sample/out-of-sample split is there to expose.
+// (build 2026.09.24-106) execution lag + slippage: 'next' = the book fills at the NEXT bar's close
+// after the signal's (the default — no fill at the very close the signal was computed from);
+// slippage is bps PER SIDE on turnover, charged beside the taker fee (and twice a night overnight).
+function btLag(p){ return p&&p.lag==='same'?0:1; }
+function btSlipR(p){ const b=p?+p.slip:0; return Number.isFinite(b)&&b>0? b/1e4 : 0; }
 const BT_MIN_DAYS=25, BT_ANN_UTC=365;   // (build 2026.09.24-104) fallback periods/yr: the spine is UTC days, weekends included
 const BT_SIGNALS={ mom:'Momentum', smom:'Sector-relative momentum', rev:'Short-term reversion', res:'Residual momentum (β-neutral)',
   lowvol:'Low volatility', ivol:'Low idiosyncratic vol', beta:'Low beta (BAB)', max:'Anti-lottery (low MAX)',
@@ -245,15 +250,27 @@ function btRun(){
   const { rows, days, series, benchSeries, fund, fundCov, ovG, ovF, ovCov, pxm, him, vom, oim, hiCov, voCov, oiCov }=mx, coins=rows.map(r=>r.coin);
   const covOf={ fundCov, hiCov, voCov, oiCov };
   if(BT_NEEDS[p.signal] && !(covOf[BT_NEEDS[p.signal]]>0)) return { ok:false, nodata:BT_SIGNALS[p.signal] };   // the column this rule ranks on isn't in the payload yet — say so instead of ranking nothing
-  const L=p.lookback, cad=Math.max(1,p.cadence), q=p.quantile, costR=p.cost/1e4, start=warmN, on=p.holdWindow==='on' && state.scope!=='crypto';   // 24/7 markets have no overnight boundary
-  let weights=new Map(), lastBook=null, feeCum=0, fundCum=0;
+  const L=p.lookback, cad=Math.max(1,p.cadence), q=p.quantile, costR=p.cost/1e4, slipR=btSlipR(p), lag=btLag(p), start=warmN, on=p.holdWindow==='on' && state.scope!=='crypto';   // 24/7 markets have no overnight boundary
+  let weights=new Map(), lastBook=null, feeCum=0, fundCum=0, slipCum=0, pend=null;
   const tkOf=new Map(rows.map(r=>[r.coin, r.ticker]));
   const secOf=new Map(rows.map(r=>[r.coin, r.sector||r.assetClass||'—']));           // smom demean groups; unsectored names pool together
   const exOf=(c)=>({ f:fund.get(c)||null, px:pxm.get(c)||null, hi:him.get(c)||null, vo:vom.get(c)||null, oi:oim.get(c)||null });
   const base=p.signal==='smom'?'mom':p.signal;
   const portR=[], eq=[1], eqg=[1], eqb=[1], eqew=[1], curveDays=[days[start]];
   let turnoverSum=0, rebalances=0, posSum=0, posCount=0;
+  // (build 2026.09.24-106) execution lag. The signal at di reads the close of bar di; 'same' fills
+  // at that same close (the pre-106 behaviour — a close you cannot trade on after computing a signal
+  // from it), 'next' (default) holds the new book as PENDING and fills it at the NEXT bar's close,
+  // so its first return is bar di+2's. Turnover, taker fee and slippage are charged at the fill.
+  const fill=(nw)=>{
+    let to=0; const keys=new Set([...weights.keys(),...nw.keys()]);
+    for(const c of keys) to+=Math.abs((nw.get(c)||0)-(weights.get(c)||0));
+    turnoverSum+=to; rebalances++;
+    if(!on){ feeCum+=to*costR; slipCum+=to*slipR; eq[eq.length-1]*=(1-to*(costR+slipR)); }      // close-to-close: taker fee + slippage on turnover; overnight charges a nightly round-trip instead
+    weights=nw;
+  };
   for(let di=start; di<days.length-1; di++){
+    if(pend){ fill(pend); pend=null; }                               // next-bar: yesterday's decision fills at this bar's close
     if((di-start)%cad===0){                                          // rebalance
       const scored=[];
       for(const c of coins){ const raw=btScore(base, series.get(c), benchSeries, di, L, exOf(c));
@@ -280,11 +297,7 @@ function btRun(){
       const bk={ longs:[], shorts:[] };                              // snapshot the book for the "what it holds now" panel
       for(const [c,w] of nw){ const s=scored.find(z=>z.c===c); (w>=0?bk.longs:bk.shorts).push({ coin:c, ticker:tkOf.get(c)||c, w, score:s?s.raw:null }); }
       bk.longs.sort((a,b)=>b.w-a.w); bk.shorts.sort((a,b)=>a.w-b.w); lastBook=bk;
-      let to=0; const keys=new Set([...weights.keys(),...nw.keys()]);
-      for(const c of keys) to+=Math.abs((nw.get(c)||0)-(weights.get(c)||0));
-      turnoverSum+=to; rebalances++;
-      if(!on){ feeCum+=to*costR; eq[eq.length-1]*=(1-to*costR); }      // close-to-close: taker fee on turnover; overnight charges a nightly round-trip instead
-      weights=nw;
+      if(lag) pend=nw; else fill(nw);
     }
     const fd=di+1; let pr=0, fpay=0, ok=false, gb=0;
     if(on){                                                            // overnight: capture the close->open (+weekend) hold, flat during the cash session
@@ -295,8 +308,8 @@ function btRun(){
       for(const [c,w] of weights){ const x=series.get(c)[fd]; if(Number.isFinite(x)){ pr+=w*(Math.exp(x)-1); ok=true; } const fa=fund.get(c); if(fa) fpay+=w*fa[fd]; }
     }
     pr=ok?pr:0; const fRet=-fpay;                                    // a position pays w*rate: a long pays when funding>0, a short receives
-    const feeDay=on? gb*2*costR : 0;                                 // overnight round-trips the whole book every night (exit at open + enter at close)
-    if(on) feeCum+=feeDay;
+    const feeDay=on? gb*2*(costR+slipR) : 0;                         // overnight round-trips the whole book every night (exit at open + enter at close), fee + slippage per side
+    if(on){ feeCum+=gb*2*costR; slipCum+=gb*2*slipR; }
     fundCum+=fRet; portR.push(pr+fRet-feeDay);                        // net return incl. funding and (overnight) the nightly fee
     eq.push(eq[eq.length-1]*(1+pr+fRet-feeDay)); eqg.push(eqg[eqg.length-1]*(1+pr));   // gross = price only; net = price + funding − fees
     const bx=benchSeries?benchSeries[fd]:NaN; eqb.push(eqb[eqb.length-1]*(1+(Number.isFinite(bx)?Math.exp(bx)-1:0)));
@@ -305,7 +318,7 @@ function btRun(){
   }
   return { ok:true, days:curveDays, eq, eqg, eqb, eqew, portR,
     turnover:rebalances?turnoverSum/rebalances:0, avgPos:posCount?posSum/posCount:0, universeN:rows.length, book:lastBook,
-    fundCov, fundCum, feeCum, ovCov, on };
+    fundCov, fundCum, feeCum, slipCum, ovCov, on, lag };
 }
 // ===== Single-asset mode — the same signal, run as a timing rule on one name ==================
 // What changes: the score stops being a RANK and becomes a LEVEL, so the position comes from the
@@ -318,7 +331,7 @@ function btRun(){
 // on the same axis, which they wouldn't if the scale were demeaned.
 function btRunOne(p){
   const tgt=btPickRows()[0]; if(!tgt) return { ok:false, have:0, days:0, need:1 };
-  const cr=state.scope==='crypto', L=p.lookback, cad=Math.max(1,p.cadence), costR=p.cost/1e4;
+  const cr=state.scope==='crypto', L=p.lookback, cad=Math.max(1,p.cadence), costR=p.cost/1e4, slipR=btSlipR(p), lag=btLag(p);
   const warmN=BT_MVAR[p.signal]?Math.max(L,31):L;
   // Sector-relative momentum is a demean against peers, so on one name the peers have to come
   // along — otherwise the rule silently degrades to plain momentum under a label that promises
@@ -355,8 +368,20 @@ function btRunOne(p){
   const on=p.holdWindow==='on' && !cr;
   const start=warmN;
   const eq=[1], eqg=[1], eqb=[1], eqbh=[1], curveDays=[days[start]], portR=[], pos=[], trades=[];
-  let w=0, feeCum=0, fundCum=0, inMkt=0, open=null, flips=0;
+  let w=0, feeCum=0, fundCum=0, slipCum=0, inMkt=0, open=null, flips=0, pend=null;
+  // (-106) the fill: at the decision bar's close ('same') or the next bar's ('next', default — the
+  // trade log's "in"/"out" dates are the FILL bars, so they move one bar later with the lag)
+  const fill=(nw, fi, meta)=>{
+    if(nw===w) return;
+    const to=Math.abs(nw-w);
+    if(!on){ feeCum+=to*costR; slipCum+=to*slipR; eq[eq.length-1]*=(1-to*(costR+slipR)); }   // overnight charges its nightly round-trip below instead
+    flips++;
+    if(open){ open.exit=days[fi]; open.ret=eq[eq.length-1]/open.eq0-1; trades.push(open); open=null; }
+    if(nw!==0) open={ side:nw>0?'LONG':'SHORT', size:Math.abs(nw), entry:days[fi], eq0:eq[eq.length-1], score:meta.score, z:meta.z };
+    w=nw;
+  };
   for(let di=start; di<N-1; di++){
+    if(pend){ fill(pend.nw, di, pend); pend=null; }       // next-bar: yesterday's decision fills at this close
     if((di-start)%cad===0){                               // re-decide the position
       let nw=0; const s=raw[di], sig=(p.direction==='low'? -s : s);   // sig = the quantity we go long on
       if(Number.isFinite(sig) && sig!==0){
@@ -370,14 +395,8 @@ function btRunOne(p){
           else if(p.weighting==='vol'){ const v=btVol(a,di,Math.max(20,L)); nw*= v>0? clamp(BT_VOLTGT/(v*Math.sqrt(btAnn(days))),0.25,2) : 1; }   // size to a 20% annualized vol target
         }
       }
-      if(nw!==w){
-        const to=Math.abs(nw-w);
-        if(!on){ feeCum+=to*costR; eq[eq.length-1]*=(1-to*costR); }   // overnight charges its nightly round-trip below instead
-        flips++;
-        if(open){ open.exit=days[di]; open.ret=eq[eq.length-1]/open.eq0-1; trades.push(open); open=null; }
-        if(nw!==0) open={ side:nw>0?'LONG':'SHORT', size:Math.abs(nw), entry:days[di], eq0:eq[eq.length-1], score:raw[di], z:(Number.isFinite(scale[di])&&scale[di]>0)?raw[di]/scale[di]:null };
-        w=nw;
-      }
+      const meta={ nw, score:raw[di], z:(Number.isFinite(scale[di])&&scale[di]>0)?raw[di]/scale[di]:null };
+      if(lag) pend=meta; else fill(nw, di, meta);
     }
     const fd=di+1; let pr=0, fpay=0;
     if(on){ const ga=ovG.get(c), g=ga?ga[fd]:NaN;         // overnight: hold the close→open gap, flat through the cash session
@@ -387,8 +406,8 @@ function btRunOne(p){
       const x=a[fd]; if(Number.isFinite(x)) pr=w*(Math.exp(x)-1);
       const fa=fund.get(c); if(fa) fpay=w*fa[fd];
     }
-    const fRet=-fpay, feeDay=on? Math.abs(w)*2*costR : 0;  // a long pays funding, a short receives it
-    if(on) feeCum+=feeDay;
+    const fRet=-fpay, feeDay=on? Math.abs(w)*2*(costR+slipR) : 0;  // a long pays funding, a short receives it; overnight = fee + slippage per side, twice a night
+    if(on){ feeCum+=Math.abs(w)*2*costR; slipCum+=Math.abs(w)*2*slipR; }
     fundCum+=fRet; if(w!==0) inMkt++;
     portR.push(pr+fRet-feeDay);
     eq.push(eq[eq.length-1]*(1+pr+fRet-feeDay));
@@ -407,12 +426,16 @@ function btRunOne(p){
   const avgTrade=trades.length? tSum/trades.length : null;
   return { ok:true, single:true, avgTrade, row:tgt, days:curveDays, eq, eqg, eqb, eqew:eqbh, eqbh, portR, pos, trades,
     turnover:0, avgPos:inMkt?1:0, universeN:1, book:null, peers:peers.length,
-    fundCov, fundCum, feeCum, ovCov, on, flips, exposure:pos.length?inMkt/pos.length:0,
+    fundCov, fundCum, feeCum, slipCum, ovCov, on, lag, flips, exposure:pos.length?inMkt/pos.length:0,
     curW:w, curScore:raw[N-2], curZ:(Number.isFinite(scale[N-2])&&scale[N-2]>0)?raw[N-2]/scale[N-2]:null };
 }
 function btVol(a, di, L){ const lo=di-L+1; if(lo<0) return 0; let s=0,sq=0,n=0;
   for(let i=lo;i<=di;i++){ const x=a[i]; if(Number.isFinite(x)){ s+=x; sq+=x*x; n++; } }
   if(n<3) return 0; const m=s/n; return Math.sqrt(Math.max(0,(sq-n*m*m)/(n-1))); }
+// (build 2026.09.24-106) Sharpe's standard error, Lo (2002) under iid returns: in per-period units
+// SE(SR) ≈ √((1 + ½·SR²)/T), annualized by the same √(periods/yr) as the ratio itself. A Sharpe
+// whose ±1.96·SE band spans 0 is not distinguishable from no edge at 95%, and the box says so.
+function btSharpeSE(srPer, T, ann){ return T>1&&Number.isFinite(srPer)? Math.sqrt((1+0.5*srPer*srPer)/T)*Math.sqrt(ann||BT_ANN_UTC) : null; }
 function btStats(portR, eqSeg, ann){
   const n=portR.length; if(!n||eqSeg.length<2) return null;
   let mean=0; for(const x of portR) mean+=x; mean/=n;
@@ -420,7 +443,8 @@ function btStats(portR, eqSeg, ann){
   let hit=0; for(const x of portR) if(x>0) hit++;
   const total=eqSeg[eqSeg.length-1]/eqSeg[0]-1;
   let peak=eqSeg[0], mdd=0; for(const e of eqSeg){ if(e>peak) peak=e; const dd=e/peak-1; if(dd<mdd) mdd=dd; }
-  return { total, sharpe: sd>0? mean/sd*Math.sqrt(ann||BT_ANN_UTC):0, hit:hit/n, mdd, n };
+  const srPer=sd>0? mean/sd : 0, sharpe=srPer*Math.sqrt(ann||BT_ANN_UTC), sharpeSE=btSharpeSE(srPer, n, ann);
+  return { total, sharpe, sharpeSE, sharpeZero: sharpeSE!=null&&Math.abs(sharpe)<1.96*sharpeSE, hit:hit/n, mdd, n };
 }
 // equity curve: net (accent) / gross (blue) / benchmark (muted) / equal-weight (faint); IS|OOS split shaded; crosshair hover
 function btCurveSvg(res, splitIdx){
@@ -483,7 +507,8 @@ function btStatBox(label, st, accent){
   const f=(x,d,pct)=>(x>0?'+':'')+(x*(pct?100:1)).toFixed(d)+(pct?'%':'');
   return `<div class="s-stat"><div class="s-k">${label} · ${st.n}d</div>`+
     `<div class="s-row"><span>return</span><b class="${st.total>=0?'pos':'neg'}">${f(st.total,1,true)}</b></div>`+
-    `<div class="s-row"><span>Sharpe</span><b style="color:${accent}">${st.sharpe.toFixed(2)}</b></div>`+
+    `<div class="s-row"><span title="annualized Sharpe ± its standard error (Lo 2002: √((1+½SR²)/T) per period, annualized)">Sharpe</span><b style="color:${accent}">${st.sharpe.toFixed(2)}${st.sharpeSE!=null?` <span class="sec" style="font-weight:400">± ${st.sharpeSE.toFixed(2)}</span>`:''}</b></div>`+
+    (st.sharpeZero?`<div class="s-row"><span class="sec" style="font-size:var(--fs-2xs)" title="the 95% interval (Sharpe ± 1.96·SE) includes zero — this sample cannot tell the rule from no edge">95% CI includes 0</span><b class="sec">⚠</b></div>`:'')+
     `<div class="s-row"><span>hit</span><b>${(st.hit*100).toFixed(0)}%</b></div>`+
     `<div class="s-row"><span>max DD</span><b class="neg">${(st.mdd*100).toFixed(1)}%</b></div></div>`;
 }
@@ -620,6 +645,8 @@ function renderBacktest(){
       ? `<span class="lbl" title="how far from zero the score must sit before a position is taken — the single-name replacement for the book quantile. σ is that name's own trailing score scale (RMS about zero), measured through that day only.">entry</span>${seg('btEntry',p.entry,[[0,'sign only'],[0.5,'±0.5σ'],[1,'±1σ']])}`
       : `<span class="lbl">book</span>${seg('btQ',p.quantile,[[0.1,'10%'],[0.2,'20%'],[0.33,'33%'],[1,'all']])}`)+
     `<span class="lbl">taker bps</span>${seg('btCost',p.cost,[[0,'0'],[5,'5'],[10,'10'],[20,'20']])}`+
+    `<span class="lbl" title="slippage in bps PER SIDE, charged on turnover at every fill beside the taker fee (build 2026.09.24-106)">slip bps</span>${seg('btSlip',p.slip,[[0,'0'],[5,'5'],[10,'10'],[25,'25']])}`+
+    `<span class="lbl" title="when the book fills: at the NEXT bar's close after the signal (default — the signal reads a close you cannot also trade at), or at the same close the signal was computed from (the pre-106 behaviour, optimistic)">fill</span>${seg('btLag',btLag(p)?'next':'same',[['next','next bar'],['same','same close (as before)']])}`+
     `<span class="lbl">in-sample</span>${seg('btSplit',p.split,[[0.5,'50%'],[0.6,'60%'],[0.7,'70%']])}</div>`+
     `<div class="s-ctrls"><span class="lbl">direction</span>${seg('btDir',p.direction,[['high','long strong'],['low','long weak']])}`+
     `<span class="lbl">structure</span>${single
@@ -658,7 +685,8 @@ function renderBacktest(){
   const ann=btAnn(res.days);   // (-104) the curve's own periods/yr, not 252
   const full=btStats(res.portR,res.eq,ann), is=btStats(isR,isE,ann), oos=btStats(oosR,oosE,ann);
   const fundRow=`<div class="s-row"><span>funding</span>${res.fundCov>0?`<b class="${res.fundCum>=0?'pos':'neg'}">${(res.fundCum>0?'+':'')+(res.fundCum*100).toFixed(1)}%</b>`:`<b class="sec" title="funding not loaded — update the server">—</b>`}</div>`;
-  const feeRow=`<div class="s-row"><span>fees</span><b class="neg">−${(res.feeCum*100).toFixed(1)}%</b></div>`;
+  const feeRow=`<div class="s-row"><span>fees</span><b class="neg">−${(res.feeCum*100).toFixed(1)}%</b></div>`
+    +`<div class="s-row"><span title="${p.slip||0}bp per side on turnover">slippage</span><b class="${res.slipCum>0?'neg':'sec'}">${res.slipCum>0?'−'+(res.slipCum*100).toFixed(1)+'%':'0'}</b></div>`;
   // Single-asset mode replaces the universe/turnover box with the two numbers that actually decide
   // whether a one-name rule was worth running: what it made against simply holding the thing, and
   // how many independent decisions that verdict rests on.
@@ -699,6 +727,11 @@ function renderBacktest(){
   const mvarNote = BT_MVAR[p.signal]
     ? ` <b>Live-score variant:</b> fixed 1/7/30d risk-adjusted horizons mirroring the Markets-tab momentum blend — the lookback control does not apply. Judge it against <i>Blend M0 — live-score analogue</i> on out-of-sample net: only a term that beats the control there earns promotion into the live column. Daily granularity can only mirror the ≥1d structure of the live score (weights renormalized to .40/.40/.20; the intraday terms carry over untested either way), and the range tilt runs on closes on both rails (older daily history carries no low)${mvarCol?`. Names missing the ${mvarCol} column fall back to the unmodulated core, so the ranked universe matches the control and the OOS gap measures the term itself`:''}.`
     : '';
+  // (build 2026.09.24-106) execution, slippage and survivorship, stated on every caption. Delisted
+  // names' daily history is not shipped (/api/daily serves live listings; the server frees a delisted
+  // market's history after 7d), so the universe is today's survivors — said, not silently assumed.
+  const execTxt=`${res.lag?`Fills at the <b>next bar's close</b> after the signal (no trade at the close the signal was computed from)`:`Fills at the <b>same close</b> the signal reads (as before -106 — optimistic: that close is not tradable once the signal is known)`}; ${p.slip||0}bp slippage per side on turnover${res.on?' (twice a night overnight)':''} on top of the fee. Sharpe ± its standard error (Lo 2002); ⚠ where the 95% band includes 0.`;
+  const survTxt=` <b>Survivorship: current listings only</b> — names delisted from the venue drop out of the history this server ships, so the rule never held the ones that died.`;
   // ---- single-asset caption: what the rule did, and the two things that make a one-name result
   // easier to fool yourself with than a cross-sectional one (no diversification, few decisions).
   const oneTk=res.single?esc(res.row.ticker||res.row.coin):'';
@@ -714,10 +747,10 @@ function renderBacktest(){
     (p.signal==='smom'?`Sector-relative momentum is demeaned against ${res.peers} live peers in the same sector, so the rule keeps its meaning on one name${res.peers<3?' — under three peers there is no sector mean and the run stays flat':''}. `:'')+
     `<b>One name is one bet:</b> there is no cross-sectional diversification here, and this run rests on ${res.trades.length} round trip${res.trades.length===1?'':'s'}`+
     `${res.trades.length<BT_TRADE_MIN?` — under ${BT_TRADE_MIN}, so read the Sharpe as an anecdote and the out-of-sample half as the only honest part`:''}. `+
-    `Shaded region is out-of-sample. Slippage not modeled.${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`;
+    `Shaded region is out-of-sample. ${execTxt}${survTxt}${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`;
   const cap = res.single ? capOne : res.on
-    ? `<b>Overnight hold.</b> Each night buy the book at the 16:00 ET close and sell at the next 09:30 ET open (Fri→Mon over the weekend), flat during the cash session — ${structTxt}${mode==='set'?` of the ${picked.length} picked names`:''}, ${wtTxt}. The book round-trips every night, so it pays the ${p.cost}bp taker fee twice a night (that's the big drag here), plus the funding accrued over each hold. Gross is price-only; the gross↔net gap is fees + funding. Uses the close→open boundary holds from the hourly spine${res.ovCov>0?'':' — not loaded yet, so this is empty until the server ships them'}. Shaded = out-of-sample. Slippage not modeled.${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`
-    : `Each rebalance, rank ${mode==='set'?`the ${picked.length} picked names`:'the universe'} by ${BT_SIGNALS[p.signal].toLowerCase()} and go ${structTxt}, ${wtTxt}, held to the next rebalance. Net of a ${p.cost}bp market-order taker fee on turnover and the actual funding each position pays or earns while held${res.fundCov>0?'':' — funding not loaded yet, so this is price-only until the server ships it'}. Gross line is price-only; the gross↔net gap is your funding + fee drag. Shaded region is out-of-sample. In-sample-selected, slippage not yet modeled — the test runs on exactly the daily history this server ships${cr?' (crypto: ~90d, BTC benchmark, 365d annualization)':` Sharpe and the vol target annualize at the series' own ${Math.round(ann)} periods/yr — UTC-day candles, weekends included, not 252 sessions`}.${mvarNote}${mode==='set'?` <b>Custom universe:</b> ranks run only among the ${picked.length} names you picked, so the tails are ${Math.max(1,Math.floor(picked.length*p.quantile))} name per side — a sketch, not a cross-section.`:''} <b>Hover</b> the curve. Not a live trade signal.`;
+    ? `<b>Overnight hold.</b> Each night buy the book at the 16:00 ET close and sell at the next 09:30 ET open (Fri→Mon over the weekend), flat during the cash session — ${structTxt}${mode==='set'?` of the ${picked.length} picked names`:''}, ${wtTxt}. The book round-trips every night, so it pays the ${p.cost}bp taker fee twice a night (that's the big drag here), plus the funding accrued over each hold. Gross is price-only; the gross↔net gap is fees + funding. Uses the close→open boundary holds from the hourly spine${res.ovCov>0?'':' — not loaded yet, so this is empty until the server ships them'}. Shaded = out-of-sample. ${execTxt}${survTxt}${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`
+    : `Each rebalance, rank ${mode==='set'?`the ${picked.length} picked names`:'the universe'} by ${BT_SIGNALS[p.signal].toLowerCase()} and go ${structTxt}, ${wtTxt}, held to the next rebalance. Net of a ${p.cost}bp market-order taker fee on turnover and the actual funding each position pays or earns while held${res.fundCov>0?'':' — funding not loaded yet, so this is price-only until the server ships it'}. Gross line is price-only; the gross↔net gap is your funding + fee drag. Shaded region is out-of-sample. ${execTxt}${survTxt} In-sample-selected — the test runs on exactly the daily history this server ships${cr?' (crypto: ~90d, BTC benchmark, 365d annualization)':` Sharpe and the vol target annualize at the series' own ${Math.round(ann)} periods/yr — UTC-day candles, weekends included, not 252 sessions`}.${mvarNote}${mode==='set'?` <b>Custom universe:</b> ranks run only among the ${picked.length} names you picked, so the tails are ${Math.max(1,Math.floor(picked.length*p.quantile))} name per side — a sketch, not a cross-section.`:''} <b>Hover</b> the curve. Not a live trade signal.`;
   const vbCap=res.eqvb?` The dashed <b>\u2b12 ${esc(res.vbName)}</b> line is that basket's price-only EW daily index over the same days \u2014 no costs, no funding, a comparison yardstick that never enters the stats; basket gap days (sub-floor coverage) compound flat.`:'';
   return head+controls+stats+(res.single?btPositionPanel(res):btBookPanel(res.book))+leg+sCard(btCurveSvg(res,splitIdx))+sCap(cap+vbCap)+renderDuelSection()+renderRetestSection();   // -96: the D1 retest study under the duel
 }
@@ -801,6 +834,7 @@ function attachBtControls(){
   const vbs=el('btVsB'); if(vbs) vbs.addEventListener('change',()=>{ state.backtest.vsBasket=vbs.value; drawBacktest(); });
   const segWire=(id,key,num)=>{ const g=el(id); if(!g) return; g.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{ state.backtest[key]=num?parseFloat(b.dataset.v):b.dataset.v; drawBacktest(); })); };
   segWire('btLb','lookback',true); segWire('btCad','cadence',true); segWire('btQ','quantile',true); segWire('btCost','cost',true); segWire('btSplit','split',true);
+  segWire('btSlip','slip',true); segWire('btLag','lag',false);   // (-106) slippage bps per side; fill at the next bar or the same close
   segWire('btDir','direction',false); segWire('btStruct','structure',false); segWire('btWt','weighting',false); segWire('btHold','holdWindow',false);
   const rq=el('btReq'); if(rq) rq.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{ state.backtest.reqSign=(b.dataset.v==='sign'); drawBacktest(); }));
   segWire('btEntry','entry',true);

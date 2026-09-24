@@ -71,7 +71,7 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
   sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30', grp:'sector' }, dataTs:0, connOk:true, view:'markets', prevView:null, regimeSrv:null,
   backtest:{ signal:'mom', lookback:20, cadence:5, quantile:0.2, cost:5, universe:'all', split:0.6,
     direction:'high', structure:'ls', weighting:'eq', reqSign:false, holdWindow:'cc', vsBasket:'',
-    picks:[], entry:0 },   // picks: explicitly targeted coins — one = single-asset timing test, several = a custom universe. entry: the σ threshold that replaces the book quantile on one name.
+    picks:[], entry:0, lag:'next', slip:5 },   // lag/slip (build 2026.09.24-106): fill at the next bar's close by default; slippage bps per side. picks: explicitly targeted coins — one = single-asset timing test, several = a custom universe. entry: the σ threshold that replaces the book quantile on one name.
   duel:{ data:null, at:0, pending:false },   // score-duel record (/api/duel), 60s client memo
   watch:new Set(), watchOnly:false, detail:null,
   notes:null, notesRev:0, noteOnly:false, noteTag:null, noteQ:'',   // written notes: the book from /api/notes, the ★-only-style row filter, and the Notes tab's own filters
