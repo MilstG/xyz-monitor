@@ -826,7 +826,10 @@ test("perf batch 2026.07.21-08: getFunding memo, bucketsFor memo, gzip+dataTs wi
 
   // #4 getFunding memo + its per-row invalidation at every fundH mutation site (5 writes + clear + sweep)
   assert.ok(pol.includes("r._fgVer === r._fVer && r._fgH === hourKey"), "getFunding memo key missing");
-  assert.equal((pol.match(/r\._fVer = \(r\._fVer \|\| 0\) \+ 1/g) || []).length, 6, "every fundH mutation site must bump _fVer (seed, 2x foldCtx, backfill, clear, sweep)");
+  // Since build 2026.09.24-102 both foldCtx writes go through fundSet, which bumps once (and keeps the memo incrementally).
+  assert.equal((pol.match(/r\._fVer = \(r\._fVer \|\| 0\) \+ 1/g) || []).length, 5, "every fundH mutation site must bump _fVer (seed, fundSet, backfill, clear, sweep)");
+  assert.equal((pol.match(/fundSet\(r, hourNow, fn\)/g) || []).length, 2, "both foldCtx forward-fill writes go through fundSet");
+  assert.ok(!/r\.fundH\.set\(hourNow/.test(pol), "no raw forward-fill write left that would skip the version bump");
 
   // #3 bucketsFor memo, and NO raw spine bucketing left at the hot call sites
   assert.ok(pol.includes("function bucketsFor(r, width)"), "bucketsFor memo helper missing");
@@ -1399,7 +1402,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract â€
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.24-101"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.24-102"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);

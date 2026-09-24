@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.24-101";
+const VERSION = "2026.09.24-102";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -274,17 +274,60 @@ function sendCachedBody(req, reply, body, tag) {
 // cache holds the built object under that key, giving the serialize+gzip memo a stable reference
 // to hit on the tf-toggle spam these routes actually see. A new content version yields a new key,
 // so a stale body is never served — the map just accumulates a superseded entry, pruned by size.
-const keyedCache = new Map();   // etagKey -> built payload object (stable identity for the memos)
-function serveKeyed(req, reply, etagKey, build, fallback) {
+//
+// Byte-bounded LRU (build 2026.09.24-102). The cap used to be 800 ENTRIES with insertion-order
+// eviction, whatever their size — 800 deep-candle payloads is hundreds of MB — and each entry held
+// the built object while the WeakMap memos held its string and gzip Buffer beside it. An entry is
+// now just what is served: the serialized string (built once, the object is then dropped) and its
+// gzip Buffer once compressed, both counted against KEYED_MAX_BYTES; a hit moves the entry to the
+// most-recent end; eviction takes the least-recently used until both caps hold. An optional `slot`
+// names the payload a key is a VERSION of (one chart, one coin's series): a new version replaces
+// the previous one instead of piling up next to it — the tf-candle key folds a ~0.1% price bucket
+// (the forming bar's live close) and would otherwise mint a fresh entry on every small move.
+const KEYED_MAX_BYTES = 64 * 1024 * 1024, KEYED_MAX_ENTRIES = 800;
+function makeKeyedCache(maxBytes, maxEntries) {
+  const map = new Map(), slots = new Map();   // key -> { key, s, gz, bytes, slot, live }; slot -> key
+  let bytes = 0;
+  const drop = (k) => {
+    const e = map.get(k); if (!e) return;
+    map.delete(k); bytes -= e.bytes; e.live = false;
+    if (e.slot != null && slots.get(e.slot) === k) slots.delete(e.slot);
+  };
+  const evict = () => { for (const k of map.keys()) { if (bytes <= maxBytes && map.size <= maxEntries) break; drop(k); } };
+  return {
+    get(k) { const e = map.get(k); if (e) { map.delete(k); map.set(k, e); } return e; },   // LRU touch
+    put(k, s, slot) {
+      drop(k);
+      if (slot != null) { const prev = slots.get(slot); if (prev !== undefined) drop(prev); slots.set(slot, k); }
+      const e = { key: k, s, gz: null, bytes: s.length, slot: slot == null ? null : slot, live: true };
+      map.set(k, e); bytes += e.bytes; evict();
+      return e;
+    },
+    // The compressed Buffer joins the entry's account when it lands (if the entry is still live).
+    addGz(e, buf) { e.gz = buf; if (e.live && map.get(e.key) === e) { e.bytes += buf.length; bytes += buf.length; evict(); } },
+    stats: () => ({ entries: map.size, bytes, slots: slots.size }),
+    keys: () => [...map.keys()],
+  };
+}
+const keyedCache = makeKeyedCache(KEYED_MAX_BYTES, KEYED_MAX_ENTRIES);
+function serveKeyed(req, reply, etagKey, build, fallback, slot) {
   const tag = 'W/"' + etagKey + '"';
   if (req.headers["if-none-match"] === tag) { reply.header("etag", tag).header("cache-control", "no-cache").code(304).send(); return; }
-  let body = keyedCache.get(etagKey);
-  if (body === undefined) {
-    body = build() || fallback;
-    keyedCache.set(etagKey, body);
-    if (keyedCache.size > 800) { let i = 0; for (const k of keyedCache.keys()) { keyedCache.delete(k); if (++i >= 400) break; } }
+  let e = keyedCache.get(etagKey);
+  if (e === undefined) e = keyedCache.put(etagKey, JSON.stringify(build() || fallback), slot);
+  // Same response as sendCachedBody gives for the object: headers, the >=1KB gzip rule, threadpool
+  // compression shared by concurrent first requests, then the Buffer on the synchronous path.
+  reply.header("cache-control", "no-cache");
+  reply.header("etag", tag);
+  reply.header("content-type", "application/json; charset=utf-8");
+  if (e.s.length >= 1024 && /\bgzip\b/.test(req.headers["accept-encoding"] || "")) {
+    let gz = e.gz;
+    if (gz === null) { const ent = e; gz = e.gz = gzipAsync(e.s).then((buf) => { keyedCache.addGz(ent, buf); return buf; }); }
+    reply.header("content-encoding", "gzip");
+    reply.header("vary", "accept-encoding");
+    return Buffer.isBuffer(gz) ? reply.send(gz) : gz.then((buf) => reply.send(buf));
   }
-  return sendCachedBody(req, reply, body, tag);
+  return reply.send(e.s);
 }
 
 // SSE write with backpressure (build 2026.09.24-101). Every frame used to be written blind: a
@@ -2646,7 +2689,7 @@ async function buildServer() {
     serveKeyed(req, reply, "series|" + coin + "|" + poller.getCoinStamp(coin).st,
       () => { const s = poller.getSeries(coin) || { oi: [], funding: [] };
         return { coin, oi: downsampleSeries(s.oi, SERIES_CAP), funding: downsampleSeries(s.funding, SERIES_CAP) }; },
-      { coin, oi: [], funding: [] });
+      { coin, oi: [], funding: [] }, "series|" + coin);   // slot: a new stamp replaces the old version (build 2026.09.24-102)
   });
   // Crypto intraday correlation matrix (Correlation tab, crypto scope). w = 4h | 1d | 7d selects
   // the window (and its base bar: 5m / 15m / 1h). The poller builds it over the 5m archive and
@@ -2835,17 +2878,18 @@ async function buildServer() {
     // key, and the forming bar can never freeze against the tape (the one-code-path rule). The
     // legacy `days` hourly payload does no live-mark substitution client-side, so it keys on the
     // spine stamp alone.
-    let key;
+    let key, slot;
     const cfast = req.query && req.query.fast, cslow = req.query && req.query.slow;
     const cpair = (cfast != null || cslow != null) ? `|ma:${cfast || ""}-${cslow || ""}` : "";
     if (tf) { const cs = poller.getCoinStamp(coin);
       const bucket = cs.px > 0 ? Math.round(Math.log(cs.px) * 1000) : 0;   // ~0.1% granularity, scale-free
-      key = "candles|" + coin + "|tf:" + String(tf).toLowerCase() + cpair + "|" + cs.st + "|" + bucket; }
-    else key = "candles|" + coin + "|d:" + (days || 14) + "|" + poller.getCoinStamp(coin).st;
+      slot = "candles|" + coin + "|tf:" + String(tf).toLowerCase() + cpair;   // one live version per chart: a new price bucket or stamp replaces it (build 2026.09.24-102)
+      key = slot + "|" + cs.st + "|" + bucket; }
+    else { slot = "candles|" + coin + "|d:" + (days || 14); key = slot + "|" + poller.getCoinStamp(coin).st; }
     serveKeyed(req, reply, key, () => {
       if (tf) { const r = poller.getTfCandles(coin, tf, cfast, cslow); if (r) return r; }
       return { coin, candles: poller.getCandles(coin, days) };
-    }, { coin, candles: [] });
+    }, { coin, candles: [] }, slot);
   });
   // AI analyst report: everything this server holds on one ticker, compiled and sent to the
   // Anthropic API (Fable, Opus fallback), validated, and cached for the whole group. GET serves
@@ -3394,7 +3438,8 @@ async function main() {
 
 // _poller is a testing seam (build 2026.09.24-99): the Telegram sync suite binds chats and drains
 // the outbox against a stubbed Bot API through it. Nothing in the app reads it.
-module.exports = { buildServer, VERSION, _poller: () => poller, _sseWriteTo: sseWriteTo, SSE_MAX_BUFFERED };
+module.exports = { buildServer, VERSION, _poller: () => poller, _sseWriteTo: sseWriteTo, SSE_MAX_BUFFERED,
+  _makeKeyedCache: makeKeyedCache, _keyedStats: () => keyedCache.stats(), KEYED_MAX_BYTES, KEYED_MAX_ENTRIES };   // build 2026.09.24-102: LRU seams for the tests
 if (require.main === module) main().catch((e) => { console.error(e); process.exit(1); });
 
 // Graceful stop: flush EVERYTHING that persists on a timer, not just features + ledger — the
@@ -3405,6 +3450,9 @@ let shuttingDown = false;
 async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
+  // Let in-flight async features/ledger writes settle first (build 2026.09.24-102), so the final
+  // synchronous saves below are the last writes of those files; bounded, never holds the exit.
+  try { if (store.drainWrites) await store.drainWrites(5000); } catch (_) {}
   try { poller.persistFeatures(); } catch (_) {}
   try { poller.persistLedger(); } catch (_) {}
   try { poller.persistTriggers(); } catch (_) {}

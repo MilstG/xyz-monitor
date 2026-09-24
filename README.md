@@ -736,6 +736,28 @@ limiter keeps a running sum instead of filter+reduce per grant, the zip ingests 
 the sync-heavy timers (snapshot, store flush, signals + ledger, daily, features) sit on distinct
 phases instead of firing in the same tick. Cadences are unchanged.
 
+**Performance (build 2026.09.24-102).** The timers that mostly find nothing new now find that out
+first. `buildDaily` (60 s) computes its signature from per-row memos — daily tuples, the daily-step
+OI series, funding by day, each keyed on its own inputs — and returns the previous object before
+assembling anything (~100 ms → ~1.3 ms on the 150-market bench with a full year of OI history).
+The forward-fill funding write keeps `getFunding`'s sorted copy incrementally instead of re-sorting
+~1,440 hours per market per 30 s poll. In `buildSnapshot` (15 s) the funding percentile is
+memoized exactly (it holds until the funding map, the rate, or the 31-day cut past its oldest
+counted hour moves), the 7d/30d window-average funding legs are memoized per sample and clock
+minute (the short legs stay fresh), and the change signature reuses cached per-object strings
+(~40 ms → ~11–19 ms unchanged on the same bench). The in-memory OI history thins samples that
+age past the 31-day full-resolution window about hourly on push (the same first-sample-per-hour
+rule the daily pass applies), trims its front with one splice, and `getSeries` is memoized per
+sample. The keyed
+response cache is a byte-bounded LRU (64 MB, 800 entries) that holds only the serialized string and
+its gzip, and a new version of a chart or series replaces its previous one — the tf-candle key keeps
+its ~0.1 % price bucket (the forming bar's live close) without piling up an entry per bucket.
+Shutdown awaits in-flight async writes before its final synchronous saves, and a synchronous save
+that overlaps an async rename of the same file is re-landed after it, so the older copy never wins.
+The history stays as `[ts, oi, funding]` arrays (~210 MB of heap for 150 markets × 365 days on the
+bench): moving it to columnar typed arrays would touch every reader that indexes `s[0]`/`s[1]`/`s[2]`
+(the ΔOI and funding windows, the studies, the drawer series, the sector spines), so it is deferred.
+
 ## Optional: earnings calendar (Finnhub)
 
 The Earnings tab and the markets-table E badges need a free Finnhub API key: sign up at

@@ -126,6 +126,29 @@ function openStore(dataDir) {
   let dPruning = false;   // hold deriv appends in dbuf during the streaming rewrite, same as the OI prune
   let featGen = 0, featSeq = 0, featChain = Promise.resolve(true);   // saveFeaturesAsync serialization (build 2026.09.24-101)
   let cfgChain = Promise.resolve(), cfgGen = new Map();              // saveConfigAsync serialization, per-file generation (same build)
+  // Rename-window guard (build 2026.09.24-102). The generation check before an async rename
+  // closes every window but one: the rename itself is queued on the threadpool, so a synchronous
+  // shutdown/crash save that runs WHILE it is outstanding can land first and then be overwritten by
+  // the older async copy. A sync save made while a rename of the same file is outstanding stashes
+  // its writer here; when the rename settles, the async path re-lands that newer write (sync) and
+  // reports itself superseded. Graceful shutdown also awaits drainWrites() before its final saves,
+  // so on that path the window is empty; the stash covers anything that still overlaps.
+  const renaming = new Map();     // file -> outstanding async renames
+  const relandAfter = new Map();  // file -> () => void, the newest sync save made during that window
+  async function guardedRename(tmp, file, isStale) {
+    if (isStale()) { await fs.promises.unlink(tmp).catch(() => {}); return false; }
+    renaming.set(file, (renaming.get(file) || 0) + 1);
+    try { await fs.promises.rename(tmp, file); }
+    finally { const n = (renaming.get(file) || 1) - 1; if (n) renaming.set(file, n); else renaming.delete(file); }
+    const reland = relandAfter.get(file);
+    if (reland) { relandAfter.delete(file); try { reland(); } catch (_) {} return false; }
+    return !isStale();
+  }
+  // A sync save: run it now, and if an async rename of the same file is outstanding, arm the re-land.
+  function syncSave(file, write) {
+    if (renaming.get(file)) relandAfter.set(file, write);
+    write();
+  }
   let oiPreloaded = null; // set by preloadOI(); consumed once by the next loadAll()
   // CONFIG-grade files (notes, rules, baskets, ledger): somebody typed these, or they are the
   // record itself, and nothing can rebuild them. tmp+rename alone is durable only by ext4
@@ -136,12 +159,15 @@ function openStore(dataDir) {
   // on the next save — which is how a corrupt notes.json used to eat every note.
   function saveConfig(file, data) {
     cfgGen.set(file, (cfgGen.get(file) || 0) + 1);   // supersedes any saveConfigAsync of this file still in flight
-    const tmp = file + ".tmp";
-    const fd = fs.openSync(tmp, "w");
-    try { fs.writeSync(fd, JSON.stringify(data)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-    try { if (fs.existsSync(file)) fs.copyFileSync(file, file + ".bak"); } catch (_) {}
-    fs.renameSync(tmp, file);
-    try { const dfd = fs.openSync(path.dirname(file), "r"); try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); } } catch (_) {}
+    const body = JSON.stringify(data);
+    syncSave(file, () => {
+      const tmp = file + ".tmp";
+      const fd = fs.openSync(tmp, "w");
+      try { fs.writeSync(fd, body); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      try { if (fs.existsSync(file)) fs.copyFileSync(file, file + ".bak"); } catch (_) {}
+      fs.renameSync(tmp, file);
+      try { const dfd = fs.openSync(path.dirname(file), "r"); try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); } } catch (_) {}
+    });
   }
   // Async twin of saveConfig (build 2026.09.24-101) for the PERIODIC ledger persist: the same
   // write -> fsync -> .bak -> rename -> dir fsync sequence, through a FileHandle, so the two fsyncs
@@ -163,8 +189,7 @@ function openStore(dataDir) {
         try { await fh.writeFile(body); await fh.sync(); } finally { await fh.close(); }
         if (stale()) { await fs.promises.unlink(tmp).catch(() => {}); return false; }
         try { await fs.promises.copyFile(file, file + ".bak"); } catch (_) {}   // first write: no previous version
-        if (stale()) { await fs.promises.unlink(tmp).catch(() => {}); return false; }
-        await fs.promises.rename(tmp, file);
+        if (!(await guardedRename(tmp, file, stale))) return false;   // checks the generation right before, and re-lands a sync save that overlapped the rename (build 2026.09.24-102)
         try { const dh = await fs.promises.open(path.dirname(file), "r"); try { await dh.sync(); } finally { await dh.close(); } } catch (_) {}
         return true;
       } catch (_) { await fs.promises.unlink(tmp).catch(() => {}); return false; }
@@ -428,9 +453,12 @@ function openStore(dataDir) {
     saveFeatures(data) {
       featGen++;   // any async write still in flight is now older than this one: it must not rename over it
       try {
-        const tmp = featFile + ".tmp";
-        fs.writeFileSync(tmp, JSON.stringify(data));
-        fs.renameSync(tmp, featFile);
+        const body = JSON.stringify(data);
+        syncSave(featFile, () => {   // re-landed after an overlapping async rename (build 2026.09.24-102)
+          const tmp = featFile + ".tmp";
+          fs.writeFileSync(tmp, body);
+          fs.renameSync(tmp, featFile);
+        });
       } catch (_) {}
     },
     // The periodic path (build 2026.09.24-101): the multi-MB write goes through fs.promises so
@@ -447,14 +475,22 @@ function openStore(dataDir) {
       const run = async () => {
         try {
           await fs.promises.writeFile(tmp, body);
-          if (gen !== featGen) { await fs.promises.unlink(tmp).catch(() => {}); return false; }
-          await fs.promises.rename(tmp, featFile);
-          return true;
+          return await guardedRename(tmp, featFile, () => gen !== featGen);   // build 2026.09.24-102: see guardedRename
         } catch (_) { await fs.promises.unlink(tmp).catch(() => {}); return false; }
       };
       const p = featChain.then(run);
       featChain = p;
       return p;
+    },
+    // Graceful shutdown (build 2026.09.24-102): settle every queued async features/config write
+    // before the final synchronous saves, bounded so a stuck disk cannot hold the exit. Resolves
+    // true when the queues drained, false on timeout; never rejects.
+    drainWrites(timeoutMs) {
+      const all = Promise.all([featChain, cfgChain]).then(() => true, () => true);
+      if (!(timeoutMs > 0)) return all;
+      let t;
+      const to = new Promise((r) => { t = setTimeout(() => r(false), timeoutMs); });   // cleared below as soon as the queues settle
+      return Promise.race([all, to]).finally(() => clearTimeout(t));
     },
     loadFeatures() {
       try { if (fs.existsSync(featFile)) return JSON.parse(fs.readFileSync(featFile, "utf8")); }

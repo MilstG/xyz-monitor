@@ -352,17 +352,58 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       const f = (r.funding != null && isFinite(r.funding)) ? r.funding : null;
       h.push([now, r.oiBase, f]);
       store.insert(r.coin, now, r.oiBase, f);
-      while (h.length && h[0][0] < cut) h.shift();
+      histRetain(r.coin, h, now, cut);
     }
   }
+  // ---- incremental OI-history retention (build 2026.09.24-102) ---------------------------------
+  // The 365d tier used to be thinned to one sample per hour only by the daily maintenance pass, so
+  // every xyz series carried up to a day of full-resolution samples past OI_FULL_RES, and the front
+  // trim was a shift() loop. Now each push trims the front with ONE splice and, at most about once
+  // an hour per series, thins the samples that aged past the full-resolution window since the last
+  // pass — exactly maintenance's rule (first sample of each UTC hour), resumed from a remembered
+  // index so a pass touches only the newly aged samples. The result at any moment equals the daily
+  // batch thin run at that moment (maintenance still runs and is now a no-op on these arrays).
+  // Crypto series keep their existing shape (flat, trimmed by maintenance). Every non-append
+  // mutation bumps histMut, which the history memos (getSeries, oiDailySeries) fold into their keys.
+  const histMut = new WeakMap();    // hist array -> count of in-place non-append mutations
+  const histThin = new WeakMap();   // hist array -> index below which it is already hourly-thinned
+  const bumpHistMut = (a) => histMut.set(a, (histMut.get(a) || 0) + 1);
+  function histRetain(coin, h, now, cut) {
+    if (h.length && h[0][0] < cut) {
+      let i = 0; while (i < h.length && h[i][0] < cut) i++;
+      h.splice(0, i); bumpHistMut(h);
+      const u = histThin.get(h); if (u) histThin.set(h, Math.max(0, u - i));
+    }
+    if (!coin.includes(":")) return;   // crypto: flat window, maintenance's trim
+    const full = now - OI_FULL_RES, u = histThin.get(h) || 0;
+    if (u < h.length && h[u][0] < full - HOUR) histThinTo(h, full);   // an hour of newly aged samples pending: amortized, ~hourly
+  }
+  function histThinTo(h, full) {
+    let i = histThin.get(h) || 0, w = i;
+    let lastHb = w > 0 ? Math.floor(h[w - 1][0] / HOUR) : -1;
+    for (; i < h.length && h[i][0] < full; i++) {
+      const hb = Math.floor(h[i][0] / HOUR);
+      if (hb !== lastHb) { h[w++] = h[i]; lastHb = hb; }
+    }
+    if (w !== i) { h.splice(w, i - w); bumpHistMut(h); }
+    histThin.set(h, w);
+  }
 
-  // Per-market OI + funding history (for the ticker drawer sparklines).
+  // Per-market OI + funding history (for the ticker drawer sparklines). Memoized (build
+  // 2026.09.24-102) on the array, its length, edge timestamps and mutation count: a cache miss
+  // copied the whole year-deep series; it now changes only when a sample lands (~4.5 min).
+  const seriesMemo = new Map();   // coin -> { h, n, t0, t1, m, out }
   function getSeries(coin) {
     const h = hist.get(coin);
     if (!h) return { oi: [], funding: [] };
+    const n = h.length, t0 = n ? h[0][0] : 0, t1 = n ? h[n - 1][0] : 0, m = histMut.get(h) || 0;
+    const c = seriesMemo.get(coin);
+    if (c && c.h === h && c.n === n && c.t0 === t0 && c.t1 === t1 && c.m === m) return c.out;
     const oi = [], funding = [];
     for (const s of h) { oi.push([s[0], s[1]]); if (s[2] != null) funding.push([s[0], s[2]]); }
-    return { oi, funding };
+    const out = { oi, funding };
+    seriesMemo.set(coin, { h, n, t0, t1, m, out });
+    return out;
   }
 
   // Per-market hourly OHLCV spine (rolling ~HOURLY_HISTORY_DAYS): [[t,o,h,l,c,v], ...] oldest->newest.
@@ -443,6 +484,28 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     r._fgVer = r._fVer; r._fgH = hourKey; r._fg = out;
     return out;
   }
+  // The live forward-fill write (build 2026.09.24-102). Every 30s poll rewrote the current hour and
+  // bumped _fVer, so getFunding re-walked and re-sorted ~1,440 entries per market per poll. A write
+  // that lands at or after the memo's last hour (always, for the forward-fill) now updates the memo
+  // copy-on-write — replace or append the last entry, drop leading entries that fell out of the
+  // window — giving exactly what a full rebuild at this instant returns, without the sort. A write
+  // that does not change the stored value is not a change at all (no version bump). Anything else
+  // (an older hour, a stale memo) falls back to the full rebuild on the next read.
+  function fundSet(r, t, rate) {
+    if (r.fundH.has(t) && Object.is(r.fundH.get(t), rate)) return;
+    const fg = r._fg, valid = fg && r._fgVer === r._fVer;
+    r.fundH.set(t, rate);
+    r._fVer = (r._fVer || 0) + 1;
+    if (!valid) return;
+    const last = fg.length ? fg[fg.length - 1] : null;
+    if (last && t < last[0]) return;
+    const now = Date.now(), cut = now - FUNDING_HISTORY_DAYS * DAY;
+    if (t < cut) return;
+    let i0 = 0; while (i0 < fg.length && fg[i0][0] < cut) i0++;
+    const out = fg.slice(i0, last && last[0] === t ? -1 : fg.length);
+    if (Number.isFinite(rate)) out.push([t, rate]);
+    r._fg = out; r._fgVer = r._fVer; r._fgH = Math.floor(now / HOUR);
+  }
   function fundingCoverage(U) {
     let coins = 0, points = 0;
     const src = U ? U.roster() : [...rows.values()];
@@ -496,10 +559,39 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
 
   // Time-weighted average funding per window, over the same interval as the ΔOI legs, so the
   // regime's funding corroboration is measured on matching windows rather than a point-in-time rate.
+  // Build 2026.09.24-102: the d7/d30 legs walk ~2k/~8.6k samples per market and ran on every 15s
+  // snapshot although hist only gains a sample every OI_MIN_GAP. They are memoized per row on
+  // (array, length, last ts, mutation count, clock minute) — the value is the fresh computation as
+  // of the first build in that minute, a <=60s shift of a 7-30 day window's left edge. The short
+  // legs (h1/h4/d1: <=~300 samples) stay fresh every call, since a minute is a visible slice of them.
+  const FUNDWIN_MEMO = { d7: 1, d30: 1 };
   function computeFundWin(r) {
     const h = hist.get(r.coin), out = {};
-    for (const k in TF) out[k] = fundingAvg(h, TF[k]);
+    const mk = h ? h.length + ":" + (h.length ? h[h.length - 1][0] : 0) + ":" + (histMut.get(h) || 0) + ":" + Math.floor(Date.now() / 60000) : "";
+    let m = r._fwM;
+    if (!m || m.h !== h || m.k !== mk) m = r._fwM = { h, k: mk, v: {} };
+    for (const k in TF) {
+      if (!FUNDWIN_MEMO[k]) { out[k] = fundingAvg(h, TF[k]); continue; }
+      if (!(k in m.v)) m.v[k] = fundingAvg(h, TF[k]);
+      out[k] = m.v[k];
+    }
     return out;
+  }
+  // Funding percentile (build 2026.09.24-102, one definition for the snapshot, the duel and the
+  // earnings setups): where the CURRENT rate sits in this market's own 31d hourly distribution,
+  // >=96 samples before claiming one. It was a full scan of the funding Map per market per 15s
+  // tick. Memoized on the Map (identity + size), its write counter and the current rate, and valid
+  // while the moving 31d cut has not passed the oldest sample the scan counted — the inputs of the
+  // count are then identical, so the memo returns exactly what the scan would.
+  function fundPctOf(r) {
+    if (r.funding == null || !isFinite(r.funding) || !r.fundH || !r.fundH.size) return null;
+    const cut = Date.now() - 31 * DAY, m = r._fpM;
+    if (m && m.fh === r.fundH && m.size === r.fundH.size && m.ver === r._fVer && Object.is(m.rate, r.funding) && cut <= m.tMin) return m.v;
+    let n = 0, le = 0, tMin = Infinity;
+    for (const [t, rate] of r.fundH) { if (t < cut || !isFinite(rate)) continue; n++; if (rate <= r.funding) le++; if (t < tMin) tMin = t; }
+    const v = n >= 96 ? Math.round((100 * le) / n) : null;
+    r._fpM = { fh: r.fundH, size: r.fundH.size, ver: r._fVer, rate: r.funding, tMin, v };
+    return v;
   }
 
   // ===== Score duel: MOM vs MOM+ on daily forward rank IC (build 2026.07.24-07) ================
@@ -529,14 +621,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // funding percentile: same loop as the snapshot's fundPct — current rate vs the market's own
     // 31d hourly distribution, ≥96 samples before claiming one (an honest null beats a fake rank)
     let fundPct = null;
-    try {
-      if (r.funding != null && isFinite(r.funding) && r.fundH && r.fundH.size) {
-        const cut = Date.now() - 31 * DAY;
-        let n = 0, le = 0;
-        for (const [t, rate] of r.fundH) { if (t < cut || !isFinite(rate)) continue; n++; if (rate <= r.funding) le++; }
-        if (n >= 96) fundPct = Math.round((100 * le) / n);
-      }
-    } catch (_) {}
+    try { fundPct = fundPctOf(r); } catch (_) {}
     const fh = (fw.d1 != null && isFinite(fw.d1)) ? fw.d1 : r.funding;   // window-avg funding, point-rate fallback
     return {
       h1: pct(ref.p1h), h4: pct(ref.p4h),
@@ -650,7 +735,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const px = num(ctx.markPx) ?? num(ctx.midPx) ?? num(ctx.oraclePx);
     if (px != null) r.px = px;
     const pd = num(ctx.prevDayPx); if (pd != null) r.prevDay = pd;
-    const fn = num(ctx.funding); if (fn != null) { r.funding = fn; r.fundH.set(hourNow, fn); r._fVer = (r._fVer || 0) + 1; }  // forward-fill the current hour
+    const fn = num(ctx.funding); if (fn != null) { r.funding = fn; fundSet(r, hourNow, fn); }  // forward-fill the current hour (incremental memo, build 2026.09.24-102)
     const vl = num(ctx.dayNtlVlm); if (vl != null) r.vol = vl;
     const oc = num(ctx.oraclePx); if (oc != null) r.oracle = oc;
     const oi = num(ctx.openInterest);
@@ -726,7 +811,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       const px = num(ctx.markPx) ?? num(ctx.midPx) ?? num(ctx.oraclePx);
       if (px != null) r.px = px;
       const pd = num(ctx.prevDayPx); if (pd != null) r.prevDay = pd;
-      const fn = num(ctx.funding); if (fn != null) { r.funding = fn; r.fundH.set(hourNow, fn); r._fVer = (r._fVer || 0) + 1; }
+      const fn = num(ctx.funding); if (fn != null) { r.funding = fn; fundSet(r, hourNow, fn); }
       const vl = num(ctx.dayNtlVlm); if (vl != null) r.vol = vl;
       const oc = num(ctx.oraclePx); if (oc != null) r.oracle = oc;
       const oi = num(ctx.openInterest);
@@ -1277,14 +1362,24 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // Compact per-market fingerprint for the snapshot content signature (see buildSnapshot). Covers
   // every field mapMarket emits that a client renders: the scalars are already sig()-quantized and
   // the small nested objects are stringified (they only move on a poll / candle refresh anyway).
+  // Build 2026.09.24-102: the nested objects were JSON.stringified per market per tick. ref/feat
+  // are now the same trimmed object while the row's source object is (trimMemo), and red/rvol are
+  // already memoized objects, so their strings are cached per object identity (jsonOf). doi and
+  // fundByWin are rebuilt each tick as flat {window: number|null} maps in fixed TF order, so their
+  // values joined are the same information as their JSON.
+  const jsonMemo = new WeakMap();
+  const jsonOf = (o) => { let v = jsonMemo.get(o); if (v === undefined) { v = JSON.stringify(o); jsonMemo.set(o, v); } return v; };
+  const flatSig = (o) => { let v = "{"; for (const k in o) v += o[k] + ","; return v + "}"; };
+  const trimMemo = new WeakMap();   // r.ref / r.feat (replaced by assignment, never mutated) -> trimmed copy
+  const trimOnce = (src, fn) => { if (!src) return fn(src); let v = trimMemo.get(src); if (v === undefined) { v = fn(src); trimMemo.set(src, v); } return v; };
   function markSig(m) {
     return m.coin + "|" + m.px + "," + m.prevDay + "," + m.funding + "," + m.vol + "," + m.oi + ","
       + m.oiBase + "," + m.oracle + "," + m.d1 + "," + m.fundPct + "," + (m.delisted ? 1 : 0) + "," + (m.cascT || 0) + "," + (m.liq24 || 0)
       + "," + (m.tscore == null ? "" : m.tscore) + "," + (m.e21d == null ? "" : m.e21d)
       + "," + (m.p5m == null ? "" : m.p5m) + "," + (m.p15m == null ? "" : m.p15m)
-      + "|" + (m.ref ? JSON.stringify(m.ref) : "") + (m.feat ? JSON.stringify(m.feat) : "")
-      + (m.red ? JSON.stringify(m.red) : "") + (m.rvol ? JSON.stringify(m.rvol) : "")
-      + (m.doi ? JSON.stringify(m.doi) : "") + (m.fundByWin ? JSON.stringify(m.fundByWin) : "") + ";";
+      + "|" + (m.ref ? jsonOf(m.ref) : "") + (m.feat ? jsonOf(m.feat) : "")
+      + (m.red ? jsonOf(m.red) : "") + (m.rvol ? jsonOf(m.rvol) : "")
+      + (m.doi ? flatSig(m.doi) : "") + (m.fundByWin ? flatSig(m.fundByWin) : "") + ";";
   }
   // ---- volume profile + unified level map (build 2026.07.27-22) ------------------------------
   // One memoized {vp, map} per name. Bars: dailyRaw for depth (370d equity AND crypto since -20),
@@ -1373,19 +1468,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       // Funding percentile: where the CURRENT rate sits in this market's own 31d hourly funding
       // distribution. 96 = the crowd is paying near its monthly extreme — the classic crypto
       // mean-reversion zone. Computed for every universe; extremes are just rarer on equities.
+      // Reads the funding Map directly (a percentile is order-independent), memoized in fundPctOf
+      // (build 2026.09.24-102) — >=4 days of hourly samples before we claim a percentile.
       let fundPct = null;
-      try {
-        if (r.funding != null && isFinite(r.funding) && r.fundH && r.fundH.size) {
-          // Read the funding Map DIRECTLY — a percentile is order-independent (a count of samples
-          // at or below the current rate), so it never needed the sorted [t,rate] copy getFunding
-          // builds. Skipping that per-market sort on every 15s tick is the point; the live Map is
-          // the single source, so there's no staleness window.
-          const cut = Date.now() - 31 * DAY;
-          let n = 0, le = 0;
-          for (const [t, rate] of r.fundH) { if (t < cut || !isFinite(rate)) continue; n++; if (rate <= r.funding) le++; }
-          if (n >= 96) fundPct = Math.round((100 * le) / n);   // >=4 days of hourly samples before we claim a percentile
-        }
-      } catch (_) {}
+      try { fundPct = fundPctOf(r); } catch (_) {}
       // Red-tape resilience (fixed 31d, 4h bars, breadth-defined red, universe-median reference)
       // + clock-hour-matched relative volume for the 1h/4h/1d windows. Both derive entirely from
       // the retained hourly spine — zero additional API weight.
@@ -1482,7 +1568,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         px: sig(r.px, 9), prevDay: sig(r.prevDay, 9), funding: sig(r.funding, 6),
         vol: rnd(r.vol, 0), oi: rnd(r.oi, 0), oiBase: sig(r.oiBase, 9),
         oracle: sig(r.oracle, 9), d1: rnd(r.d1, 4),
-        ref: trimRef(r.ref), feat: trimFeat(r.feat),
+        ref: trimOnce(r.ref, trimRef), feat: trimOnce(r.feat, trimFeat),   // same trimmed object while the source is (build 2026.09.24-102)
         doi: trimWin(computeDoi(r)), fundByWin: trimWin(computeFundWin(r), 6),
         sector: cl.sector, assetClass: cl.assetClass,
         // Overlay provenance (build 2026.08.05-02): present ONLY when the classification came from
@@ -1604,21 +1690,55 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
     return hs.length > 24 ? deriveDailyClose(hs) : null;   // UTC-floored by construction — correct for 24/7 markets
   }
+  // ---- buildDaily memos (build 2026.09.24-102) ------------------------------------------------
+  // buildDaily runs every 60s and used to rebuild every per-row series before comparing its
+  // signature. Each piece is now memoized on its own inputs — the values are what the fresh
+  // computation returns — and the signature is computed from them FIRST, so the unchanged path
+  // (the common one) costs a key compare per row. Consumers only read these arrays.
+  //   dailyTuplesM: dailyRaw (replaced by assignment) + its length/last bar, plus the hourly spine
+  //                 (also replaced by assignment) whenever the spine feeds the result.
+  //   oiDailyM:     see oiDailySeriesM.
+  //   fundByDayM:   getFunding's array (a new array whenever its content changes, see fundSet).
+  function dailyTuplesM(r, hs) {
+    const d = r.dailyRaw, dl = d ? d.length : -1, dLast = dl > 0 ? d[dl - 1] : null;
+    const lacks = dailyLacksOHLC(r), useHs = !(dl >= 5) || lacks;
+    const hk = useHs ? (Array.isArray(r.hourlyRaw) ? r.hourlyRaw : null) : null, hl = useHs ? hs.length : -1;   // the spine array itself (getHourly hands out a fresh [] when there is none)
+    const m = r._dtM;
+    if (m && m.d === d && m.dl === dl && m.lt === (dLast && dLast.t) && m.lc === (dLast && dLast.c) && m.lacks === lacks
+      && m.hk === hk && m.hl === hl) return m.v;
+    const v = dailyTuples(r, hs);
+    r._dtM = { d, dl, lt: dLast && dLast.t, lc: dLast && dLast.c, lacks, hk, hl, v };
+    return v;
+  }
+  function oiDailyM(r) {
+    const os = oiDailySeriesM(r.coin);
+    if (!os) return null;
+    const m = r._odM;
+    if (m && m.os === os) return m.v;
+    const v = os.map(([d, x]) => [d, sigq(x, 6)]);
+    r._odM = { os, v };
+    return v;
+  }
+  function fundByDayM(r, fh) {
+    const m = r._fdM;
+    if (m && m.fh === fh) return m.v;
+    const byDay = new Map();
+    for (const [t, rate] of fh) { const d = Math.floor(t / DAY) * DAY; byDay.set(d, (byDay.get(d) || 0) + rate); }
+    const v = [...byDay.entries()].sort((a, b) => a[0] - b[0]).map(([d, f]) => [d, +f.toFixed(8)]);
+    r._fdM = { fh, v };
+    return v;
+  }
   function buildDailyMain(daily, funding, oi) {
     for (const r of mainMarkets()) {
       const hs = getHourly(r.coin);
-      const dr = dailyTuples(r, hs);
+      const dr = dailyTuplesM(r, hs);
       if (dr && dr.length) {
         deepDaily.set(r.coin, dr);                                 // full 370d for the signal loop — the whole point of the -20 retention
         daily[r.coin] = dr.slice(-(MAIN_DAILY_PAYLOAD + 2));       // -20: the wire stays at the ~90d the clients render
       }
-      if (oi) { const os = oiDailySeries(r.coin); if (os) oi[r.coin] = os.map(([d, x]) => [d, sigq(x, 6)]); }
+      if (oi) { const ov = oiDailyM(r); if (ov) oi[r.coin] = ov; }
       const fh = getFunding(r.coin);
-      if (fh.length) {
-        const byDay = new Map();
-        for (const [t, rate] of fh) { const d = Math.floor(t / DAY) * DAY; byDay.set(d, (byDay.get(d) || 0) + rate); }
-        funding[r.coin] = [...byDay.entries()].sort((a, b) => a[0] - b[0]).map(([d, f]) => [d, +f.toFixed(8)]);
-      }
+      if (fh.length) funding[r.coin] = fundByDayM(r, fh);
     }
   }
   function buildDaily() {
@@ -1628,19 +1748,41 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const offHours = computeOffHours(nowMs);   // kept here too for client compatibility; the snapshot copy is the fresh one
     const offHoursBy = homeStateAll(nowMs);    // per-HOME-market states — the foreign-home rows anchor to these, never to the US flag
     let coins = 0, lens = 0;
-    for (const r of activeMarkets()) {
-      const hs = getHourly(r.coin);   // normalized array spine [[t,o,h,l,c,v], ...]; the boundary engine + priceAsOf are array-indexed
+    // Signature pass first (build 2026.09.24-102): the same terms the old post-build signature
+    // summed, read off the memoized per-row series, so an unchanged minute returns before any
+    // funding aggregation, overnight run or payload assembly.
+    const act = activeMarkets(), drs = new Array(act.length), ovs = new Array(act.length);
+    for (let i = 0; i < act.length; i++) {
+      const r = act[i];
       // daily closes: prefer the real 370d backfill; otherwise bootstrap from the hourly spine
-      const dr = dailyTuples(r, hs);
-      if (dr && dr.length) { daily[r.coin] = dr; coins++; lens += dr.length; if (!r.dailyRaw || !dailyLacksOHLC(r)) ohlcN++; }   // count natively-full names: each in-place OHLC upgrade moves this and busts the cache
-      { const os = oiDailySeries(r.coin); if (os) { oi[r.coin] = os.map(([d, x]) => [d, sigq(x, 6)]); oiN += os.length; } }   // daily-step OI for the backtest's OI-change signal
+      const dr = drs[i] = dailyTuplesM(r, getHourly(r.coin));
+      if (dr && dr.length) { coins++; lens += dr.length; if (!r.dailyRaw || !dailyLacksOHLC(r)) ohlcN++; }   // count natively-full names: each in-place OHLC upgrade moves this and busts the cache
+      const os = oiDailySeriesM(r.coin); if (os) oiN += os.length;   // daily-step OI for the backtest's OI-change signal
+      ovs[i] = os;
+      // The overnight memo refreshes here, on the first pass after a spine refresh, whether or not
+      // the payload is rebuilt — exactly when it did before the signature moved first.
+      const hs = getHourly(r.coin);
+      if (hs.length > 2 && r._ovTs !== r.hourlyTs) {
+        const hmk = homeMkt(r.ticker, r.uni);
+        const start = hs[0][0], end = hs[hs.length - 1][0];
+        const anchors = hmk
+          ? homeOvernightAnchors(hmk, start, end).concat(homeWeekendAnchors(hmk, start, end))
+          : overnightAnchors(start, end).concat(weekendAnchors(start, end));
+        r._ovClose = runHolds(hs, getFunding(r.coin), anchors).map((h) => [Math.floor(h.exit / DAY) * DAY, +h.gross.toFixed(8), +(h.funding || 0).toFixed(8)]).sort((a, b) => a[0] - b[0]);
+        r._ovTs = r.hourlyTs;
+      }
+    }
+    const sig = coins + ":" + lens + ":" + (offHours.closed ? 1 : 0) + ":" + Object.keys(HOME_MKTS).map((k) => (offHoursBy[k].closed ? 1 : 0)).join("") + ":" + ohlcN + ":" + oiN;   // session flips bust it — the US one AND each home market's (a KRX close must refresh SMSN's liveClose even while NYSE is open)
+    if (dailyCache && sig === dailySig) return;   // unchanged — keep the OBJECT so serialize/gzip caches stay warm + 304s flow
+    for (let i = 0; i < act.length; i++) {
+      const r = act[i];
+      const hs = getHourly(r.coin);   // normalized array spine [[t,o,h,l,c,v], ...]; the boundary engine + priceAsOf are array-indexed
+      const dr = drs[i];
+      if (dr && dr.length) daily[r.coin] = dr;
+      if (ovs[i]) oi[r.coin] = oiDailyM(r);
 
       const fh = getFunding(r.coin);                                    // hourly [t,rate] -> daily funding a 1x long pays (sum of the day's hourly rates)
-      if (fh.length) {
-        const byDay = new Map();
-        for (const [t, rate] of fh) { const d = Math.floor(t / DAY) * DAY; byDay.set(d, (byDay.get(d) || 0) + rate); }
-        funding[r.coin] = [...byDay.entries()].sort((a, b) => a[0] - b[0]).map(([d, f]) => [d, +f.toFixed(8)]);
-      }
+      if (fh.length) funding[r.coin] = fundByDayM(r, fh);
       // overnight + weekend holds (buy at close, sell before open) via the boundary engine; memoized
       // to the spine version. RE-ANCHORED per row (build 2026.08.14-01): a foreign-home name's
       // close->open is its HOME exchange's boundary — 15:30 KST -> 09:00 KST next session for a
@@ -1648,21 +1790,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       // live in-progress gap for SMSN runs while KRX is closed, not while NYSE is.
       if (hs.length > 2) {
         const hmk = homeMkt(r.ticker, r.uni);
-        if (r._ovTs !== r.hourlyTs) {
-          const start = hs[0][0], end = hs[hs.length - 1][0];
-          const anchors = hmk
-            ? homeOvernightAnchors(hmk, start, end).concat(homeWeekendAnchors(hmk, start, end))
-            : overnightAnchors(start, end).concat(weekendAnchors(start, end));
-          r._ovClose = runHolds(hs, fh, anchors).map((h) => [Math.floor(h.exit / DAY) * DAY, +h.gross.toFixed(8), +(h.funding || 0).toFixed(8)]).sort((a, b) => a[0] - b[0]);
-          r._ovTs = r.hourlyTs;
-        }
         if (r._ovClose && r._ovClose.length) overnight[r.coin] = r._ovClose;
         const oh = hmk ? offHoursBy[hmk] : offHours;
         if (oh.closed) { const pc = priceAsOf(hs, oh.closeT, 3 * HOUR); if (pc > 0) liveClose[r.coin] = +pc.toFixed(8); }  // price at the last close, for the live in-progress gap
       }
     }
-    const sig = coins + ":" + lens + ":" + (offHours.closed ? 1 : 0) + ":" + Object.keys(HOME_MKTS).map((k) => (offHoursBy[k].closed ? 1 : 0)).join("") + ":" + ohlcN + ":" + oiN;   // session flips bust it — the US one AND each home market's (a KRX close must refresh SMSN's liveClose even while NYSE is open)
-    if (dailyCache && sig === dailySig) return;   // unchanged — keep the OBJECT so serialize/gzip caches stay warm + 304s flow
     dailySig = sig; dailyVer = Math.max(Date.now(), dailyVer + 1);   // content changed -> new ETag + fresh object; monotonic: two content changes in one ms must not share an ETag
     if (crypto) buildDailyMain(daily, funding, oi);
     dailyCache = { ts: Date.now(), dataTs: dailyVer, daily, funding, overnight, offHours, offHoursBy, liveClose, oi };
@@ -1725,6 +1857,23 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   const CRYPTO_EPOCH = Date.UTC(2026, 6, 26);   // 2026-07-26T00:00:00Z
   // Daily-step OI series from the sampled history: nearest sample within 12h of each UTC
   // midnight. Feeds the flush study; cheap because hist is already in memory.
+  // Memoized twin (build 2026.09.24-102): a linear walk over the whole year-deep series per market
+  // per minute. An APPENDED sample is later than every sample before it, so it can never be nearer
+  // to a midnight at or before the previous last sample than that sample already was: appends can
+  // only change the result when the last sample crosses into a new UTC day (a new midnight enters
+  // the grid) or the series crosses the 24-sample floor. Every other mutation (front trim, hourly
+  // thinning) bumps histMut, and maintenance replaces the array. So the key is exactly those.
+  const oiDailyMemo = new Map();   // coin -> { arr, t0, day, few, m, v }
+  function oiDailySeriesM(coin) {
+    const arr = hist.get(coin);
+    if (!arr || arr.length < 24) { oiDailyMemo.delete(coin); return oiDailySeries(coin); }
+    const t0 = arr[0][0], day = Math.floor(arr[arr.length - 1][0] / DAY), mu = histMut.get(arr) || 0;
+    const c = oiDailyMemo.get(coin);
+    if (c && c.arr === arr && c.t0 === t0 && c.day === day && c.m === mu) return c.v;
+    const v = oiDailySeries(coin);
+    oiDailyMemo.set(coin, { arr, t0, day, m: mu, v });
+    return v;
+  }
   function oiDailySeries(coin) {
     const arr = hist.get(coin);
     if (!arr || arr.length < 24) return null;
@@ -1769,14 +1918,14 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // a 1x position held over the horizon pays it, so a base rate that ignores it overstates the
     // edge on names whose funding runs against the event direction.
     const fundH = getFunding(r.coin);
-    const sig = (r.hourlyTs || 0) + ":" + (closes ? closes.length : 0) + ":" + (dayFunding ? dayFunding.length : 0) + ":" + (oiArr ? oiArr.length : 0) + ":" + fundH.length;
+    const sig = (r.hourlyTs || 0) + ":" + (closes ? closes.length : 0) + ":" + (dayFunding ? dayFunding.length : 0) + ":" + (oiArr ? oiArr.length + "." + (histMut.get(oiArr) || 0) : 0) + ":" + fundH.length;   // histMut: an hourly thin can leave the length where it was (build 2026.09.24-102)
     if (r._stSig === sig && r._st) return r._st;
     const st = {};
     if (closes && closes.length >= 40) {
       st.bigmove = studyBigMove(closes, fundH);
       st.breakout = studyBreakout(closes, fundH);
       st.breakdown = studyBreakdown(closes, fundH);
-      st.oiflush = studyOIFlush(closes, oiDailySeries(r.coin));
+      st.oiflush = studyOIFlush(closes, oiDailySeriesM(r.coin));
       st.coil = closes.length >= 140 ? compressionNow(closes) : null;
       st.fpdiv = studyFPDiv(closes, dayFunding);
       if (closes.length >= 140) st.volshift = studyVolShift(closes, fundH);
@@ -2181,7 +2330,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         if (fp != null) c.fndP = fp;
       }
       // 5d OI change % — from the same daily OI series the flush study consumes
-      const oi = oiDailySeries(r.coin);
+      const oi = oiDailySeriesM(r.coin);
       if (oi && oi.length >= 6) {
         const base = oi[oi.length - 6][1];
         if (base > 0) c.oi5 = +((oi[oi.length - 1][1] / base - 1) * 100).toFixed(1);
@@ -4643,12 +4792,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   let setupCache = null, setupBuilt = 0, setupSrc = null, setupSig = "", setupVer = 0;
   const SETUP_MS = 60 * 1000;
   function setupFundPct(r) {
-    // same loop (and the same >=96-sample bar) as the snapshot's fundPct — one definition
-    if (r.funding == null || !isFinite(r.funding) || !r.fundH || !r.fundH.size) return null;
-    const cut = Date.now() - 31 * DAY;
-    let n = 0, le = 0;
-    for (const [t, rate] of r.fundH) { if (t < cut || !isFinite(rate)) continue; n++; if (rate <= r.funding) le++; }
-    return n >= 96 ? Math.round((100 * le) / n) : null;
+    return fundPctOf(r);   // the snapshot's fundPct — one definition (memoized, build 2026.09.24-102)
   }
   function buildEarnSetups(now) {
     const cards = [];
@@ -9458,7 +9602,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   function aiFlags(r) {
     const flags = [];
     try {
-      const oid = oiDailySeries(r.coin);
+      const oid = oiDailySeriesM(r.coin);
       const daily = Array.isArray(r.dailyRaw) ? r.dailyRaw.filter((k) => Number.isFinite(+k.c)) : [];
       if (oid && oid.length >= 4 && daily.length >= 4) {
         const o0 = oid[oid.length - 4][1], o1 = oid[oid.length - 1][1];
@@ -15367,6 +15511,9 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       return r;
     },
     detectBenchNow: () => { benchCoin = detectBenchmark(); return benchCoin; },   // harness: resolve the SPX proxy without a universe refresh (the brief must never resolve its own)
+    // harness (build 2026.09.24-102): the memoized paths next to their fresh twins, for the equivalence tests
+    perfNow: { oiDailySeries, oiDailySeriesM, histRetain, histThinTo, fundSet, fundPctOf, computeFundWin, getFunding, getSeries,
+      dailyTuples, dailyTuplesM, hist: () => hist, histMut: (a) => histMut.get(a) || 0 },
     seedHistNow: (coin, arr) => { hist.set(coin, arr); },   // harness: seed the sampled OI/funding history ([t, oi, funding] rows) so oiDailySeries is testable without network
     hydrateFeaturesNow: hydrateFeatures,   // harness: run the warm-cache hydrate against an injected store.loadFeatures — persisted-shape compat is testable without a boot
     seedEarnNow: (entries, study, prints) => {   // harness: inject calendar rows / study / print history so the earnings-context split is testable without network
