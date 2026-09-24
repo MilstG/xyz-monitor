@@ -350,6 +350,7 @@ const LAZY_IMPORTERS={
   funds:()=>import("./funds.js"),
   insiders:()=>import("./insiders.js"),
   positioning:()=>import("./positioning.js"),
+  usageadm:()=>import("./usageadm.js"),   // (build 2026.09.24-109) the Admin Usage fold, fetched only when that fold opens
 };
 const LAZY={}, _lazyP={};
 // Namespace once loaded (booted), else null — for callers that should only act on an ALREADY

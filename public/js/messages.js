@@ -13,6 +13,7 @@ import { HELP_KEYS, closeHelp } from "./nav.js";
 import { TFIELD, nlResolve, termActive, termAsk, termComps, termErr, termExec, termFind, termGrammarComplete, termHistPush, termOutTrans, termSetSink, termSink, tpad } from "./terminal.js";
 import { cardCanRecapture, cardHtml, cardOpen, cardPost, cardRecapture, shSvgPng, shareCommand } from "./share.js";
 import { loadRules } from "./triggers.js";
+import { usageCardHtml, usageMeLoad } from "./usage.js";
 
 
 // ===== MESSAGES tab (build 2026.08.30-46, groups/files/reactions/search 2026.08.31-47) =========
@@ -2030,7 +2031,9 @@ function dmRenderNow(){
       +'<div role="button" tabindex="0" class="dm-new" id="dm-newbtn">'+(dmState.picking?'× close':'+ new message')+'</div>'+dmPickerHtml()
       +dmTopicsHtml()
       +dmTgHintHtml()
-      +watchBox+'</div>'
+      +watchBox
+      // (build 2026.09.24-109) "Your usage": what the operator can see about this member, and the pause.
+      +'<div class="dm-usage" id="dm-usage">'+usageCardHtml()+'</div>'+'</div>'
     +'<div class="dm-main">'+main+composer+disclosure+'</div></div>';
 
   const ta=el('dm-input');
@@ -2300,6 +2303,7 @@ function dmKeys(e){
 async function openDM(){
   dmWire();
   dmPushProbe();                  // reflect this browser's real subscription state, async
+  usageMeLoad();                  // (build 2026.09.24-109) the "Your usage" card fills itself when its numbers land
   dmRender();                     // paint the shell immediately, fill it as data lands
   await dmLoad();
   if(!dmState.sel&&dmState.threads.length) { await dmOpenThread(dmState.threads[0].id); return; }

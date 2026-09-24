@@ -28,6 +28,7 @@ import { __boot_report_12113 } from "./js/report.js";
 import "./js/focus.js";
 import { __boot_messages_14817 } from "./js/messages.js";
 import "./js/access.js";
+import { __boot_usage_1 } from "./js/usage.js";
 
 __boot_core_1();
 __boot_base_1();
@@ -50,3 +51,4 @@ __boot_terminal_10926();
 __boot_terminal_11651();
 __boot_report_12113();
 __boot_messages_14817();
+__boot_usage_1();   // (build 2026.09.24-109) last: the first tab is already chosen by the time it starts counting

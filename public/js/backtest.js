@@ -17,6 +17,7 @@ import { openHousing, openLiquidity, openNotes } from "./notes.js";
 import { openReportView } from "./report.js";
 import { renderSectors } from "./sectors.js";
 import { attachRetestControls, loadRetestStudy, renderRetestSection } from "./retest.js";
+import { usageView } from "./usage.js";
 import { openTrend, renderSignals, renderTrend } from "./trend.js";
 
 // ===== Strategy backtest — client-side, cross-sectional long/short on the daily returns already loaded =====
@@ -962,6 +963,7 @@ function showView(v){
   const switching=v!==state.view;
   state.view=v;
   if(switching) overlayCloseAll();
+  usageView(v);   // (build 2026.09.24-109) the usage accumulator's one hook: every switch passes here
   // Where the ← button returns to: the tab you were actually on. A fallback bounce (a view whose
   // section is missing from this build) sets state.view before landing here again, so a view
   // with no section was never a place you were and must not become the Back target.

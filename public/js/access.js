@@ -3,7 +3,7 @@
 // order once every module has evaluated (see app.js). Shared cross-module mutable state lives
 // on G (core.js).
 import { IS_ADMIN } from "./admin.js";
-import { el, esc } from "./core.js";
+import { el, esc, lazyCall } from "./core.js";
 import { fetchJSON } from "./data.js";
 import { dmPost, dmSysLine } from "./messages.js";
 
@@ -194,6 +194,9 @@ async function admDmModerate(body,confirmText){
 }
 function admWhen(ts){ try{ return new Date(ts).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false}); }catch(_){ return ''; } }
 
+// How each dm_audit action reads in the log. Unlisted actions show their raw name, as they always did.
+// (build 2026.09.24-109) view-usage: an operator opened one member's usage detail in the Usage fold.
+const ADM_AUDIT_LABEL={'view-usage':'viewed the usage detail of'};
 function renderAdmDm(){
   const box=el('admDmBox'); if(!box) return;
   if(!IS_ADMIN){ box.innerHTML=''; return; }
@@ -238,7 +241,7 @@ function renderAdmDm(){
   }
 
   const audit=(_admDmAudit&&_admDmAudit.entries||[]).map(a=>
-    '<div class="acc-note" style="margin:0">'+admWhen(a.at)+' · <b>'+esc(a.who)+'</b> '+esc(a.action)
+    '<div class="acc-note" style="margin:0">'+admWhen(a.at)+' · <b>'+esc(a.who)+'</b> '+esc(ADM_AUDIT_LABEL[a.action]||a.action)
     +(a.thread?' #'+a.thread:'')+(a.detail?' · '+esc(a.detail):'')+'</div>').join('')
     ||'<div class="acc-note" style="margin:0">Nothing read yet.</div>';
 
@@ -251,7 +254,7 @@ function renderAdmDm(){
     +'<div class="acc-sec"><div class="dm-sh" style="padding-left:0">Conversations</div>'+threads+'</div>'
     +(panel?'<div class="acc-sec">'+panel+'</div>':'')
     +'<div class="acc-sec"><div class="dm-sh" style="padding-left:0">Read log</div>'+audit
-      +'<div class="acc-note">Every read and search above is recorded here. Members are told, in the Messages tab, that the operator can read their messages.</div></div>';
+      +'<div class="acc-note">Every read and search above is recorded here, and so is every member usage detail opened in Usage. Members are told, in the Messages tab, that the operator can read their messages and see their usage summary.</div></div>';
 }
 
 function admDmWire(){
@@ -306,6 +309,10 @@ function admFoldApply(){
   // nothing is worse than no header.
   { const box=el('admLoop'), fold=document.querySelector('#view-admin .adm-fold[data-fold="loop"]');
     if(box&&fold) fold.hidden=!!box.hidden; }
+  // (build 2026.09.24-109) The Usage fold's module loads on first open, and refreshes (at most once a
+  // minute, its own rule) whenever the fold is open as the panel is applied.
+  { const uf=document.querySelector('#view-admin .adm-fold[data-fold="usage"]');
+    if(uf&&uf.classList.contains('open')&&IS_ADMIN) lazyCall('usageadm','openUsageAdm'); }
   const all=el('admFoldAll');
   if(all) all.textContent=admFolds().some(f=>f.classList.contains('open')&&!f.hidden)?'collapse all':'expand all';
 }

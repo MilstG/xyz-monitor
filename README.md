@@ -496,7 +496,8 @@ instant, and the per-IP rate limit stops being a per-user problem.
   earnings, live signals and the tape's 24h extremes. Opt-in by construction: it has no default
   hour, so nothing sends until a member picks one in the alerts panel.
 - **Watched tickers in messages** — a per-person list, separate from the markets watchlist (which
-  lives in localStorage and the server has never seen). A message whose `$TICKER` is on your list
+  lives in localStorage and, for a signed-in member, syncs to the account through `user_pref`,
+  but never feeds messages). A message whose `$TICKER` is on your list
   escalates to Telegram **immediately** and **pierces a muted conversation**: muting a busy group
   should not be the same as asking not to be told when somebody mentions the name you are watching.
 - **Read receipts, pins, drafts, export, keyboard** — "seen by" under the last message you sent
@@ -525,6 +526,22 @@ instant, and the per-IP rate limit stops being a per-user problem.
   at all. Every read and every search is written to an audit log shown in the Admin panel, and the
   Messages tab tells members plainly that the operator can read what they write — people write
   differently when they believe a message is private, and on this deployment it is not.
+- **Usage** (build 2026.09.24-109) — a small first-party beacon records **which tab is on
+  screen and for how long**, for signed-in members only, and the Admin panel's **Usage** fold
+  (between Access and All messages) shows who is active, reach and time per tab, and a members
+  table. Time counts only while the page is visible and there was input in the last 5 minutes;
+  the client flushes with `sendBeacon` every 60s and on `pagehide`. The server accepts one beacon
+  per member per 30s, clamps it to the wall time since the last, drops unknown tab names, and
+  keeps **daily aggregates** (`usage_day(day, uid, kind, key, n, ms)`, ET days), flushed every 60s
+  in one transaction. Device is a coarse class (desktop / mobile / tablet, plus a PWA flag) derived
+  server-side; the raw User-Agent is never stored. **Not collected**: search text, filters, column
+  layouts, tickers, anything typed. Per-member rows are kept **30 days**, then folded into sitewide
+  totals and deleted. Members see their own summary ("Your usage", in the Messages rail) and can
+  **pause** it; the operator then sees "paused". The sitewide panel is not logged; **opening one
+  member's detail is**, as `view-usage` in the same audit log as the message read-through.
+  Signed-out tracking is a server flag (`USAGE_PUBLIC=1`), off, and in this build collects nothing
+  even when set. Routes: `POST /api/usage`, `GET /api/usage/me`, `POST /api/usage/pause`,
+  `GET /api/admin/usage?r=7|30`, `GET /api/admin/usage/member?h=`.
 - **Admin panel folds** — the panel had grown to eight full-height boxes, so reaching the one you
   wanted meant scrolling past the seven you did not. Every segment is now a collapsed row naming
   what is inside it, with an expand-all/collapse-all control. Each fold wraps its box from
@@ -554,7 +571,8 @@ instant, and the per-IP rate limit stops being a per-user problem.
   rate-limited "request an invite" that pings the operator's ops channel.
 - **Saved layouts** — named views of the markets table (column order + visibility, sort,
   analysis window, vol/OI filters, ★-only), saved and switched from the Layouts menu. Stored
-  per browser in localStorage; the active layout shows a • when the live view has unsaved changes.
+  per browser in localStorage (and synced to a signed-in member's account through `user_pref`);
+  the active layout shows a • when the live view has unsaved changes.
 - **Persistent OI** — open interest accrues over time and can't be re-fetched, so every
   sample is written to an append-only log on a mounted volume (`$DATA_DIR/oi.log`) and
   reloaded on boot. It survives restarts and redeploys. Retained 365 days: full resolution for 31, thinned to hourly beyond (the main-dex roster keeps a flat 31); pruned daily.

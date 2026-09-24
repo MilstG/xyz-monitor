@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.24-108";
+const VERSION = "2026.09.24-109";
 // (build 2026.09.24-107) Distinguishes this process from the last one in ETags built on
 // per-process counters (a restart must never 304 a client onto a different body).
 const BOOT_NONCE = Date.now().toString(36) + crypto.randomBytes(3).toString("hex");
@@ -1509,6 +1509,72 @@ async function buildServer() {
     }
     return r;
   });
+  // ===== usage beacon + "Your usage" (build 2026.09.24-109) ======================================
+  // First-party, members only: which tab is on screen and for how long, rolled into daily
+  // aggregates (accounts.js usage_day). The beacon carries {tabs:{view -> visible ms}, pwa} and
+  // nothing else — no tickers, no search text, no filters, and the device class is derived HERE
+  // from the User-Agent and stored as one of three words; the UA itself is never kept.
+  // Public (signed-out) tracking is a server flag, OFF by default, and even on it only acknowledges:
+  // the anonymous-visitor bucket is not built (stage C, if ever).
+  const USAGE_PUBLIC = process.env.USAGE_PUBLIC === "1";
+  const USAGE_MIN_GAP_MS = 30000;          // one accepted beacon per member per 30s
+  const USAGE_MAX_FLUSH_MS = 120000;       // a beacon never claims more than 2 min of screen time
+  const USAGE_TABS = () => require("./src/compute").FEATURES.filter((f) => f.kind === "tab").map((f) => {
+    const g = require("./src/compute").featureState(poller.getFlags(), f.key);
+    return { key: f.key, label: f.label, gate: f.key === "dm" && g === "public" ? "members" : g };   // Messages needs an account whatever its flag
+  });
+  const USAGE_TAB_KEYS = new Set(require("./src/compute").FEATURES.filter((f) => f.kind === "tab").map((f) => f.key));
+  const usageLast = new Map();             // uid -> ts of the last ACCEPTED beacon (in memory: a restart only loosens one gap)
+  function usageDevice(ua, pwa) {
+    const s = String(ua || "");
+    const cls = /iPad|Tablet|PlayBook|Silk|Android(?!.*Mobile)/i.test(s) ? "tablet" : /Mobi|iPhone|iPod|Android/i.test(s) ? "mobile" : "desktop";
+    return cls + (pwa === true ? "-pwa" : "");
+  }
+  // Validate + clamp one beacon body against the member's last accepted beacon. Returns
+  // {tabs, pwa} (tabs possibly empty) or {error}. text/plain is what sendBeacon sends a string as.
+  function usageClamp(body, lastTs, now) {
+    let b = body;
+    if (typeof b === "string") { try { b = JSON.parse(b); } catch (_) { return { error: "bad json" }; } }
+    if (!b || typeof b !== "object" || Array.isArray(b) || !b.tabs || typeof b.tabs !== "object" || Array.isArray(b.tabs)) return { error: "bad body" };
+    const tabs = {};
+    let tot = 0;
+    for (const [k, v] of Object.entries(b.tabs)) {
+      if (!USAGE_TAB_KEYS.has(k)) continue;                 // unknown view names are dropped, never stored
+      const ms = Math.round(Number(v));
+      if (!Number.isFinite(ms) || ms <= 0) continue;
+      tabs[k] = ms; tot += ms;
+    }
+    // The whole beacon may not claim more screen time than wall time has passed since the last one
+    // this member got accepted (first beacon after a boot: the 2-minute ceiling alone).
+    const cap = Math.min(USAGE_MAX_FLUSH_MS, lastTs ? Math.max(0, now - lastTs) : USAGE_MAX_FLUSH_MS);
+    if (tot > cap) { const f = cap / tot; for (const k of Object.keys(tabs)) tabs[k] = Math.floor(tabs[k] * f); }
+    return { tabs, pwa: b.pwa === true };
+  }
+  fastify.post("/api/usage", { bodyLimit: 4 * 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = meOf(req);
+    if (!me) return reply.code(204).send();                 // signed out: nothing is collected (USAGE_PUBLIC builds no visitor id yet)
+    if (ACCOUNTS.usagePaused(me.uid)) return reply.code(204).send();
+    const now = Date.now(), last = usageLast.get(me.uid) || 0;
+    if (last && now - last < USAGE_MIN_GAP_MS) return reply.code(429).header("retry-after", String(Math.ceil((USAGE_MIN_GAP_MS - (now - last)) / 1000))).send();
+    const c = usageClamp(req.body, last, now);
+    if (c.error) return reply.code(400).send({ ok: false, error: c.error });
+    const r = ACCOUNTS.usageRecord(me.uid, c.tabs, usageDevice(req.headers["user-agent"], c.pwa), now);
+    if (r.stored) { usageLast.set(me.uid, now); ACCOUNTS.touch(me.uid); }
+    return reply.code(204).send();
+  });
+  fastify.get("/api/usage/me", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    return ACCOUNTS.usageMine(me.uid, USAGE_TABS());
+  });
+  fastify.post("/api/usage/pause", { bodyLimit: 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const me = dmMe(req, reply); if (!me) return;
+    const r = ACCOUNTS.setUsagePaused(me.uid, !!(req.body || {}).paused);
+    if (r.ok && r.paused) usageLast.delete(me.uid);
+    return r;
+  });
   fastify.get("/api/dm/sync", (req, reply) => {
     reply.header("cache-control", "no-store");
     const me = dmMe(req, reply); if (!me) return;
@@ -2128,6 +2194,35 @@ async function buildServer() {
     for (const t of new Set(pairs.map((x) => x.thread))) { try { dmMirror(t); } catch (e) { log("dm mirror sweep failed (isolated): " + (e && e.message)); } }
   }, 30 * 1000).unref();
 
+  // ===== usage, the operator's side (build 2026.09.24-109) =======================================
+  // Beside the read-through, not inside it: adminOnly / adminUid are that block's gates, reused.
+  // The sitewide panel is aggregates and is NOT logged; one member's drill-in IS (dm_audit
+  // 'view-usage', shown in the All messages read log beside every message read). The panel body is
+  // cached per range and keyed on the flush generation, the member count and who is online, so an
+  // unchanged minute revalidates to a 304 like every other admin payload.
+  const usageBodies = new Map();
+  fastify.get("/api/admin/usage", (req, reply) => {
+    if (!adminOnly(req, reply)) return;
+    const r = Math.max(1, Math.min(ACCOUNTS.USAGE_KEEP_DAYS, Math.trunc(+one((req.query || {}).r) || 7)));
+    if (ACCOUNTS.usagePending()) ACCOUNTS.usageFlush();
+    const online = dmOnline();
+    const key = [BOOT_NONCE, ACCOUNTS.usageGen(), r, ACCOUNTS.countUsers(), [...online].sort().join(","), Math.floor(Date.now() / 60000)].join(".");
+    let hit = usageBodies.get(r);
+    if (!hit || hit.key !== key) {
+      const body = ACCOUNTS.usageSummary({ r, online, tabs: USAGE_TABS() });
+      body.publicOn = USAGE_PUBLIC; body.beacon = true;
+      hit = { key, body, tag: 'W/"u' + crypto.createHash("sha1").update(key).digest("base64url").slice(0, 16) + '"' };
+      usageBodies.set(r, hit);
+    }
+    return sendCachedBody(req, reply, hit.body, hit.tag);
+  });
+  fastify.get("/api/admin/usage/member", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    if (!adminOnly(req, reply)) return;
+    const r = ACCOUNTS.usageMember(adminUid(req), str((req.query || {}).h) || "", USAGE_TABS());
+    if (!r.ok) return reply.code(404).send(r);
+    return r;
+  });
   // ===== /alert: threshold rules written in a conversation (build 2026.09.21-83) ==================
   // The same line works in a chat's composer and at the Telegram bot. A rule written IN a
   // conversation is bound to it: when it fires, the fire posts there under its author's name
@@ -2441,7 +2536,7 @@ async function buildServer() {
     "window.__FLAGS=" + jsonForScript(resolveFeatures(poller.getFlags(), admin)) +
     ";window.__ADMIN=" + (admin ? "true" : "false") +
     ";window.__NAVGROUPS=" + jsonForScript(poller.getNavGroups()) +
-    ";window.__ME=" + jsonForScript(me ? ACCOUNTS.pub(me) : null) + ";";
+    ";window.__ME=" + jsonForScript(me ? Object.assign(ACCOUNTS.pub(me), { usagePaused: ACCOUNTS.usagePaused(me.uid) }) : null) + ";";   // -109: the beacon starts paused when the member paused it
   const serveIndex = (req, reply) => {
     const admin = isAdmin(req);
     const boot = bootScript(admin, meOf(req));
@@ -3504,6 +3599,13 @@ async function main() {
     .catch((e) => log("accounts backup FAILED (isolated): " + (e && e.message)));
   setTimeout(accountsBackup, 5 * 60 * 1000).unref();
   setInterval(accountsBackup, 24 * 3600 * 1000).unref();
+  // (build 2026.09.24-109) Usage: the pending beacon minutes land every 60s in one transaction
+  // (and once more from ACCOUNTS.close() at shutdown); once a day, rows past the 30-day window
+  // fold into the sitewide bucket and the per-member rows go.
+  setInterval(() => { try { ACCOUNTS.usageFlush(); } catch (e) { log("usage flush FAILED: " + (e && e.message)); } }, 60 * 1000).unref();
+  const usageRetain = () => { try { const r = ACCOUNTS.usageRetain(); if (r.dropped) log(`usage retention: ${r.dropped} per-member row(s) before ${r.cut} folded into sitewide totals`); } catch (e) { log("usage retention FAILED: " + (e && e.message)); } };
+  setTimeout(usageRetain, 2 * 60 * 1000).unref();
+  setInterval(usageRetain, 24 * 3600 * 1000).unref();
   poller.start().catch((e) => log("poller start error: " + (e && e.message)));
 }
 

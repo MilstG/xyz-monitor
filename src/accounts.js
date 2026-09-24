@@ -143,7 +143,7 @@ function firstTickerRef(body) {
   return m ? m[1].toUpperCase() : "";
 }
 
-const { callRead, callTarget, callBarReaches, inCashSession, marketSessions, callSessionClose } = require("./compute");
+const { callRead, callTarget, callBarReaches, inCashSession, marketSessions, callSessionClose, etDayStr } = require("./compute");
 const { homeMkt } = require("./sectors");
 
 function openAccounts(dataDir, opts) {
@@ -165,7 +165,8 @@ CREATE TABLE IF NOT EXISTS user (
   createdAt INTEGER NOT NULL,
   invitedBy TEXT,
   lastSeen INTEGER NOT NULL DEFAULT 0,
-  disabledAt INTEGER
+  disabledAt INTEGER,
+  usagePaused INTEGER NOT NULL DEFAULT 0   -- (build 2026.09.24-109) 1 = this member paused the usage beacon
 ) STRICT;
 CREATE UNIQUE INDEX IF NOT EXISTS user_handle ON user(handle);
 
@@ -375,6 +376,22 @@ CREATE TABLE IF NOT EXISTS dm_webpush (
   ua TEXT,
   addedAt INTEGER NOT NULL
 ) STRICT;
+
+-- Usage (build 2026.09.24-109): DAILY AGGREGATES, never an event log. One row per (ET calendar
+-- day, member, kind, key): kind 'tab' = visible ms on that tab (n = beacons that carried it), kind
+-- 'dev' = the coarse device class the beacons came from (desktop | mobile | tablet, '-pwa' when
+-- installed; never the raw UA). uid '0' is the sitewide bucket: per-member rows older than the
+-- retention window fold into it (summed per day/kind/key) and are deleted, so the long-run tab
+-- trend survives and the per-person history does not. No free text, no tickers, no filters.
+CREATE TABLE IF NOT EXISTS usage_day (
+  day TEXT NOT NULL,
+  uid TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  key TEXT NOT NULL,
+  n INTEGER NOT NULL DEFAULT 0,
+  ms INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, uid, kind, key)
+) STRICT, WITHOUT ROWID;
 `);
 
   // ---- migration from the pair-columns schema --------------------------------------------------
@@ -386,6 +403,7 @@ CREATE TABLE IF NOT EXISTS dm_webpush (
   // ALTERs: the next column added to the schema above only has to be named here, and forgetting is
   // what produced "table dm_msg has no column named sys" the first time round.
   const ADDED_COLUMNS = {
+    user: [["usagePaused", "INTEGER NOT NULL DEFAULT 0"]],   // (build 2026.09.24-109)
     dm_thread: [["kind", "TEXT NOT NULL DEFAULT 'dm'"], ["pairKey", "TEXT"], ["title", "TEXT"], ["createdBy", "TEXT"]],
     dm_msg: [["sys", "TEXT"], ["fileId", "TEXT"], ["via", "TEXT"], ["pinnedAt", "INTEGER"], ["pinnedBy", "TEXT"], ["replyTo", "INTEGER"], ["side", "TEXT"],
       ["cmd", "TEXT"], ["cmdAi", "INTEGER"], ["card", "TEXT"], ["callH", "INTEGER"], ["closedAt", "INTEGER"], ["closePx", "REAL"],
@@ -2462,6 +2480,196 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       messages: S.msgMaxId.get().m };
   }
 
+  // ---- usage: daily aggregates behind the admin Usage fold (build 2026.09.24-109) ----------------
+  // The beacon (POST /api/usage) lands here as an in-memory increment — the request path never
+  // touches SQLite. usageFlush writes the pending map in ONE transaction of prepared upserts, every
+  // 60s from the server and once more from close() on the way out, and bumps a generation the
+  // admin payload's cache key is built on. Retention: USAGE_KEEP_DAYS ET days per member, then the
+  // rows fold into uid '0' (sitewide) and the per-member rows go.
+  const USAGE_KEEP_DAYS = 30;
+  const USAGE_SITE = "0";   // no real uid is one character (adoptableUid wants 12+), so it can never collide
+  const US = {
+    up: db.prepare(`INSERT INTO usage_day (day, uid, kind, key, n, ms) VALUES (?,?,?,?,?,?)
+      ON CONFLICT(day, uid, kind, key) DO UPDATE SET n = n + excluded.n, ms = ms + excluded.ms`),
+    range: db.prepare("SELECT * FROM usage_day WHERE day >= ? AND day <= ?"),
+    rangeOf: db.prepare("SELECT * FROM usage_day WHERE uid = ? AND day >= ? AND day <= ?"),
+    // WHERE ... GROUP BY: the SELECT needs its WHERE for SQLite to parse the upsert's ON CONFLICT
+    fold: db.prepare(`INSERT INTO usage_day (day, uid, kind, key, n, ms)
+      SELECT day, '${USAGE_SITE}', kind, key, SUM(n), SUM(ms) FROM usage_day WHERE day < ? AND uid <> '${USAGE_SITE}' GROUP BY day, kind, key
+      ON CONFLICT(day, uid, kind, key) DO UPDATE SET n = n + excluded.n, ms = ms + excluded.ms`),
+    drop: db.prepare(`DELETE FROM usage_day WHERE day < ? AND uid <> '${USAGE_SITE}'`),
+    pause: db.prepare("UPDATE user SET usagePaused = ? WHERE uid = ?"),
+  };
+  let usagePend = new Map(), usageGeneration = 0;
+  // Calendar arithmetic on the ET day STRING (UTC-anchored, so DST can never skip or repeat a day).
+  const usageDayShift = (d, n) => new Date(Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)) + n * 864e5).toISOString().slice(0, 10);
+  const usageToday = (now) => etDayStr(now != null ? now : Date.now());
+  const usagePaused = (uid) => !!((users.get(uid) || {}).usagePaused);
+  function usageAdd(uid, day, kind, key, n, ms) {
+    const k = day + "\u0001" + uid + "\u0001" + kind + "\u0001" + key;
+    const cur = usagePend.get(k);
+    if (cur) { cur.n += n; cur.ms += ms; } else usagePend.set(k, { day, uid, kind, key, n, ms });
+  }
+  // One accepted beacon: {tab -> ms} already validated and clamped by the server, plus the device.
+  function usageRecord(uid, tabs, dev, now) {
+    const u = users.get(uid);
+    if (!u || u.disabledAt || u.usagePaused) return { ok: true, stored: false };
+    const day = usageToday(now);
+    let tot = 0;
+    for (const [k, ms] of Object.entries(tabs)) { if (ms > 0) { usageAdd(uid, day, "tab", k, 1, ms); tot += ms; } }
+    if (tot > 0 && dev) usageAdd(uid, day, "dev", dev, 1, tot);
+    return { ok: true, stored: tot > 0, ms: tot };
+  }
+  function usageFlush() {
+    if (!usagePend.size) return 0;
+    const rows = [...usagePend.values()];
+    usagePend = new Map();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const r of rows) US.up.run(r.day, r.uid, r.kind, r.key, r.n, Math.round(r.ms));
+      db.exec("COMMIT");
+    } catch (e) {
+      try { db.exec("ROLLBACK"); } catch (_) {}
+      // put them back: a failed flush must not lose the minute it was carrying
+      for (const r of rows) usageAdd(r.uid, r.day, r.kind, r.key, r.n, r.ms);
+      throw e;
+    }
+    usageGeneration++;
+    return rows.length;
+  }
+  // Fold everything older than the window into the sitewide bucket, then drop the per-member rows.
+  function usageRetain(now) {
+    usageFlush();
+    const cut = usageDayShift(usageToday(now), -(USAGE_KEEP_DAYS - 1));   // oldest day still kept per member
+    db.exec("BEGIN IMMEDIATE");
+    let dropped;
+    try { US.fold.run(cut); dropped = Number(US.drop.run(cut).changes || 0); db.exec("COMMIT"); }
+    catch (e) { try { db.exec("ROLLBACK"); } catch (_) {} throw e; }
+    if (dropped) usageGeneration++;
+    return { ok: true, cut, dropped };
+  }
+  function setUsagePaused(uid, on) {
+    const u = users.get(uid);
+    if (!u) return { ok: false, error: "no such account" };
+    US.pause.run(on ? 1 : 0, uid); u.usagePaused = on ? 1 : 0;
+    // What was recorded before the click stays (it ages out with the window like anything else);
+    // pausing stops the recording from here on — the server refuses, the client stops sending.
+    usageGeneration++;
+    return { ok: true, paused: !!on };
+  }
+  // tabs: [{key, label, gate}] (the feature manifest's tabs, resolved by the server). online: Set of uids.
+  const usageMed = (a) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+  const USAGE_ACTIVE_MS = 60000;   // "active" = at least a minute on screen that ET day
+  function usageDays(today, r) { const out = []; for (let i = r - 1; i >= 0; i--) out.push(usageDayShift(today, -i)); return out; }
+  function usageSummary(opts) {
+    usageFlush();
+    const o = opts || {}, now = o.now != null ? o.now : Date.now();
+    const r = Math.max(1, Math.min(USAGE_KEEP_DAYS, Math.trunc(+o.r || 7)));
+    const today = usageToday(now), days = usageDays(today, r);
+    const pFrom = usageDayShift(days[0], -r);   // the prior range runs pFrom .. the day before days[0]
+    const keepFrom = usageDayShift(today, -(USAGE_KEEP_DAYS - 1));
+    const priorKept = pFrom >= keepFrom;   // the prior range is still per-member (else only uid '0' totals survive)
+    const inRange = new Set(days);
+    const online = o.online || new Set();
+    const tabs = o.tabs || [];
+    // per (uid, day) screen ms; per (uid, tab) ms; per tab totals; per (uid, dev) ms — current and prior
+    const dayMs = new Map(), uTab = new Map(), tabMs = new Map(), tabPrev = new Map(), uDev = new Map(), uPrev = new Map();
+    const bump = (m, k, v) => m.set(k, (m.get(k) || 0) + v);
+    for (const row of US.range.all(pFrom, today)) {
+      const cur = inRange.has(row.day);
+      if (row.kind === "tab") {
+        if (cur) bump(tabMs, row.key, row.ms); else bump(tabPrev, row.key, row.ms);
+        if (row.uid === USAGE_SITE) continue;
+        if (cur) { bump(dayMs, row.uid + "|" + row.day, row.ms); bump(uTab, row.uid + "|" + row.key, row.ms); }
+        else bump(uPrev, row.uid, row.ms);
+      } else if (row.kind === "dev" && cur && row.uid !== USAGE_SITE) bump(uDev, row.uid + "|" + row.key, row.ms);
+    }
+    const activeOn = new Map();   // day -> Set(uid)
+    const uActive = new Map();    // uid -> {days, ms}
+    for (const [k, ms] of dayMs) {
+      if (ms < USAGE_ACTIVE_MS) continue;
+      const [uid, day] = k.split("|");
+      if (!activeOn.has(day)) activeOn.set(day, new Set());
+      activeOn.get(day).add(uid);
+      const a = uActive.get(uid) || { days: 0, ms: 0 };
+      a.days++; a.ms += ms; uActive.set(uid, a);
+    }
+    const series = days.map((d) => ({ day: d, n: activeOn.has(d) ? activeOn.get(d).size : 0 }));
+    const activeRange = uActive.size;
+    const meanDaily = series.reduce((s, x) => s + x.n, 0) / days.length;
+    const memberDayMin = [];
+    for (const [k, ms] of dayMs) if (ms >= USAGE_ACTIVE_MS && inRange.has(k.split("|")[1])) memberDayMin.push(ms / 60000);
+    const members = [...users.values()].filter((u) => !u.disabledAt);
+    const newMembers = members.filter((u) => etDayStr(u.createdAt) >= days[0]);
+    const tabRows = tabs.map((t) => {
+      const who = [];
+      for (const uid of uActive.keys()) { const ms = uTab.get(uid + "|" + t.key) || 0; if (ms > 0) who.push(ms / 60000); }
+      const ms = tabMs.get(t.key) || 0, prev = tabPrev.get(t.key) || 0;
+      return { key: t.key, label: t.label, gate: t.gate, users: who.length,
+        reach: activeRange ? who.length / activeRange : null, ms, medMin: usageMed(who),
+        prevMs: prev, delta: prev > 0 ? (ms - prev) / prev : null };
+    }).filter((t) => t.ms > 0 || t.prevMs > 0 || t.gate !== "off");
+    const TEN_DAYS = 10 * 864e5;
+    const memberRows = members.map((u) => {
+      const base = { handle: u.handle, display: u.display, admin: !!u.isAdmin, createdAt: u.createdAt,
+        lastSeen: u.lastSeen || 0, online: online.has(u.uid), paused: !!u.usagePaused };
+      base.lapsed = !base.online && now - Math.max(base.lastSeen, 0) > TEN_DAYS && now - (u.createdAt || 0) > TEN_DAYS;
+      if (u.usagePaused) return Object.assign(base, { days: null, minPerDay: null, top: [], dev: null, trend: null });
+      const a = uActive.get(u.uid) || { days: 0, ms: 0 };
+      const top = tabs.map((t) => [t.label, uTab.get(u.uid + "|" + t.key) || 0]).filter((x) => x[1] > 0)
+        .sort((x, y) => y[1] - x[1]).slice(0, 3).map((x) => x[0]);
+      let dev = null, devMs = 0;
+      for (const [k, ms] of uDev) { const i = k.indexOf("|"); if (k.slice(0, i) === u.uid && ms > devMs) { dev = k.slice(i + 1); devMs = ms; } }
+      let curMs = 0; for (const t of tabs) curMs += uTab.get(u.uid + "|" + t.key) || 0;
+      const prev = uPrev.get(u.uid) || 0;
+      return Object.assign(base, { days: a.days, minPerDay: a.days ? a.ms / a.days / 60000 : 0, top, dev,
+        trend: priorKept && prev > 0 ? (curMs - prev) / prev : null });
+    });
+    return { ok: true, r, today, days, keepDays: USAGE_KEEP_DAYS, priorKept, gen: usageGeneration,
+      kpi: { online: members.filter((u) => online.has(u.uid)).length,
+        activeToday: activeOn.has(today) ? activeOn.get(today).size : 0,
+        activeRange, members: members.length,
+        stickiness: activeRange ? meanDaily / activeRange : null,
+        medMinPerDay: usageMed(memberDayMin),
+        newMembers: newMembers.length, newActive: newMembers.filter((u) => uActive.has(u.uid)).length },
+      series, tabs: tabRows, members: memberRows };
+  }
+  // One member's last USAGE_KEEP_DAYS days: minutes per day, tab mix, device mix. Shared by the
+  // member's own card (usageMine) and the operator's drill-in (usageMember, which AUDITS).
+  function usageDetail(u, tabs, now) {
+    const today = usageToday(now), days = usageDays(today, USAGE_KEEP_DAYS);
+    const label = new Map((tabs || []).map((t) => [t.key, t.label]));
+    const perDay = new Map(), tab = new Map(), dev = new Map();
+    const pend = [...usagePend.values()].filter((r) => r.uid === u.uid);
+    for (const r of US.rangeOf.all(u.uid, days[0], today).concat(pend)) {
+      if (r.kind === "tab") { perDay.set(r.day, (perDay.get(r.day) || 0) + r.ms); tab.set(r.key, (tab.get(r.key) || 0) + r.ms); }
+      else if (r.kind === "dev") dev.set(r.key, (dev.get(r.key) || 0) + r.ms);
+    }
+    const total = [...tab.values()].reduce((s, v) => s + v, 0);
+    return { handle: u.handle, display: u.display, createdAt: u.createdAt,
+      invitedBy: u.invitedBy ? ((users.get(u.invitedBy) || {}).display || null) : null,
+      paused: !!u.usagePaused, keepDays: USAGE_KEEP_DAYS, days,
+      minutes: days.map((d) => Math.round((perDay.get(d) || 0) / 6000) / 10),
+      activeDays: days.filter((d) => (perDay.get(d) || 0) >= USAGE_ACTIVE_MS).length,
+      ms: total,
+      tabs: [...tab].sort((a, b) => b[1] - a[1]).map(([k, ms]) => ({ key: k, label: label.get(k) || k, ms, share: total ? ms / total : 0 })),
+      devices: [...dev].sort((a, b) => b[1] - a[1]).map(([k, ms]) => ({ key: k, ms })) };
+  }
+  function usageMine(uid, tabs, now) {
+    const u = users.get(uid);
+    if (!u) return { ok: false, error: "no such account" };
+    return Object.assign({ ok: true }, usageDetail(u, tabs, now));
+  }
+  function usageMember(adminUid, handle, tabs, now) {
+    const u = getUserByHandle(handle);
+    if (!u) return { ok: false, error: "no such member" };
+    // Every drill-in is written down, paused or not — the same rule as the message read-through.
+    adminAudit(adminUid, "view-usage", null, u.handle);
+    const d = usageDetail(u, tabs, now);
+    if (u.usagePaused) return { ok: true, handle: d.handle, display: d.display, createdAt: d.createdAt, invitedBy: d.invitedBy, paused: true, keepDays: USAGE_KEEP_DAYS };
+    return Object.assign({ ok: true }, d);
+  }
+
   // ---- backup + close --------------------------------------------------------------------------
   // accounts.db is the one file on the volume with no other copy anywhere: users, password hashes,
   // invites, every message and every attachment. VACUUM INTO writes a consistent, compacted copy
@@ -2538,6 +2746,8 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     return Promise.race([backupChain.then(() => true, () => true), to]).finally(() => clearTimeout(t));
   }
   function close() {
+    // (build 2026.09.24-109) the last minute of usage lands before the handle closes
+    try { usageFlush(); } catch (_) {}
     // A copy still running is abandoned with the process: its partial file goes now (the worker
     // may still hold it open — unlinking an open file is fine), not at the next boot's backup.
     if (backupTmpLive) { try { fs.unlinkSync(backupTmpLive); } catch (_) {} }
@@ -2567,6 +2777,9 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     prefsGet, prefsPut,
     walletGet, walletSet, walletDrop, walletsAll,
     adminThreads, adminHistory, adminSearch, adminAuditLog,
+    // usage (build 2026.09.24-109)
+    usageRecord, usageFlush, usageRetain, usageSummary, usageMine, usageMember, usagePaused, setUsagePaused,
+    usageGen: () => usageGeneration, usagePending: () => usagePend.size, USAGE_KEEP_DAYS,
     pendingEscalations, markEscalated,
     setPxHistory,
     // browser push subscriptions — stored here, delivered by the server (which holds the keys)
