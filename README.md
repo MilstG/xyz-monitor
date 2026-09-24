@@ -307,8 +307,35 @@ instant, and the per-IP rate limit stops being a per-user problem.
   body that search, export, the digest and the Telegram mirror all read — the client never
   supplies the text. A card is immutable like a command result (re-capture posts a fresh one of
   the same address), never a reply, and its note travels as an ordinary message right behind it.
-  Not in this cut: charts, drawer sections and the other boards (the mock in `docs/` shows where
-  the same glyph goes next), and a screen card does not re-run its filters live.
+  Charts, drawer sections, the other boards and live screens followed in 2026.09.24-98 (next entry).
+- **Share to chat everywhere** (build 2026.09.24-98) — the mock's "everywhere else", on the same
+  glyph, sheet and card format. Two new card kinds: a **panel** is any other surface captured from
+  what it *drew* (the column-table rule again: each cell's text and the colour class it wore, no
+  second list of getters), as label/value lines (one row, one section) or a table (a whole board,
+  first 25 rows); a sparkline travels as its **numbers** (≤ 120, gaps kept as gaps) and the card
+  redraws it, and the text body renders it as block heights for the phone. A **chart** takes the
+  `/ratio` road: rasterised offscreen to a PNG, uploaded into the thread, and posted with the card
+  as its caption (the route refuses a chart card without its own upload, and `send()` holds the
+  file to the same thread-and-owner rule as any attachment), so a picture goes to an existing
+  conversation. Where the glyph sits: **Trend, Actionable, Sectors, Drawdown** rows float it at the
+  row's end, with *the row* / *this board* on right-click; the **Funding heatmap** is an SVG, so
+  its row label carries the market and the card is built from the payload that drew it (mean,
+  now, window, the row's cells as a zero-lined spark, in the unit on screen); every **drawer**
+  section header floats it (metrics, the earnings reaction — now its own fields: next print,
+  session, EPS est, prints, avg/median |move|, up/down, ×usual day, gaps, +24h — notes, OI and
+  funding sparklines, the 30d split, co-movers); each **Charts** pane header has one, and the
+  drawer's hourly candles share as a raster of the same drawing (`candleGeom`, theme variables
+  resolved, since an `<img>` reads no CSS). `/ratio` now uses the same rasteriser (`shSvgPng`).
+  A **screen** carries its filters as data (`q`: text filter, vol/OI bounds, drill set ≤ 150,
+  sort, scope — validated field by field) and can be shared **live**: every viewer's copy re-runs
+  the screener's own rules over the snapshot they hold, drawn by the columns' own renderers,
+  with newcomers marked, and the capture stays underneath *as shared* with the names that no
+  longer pass struck through; a frozen screen that carried `q` still says "k of N still pass". A
+  screen leaning on ★ only / noted / held cannot go live (those lists are the sharer's), and the
+  sheet says why. Panels and charts are shared again from where they live — *re-capture* stays a
+  screener verb, and the button only shows where it works. Not here: `/share` in the composer
+  still speaks only for the screener, and a live screen re-runs on the viewer's snapshot (no ★
+  pinning), not the sharer's.
 - **Reading a call** (build 2026.09.22-89) — the words around a `$TICKER` decide the direction and
   the horizon, from a fixed vocabulary on purpose: a call posts under your name and enters your
   record, so a wrong guess costs more than no guess. Short words before the ticker: `short`,

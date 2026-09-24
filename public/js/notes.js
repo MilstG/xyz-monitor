@@ -598,7 +598,26 @@ function earnDrawerHtml(r){
   if(!p&&!st) return '';
   const up=p?`Earnings ${p.diff===0?'<b style="color:var(--accent)">TODAY</b>':p.diff===1?'<b style="color:var(--accent)">tomorrow</b>':'in '+p.diff+'d'} · ${esc(earnSessLbl(p.e.s))}${p.e.eps!=null?' · EPS est '+epsFmt(p.e.eps):''}`:'';
   const hist=st?`${up?' · ':''}<span class="sec" data-tip="own reaction base rate — hover the Earnings tab row for the full breakdown">${st.n} print${st.n===1?'':'s'}, avg |${st.avgAbs}%|</span>`:'';
-  return `<div class="dsub" style="margin-top:2px">${up}${hist}</div>`;
+  return `<div class="dsub" style="margin-top:2px" data-shsec="earn" data-shlabel="Earnings reaction">${up}${hist}</div>`;
+}
+// The earnings line as a card (build 2026.09.24-98): the next print and this name's own reaction
+// base rate, as label/value lines — the fields the line and its hover already print, no new math.
+function earnShareRows(r){
+  if(!r||r.uni!=='xyz') return [];
+  const p=state.earn?earnNext(r.ticker):null;
+  const st=state.earnPayload&&state.earnPayload.study&&state.earnPayload.study[r.ticker];
+  const L=(t,s,c)=>({t,c:[{s:String(s),c:c||''}]}), out=[];
+  if(p){ out.push(L('next print',p.diff===0?'today':p.diff===1?'tomorrow':'in '+p.diff+'d',p.diff<=1?'pos':''));
+    out.push(L('session',earnSessLbl(p.e.s)));
+    if(p.e.eps!=null) out.push(L('EPS est',epsFmt(p.e.eps))); }
+  if(st){ out.push(L('prints',st.n)); out.push(L('avg |move|',st.avgAbs+'%'));
+    if(st.medAbs!=null) out.push(L('median |move|',st.medAbs+'%'));
+    if(st.up!=null) out.push(L('up / down',st.up+' \u2191 '+(st.n-st.up)+' \u2193',st.up*2>st.n?'pos':st.up*2<st.n?'neg':'sec'));
+    if(st.xMed!=null) out.push(L('vs usual day',st.xMed+'x median'));
+    if(st.gapN>0) out.push(L('gapped up',st.gapUp+' / '+st.gapN));
+    const c24=st.curve&&st.curve.agg&&st.curve.agg.h24;
+    if(c24&&c24.n>0) out.push(L('+24h |move|',c24.medAbs+'% median')); }
+  return out;
 }
 // Reported window for the tab: the server's `recent` (past 2 ET days, derived from the persisted
 // print history) MERGED with any upcoming entries that rolled past ET midnight since the last
@@ -759,4 +778,4 @@ function renderEarnings(){
   box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',(ev)=>{ if(ev.target.closest('a,button')) return; const c=rw.dataset.coin; if(state.rows.has(c)) openDetail(c); }));   // in-place drawer — no tab switch
   wireEarnVoid(box);
 }
-export { _hsgLast, _liqLast, _notesLoading, earnDrawerHtml, epsFmt, epsPairFmt, loadHousing, loadLiquidity, loadNotes, noteBadge, noteDrawerHtml, notesStale, openHousing, openLiquidity, openNotes, renderDrawerNotes, renderEarnings, renderHousing, renderLiquidity, renderNotes, wireDrawerNotes };
+export { _hsgLast, _liqLast, _notesLoading, earnDrawerHtml, earnShareRows, epsFmt, epsPairFmt, loadHousing, loadLiquidity, loadNotes, noteBadge, noteDrawerHtml, notesStale, openHousing, openLiquidity, openNotes, renderDrawerNotes, renderEarnings, renderHousing, renderLiquidity, renderNotes, wireDrawerNotes };

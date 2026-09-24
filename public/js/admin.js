@@ -12,6 +12,7 @@ import { FOC, focFetch } from "./focus.js";
 import { homeWallToEtMin, sessEx } from "./markets.js";
 import { TAB_GROUPS, applyTabVisibility, buildTabGroups, wireTabDrag } from "./nav.js";
 import { drawSessions } from "./positioning.js";
+import { shPanel } from "./share.js";
 import { termFind } from "./terminal.js";
 import { loadPush, pushAct, pushState } from "./triggers.js";
 
@@ -1154,7 +1155,7 @@ function fhHeatSvg(fh,rows,tf){
     `<text x="${W-4}" y="13" text-anchor="end" class="fh-hd"><title>${esc(nowTip)}</title>${apr?'now APR':'now / '+esc(tf)}</text>`;
   rows.forEach((r,ri)=>{
     const y=pt+ri*ch, cells=fhCells(fh,r,tf), mraw=fhMean(r,tf), mean=mraw==null?null:mraw*(apr?ann:1);
-    s+=`<text x="${lx-7}" y="${(y+ch/2+3.3).toFixed(1)}" text-anchor="end" class="fh-tk">${esc(r.ticker)}</text>`;
+    s+=`<text x="${lx-7}" y="${(y+ch/2+3.3).toFixed(1)}" text-anchor="end" class="fh-tk" data-coin="${esc(r.coin||'')}">${esc(r.ticker)}</text>`;   // data-coin: the share glyph's handle (build 2026.09.24-98)
     for(let i=0;i<nb;i++){
       const x=lx+i*cw, v=cells[i], col=fhColor(v,cap);
       const t0=ax.t0+i*ax.width, when=f.d.format(t0)+(ax.bucketHours>=24?'':' '+f.h.format(t0));
@@ -1228,6 +1229,24 @@ function renderFundHeat(fh){
   // No sHead: the board IS the tab now, so the tab's own title carries the name. A section header
   // here would print the same sentence twice, one line apart.
   return controls+legend+`<div class="s-card" style="overflow-x:auto">${fhHeatSvg(fh,shown,tf)}</div>`+sCap(capTxt);
+}
+// A heatmap row as a card (build 2026.09.24-98): the grid is a picture (SVG), so the row is read from
+// the payload that drew it, in the unit on screen — the window mean, the live now, the window, and
+// the row's cells as the card's spark (zero-lined: the sign is the reading). Same numbers, same
+// formatter, same "flat wears no colour" rule as the row's own labels.
+function fhShareCard(coin){
+  const fh=((state.funding&&state.funding.view)||{}).data; if(!fh||!Array.isArray(fh.rows)) return null;
+  const row=fh.rows.find(r=>r.coin===coin); if(!row) return null;
+  const tf=fhTf(fh), ax=(fh.axis||{})[tf]; if(!ax) return null;
+  const apr=fhUnit()==='apr', cap=fhCap(fh,tf), dp=fhDpU(cap), zero=0.5*Math.pow(10,-dp)/100;
+  const cells=fhCells(fh,row,tf), mraw=fhMean(row,tf), mean=mraw==null?null:mraw*(apr?fhAnn(fh,tf):1);
+  const fnow=fhNowOf(row), now=fnow==null?null:fnow*(apr?FH_HPY:ax.bucketHours);
+  const cls=v=>v==null||Math.abs(v)<zero?'sec':(v>0?'neg':'pos');   // red = longs pay, as on the grid
+  const L=(t,v,c)=>({t,c:[{s:v,c:c||''}]});
+  return shPanel({ view:'funding', coin, title:'Funding heat \u00b7 '+tf+(apr?' \u00b7 APR':' \u00b7 per bucket'),
+    rows:[L(apr?'mean APR':'mean / '+tf,fhPct(mean,dp),cls(mean)), L(apr?'now APR':'now / '+tf,fhPct(now,dp),cls(now)),
+      L('window',ax.buckets+' \u00d7 '+ax.bucketHours+'h buckets','sec'), L('reads','+ = longs pay \u00b7 \u2212 = longs receive','sec')],
+    spark:{ v:cells.map(v=>v==null?null:v*100), l:'funding '+fhUnitTag(tf)+' per bucket, oldest left (%)', z:true } });
 }
 function attachFundHeatControls(){
   document.querySelectorAll('.fhunit').forEach(b=>b.addEventListener('click',()=>{ state.analytics.fheat.unit=b.dataset.u==='bucket'?'bucket':'apr';
@@ -1397,4 +1416,4 @@ function renderSeasonality(se){
   return sHead('Return seasonality by hour','quarantined — pick all, a sector or one name; grey is noise, colored cleared significance')+controls+banner+sCard(seasonBarSvg(v.hours))+sCap(cap);
 }
 function attachSeasonControls(){ const sel=el('seasonsel'); if(sel) sel.addEventListener('change',()=>{ state.analytics.season.sel=sel.value; drawSessions(); }); }
-export { IS_ADMIN, WD_NAMES, _hoverReg, _szCash, applyHash, attachClockControls, attachDowControls, attachLineHover, attachOverlayControls, attachSeasonControls, covPct, featureOn, fhLiveRefresh, fp, hoverChart, lcGrid, lcTicks, loadAnalytics, loadFunding, openAdmin, openFunding, renderClassOverlay, renderClocks, renderClusters, renderDow, renderFunding, renderSeasonality, renderSessionDecomp, renderSessions, sCap, sCard, sHead, sLeg, sessDate, syncAnalyticsSlot, syncFundingSlot, tabVisible, toggleViewAsPublic };
+export { IS_ADMIN, WD_NAMES, _hoverReg, _szCash, applyHash, attachClockControls, attachDowControls, attachLineHover, attachOverlayControls, attachSeasonControls, covPct, featureOn, fhLiveRefresh, fhShareCard, fp, hoverChart, lcGrid, lcTicks, loadAnalytics, loadFunding, openAdmin, openFunding, renderClassOverlay, renderClocks, renderClusters, renderDow, renderFunding, renderSeasonality, renderSessionDecomp, renderSessions, sCap, sCard, sHead, sLeg, sessDate, syncAnalyticsSlot, syncFundingSlot, tabVisible, toggleViewAsPublic };

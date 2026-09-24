@@ -671,6 +671,47 @@ test("dm: a card posts with a server-rendered body, an optional note behind it, 
   assert.ok(/CLIENT_MODULES = \(\(\) => \{ try \{ return fs\.readdirSync/.test(srv), "modules are discovered from the directory, so share.js ships precompressed and stamped");
 });
 
+// ===== build 2026.09.24-98: share to chat everywhere — panels, charts, live screens over the wire ====
+test("dm: a panel posts as a card, a chart only as the caption of its own uploaded picture, a live screen keeps its query", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const cara = jar(); cara.absorb(await post("/login", { handle: "cara", password: "yet-another-long-pw" }));
+  const members = JSON.parse((await get("/api/access", gus)).body).members;
+  const gusUid = members.find((m) => m.handle === "gus").uid;
+  // A drawer section: label/value lines and a spark, the body rendered by the server.
+  const panel = { kind: "panel", view: "drawer", title: "Funding APR · last 7d", coin: "xyz:NVDA", t: "NVDA", px: 176.4, cols: [{ k: "v", l: "value" }],
+    rows: [{ t: "from", c: [{ s: "4.10", c: "" }] }, { t: "to", c: [{ s: "11.30", c: "" }] }], spark: { v: [4.1, 6, -1, 11.3], l: "Funding APR", z: true }, at: 1790000000000 };
+  const p1 = JSON.parse((await post("/api/dm", { to: gusUid, card: panel }, cara)).body);
+  assert.ok(p1.ok, JSON.stringify(p1));
+  assert.equal(p1.message.card.kind, "panel"); assert.equal(p1.message.card.title, "Funding APR · last 7d");
+  assert.deepEqual(p1.message.card.spark.v, [4.1, 6, -1, 11.3]);
+  assert.ok(p1.message.body.startsWith("⤴ NVDA · Funding APR · last 7d · captured "), p1.message.body);
+  assert.ok(/\nfrom  4\.10\nto    11\.30\n/.test(p1.message.body), "label/value lines, padded: " + p1.message.body);
+  // A chart without its picture is refused; an upload into the thread, then the caption naming it, posts.
+  const chart = { kind: "chart", view: "charts", title: "4H candles · 90 bars", coin: "xyz:NVDA", t: "NVDA", tf: "4H", cols: [{ k: "v", l: "value" }],
+    rows: [{ t: "last", c: [{ s: "176.40", c: "" }] }], at: 1790000000000 };
+  const noPic = await post("/api/dm", { thread: p1.thread, card: chart }, cara);
+  assert.equal(noPic.statusCode, 400); assert.match(JSON.parse(noPic.body).error, /no-image/);
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4E, 0x47, 13, 10, 26, 10]), Buffer.alloc(32)]);
+  const up = JSON.parse((await post("/api/dm/upload", { thread: p1.thread, name: "chart-NVDA-4H.png", data: png.toString("base64") }, cara)).body);
+  assert.ok(up.ok, JSON.stringify(up));
+  const c1 = JSON.parse((await post("/api/dm", { thread: p1.thread, card: chart, fileId: up.file.id }, cara)).body);
+  assert.ok(c1.ok, JSON.stringify(c1));
+  assert.equal(c1.message.card.kind, "chart"); assert.ok(c1.message.file && c1.message.file.inline, "the picture rides the card's message, inline");
+  assert.ok(c1.message.body.includes("(the chart is attached as a picture)"));
+  // Somebody else's upload cannot be captioned; a panel never carries a file even when one is named.
+  const up2 = JSON.parse((await post("/api/dm/upload", { thread: p1.thread, name: "g.png", data: png.toString("base64") }, gus)).body);
+  assert.equal((await post("/api/dm", { thread: p1.thread, card: chart, fileId: up2.file.id }, cara)).statusCode, 400, "the attachment is not yours");
+  const p2 = JSON.parse((await post("/api/dm", { thread: p1.thread, card: panel, fileId: up2.file.id }, gus)).body);
+  assert.ok(p2.ok && !p2.message.file, "a panel ignores a fileId");
+  // A live screen keeps its query as data; the text body says it is live.
+  const screen = { kind: "screen", cols: [{ k: "d1", l: "24h" }], rows: [{ coin: "xyz:NVDA", t: "NVDA", c: [{ s: "+1.2%", c: "pos" }] }],
+    q: { f: "NV", vmin: 1e6, sk: "d1", sd: "desc", sc: "stocks", grp: ["xyz:NVDA"] }, live: true, at: 1790000000000 };
+  const s1 = JSON.parse((await post("/api/dm", { thread: p1.thread, card: screen }, cara)).body);
+  assert.ok(s1.ok, JSON.stringify(s1));
+  assert.equal(s1.message.card.live, true); assert.equal(s1.message.card.q.f, "NV"); assert.equal(s1.message.card.q.vmin, 1e6);
+  assert.ok(s1.message.body.split("\n")[0].includes("· live") && /live: re-runs these filters/.test(s1.message.body), s1.message.body);
+});
+
 // ===== build 2026.09.22-88: closing and extending a call over the wire =========================
 test("dm: close and extend are the author's verbs on an open call; a stamp needs a live mark to close", async () => {
   const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));

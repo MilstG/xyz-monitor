@@ -2771,3 +2771,140 @@ test("retest panel -96: renders the server's cells as served — floor, control,
   const feat = fs.readFileSync(path.join(__dirname, "..", "docs", "xyz-monitor-features.html"), "utf8");
   assert.ok(!feat.includes('"designed, not yet built"') && feat.includes('{nm:"D1 retest study",sc:"adm",fd:"built'), "the features page marks it built");
 });
+
+// ===== build 2026.09.24-98: share to chat everywhere — the cards EXECUTE ==============================
+// The whole client runs in a sandbox (the _btHarness pattern) and the new card kinds render through
+// the real cardHtml: a panel's lines and its redrawn spark, a chart's server-verified picture, a live
+// screen re-running its query over rows that moved since the capture. The board reader runs over a
+// minimal DOM row so the name-column and colour-class rules are exercised, not just named.
+function _shareHarness() {
+  const app = require("./_client").clientSource();
+  const els = {};
+  const mk = (id) => ({ id, innerHTML: "", hidden: false, value: "", checked: false, textContent: "", style: {}, dataset: {},
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    querySelectorAll: () => [], querySelector: () => null, addEventListener() {}, appendChild() {}, removeChild() {},
+    setAttribute() {}, getAttribute: () => null, focus() {}, scrollIntoView() {}, getBoundingClientRect: () => ({ left: 0, top: 0, width: 900, height: 300 }) });
+  const saved = { si: global.setInterval, st: global.setTimeout, raf: global.requestAnimationFrame, doc: global.document, win: global.window,
+    ls: global.localStorage, f: global.fetch, ct: global.clearTimeout, ci: global.clearInterval };
+  global.setInterval = () => 0; global.setTimeout = () => 0; global.requestAnimationFrame = () => 0; global.clearTimeout = () => 0; global.clearInterval = () => 0;
+  global.document = { getElementById: (id) => (els[id] = els[id] || mk(id)), querySelectorAll: () => [], querySelector: () => null,
+    createElement: mk, addEventListener() {}, body: mk("body"), documentElement: mk("html"), hidden: false };
+  global.window = { addEventListener() {}, location: { reload() {}, href: "/", hash: "" }, matchMedia: () => ({ matches: false, addEventListener() {} }), __FLAGS: {}, __ADMIN: true };
+  global.localStorage = { _d: {}, getItem(k) { return this._d[k] ?? null; }, setItem(k, v) { this._d[k] = String(v); }, removeItem(k) { delete this._d[k]; } };
+  global.fetch = () => new Promise(() => {});
+  const api = new Function(app + "\n;return {state, COL_BY_KEY, cardHtml, cardCanRecapture, cardRecapture, cardWire, screenRun, screenQuery, captureBoardRow, earnShareRows, shPanel};")();
+  const restore = () => { global.setInterval = saved.si; global.setTimeout = saved.st; global.requestAnimationFrame = saved.raf; global.clearTimeout = saved.ct; global.clearInterval = saved.ci;
+    global.document = saved.doc; global.window = saved.win; global.localStorage = saved.ls; global.fetch = saved.f; };
+  return { api, restore };
+}
+test("share everywhere (-98): panel, chart and live-screen cards render; the live screen re-runs its query; boards read what they drew", () => {
+  const { api, restore } = _shareHarness();
+  try {
+    const { state } = api;
+    const row = (coin, t, uni, d1, vol, oi) => ({ coin, ticker: t, uni, d1, vol, oi, px: 100, delisted: false });
+    state.rows = new Map([
+      ["xyz:NVDA", row("xyz:NVDA", "NVDA", "xyz", 3.1, 5e8, 9e7)], ["xyz:NVDL", row("xyz:NVDL", "NVDL", "xyz", 5.5, 4e8, 1e7)],
+      ["xyz:NVTS", row("xyz:NVTS", "NVTS", "xyz", -1.0, 1e5, 1e6)],   // under the vol floor: drops out
+      ["xyz:AMD", row("xyz:AMD", "AMD", "xyz", 9.9, 9e8, 9e7)],      // fails the text filter
+      ["NVX", row("NVX", "NVX", "main", 7.0, 9e8, 9e7)],             // other universe
+    ]);
+    // ---- screenRun: the screener's rules, the card's scope, the card's sort ----
+    const q = { f: "NV", vmin: 1e6, vmax: null, omin: null, omax: null, grp: [], gl: "", sk: "d1", sd: "desc", sc: "stocks" };
+    assert.deepEqual(api.screenRun(q).map((r) => r.ticker), ["NVDL", "NVDA"], "filter text, vol floor, scope and the d1 sort all apply");
+    assert.deepEqual(api.screenRun(Object.assign({}, q, { sd: "asc", grp: ["xyz:NVDA", "xyz:NVTS"], vmin: null })).map((r) => r.ticker), ["NVTS", "NVDA"], "a drill set narrows");
+    assert.deepEqual(api.screenRun(Object.assign({}, q, { sc: "crypto" })).map((r) => r.ticker), ["NVX"]);
+    // screenQuery: personal lists make a screen un-liveable, and say nothing otherwise
+    state.filter = " nv "; state.filters = { volMin: 1e6 }; state.sortKey = "d1"; state.sortDir = "desc"; state.scope = "stocks"; state.grpDrill = null;
+    state.watchOnly = false; state.noteOnly = false; state.posOnly = false;
+    assert.deepEqual(api.screenQuery(), { f: "nv", vmin: 1e6, vmax: null, omin: null, omax: null, grp: [], gl: "", sk: "d1", sd: "desc", sc: "stocks" });
+    state.watchOnly = true; assert.equal(api.screenQuery(), null, "★ only is the sharer's list — no live re-run"); state.watchOnly = false;
+    state.grpDrill = { label: "big", set: new Set(Array.from({ length: 151 }, (_, i) => "c" + i)) };
+    assert.equal(api.screenQuery(), null, "a drill too big to carry cannot go live"); state.grpDrill = null;
+
+    // ---- a live screen: captured NVDA + NVTS; now NVDL is new and NVTS no longer passes ----
+    const cap = { v: 1, kind: "screen", view: "markets", scope: "stocks", tf: "1d", cols: [{ k: "d1", l: "24h" }],
+      rows: [{ coin: "xyz:NVDA", t: "NVDA", c: [{ s: "+1.0%", c: "pos" }] }, { coin: "xyz:NVTS", t: "NVTS", c: [{ s: "+2.0%", c: "pos" }] }],
+      filters: "filter “NV” & vol ≥ 1000000M", sort: "24h desc", total: 2, q, live: true, at: Date.now() };
+    const html = api.cardHtml(cap, { id: 7 });
+    assert.ok(html.includes("<b>live</b> · now · 2 pass · 1 of 2 from the capture still pass"), "the live header counts what passes now and what survived");
+    const liveT = html.slice(0, html.indexOf("as shared")), frozen = html.slice(html.indexOf("as shared"));
+    assert.ok(liveT.indexOf(">NVDL <span class=\"nwk\">new</span>") > 0 && liveT.indexOf("NVDL") < liveT.indexOf(">NVDA<"), "live rows are re-sorted, the newcomer marked");
+    assert.ok(liveT.includes("<tr class=\"nw\">") && !liveT.includes("NVTS"), "a name that fails the filters now is not in the live table");
+    assert.ok(liveT.includes("<span class=\"pos\">+5.50%</span></td>") && liveT.includes("<span class=\"pos\">+3.10%</span></td>"), "live cells come from the column's own renderer over the live row");
+    assert.ok(frozen.includes("<tr class=\"gone\" title=\"no longer passes these filters\"><td class=\"tk\" data-cardcoin=\"xyz:NVTS\">NVTS</td>")
+      && frozen.includes("<span class=\"pos\">+1.0%</span>"), "the capture stays, as shared, with the dropout struck");
+    assert.ok(html.includes("<span class=\"mk-chip\">live screen</span>"));
+    // frozen but query-carrying: the footer still says how many survive; no live table
+    const fro = api.cardHtml(Object.assign({}, cap, { live: false }), { id: 8 });
+    assert.ok(!fro.includes("<b>live</b>") && fro.includes("<span class=\"now\">1 of 2 still pass</span>"), "a frozen screen still counts its survivors");
+
+    // ---- a panel: lines, a label-less sentence, the redrawn spark, the drawer's door ----
+    const panel = { v: 1, kind: "panel", view: "drawer", title: "Open interest · last 7d", coin: "xyz:NVDA", t: "NVDA", px: 95, scope: "stocks", tf: "1d",
+      cols: [{ k: "v", l: "value" }], rows: [{ t: "from", c: [{ s: "80.0M", c: "" }] }, { t: "", c: [{ s: "wrote it at 95 <b>", c: "" }] }],
+      spark: { v: [1, 2, null, 4], l: "OI", z: false }, total: 2, at: Date.now() };
+    const ph = api.cardHtml(panel, { id: 9, mine: true });
+    assert.ok(ph.includes("<div class=\"pl\"><span class=\"k\">from</span><span class=\"v\"><span class=\"\">80.0M</span></span></div>"), "label/value line");
+    assert.ok(ph.includes("<div class=\"pl wide\"><span class=\"v\"><span class=\"\">wrote it at 95 &lt;b&gt;</span>"), "a sentence spans the card, escaped");
+    assert.ok(/<div class="pspark"><svg class="spark" data-series="1,2,,4"/.test(ph) && ph.includes("stroke=\"var(--up)\""), "the spark is redrawn from its numbers, coloured by its direction");
+    assert.ok(ph.includes("<span class=\"mk-chip\">drawer</span>") && ph.includes(">open the drawer ↗</button>"), "the chip names the surface and the door opens it");
+    assert.ok(ph.includes("now 100.00") || ph.includes("now 100"), "a panel that names a market drifts against its live mark");
+    assert.equal(api.cardCanRecapture(panel), false, "a panel is shared again from where it lives, not re-captured by address");
+    assert.equal(api.cardRecapture(panel), null);
+    // a board panel is a table whose names open drawers
+    const board = api.cardHtml({ v: 1, kind: "panel", view: "trend", title: "Trend ladder", coin: "", t: "", px: null, cols: [{ k: "c2", l: "D1" }, { k: "c3", l: "H4" }],
+      rows: [{ coin: "xyz:NVDA", t: "NVDA", c: [{ s: "+4", c: "pos" }, { s: "\u2713", c: "" }] }], total: 30, at: Date.now() }, { id: 10 });
+    assert.ok(board.includes("<th></th><th>D1</th><th>H4</th>") && board.includes("<td class=\"tk\" data-cardcoin=\"xyz:NVDA\">NVDA</td><td><span class=\"pos\">+4</span></td>") && board.includes(" · 1 of 30") && board.includes(">open in Trend ↗<"));
+
+    // ---- a chart: the server-verified picture, inline; the caption below ----
+    const chart = { v: 1, kind: "chart", view: "charts", title: "4H candles · 90 bars", coin: "xyz:NVDA", t: "NVDA", px: 100, scope: "stocks", tf: "4H",
+      cols: [{ k: "v", l: "value" }], rows: [{ t: "last", c: [{ s: "100.00", c: "" }] }], at: Date.now() };
+    const chh = api.cardHtml(chart, { id: 11, file: { id: "ab12", inline: true, name: "chart.png" } });
+    assert.ok(chh.includes("<a class=\"dm-img cimg\" href=\"/api/dm/file/ab12\"") && chh.includes("<img src=\"/api/dm/file/ab12\" alt=\"4H candles · 90 bars\""), "the picture is the message's own attachment");
+    assert.ok(chh.includes("<span class=\"k\">last</span>") && chh.includes(">open in Charts ↗<"));
+    assert.ok(api.cardHtml(chart, { id: 12, file: null }).includes("picture unavailable"), "no picture is said, not a broken image");
+    // the wire copy drops the client-only fields (the PNG blob, its preview URL)
+    assert.deepEqual(Object.keys(api.cardWire(Object.assign({ _png: {}, _url: "blob:x", _name: "c.png" }, chart))).filter((k) => k[0] === "_"), []);
+
+    // ---- the board reader over a minimal DOM row: the name column is the title, classes survive ----
+    const cell = (text, cls) => ({ textContent: text, classList: { contains: (k) => k === cls }, querySelector: () => null });
+    const heads = ["#", "asset", "D1", "H4", ""].map((t) => ({ textContent: t + (t === "D1" ? " ▾" : "") }));
+    const table = { tHead: { rows: [{ cells: heads }] } };
+    const tr = { tagName: "TR", dataset: { coin: "xyz:NVDA" }, cells: [cell("1"), cell("NVDA RETEST"), cell("+4", "pos"), cell("✗", "neg"), cell("chart")], closest: () => table };
+    const rc = api.captureBoardRow(tr, { view: "trend", title: "Trend ladder" });
+    assert.equal(rc.kind, "panel"); assert.equal(rc.coin, "xyz:NVDA"); assert.equal(rc.t, "NVDA"); assert.equal(rc.title, "Trend ladder");
+    assert.deepEqual(rc.rows.map((r) => [r.t, r.c[0].s, r.c[0].c]), [["D1", "+4", "pos"], ["H4", "✗", "neg"]],
+      "rank, the name column and an unlabelled button column are not fields; the sort arrow is not part of a label");
+
+    // ---- the earnings line as fields ----
+    state.earn = new Map(); state.earnPayload = { study: { NVDA: { n: 8, avgAbs: 6.2, medAbs: 5.1, up: 5, xMed: 1.8, gapN: 0 } } };
+    const er = api.earnShareRows(state.rows.get("xyz:NVDA"));
+    assert.deepEqual(er.map((r) => r.t + "=" + r.c[0].s), ["prints=8", "avg |move|=6.2%", "median |move|=5.1%", "up / down=5 ↑ 3 ↓", "vs usual day=1.8x median"]);
+    assert.equal(er[3].c[0].c, "pos", "more ups than downs reads green");
+    restore();
+  } catch (e) { restore(); throw e; }
+});
+
+test("share everywhere (-98) manifest: every board and the drawer are wired, charts carry the glyph, /ratio shares the rasteriser, docs say so", () => {
+  const fs = require("fs"), path = require("path"), root = path.join(__dirname, "..");
+  const rd = (...p) => fs.readFileSync(path.join(root, ...p), "utf8");
+  const nav = rd("public", "js", "nav.js");
+  for (const [id, view] of [["trend-body", "trend"], ["act-body", "actionable"], ["sect-board", "sectors"], ["rvd-wrap", "drawdown"], ["funding-body", "funding"]])
+    assert.ok(new RegExp("shareWireBoard\\(el\\('" + id + "'\\), \\{view:'" + view + "'").test(nav), view + " board is wired to the share glyph");
+  assert.ok(nav.includes("shareWireDrawer(el('drawer'));") && nav.includes("capture:n=>fhShareCard(n.getAttribute('data-coin'))"), "drawer sections and heatmap rows share");
+  const admin = rd("public", "js", "admin.js");
+  assert.ok(admin.includes('class="fh-tk" data-coin="${esc(r.coin||\'\')}"'), "the heatmap's row label carries its market");
+  const charts = rd("public", "js", "charts.js");
+  assert.ok(charts.includes("class=\"chshr\"") && charts.includes("shareOpen(chShareCard(p))") && charts.includes("const png=await shCanvasPng(p.canvas);"), "every Charts pane shares its canvas");
+  const drawer = rd("public", "js", "drawer.js");
+  assert.ok(drawer.includes("const png=await shSvgPng(svg,g.W,g.H);") && drawer.includes("_dcand={coin,days,cd};"), "the drawer's candles share as a raster of the same drawing");
+  const notes = rd("public", "js", "notes.js");
+  assert.ok(notes.includes('data-shsec="earn" data-shlabel="Earnings reaction"'), "the earnings line is a shareable section");
+  const msgs = rd("public", "js", "messages.js");
+  assert.ok(msgs.includes("const png=await shSvgPng(S.svg,S.W,S.H);") && !msgs.includes("c.toBlob("), "/ratio and share use one rasteriser");
+  assert.ok(msgs.includes("(m.card&&cardCanRecapture(m.card)?"), "re-capture is offered only where it can work");
+  const css = rd("public", "styles.css");
+  assert.ok(css.includes(".dm-card .plines{") && css.includes(".dm-card tr.gone td{") && css.includes(".chshr{"), "the new card parts are styled");
+  const readme = rd("README.md");
+  assert.ok(readme.includes("**Share to chat everywhere** (build 2026.09.24-98)") && !readme.includes("Not in this cut: charts, drawer sections and the other boards"), "README entry, caveat retired");
+  assert.ok(rd("public", "docs.html").includes("Share to chat everywhere"), "the manual covers it");
+});

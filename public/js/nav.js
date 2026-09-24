@@ -2,7 +2,7 @@
 // declarations; side-effecting top-level statements run from __boot_* in the original source
 // order once every module has evaluated (see app.js). Shared cross-module mutable state lives
 // on G (core.js).
-import { tabVisible, toggleViewAsPublic } from "./admin.js";
+import { fhShareCard, tabVisible, toggleViewAsPublic } from "./admin.js";
 import { alertMarkRead, buildAlertsPanel, loadAlerts, notifyNewBuild, updateBell } from "./alerts.js";
 import { applyScope, setScope, showView, syncTabNav, syncTabScroll } from "./backtest.js";
 import { COLS } from "./base.js";
@@ -13,7 +13,7 @@ import { closeDetail, openDetail, runSigHist, toggleWatch } from "./drawer.js";
 import { buildHead, clearDrill, render, renderActionLists, renderRegimeStrip, scheduleRender, setGrp, sortedRows, syncGrpSeg, visibleCols } from "./markets.js";
 import { dmKeys, dmLoad, dmRefreshOpen, dmRender, dmState, dmSync, dmTypingFrame } from "./messages.js";
 import { renderHousing, renderLiquidity } from "./notes.js";
-import { shareSetSource, shareWireTable } from "./share.js";
+import { shareSetSource, shareWireBoard, shareWireDrawer, shareWireTable } from "./share.js";
 import { buildLayoutMenu, loadLayouts, loadPositions, loadPrefs, posLink, posStatText, prefsRemoteFrame, saveLayouts, savePrefs, updateLayoutBtn } from "./prefs.js";
 import { aiMatches, openAiReport } from "./report.js";
 import { exportSectors, renderSectors } from "./sectors.js";
@@ -194,6 +194,15 @@ el('body').addEventListener('keydown', e=>{ const pit=e.target.closest&&e.target
 // columns, and the table grows the floating glyph, the right-click menu and the `s` key.
 shareSetSource(()=>({rows:sortedRows(),cols:visibleCols()}));
 shareWireTable(el('body'), visibleCols);
+// ...and every other surface (build 2026.09.24-98): the same glyph on the boards' rows, with the row
+// and the whole board in the right-click menu, and on every section header of the drawer. The boards
+// are read from what they drew; the funding heatmap is an SVG, so its row comes from the payload.
+shareWireBoard(el('trend-body'), {view:'trend', title:'Trend ladder', rowSel:'tr[data-coin]'});
+shareWireBoard(el('act-body'), {view:'actionable', title:'Actionable', rowSel:'tr.act-row'});
+shareWireBoard(el('sect-board'), {view:'sectors', title:()=>state.sect&&state.sect.grp==='ind'&&state.scope!=='crypto'?'Industry rotation':'Sector rotation', rowSel:'tr[data-sect]'});
+shareWireBoard(el('rvd-wrap'), {view:'drawdown', title:'Drawdown', rowSel:'tr[data-coin]'});
+shareWireBoard(el('funding-body'), {view:'funding', title:'Funding heat', rowSel:'text.fh-tk[data-coin]', capture:n=>fhShareCard(n.getAttribute('data-coin'))});
+shareWireDrawer(el('drawer'));
 el('watchOnly').addEventListener('click',()=>{ state.watchOnly=!state.watchOnly; el('watchOnly').classList.toggle('on', state.watchOnly); updateFilterChip(); render(); savePrefs(); });
 // Deliberately NOT part of a saved layout, unlike ★-only: adding a field to the layout signature
 // would mark every layout the operator has already saved as dirty. Per browser, in prefs.

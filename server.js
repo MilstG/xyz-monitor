@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.24-97";
+const VERSION = "2026.09.24-98";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1670,8 +1670,13 @@ async function buildServer() {
       // quotable — and its failure never un-sends the card.
       const v = validateCard(b.card);
       if (!v.ok) return reply.code(400).send({ ok: false, error: "that card can't be shared (" + v.error + ")" });
+      // A chart card (build 2026.09.24-98) is the caption of a picture: the PNG was uploaded into
+      // this thread first (the /ratio road), and send() holds it to the same thread-and-owner rule
+      // as any attachment. No picture, no chart card; the screener kinds never carry one.
+      if (v.card.kind === "chart" && !b.fileId) return reply.code(400).send({ ok: false, error: "that card can't be shared (no-image)" });
       r = ACCOUNTS.send(me.uid, String(b.to || ""), cardText(v.card), coinForSymbol,
-        { thread: b.thread || null, card: v.card, stampSym: b.call && v.card.t ? v.card.t : null });
+        { thread: b.thread || null, card: v.card, stampSym: b.call && v.card.t ? v.card.t : null,
+          fileId: v.card.kind === "chart" ? String(b.fileId) : null });
       if (r.ok && typeof b.body === "string" && b.body.trim()) {
         const note = ACCOUNTS.send(me.uid, null, b.body, coinForSymbol, { thread: r.thread });
         r.note = note.ok ? note.message : null;

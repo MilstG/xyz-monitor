@@ -11,7 +11,7 @@ import { fetchJSON } from "./data.js";
 import { openDetail } from "./drawer.js";
 import { HELP_KEYS, closeHelp } from "./nav.js";
 import { TFIELD, nlResolve, termActive, termAsk, termComps, termErr, termExec, termFind, termGrammarComplete, termHistPush, termOutTrans, termSetSink, termSink, tpad } from "./terminal.js";
-import { cardHtml, cardOpen, cardPost, cardRecapture, shareCommand } from "./share.js";
+import { cardCanRecapture, cardHtml, cardOpen, cardPost, cardRecapture, shSvgPng, shareCommand } from "./share.js";
 import { loadRules } from "./triggers.js";
 
 
@@ -526,7 +526,7 @@ const DM_CMD_GUIDE=[
     ['report <ticker> \u00b7 report sector <name> \u00b7 report basket <t> <t> \u2026','the AI analyst report \u2014 opens the report view','ti']]},
   {h:'Chat only',rows:[
     ['/alert <ticker> <above|below|crosses> <n>','a threshold alert that fires INTO this conversation \u00b7 /alert NVDA > 200 \u00b7 /alert NVDA crosses down 180 \u00b7 /alert NVDA above 200ma \u00b7 /alert HOOD d1 > 5 \u00b7 /alert list \u00b7 /alert off <id>','c'],
-    ['/share <ticker> [column] \u00b7 /share screen','a piece of the screener as a data card \u2014 /share HOOD funding \u00b7 /share NVDA \u00b7 /share screen \u00b7 the \u2934 glyph on the table does the same with a picker','c'],
+    ['/share <ticker> [column] \u00b7 /share screen','a piece of the screener as a data card \u2014 /share HOOD funding \u00b7 /share NVDA \u00b7 /share screen \u00b7 the \u2934 glyph on the table, the boards, the drawer and the charts shares with a picker (charts as a picture, screens optionally live)','c'],
     ['/help','the short card, privately \u2014 only you see it','c'],
     ['/clear','forget your private lines; the conversation is untouched','c'],
     ['//text','send a message that really starts with a slash','c']]},
@@ -616,12 +616,9 @@ async function dmRatioChart(args){
   if(!d.tf) d.tf=tf;
   const S=ratioImageSvg(d,{scale:'reb',colors,tf});
   const title=`${d.num} \u00f7 ${d.den} \u00b7 ${tf.toUpperCase()} \u00b7 rebased 100${d.ema200?' \u00b7 EMA '+(d.emaSpan||200):''} \u00b7 last ${d.shown||d.candles.length}/${d.bars||d.candles.length} bars`;
-  const W=S.W, H=S.H, svg=S.svg;
-  const png=await new Promise((res)=>{
-    const img=new Image(); const url=URL.createObjectURL(new Blob([svg],{type:'image/svg+xml;charset=utf-8'}));
-    img.onload=()=>{ try{ const c=document.createElement('canvas'); c.width=W*2; c.height=H*2; const g=c.getContext('2d'); g.scale(2,2); g.drawImage(img,0,0); c.toBlob(bl=>{ URL.revokeObjectURL(url); res(bl); },'image/png'); }catch(_){ URL.revokeObjectURL(url); res(null); } };
-    img.onerror=()=>{ URL.revokeObjectURL(url); res(null); };
-    img.src=url; });
+  // One rasteriser for every chart that leaves as a picture (build 2026.09.24-98): share.js owns it,
+  // and the drawer's candles and the Charts panes ride the same one when shared to chat.
+  const png=await shSvgPng(S.svg,S.W,S.H);
   if(!png) return {error:'could not render the chart image'};
   const legs=[d.numBasket?'numerator is a basket (EW, synthesized hourly)':null, d.denBasket?'denominator is a basket (EW, synthesized hourly)':null].filter(Boolean);
   const last=d.candles[d.candles.length-1], first=d.candles[0];
@@ -1449,7 +1446,7 @@ function dmMessageHtml(m,t,p){
     +'<button type="button" class="dm-tool" data-dmreply="'+m.id+'" title="Quote this message in your reply">reply</button>'
     +'<button type="button" class="dm-tool" data-dmpin="'+m.id+'" data-on="'+(m.pinned?'0':'1')+'" title="'+(m.pinned?'Unpin':'Pin this to the top of the conversation')+'">'+(m.pinned?'unpin':'pin')+'</button>'
     +((m.ref&&m.refPx!=null&&dmState.admin)?'<button type="button" class="dm-tool" data-dmnote="'+m.id+'" title="Write this into the notes book, keeping the price and time it was called at">\u2192 note</button>':'')
-    +(m.card?'<button type="button" class="dm-tool" data-dmrecap="'+m.id+'" title="Post a fresh card of the same cell, row or screen \u2014 live values, new capture time">re-capture</button>':'')
+    +(m.card&&cardCanRecapture(m.card)?'<button type="button" class="dm-tool" data-dmrecap="'+m.id+'" title="Post a fresh card of the same cell, row or screen \u2014 live values, new capture time">re-capture</button>':'')
     // The author's own open call: close it now at the live mark, or give it another week.
     +((own&&m.call&&!m.call.closed)?'<button type="button" class="dm-tool" data-dmcallclose="'+m.id+'" title="Close this call now, at the current mark \u2014 the result freezes and enters the record">close call</button>'
       +'<button type="button" class="dm-tool" data-dmcallext="'+m.id+'" data-days="'+(m.call.h+7)+'" title="Extend the horizon by a week (now '+m.call.h+'d) \u2014 the call keeps running">+7d</button>':'')

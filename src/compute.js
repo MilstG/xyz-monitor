@@ -5698,36 +5698,69 @@ module.exports.parseAlertCmd = parseAlertCmd;
 // second table of getters — and the server renders the same strings into the monospace body that
 // search, export, the digest and the Telegram mirror all read. Strings only, bounded everywhere:
 // a card is a message, and a message that needs more than 8 KB is a screenshot.
-const CARD_KINDS = ["cell", "row", "screen"];
+// Share to chat everywhere (build 2026.09.24-98): two more kinds ride the same shape. A PANEL is a
+// named piece of any other surface — a drawer section, a board row, a board — as label/value lines
+// (one column) or a small table (several), optionally with a SPARK: the numbers a sparkline drew,
+// so the card redraws the line itself instead of shipping a picture of it. A CHART is a picture: the
+// PNG rides the ordinary attachment path (the /ratio road) and the card is its caption — title,
+// a few facts, the address. A SCREEN may now be LIVE: it carries its filters as data (`q`), and a
+// viewer's copy re-runs them over the current snapshot under the frozen table, which stays as shared.
+const CARD_KINDS = ["cell", "row", "screen", "panel", "chart"];
 const CARD_MAX_ROWS = 25, CARD_MAX_COLS = 12, CARD_MAX_CTX = 6, CARD_STR = 32, CARD_LBL = 24, CARD_BYTES = 12 * 1024;   // a full 25×8 screen is ~6 KB; the route's 16 KB body limit sits above this plus a note
+const CARD_PSTR = 64, CARD_TITLE = 48, CARD_SPARK = 120, CARD_CHART_ROWS = 8, CARD_GRP = 150;   // a panel line may be a sentence fragment (a note, an earnings line); a chart caption is a handful of facts
 const CARD_CLS = new Set(["", "pos", "neg", "sec", "na"]);
 const cardStr = (v, n) => (typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, n) : "");
 const cardNum = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+// A live screen's query: the screener's own filter state, as data, bounded. Personal filters (★,
+// noted, held) are never here — they are the sharer's lists, and re-run against a viewer's they would
+// be a different screen wearing the same card — so the client only offers "live" without them.
+function cardQuery(q) {
+  if (!q || typeof q !== "object" || Array.isArray(q)) return null;
+  return {
+    f: cardStr(q.f, 40), vmin: cardNum(q.vmin), vmax: cardNum(q.vmax), omin: cardNum(q.omin), omax: cardNum(q.omax),
+    grp: Array.isArray(q.grp) ? q.grp.slice(0, CARD_GRP).map((c) => cardStr(c, 40)).filter(Boolean) : [], gl: cardStr(q.gl, 40),
+    sk: cardStr(q.sk, CARD_LBL), sd: q.sd === "asc" ? "asc" : "desc", sc: q.sc === "crypto" ? "crypto" : "stocks",
+  };
+}
 function validateCard(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "not-a-card" };
   if (!CARD_KINDS.includes(raw.kind)) return { ok: false, error: "bad-kind" };
+  const panelish = raw.kind === "panel" || raw.kind === "chart";
+  const sN = panelish ? CARD_PSTR : CARD_STR;
   const cols = Array.isArray(raw.cols) ? raw.cols.slice(0, CARD_MAX_COLS).map((c) => ({ k: cardStr(c && c.k, CARD_LBL), l: cardStr(c && c.l, CARD_LBL) })).filter((c) => c.k && c.l) : [];
-  if (!cols.length) return { ok: false, error: "no-columns" };
-  const rows = Array.isArray(raw.rows) ? raw.rows.slice(0, CARD_MAX_ROWS).map((r) => ({
-    coin: cardStr(r && r.coin, 40), t: cardStr(r && r.t, 16), px: cardNum(r && r.px),
-    c: (Array.isArray(r && r.c) ? r.c : []).slice(0, cols.length).map((x) => ({ s: cardStr(x && x.s, CARD_STR) || "\u2014", c: CARD_CLS.has(x && x.c) ? x.c : "" })),
-  })).filter((r) => r.t) : [];
-  if (!rows.length) return { ok: false, error: "no-rows" };
-  for (const r of rows) while (r.c.length < cols.length) r.c.push({ s: "\u2014", c: "na" });
-  if (raw.kind !== "screen" && (rows.length !== 1 || (raw.kind === "cell" && cols.length !== 1))) return { ok: false, error: "shape" };
+  if (!cols.length && raw.kind !== "chart") return { ok: false, error: "no-columns" };
+  const rows = Array.isArray(raw.rows) ? raw.rows.slice(0, raw.kind === "chart" ? CARD_CHART_ROWS : CARD_MAX_ROWS).map((r) => ({
+    coin: cardStr(r && r.coin, 40), t: cardStr(r && r.t, panelish ? CARD_LBL : 16), px: cardNum(r && r.px),
+    c: (Array.isArray(r && r.c) ? r.c : []).slice(0, cols.length).map((x) => ({ s: cardStr(x && x.s, sN) || "—", c: CARD_CLS.has(x && x.c) ? x.c : "" })),
+  // A panel line may be label-less (a sentence of the section); a screener row never is.
+  })).filter((r) => r.t || (panelish && r.c.length)) : [];
+  if (!rows.length && raw.kind !== "chart") return { ok: false, error: "no-rows" };
+  for (const r of rows) while (r.c.length < cols.length) r.c.push({ s: "—", c: "na" });
+  if ((raw.kind === "cell" || raw.kind === "row") && (rows.length !== 1 || (raw.kind === "cell" && cols.length !== 1))) return { ok: false, error: "shape" };
+  const title = cardStr(raw.title, CARD_TITLE);
+  if (panelish && !title) return { ok: false, error: "no-title" };
+  // Panels and charts name their market outright (a board row's rows are FIELDS, not markets); the
+  // screener kinds take it from their single row, as before.
+  const single = raw.kind === "cell" || raw.kind === "row";
   const card = {
     v: 1, kind: raw.kind,
     view: cardStr(raw.view, 16) || "markets", scope: cardStr(raw.scope, 12), tf: cardStr(raw.tf, 8),
-    coin: raw.kind === "screen" ? "" : rows[0].coin, t: raw.kind === "screen" ? "" : rows[0].t,
-    px: raw.kind === "screen" ? null : rows[0].px,
+    coin: single ? rows[0].coin : panelish ? cardStr(raw.coin, 40) : "", t: single ? rows[0].t : panelish ? cardStr(raw.t, 16) : "",
+    px: single ? rows[0].px : panelish ? cardNum(raw.px) : null,
     cols, rows,
     ctx: Array.isArray(raw.ctx) ? raw.ctx.slice(0, CARD_MAX_CTX).map((x) => ({ l: cardStr(x && x.l, CARD_LBL), s: cardStr(x && x.s, CARD_STR), c: CARD_CLS.has(x && x.c) ? x.c : "" })).filter((x) => x.l && x.s) : [],
     filters: cardStr(raw.filters, 160), sort: cardStr(raw.sort, 40),
-    total: raw.kind === "screen" ? Math.max(rows.length, Math.min(100000, Math.trunc(cardNum(raw.total) || 0))) : 0,   // rows the screen had; the card shows "n of N"
+    total: raw.kind === "screen" || raw.kind === "panel" ? Math.max(rows.length, Math.min(100000, Math.trunc(cardNum(raw.total) || 0))) : 0,   // rows the screen had; the card shows "n of N"
     // A capture time is a real, recent instant or it is now: a crafted value past what Date can
     // render threw in cardText, and a negative one rendered as 1969.
     at: (() => { const t = cardNum(raw.at); return t != null && t > 0 && t <= Date.now() + 60e3 ? Math.trunc(t) : Date.now(); })(),
   };
+  if (panelish) card.title = title;
+  if (raw.kind === "panel" && raw.spark && typeof raw.spark === "object" && Array.isArray(raw.spark.v)) {
+    const v = raw.spark.v.slice(-CARD_SPARK).map(cardNum);
+    if (v.filter((x) => x != null).length >= 2) card.spark = { v, l: cardStr(raw.spark.l, CARD_TITLE), z: raw.spark.z === true };
+  }
+  if (raw.kind === "screen") { const q = cardQuery(raw.q); if (q) { card.q = q; card.live = raw.live === true; } }
   if (JSON.stringify(card).length > CARD_BYTES) return { ok: false, error: "too-big" };
   return { ok: true, card };
 }
@@ -5735,29 +5768,56 @@ function validateCard(raw) {
 // a cell is its value and its context lines; a row is label/value pairs; a screen is a padded
 // table. Column alignment is what carries the terminal feel on a wire with no colour.
 function cardTitle(card) {
-  if (card.kind === "cell") return "\u2934 " + card.t + " \u00b7 " + card.cols[0].l;
-  if (card.kind === "row") return "\u2934 " + card.t + " \u00b7 row";
-  return "\u2934 screen \u00b7 " + card.rows.length + " row" + (card.rows.length === 1 ? "" : "s");
+  if (card.kind === "cell") return "⤴ " + card.t + " · " + card.cols[0].l;
+  if (card.kind === "row") return "⤴ " + card.t + " · row";
+  if (card.kind === "panel" || card.kind === "chart") return "⤴ " + (card.t ? card.t + " · " : "") + card.title + (card.kind === "chart" ? " · chart" : "");
+  return "⤴ screen · " + card.rows.length + " row" + (card.rows.length === 1 ? "" : "s") + (card.live ? " · live" : "");
+}
+// A spark on a wire with no pictures: eight block heights over the series' own range — enough to
+// say "rising into the print" on a phone, which is all a sparkline ever said.
+const SPARK_BLOCKS = "▁▂▃▄▅▆▇█";
+function sparkText(v) {
+  const f = v.filter((x) => x != null), lo = Math.min(...f), hi = Math.max(...f);
+  const step = Math.max(1, Math.ceil(v.length / 40));
+  let out = "";
+  for (let i = 0; i < v.length; i += step) { const x = v[i]; out += x == null ? " " : SPARK_BLOCKS[hi > lo ? Math.min(7, Math.floor(((x - lo) / (hi - lo)) * 8)) : 3]; }
+  return out;
 }
 function cardText(card) {
   const when = new Date(card.at).toISOString().slice(0, 16).replace("T", " ") + "Z";
-  const where = [card.scope, card.tf].filter(Boolean).join(" \u00b7 ");
-  const head = cardTitle(card) + " \u00b7 captured " + when + (where ? " \u00b7 " + where : "");
+  const where = [card.scope, card.tf].filter(Boolean).join(" · ");
+  const head = cardTitle(card) + " · captured " + when + (where ? " · " + where : "");
   const lines = [head];
   if (card.kind === "cell") {
     lines.push(card.rows[0].c[0].s + "   " + card.cols[0].l.toLowerCase());
-    if (card.ctx.length) lines.push(card.ctx.map((x) => x.l + " " + x.s).join(" \u00b7 "));
+    if (card.ctx.length) lines.push(card.ctx.map((x) => x.l + " " + x.s).join(" · "));
     if (card.px != null) lines.push("mark " + card.px);
   } else if (card.kind === "row") {
     const w = Math.max(...card.cols.map((c) => c.l.length));
     card.cols.forEach((c, i) => lines.push(c.l.padEnd(w) + "  " + card.rows[0].c[i].s));
     if (card.px != null) lines.push("mark".padEnd(w) + "  " + card.px);
+  } else if (card.kind === "panel" || card.kind === "chart") {
+    // One column is label/value lines (a label-less line is a sentence); several is a table.
+    if (card.cols.length <= 1) {
+      const w = Math.max(0, ...card.rows.map((r) => r.t.length));
+      for (const r of card.rows) lines.push(r.t ? r.t.padEnd(w) + "  " + (r.c[0] ? r.c[0].s : "") : (r.c[0] ? r.c[0].s : ""));
+    } else {
+      const widths = card.cols.map((c, i) => Math.max(c.l.length, ...card.rows.map((r) => r.c[i].s.length)));
+      const tw = Math.max(0, ...card.rows.map((r) => r.t.length));
+      lines.push((tw ? "".padEnd(tw) + "  " : "") + card.cols.map((c, i) => c.l.toUpperCase().padStart(widths[i])).join("  "));
+      for (const r of card.rows) lines.push((tw ? r.t.padEnd(tw) + "  " : "") + r.c.map((x, i) => x.s.padStart(widths[i])).join("  "));
+    }
+    if (card.spark) lines.push(sparkText(card.spark.v) + (card.spark.l ? "  " + card.spark.l : ""));
+    if (card.kind === "panel" && card.total > card.rows.length) lines.push(card.rows.length + " of " + card.total + " rows");
+    if (card.kind === "chart") lines.push("(the chart is attached as a picture)");
+    if (card.px != null) lines.push("mark " + card.px);
   } else {
-    if (card.filters) lines.push(card.filters + (card.sort ? " \u00b7 sorted by " + card.sort : ""));
+    if (card.filters) lines.push(card.filters + (card.sort ? " · sorted by " + card.sort : ""));
     const widths = card.cols.map((c, i) => Math.max(c.l.length, ...card.rows.map((r) => r.c[i].s.length)));
     const tw = Math.max(6, ...card.rows.map((r) => r.t.length));
     lines.push("TICKER".padEnd(tw) + "  " + card.cols.map((c, i) => c.l.toUpperCase().padStart(widths[i])).join("  "));
     for (const r of card.rows) lines.push(r.t.padEnd(tw) + "  " + r.c.map((x, i) => x.s.padStart(widths[i])).join("  "));
+    if (card.live) lines.push("live: re-runs these filters over the board when opened in the app — the table above is as shared");
   }
   return lines.join("\n");
 }

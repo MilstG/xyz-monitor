@@ -2828,7 +2828,9 @@ test("share to chat: validateCard bounds every field and cardText pads a screen 
   // Shape rules: a cell is one row × one column; a row is one row; a screen is any.
   assert.equal(validateCard({ kind: "cell", cols: [{ k: "a", l: "A" }, { k: "b", l: "B" }], rows: [{ t: "X", c: [{ s: "1" }, { s: "2" }] }] }).error, "shape");
   assert.equal(validateCard({ kind: "row", cols: [{ k: "a", l: "A" }], rows: [{ t: "X", c: [] }, { t: "Y", c: [] }] }).error, "shape");
-  assert.equal(validateCard({ kind: "chart", cols: [{ k: "a", l: "A" }], rows: [{ t: "X", c: [] }] }).error, "bad-kind");
+  // chart and panel became kinds in build 2026.09.24-98 (and need a title); an unknown kind is still refused.
+  assert.equal(validateCard({ kind: "map", cols: [{ k: "a", l: "A" }], rows: [{ t: "X", c: [] }] }).error, "bad-kind");
+  assert.equal(validateCard({ kind: "chart", cols: [{ k: "a", l: "A" }], rows: [{ t: "X", c: [] }] }).error, "no-title");
   assert.equal(validateCard({ kind: "row", cols: [], rows: [{ t: "X", c: [] }] }).error, "no-columns");
   assert.equal(validateCard({ kind: "row", cols: [{ k: "a", l: "A" }], rows: [] }).error, "no-rows");
   assert.equal(validateCard("nope").error, "not-a-card");
@@ -2861,6 +2863,57 @@ test("share to chat: validateCard bounds every field and cardText pads a screen 
   }
   const row = validateCard({ kind: "row", cols: [{ k: "px", l: "Price" }, { k: "d1", l: "24h" }], rows: [{ coin: "xyz:NVDA", t: "NVDA", px: 176.4, c: [{ s: "176.40" }, { s: "+1.2%", c: "pos" }] }], at: 1790000000000 });
   assert.deepEqual(cardText(row.card).split("\n").slice(1), ["Price  176.40", "24h    +1.2%", "mark   176.4"]);
+});
+
+// ===== build 2026.09.24-98: share to chat everywhere — panel, chart, live screen ======================
+test("share everywhere: a panel is titled lines or a table with a spark, a chart is a caption, a live screen carries a bounded query", () => {
+  const { validateCard, cardText, cardTitle } = require("../src/compute");
+  // A drawer section: the market is named outright (the rows are fields), label-less lines are kept,
+  // a panel line may be a sentence fragment up to 64 characters, and the spark is numbers, not a picture.
+  const p = validateCard({ kind: "panel", view: "drawer", title: "Notes", coin: "xyz:HOOD", t: "HOOD", px: 113.9, cols: [{ k: "v", l: "value" }],
+    rows: [{ t: "3d", c: [{ s: "the 110 shelf held twice; ".repeat(4) }] }, { t: "", c: [{ s: "wrote it at 108.20 · +5.3% since" }] }],
+    spark: { v: [1, null, 2, "x", 4], l: "OI", z: false }, at: 1790000000000 });
+  assert.ok(p.ok, p.error);
+  assert.equal(p.card.coin, "xyz:HOOD"); assert.equal(p.card.t, "HOOD"); assert.equal(p.card.px, 113.9);
+  assert.equal(p.card.rows[0].c[0].s.length, 64, "a panel line is clipped at 64, not the screener's 32");
+  assert.equal(p.card.rows.length, 2, "a label-less line survives in a panel");
+  assert.deepEqual(p.card.spark.v, [1, null, 2, null, 4], "non-numbers in a spark are gaps, never zeros");
+  assert.equal(cardTitle(p.card), "⤴ HOOD · Notes");
+  const pt = cardText(p.card).split("\n");
+  assert.ok(pt[1].startsWith("3d  the 110 shelf") && pt[2] === "wrote it at 108.20 · +5.3% since", pt.join("|"));
+  assert.ok(/^[▁-█ ]+  OI$/.test(pt[3]), "the spark renders as block heights for the phone: " + pt[3]);
+  assert.equal(pt[4], "mark 113.9");
+  // A spark needs two real points; a panel needs a title; a board panel (several columns) is a table.
+  assert.equal(validateCard({ kind: "panel", title: "x", cols: [{ k: "v", l: "v" }], rows: [{ t: "a", c: [{ s: "1" }] }], spark: { v: [1, null] } }).card.spark, undefined);
+  assert.equal(validateCard({ kind: "panel", cols: [{ k: "v", l: "v" }], rows: [{ t: "a", c: [{ s: "1" }] }] }).error, "no-title");
+  const b = validateCard({ kind: "panel", view: "trend", title: "Trend ladder", cols: [{ k: "c2", l: "D1" }, { k: "c3", l: "H4" }],
+    rows: [{ coin: "xyz:NVDA", t: "NVDA", c: [{ s: "+4", c: "pos" }, { s: "✓" }] }, { coin: "xyz:AMD", t: "AMD", c: [{ s: "-2", c: "neg" }] }], total: 40 });
+  assert.ok(b.ok, b.error);
+  assert.equal(b.card.coin, "", "a board names no single market"); assert.equal(b.card.total, 40);
+  assert.equal(b.card.rows[1].c[1].s, "—", "a missing cell pads to an honest dash");
+  const bt = cardText(b.card).split("\n");
+  assert.equal(bt[0].split(" · captured")[0], "⤴ Trend ladder");
+  assert.deepEqual(bt.slice(1, 4), ["      D1  H4", "NVDA  +4   \u2713", "AMD   -2   \u2014"]);
+  assert.equal(bt[4], "2 of 40 rows");
+  // A chart: a title and up to eight caption lines; no rows is fine (the picture is the body).
+  const ch = validateCard({ kind: "chart", title: "Hourly candles · 7d", coin: "xyz:NVDA", t: "NVDA", tf: "7d", cols: [{ k: "v", l: "value" }],
+    rows: Array.from({ length: 12 }, (_, i) => ({ t: "f" + i, c: [{ s: String(i) }] })) });
+  assert.ok(ch.ok, ch.error); assert.equal(ch.card.rows.length, 8, "a caption is a handful of facts");
+  assert.ok(validateCard({ kind: "chart", title: "t", cols: [], rows: [] }).ok, "a bare picture with a title is a chart");
+  assert.equal(cardTitle(ch.card), "⤴ NVDA · Hourly candles · 7d · chart");
+  assert.ok(cardText(ch.card).includes("(the chart is attached as a picture)"));
+  // A live screen: the query is bounded field by field; live without a query is not live.
+  const sc = (extra) => validateCard(Object.assign({ kind: "screen", cols: [{ k: "d1", l: "24h" }], rows: [{ coin: "xyz:A", t: "A", c: [{ s: "1" }] }] }, extra));
+  const q = sc({ live: true, q: { f: "x".repeat(99), vmin: "5", omax: 7, grp: Array.from({ length: 300 }, (_, i) => "xyz:C" + i), sk: "d1", sd: "sideways", sc: "moon", evil: 1 } });
+  assert.ok(q.ok, q.error);
+  assert.equal(q.card.live, true); assert.equal(q.card.q.f.length, 40); assert.equal(q.card.q.vmin, null, "a number or nothing");
+  assert.equal(q.card.q.omax, 7); assert.equal(q.card.q.grp.length, 150); assert.equal(q.card.q.sd, "desc"); assert.equal(q.card.q.sc, "stocks");
+  assert.equal(q.card.q.evil, undefined);
+  assert.equal(sc({ live: true }).card.live, undefined, "no query, no live");
+  assert.equal(sc({ q: { f: "A" } }).card.live, false, "a query alone is a frozen screen that can still say what passes");
+  assert.ok(cardTitle(q.card).endsWith("· live"));
+  // The cell/row shapes did not loosen: a row's rows are still markets and still exactly one.
+  assert.equal(validateCard({ kind: "row", cols: [{ k: "a", l: "A" }], rows: [{ t: "", c: [{ s: "1" }] }] }).error, "no-rows", "only a panel keeps a label-less line");
 });
 
 // ===== build 2026.09.22-89: reading a call — the vocabulary, and the client copy in step ==========

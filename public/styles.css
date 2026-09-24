@@ -2474,8 +2474,8 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .dm-typing{font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted);padding:0 16px 8px;font-style:italic}
 /* chat terminal (build 2026.09.11-69): a posted command result, and the private lines under the log */
 .dm-msg.cmd{max-width:92%}
-/* ---- share to chat (build 2026.09.21-84): the glyph, the menu, the sheet, the card ---- */
-.shr-fly{position:fixed;z-index:60;width:16px;height:16px;border-radius:var(--r-1);border:none;padding:0;cursor:pointer;
+/* ---- share to chat (build 2026.09.21-84): the glyph, the menu, the sheet, the card ---- */ /* the glyph sits above the drawer (81) since build 2026.09.24-98 — its section headers carry it — and under the sheet (84+) */
+.shr-fly{position:fixed;z-index:82;width:16px;height:16px;border-radius:var(--r-1);border:none;padding:0;cursor:pointer;
   background:var(--panel2);color:var(--muted);font-family:var(--mono);font-size:var(--fs-xs);line-height:1;box-shadow:0 1px 4px rgba(0,0,0,.4)}
 .shr-fly:hover{color:var(--accent);background:rgba(227,165,60,.18)}
 .shr-menu{position:fixed;z-index:95;background:var(--panel2);border:1px solid var(--border);border-radius:var(--r-2);padding:4px;min-width:240px;
@@ -2531,6 +2531,29 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .dm-card .cft .dm-tool{font-size:var(--fs-xs);text-decoration:none;color:var(--blue)} .dm-card .cft .dm-tool:hover{color:var(--accent)}
 .dm-card .cft .now{margin-left:auto} .dm-card .cft .now b{font-weight:600}
 .dm-cardmk{font-family:var(--mono);font-size:var(--fs-2xs);color:var(--dim);margin-top:2px}
+/* share to chat everywhere (build 2026.09.24-98): a panel's lines, its redrawn spark, a chart's
+   picture, a live screen's two tables, and the Charts pane's glyph */
+.dm-card .plines{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+.dm-card .plines .pl{display:flex;align-items:baseline;gap:10px;padding:5px 10px;border-bottom:1px solid var(--grid);min-width:0}
+.dm-card .plines .pl:nth-child(odd){border-right:1px solid var(--grid)}
+.dm-card .plines .pl.wide{grid-column:1/-1;border-right:none}
+.dm-card .plines .k{font-family:var(--mono);font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto}
+.dm-card .plines .v{font-family:var(--mono);font-size:var(--fs-sm);margin-left:auto;text-align:right;overflow-wrap:anywhere}
+.dm-card .plines .pl.wide .v{margin-left:0;text-align:left}
+.dm-card .pspark{padding:4px 10px 6px}
+.dm-card .pspark .k{display:block;font-family:var(--mono);font-size:var(--fs-2xs);color:var(--dim)}
+.dm-card .cimg{max-width:100%;margin:0;padding:8px 10px 4px}
+.dm-card .cimg img{width:100%}
+.dm-card .cimg-na{padding:10px;font-family:var(--mono);font-size:var(--fs-xs)}
+.dm-card .lvh{padding:5px 10px;font-family:var(--mono);font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.5px;color:var(--muted);border-bottom:1px solid var(--grid)}
+.dm-card .lvh b{color:var(--accent);font-weight:600} .dm-card .lvh.asw{border-top:1px solid var(--border);color:var(--dim)}
+.dm-card .lvnone{padding:8px 10px;font-family:var(--mono);font-size:var(--fs-xs)}
+.dm-card tr.nw td{background:rgba(227,165,60,.05)} .dm-card .nwk{font-size:var(--fs-2xs);color:var(--accent);font-weight:400;margin-left:4px}
+.dm-card tr.gone td{opacity:.45} .dm-card tr.gone td.tk{text-decoration:line-through}
+.dm-msg.card:has(.cimg){max-width:100%;width:min(100%,640px)}
+.chshr{background:transparent;border:none;color:var(--dim);font-family:var(--mono);font-size:var(--fs-xs);padding:0 3px;cursor:pointer;border-radius:var(--r-1)}
+.chshr:hover,.chshr:focus-visible{color:var(--accent);background:rgba(227,165,60,.12)}
+@media (max-width:560px){.dm-card .plines{grid-template-columns:minmax(0,1fr)} .dm-card .plines .pl:nth-child(odd){border-right:none}}
 @media (max-width:560px){.dm-card .kv{grid-template-columns:repeat(2,minmax(0,1fr))} .dm-card .kv div:nth-child(2n){border-right:none} .dm-msg.card{max-width:100%}}
 .dm-b.dm-cmdb{padding:6px 10px 7px;max-width:100%}
 .dm-cmdhd{font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted);margin-bottom:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
