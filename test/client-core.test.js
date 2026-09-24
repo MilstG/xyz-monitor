@@ -2670,7 +2670,7 @@ test("calls -88: the stamp shows the lifecycle, the author can close or extend, 
   const fs = require("fs"), path = require("path");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "js", "messages.js"), "utf8");
   const stamp = app.slice(app.indexOf("function dmStamp(m){"), app.indexOf("function dmDayShort(ts){"));
-  assert.ok(/const cl=m\.call\|\|null;/.test(stamp) && /closes '\+dmDayShort\(cl\.closeTs\)\+' \('\+cl\.h\+'d\)/.test(stamp), "an open call says when it closes");
+  assert.ok(/const cl=m\.call\|\|null;/.test(stamp) && /closes '\+dmDayShort\(cl\.closeTs\)\+' \('\+dmDaysLeft\(cl\.closeTs\)\+'d\)/.test(stamp), "an open call says when it closes");
   assert.ok(/<i class="dm-tk-cl">closed<\/i>/.test(stamp) && /\+\(finalTxt\|\|right\)\+/.test(stamp), "a closed call shows its final in place of the live move");
   assert.ok(/data-dmcallclose="'\+m\.id\+'"/.test(app) && /data-dmcallext="'\+m\.id\+'" data-days="'\+\(m\.call\.h\+7\)\+'"/.test(app), "close and +7d ride the hover bar");
   assert.ok(/\(\(own&&m\.call&&!m\.call\.closed\)\?/.test(app), "…for the author's own OPEN calls only");
@@ -2824,7 +2824,7 @@ test("share everywhere (-98): panel, chart and live-screen cards render; the liv
     // screenQuery: personal lists make a screen un-liveable, and say nothing otherwise
     state.filter = " nv "; state.filters = { volMin: 1e6 }; state.sortKey = "d1"; state.sortDir = "desc"; state.scope = "stocks"; state.grpDrill = null;
     state.watchOnly = false; state.noteOnly = false; state.posOnly = false;
-    assert.deepEqual(api.screenQuery(), { f: "nv", vmin: 1e6, vmax: null, omin: null, omax: null, grp: [], gl: "", sk: "d1", sd: "desc", sc: "stocks" });
+    assert.deepEqual(api.screenQuery(), { f: "nv", vmin: 1e6, vmax: null, omin: null, omax: null, grp: [], gl: "", sk: "d1", sd: "desc", sc: "stocks", tf: state.tf || "1d", bk: "" });   // (-108) the window rides along
     state.watchOnly = true; assert.equal(api.screenQuery(), null, "★ only is the sharer's list — no live re-run"); state.watchOnly = false;
     state.grpDrill = { label: "big", set: new Set(Array.from({ length: 151 }, (_, i) => "c" + i)) };
     assert.equal(api.screenQuery(), null, "a drill too big to carry cannot go live"); state.grpDrill = null;

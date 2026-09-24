@@ -18,7 +18,7 @@ import { buildLayoutMenu, loadLayouts, loadPositions, loadPrefs, posLink, posSta
 import { aiMatches, openAiReport } from "./report.js";
 import { exportSectors, renderSectors } from "./sectors.js";
 import { EV_LABELS } from "./trend.js";
-import { loadPush, loadRules } from "./triggers.js";
+import { loadPush, loadRules, loadTriggers } from "./triggers.js";
 
 
 // ===== polling cycle + countdown =====
@@ -69,6 +69,12 @@ function startEvents(){ if(typeof EventSource==='undefined'||_sseSrc) return;
     // including the new `v` a redeploy pushes via the reconnect's first frame — pulls immediately;
     // applySnapshot's own short-circuit and alertVer handling then do exactly what they do on a poll.
     if(d&&d.dataTs&&d.dataTs!==state.dataTs){ pullSnapshot(); nextCycle=Date.now()+_cycleMs(); }
+    // (build 2026.09.24-108) The frame already carries alertVer: a moved one pulls the trigger log
+    // DIRECTLY, visible or hidden. Since -103 a hidden tab pulls no snapshot (unless it holds an
+    // in-browser rule), and the snapshot was the only road to loadTriggers — so server triggers
+    // stopped raising desktop Notifications in background tabs, which is exactly where they matter.
+    // Setting alertVer here first makes applySnapshot's own check a no-op for this version.
+    frameAlertVer(d);
     // The reconnect's first frame after a redeploy is the fastest new-build signal there is —
     // dataTs is a restarted counter that can coincide with the one this tab already holds, so
     // the version notice must not depend on that comparison triggering a pull.
@@ -88,6 +94,11 @@ function startEvents(){ if(typeof EventSource==='undefined'||_sseSrc) return;
         dmLoad().then(()=>{ if(state.view==='dm') dmRender(); }); }
       if(typeof d.dm.seq==='number'&&d.dm.seq>dmState.cursor) dmSync();
     } };
+}
+function frameAlertVer(d){
+  const A=state.alerts;
+  if(!d||d.alertVer==null||!A||d.alertVer===A.alertVer) return false;
+  A.alertVer=d.alertVer; loadTriggers(); return true;
 }
 function _cycleMs(){ return _sseOk?Math.max(state.refreshMs,120000):state.refreshMs; }
 // ===== hidden tabs idle (build 2026.09.24-103) ================================================
@@ -116,8 +127,13 @@ function pullSnapshot(){
 // timer), and a paint if the markets table was left dirty by a background alert pull.
 function visibleCatchUp(){
   if(document.hidden) return;
-  if(_hiddenDirty){ _hiddenDirty=false; loadSnapshot(); nextCycle=Date.now()+_cycleMs(); }
-  else if(G.mktDirty&&state.view==='markets') paintMarkets();
+  // (build 2026.09.24-108) The catch-up pull can land with a dataTs this tab already holds (a
+  // background alert pull applied it), and applySnapshot then short-circuits without painting — the
+  // table stayed at its pre-hide state with G.mktDirty set. So the deferred paint runs after the
+  // pull too, whenever it is still owed.
+  const owed=()=>{ if(!document.hidden&&G.mktDirty&&state.view==='markets') paintMarkets(); };
+  if(_hiddenDirty){ _hiddenDirty=false; Promise.resolve(loadSnapshot()).then(owed,owed); nextCycle=Date.now()+_cycleMs(); }
+  else owed();
   if(_dailyDirty){ _dailyDirty=false; loadDaily(); }
 }
 function startCycle(){ clearInterval(cycleTimer); const ms=_cycleMs(); cycleTimer=setInterval(()=>{ pullSnapshot(); nextCycle=Date.now()+_cycleMs(); }, ms); nextCycle=Date.now()+ms; }

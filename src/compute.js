@@ -6207,8 +6207,18 @@ function cardQuery(q) {
     f: cardStr(q.f, 40), vmin: cardNum(q.vmin), vmax: cardNum(q.vmax), omin: cardNum(q.omin), omax: cardNum(q.omax),
     grp: Array.isArray(q.grp) ? q.grp.slice(0, CARD_GRP).map((c) => cardStr(c, 40)).filter(Boolean) : [], gl: cardStr(q.gl, 40),
     sk: cardStr(q.sk, CARD_LBL), sd: q.sd === "asc" ? "asc" : "desc", sc: q.sc === "crypto" ? "crypto" : "stocks",
+    // (build 2026.09.24-108) the window the screen was sorted under, and the basket a Δ-vs-⬒ sort
+    // measured against: the live re-run computes its tf-dependent sort keys with THESE, not the viewer's.
+    tf: CARD_TFS.includes(q.tf) ? q.tf : null, bk: cardStr(q.bk, 40),
   };
 }
+const CARD_TFS = ["1h", "4h", "1d", "7d", "30d"];
+// (build 2026.09.24-108) Sort keys whose value follows the timeframe selector through inputs the live
+// re-run cannot re-derive per card (ΔOI by window, and the scores built on it; window funding;
+// clock-matched RVOL). A screen sorted by one cannot be "live" — the client disables the box and says
+// why; this is the server's half of the same rule (public/js/share.js SCREEN_LIVE_REFUSE, kept in step).
+const SCREEN_LIVE_REFUSE = ["rvol", "doi", "sqz", "carry", "mom", "momp"];
+module.exports.SCREEN_LIVE_REFUSE = SCREEN_LIVE_REFUSE;
 function validateCard(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "not-a-card" };
   if (!CARD_KINDS.includes(raw.kind)) return { ok: false, error: "bad-kind" };
@@ -6247,7 +6257,7 @@ function validateCard(raw) {
     const v = raw.spark.v.slice(-CARD_SPARK).map(cardNum);
     if (v.filter((x) => x != null).length >= 2) card.spark = { v, l: cardStr(raw.spark.l, CARD_TITLE), z: raw.spark.z === true };
   }
-  if (raw.kind === "screen") { const q = cardQuery(raw.q); if (q) { card.q = q; card.live = raw.live === true; } }
+  if (raw.kind === "screen") { const q = cardQuery(raw.q); if (q) { card.q = q; card.live = raw.live === true && !SCREEN_LIVE_REFUSE.includes(q.sk); } }
   if (JSON.stringify(card).length > CARD_BYTES) return { ok: false, error: "too-big" };
   return { ok: true, card };
 }
@@ -6327,6 +6337,11 @@ module.exports.validateCard = validateCard;
 const CALL_SHORT_BEFORE = /(^|\W)(short|shorting|sell|selling|fade|fading|bearish|bear|dump|dumping|puts|downside)(\W|$)/i;
 const CALL_SHORT_AFTER = /^[\s,:;\u2014-]*(short|puts|lower|down|bearish|dump)\b/i;
 const CALL_SELL_BEFORE = /(^|\W)(sell|selling|sold|write|writing)(\W|$)/i;
+// (build 2026.09.24-108) An explicit side word between the ticker and its horizon or target —
+// "$NVDA short to 150 in 2w", "$NVDA long 2w" — or right after a leading horizon ("$NVDA 2w short").
+// It used to sit in front of the horizon/target readers, which are anchored at the ticker, and cancel
+// both: the call went out as a plain 7d short (or, word after the horizon, as a long).
+const CALL_SIDE_AFTER = /^[\s,:;\u2014-]*(long|buy|buying|short|shorting|sell|selling)\b/i;
 const CALL_MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, sept: 8, oct: 9, nov: 10, dec: 11 };
 function callRead(text, sym, nowMs) {
   const t = String(text || ""), S = String(sym || "").toUpperCase();
@@ -6335,25 +6350,29 @@ function callRead(text, sym, nowMs) {
   const before = t.slice(Math.max(0, i - 40), i), after = t.slice(i + S.length + 1, i + S.length + 41);
   // direction
   let side = "long", sideWord = null;
-  const optAfter = /^[\s,:;\u2014-]*(?:\$?\d+(?:\.\d+)?\s*)?(puts|calls)\b/i.exec(after);
+  // (-108) the verb may also sit between the ticker and the option: "$HOOD sell 100 puts" is a long.
+  const optAfter = /^[\s,:;\u2014-]*(?:(sell|selling|sold|write|writing|buy|buying)\s+)?(?:\$?\d+(?:\.\d+)?\s*)?(puts|calls)\b/i.exec(after);
   if (optAfter) {
-    const sold = CALL_SELL_BEFORE.exec(before);
-    const opt = optAfter[1].toLowerCase();
-    if (opt === "puts") { side = sold ? "long" : "short"; sideWord = sold ? sold[2] + " … puts" : "puts"; }
-    else { side = sold ? "short" : "long"; sideWord = sold ? sold[2] + " … calls" : "calls"; }
+    const sb = CALL_SELL_BEFORE.exec(before);
+    const sold = optAfter[1] ? (/^buy/i.test(optAfter[1]) ? null : optAfter[1]) : sb ? sb[2] : null;
+    const opt = optAfter[2].toLowerCase();
+    if (opt === "puts") { side = sold ? "long" : "short"; sideWord = sold ? sold + " … puts" : "puts"; }
+    else { side = sold ? "short" : "long"; sideWord = sold ? sold + " … calls" : "calls"; }
   } else {
-    const b = CALL_SHORT_BEFORE.exec(before), a = CALL_SHORT_AFTER.exec(after);
+    const b = CALL_SHORT_BEFORE.exec(before), a = CALL_SHORT_AFTER.exec(after), w = CALL_SIDE_AFTER.exec(after);
     if (b) { side = "short"; sideWord = b[2]; } else if (a) { side = "short"; sideWord = a[1]; }
+    else if (w) { side = /^(long|buy)/i.test(w[1]) ? "long" : "short"; sideWord = w[1]; }
   }
-  // horizon
+  // horizon — read past a leading side word (-108), and "in 2w" is the same horizon as "2w"
   const DAY = 86400e3, now = Number.isFinite(+nowMs) ? +nowMs : Date.now();
   let horizonMs = null, horizonWord = null;
   const days = (d) => (d >= 1 && d <= 365 ? d * DAY : null);
   const endOfUtcDay = (y, m, d) => Date.UTC(y, m, d + 1) - 1;
+  const lead = CALL_SIDE_AFTER.exec(after), ha = lead ? after.slice(lead[0].length) : after;
   let m;
-  if ((m = /^\s*(\d{1,3})\s*(d|days?)\b/i.exec(after))) { horizonMs = days(+m[1]); horizonWord = horizonMs ? m[0].trim() : null; }
-  else if ((m = /^\s*(\d{1,2})\s*(w|wks?|weeks?)\b/i.exec(after))) { horizonMs = days(+m[1] * 7); horizonWord = horizonMs ? m[0].trim() : null; }
-  else if ((m = /^\s*(\d{1,2})\s*(mo|months?)\b/i.exec(after))) { horizonMs = days(+m[1] * 30); horizonWord = horizonMs ? m[0].trim() : null; }
+  if ((m = /^\s*(?:in\s+)?(\d{1,3})\s*(d|days?)\b/i.exec(ha))) { horizonMs = days(+m[1]); horizonWord = horizonMs ? m[0].trim() : null; }
+  else if ((m = /^\s*(?:in\s+)?(\d{1,2})\s*(w|wks?|weeks?)\b/i.exec(ha))) { horizonMs = days(+m[1] * 7); horizonWord = horizonMs ? m[0].trim() : null; }
+  else if ((m = /^\s*(?:in\s+)?(\d{1,2})\s*(mo|months?)\b/i.exec(ha))) { horizonMs = days(+m[1] * 30); horizonWord = horizonMs ? m[0].trim() : null; }
   else if ((m = /(?:^|\W)(a week|next week|this week)(?:\W|$)/i.exec(after))) { horizonMs = days(7); horizonWord = m[1]; }
   else if ((m = /(?:^|\W)(a month|next month|this month)(?:\W|$)/i.exec(after))) { horizonMs = days(30); horizonWord = m[1]; }
   else if ((m = /(?:^|\W)(eow|end of (?:the )?week|by friday)(?:\W|$)/i.exec(after))) {
@@ -6374,6 +6393,11 @@ function callRead(text, sym, nowMs) {
       if (end < now) end = endOfUtcDay(d.getUTCFullYear() + 1, mon, day);
       horizonMs = days(Math.min(365, Math.max(1, Math.ceil((end - now) / DAY)))); horizonWord = m[0].trim();
     }
+  }
+  // "$NVDA 2w short": a side word right after a leading horizon decides the side too (-108).
+  if (!sideWord && horizonWord && !lead && ha.trim().indexOf(horizonWord) === 0) {
+    const tail = ha.slice(ha.indexOf(horizonWord) + horizonWord.length), w = CALL_SIDE_AFTER.exec(tail) || CALL_SHORT_AFTER.exec(tail);
+    if (w && !/^(puts)$/i.test(w[1])) { side = /^(long|buy)/i.test(w[1]) ? "long" : "short"; sideWord = w[1]; }
   }
   return { side, sideWord, horizonMs, horizonWord };
 }
@@ -6405,7 +6429,10 @@ function callTarget(text, sym, markPx, nowMs, sideOverride, sessionRule) {
   const t = String(text || ""), S = String(sym || "").toUpperCase();
   const i = S ? t.toUpperCase().indexOf("$" + S) : -1;
   if (i < 0) return null;
-  const after = t.slice(i + S.length + 1, i + S.length + 81);
+  // (build 2026.09.24-108) an explicit side word between the ticker and the target ("$NVDA short to
+  // 150 in 2w") is read past, not a reason to find no target; callRead below still decides the side from it.
+  const after0 = t.slice(i + S.length + 1, i + S.length + 81), lead = CALL_SIDE_AFTER.exec(after0);
+  const after = lead ? after0.slice(lead[0].length) : after0;
   const p = TG_PX.exec(after);
   if (!p) return null;
   const rest = after.slice(p[0].length);
@@ -6433,7 +6460,13 @@ function callTarget(text, sym, markPx, nowMs, sideOverride, sessionRule) {
   const stop = st ? +st[1] * (st[2] ? 1000 : 1) : null;
   const read = callRead(t, S, now);
   const side = sideOverride === "long" || sideOverride === "short" ? sideOverride : read.sideWord ? read.side : (px < markPx ? "short" : "long");
-  if (side === "long" ? px <= markPx : px >= markPx) return { ok: false, px, error: side + " to " + px + " is behind the mark (" + markPx + ")" };
+  // A side the WORDS (or the applied reading) decided that the target contradicts is refused, and the
+  // reason names the word (-108): "short" with the target above the mark is not a short to anywhere.
+  if (side === "long" ? px <= markPx : px >= markPx) {
+    const why = sideOverride === "long" || sideOverride === "short" ? " \u2014 the applied reading says " + side
+      : read.sideWord ? " \u2014 \u201c" + read.sideWord + "\u201d makes it a " + side + ", so the target has to sit " + (side === "long" ? "above" : "below") + " the mark" : "";
+    return { ok: false, px, error: side + " to " + px + " is behind the mark (" + markPx + ")" + why };
+  }
   if (stop != null && (side === "long" ? stop >= markPx : stop <= markPx)) return { ok: false, px, error: "the stop (" + stop + ") sits on the wrong side of the mark" };
   const word = (p[0] + rest.slice(0, Math.max(0, rest.indexOf(byWord)) + byWord.length)).replace(/^[\s,:;\u2014-]+/, "").replace(/[\s,.;:]+$/, "");
   // byDay (build 2026.09.24-104): the calendar DATE a dated deadline names ("by Oct 15", friday, eom,

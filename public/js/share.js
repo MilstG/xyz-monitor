@@ -18,8 +18,9 @@
 // them over the current snapshot, with the frozen table kept underneath "as shared".
 import { HASH_VIEWS, pushToast } from "./alerts.js";
 import { showView } from "./backtest.js";
-import { COL_BY_KEY, el, esc, fmtPrice, overlayPop, overlayPush, state } from "./core.js";
-import { sparkline } from "./corr.js";
+import { featureOn } from "./admin.js";
+import { COL_BY_KEY, TF_MAP, el, esc, fmtPrice, overlayPop, overlayPush, sessCalOf, state } from "./core.js";
+import { BASKETS, dvbBasketDef, sparkline } from "./corr.js";
 import { fetchJSON } from "./data.js";
 import { drawerCandleCard, openDetail } from "./drawer.js";
 import { earnShareRows } from "./notes.js";
@@ -89,21 +90,66 @@ function screenQuery() {
   const g = state.grpDrill && state.grpDrill.set ? [...state.grpDrill.set] : [];
   if (g.length > SCREEN_Q_GRP) return null;
   const t = state.filters || {}, n = (v) => (typeof v === "number" && isFinite(v) ? v : null);
+  const sk = state.sortKey || "", bk = sk === "dvb" ? ((dvbBasketDef() || {}).name || "") : "";
   return { f: String(state.filter || "").trim().slice(0, 40), vmin: n(t.volMin), vmax: n(t.volMax), omin: n(t.oiMin), omax: n(t.oiMax),
-    grp: g, gl: state.grpDrill ? String(state.grpDrill.label || "").slice(0, 40) : "", sk: state.sortKey || "", sd: state.sortDir === "asc" ? "asc" : "desc", sc: scopeOf() };
+    grp: g, gl: state.grpDrill ? String(state.grpDrill.label || "").slice(0, 40) : "", sk, sd: state.sortDir === "asc" ? "asc" : "desc", sc: scopeOf(),
+    tf: state.tf || "1d", bk };
+}
+// (build 2026.09.24-108) The live re-run used the VIEWER's timeframe (and ⬒ basket) for any sort key
+// that follows them, so "sorted by vs S&P" under the sharer's 7d re-sorted by the viewer's 1d, and a
+// Δ-vs-⬒ sort read r.dvb, which is only computed while the viewer shows that column. The card now
+// carries its tf (and basket), and the re-run computes these keys itself with them:
+const SCREEN_TF_KEYS = new Set(["rs", "vstape", "adr", "dvb"]);
+// …while these follow the window through inputs it cannot re-derive per card (ΔOI by window and the
+// scores built on it, window funding, clock-matched RVOL): a screen sorted by one is not offered as
+// live, with the reason on the box. Kept in step with compute.js SCREEN_LIVE_REFUSE (the server drops
+// `live` for the same keys).
+const SCREEN_LIVE_REFUSE = ["rvol", "doi", "sqz", "carry", "mom", "momp"];
+function screenLiveWhy(q) {
+  if (!q) return "this screen leans on your own \u2605 / noted / held list (or a drill too big to carry) \u2014 it can't re-run for anyone else";
+  if (SCREEN_LIVE_REFUSE.includes(q.sk)) { const c = COL_BY_KEY[q.sk];
+    return "sorted by " + (c ? c.label : q.sk) + ", which follows the timeframe window through data a re-run can't rebuild for the card's " + (q.tf || "window") + " \u2014 sort by another column to share it live"; }
+  return "";
+}
+// The sort value a tf/basket-dependent key takes under the CARD's window, for every row of the scope.
+function screenTfVals(rows, q) {
+  const k = q.sk, tfKey = TF_MAP[q.tf] || "d1", out = new Map();
+  const fin = (v) => v != null && isFinite(v);
+  if (k === "rs") {
+    const bc = q.sc === "crypto" ? state.benchMain : state.benchCoin, b = bc ? state.rows.get(bc) : null, br = b ? b[tfKey] : null;
+    for (const r of rows) out.set(r, !bc ? undefined : r.coin === bc ? 0 : fin(br) && fin(r[tfKey]) ? r[tfKey] - br : null);
+  } else if (k === "vstape") {
+    const a = rows.map((r) => r[tfKey]).filter(fin).sort((x, y) => x - y);
+    const med = a.length >= 5 ? (a.length % 2 ? a[(a.length - 1) / 2] : (a[a.length / 2 - 1] + a[a.length / 2]) / 2) : null;
+    for (const r of rows) out.set(r, med != null && fin(r[tfKey]) ? r[tfKey] - med : null);
+  } else if (k === "adr") {
+    for (const r of rows) { const n = sessCalOf(r) ? (q.tf === "30d" ? 21 : 5) : (q.tf === "30d" ? 30 : 7), dr = r.feat && r.feat.dr;
+      out.set(r, dr && dr.length ? dr.slice(-n).reduce((p, x) => p + x, 0) / Math.min(n, dr.length) : undefined); }
+  } else if (k === "dvb") {
+    const list = featureOn("baskets") ? BASKETS.list.filter((b) => (b.scope === "crypto") === (q.sc === "crypto")) : [];
+    const b = list.find((x) => x.name === q.bk) || null;
+    let mean = null;
+    if (b) { const byTk = new Map(); for (const r of rows) byTk.set(String(r.ticker || "").toUpperCase(), r);
+      let s = 0, n = 0; for (const m of b.members) { const mr = byTk.get(m), v = mr ? mr[tfKey] : null; if (fin(v)) { s += v; n++; } }
+      mean = n >= Math.ceil(0.6 * b.members.length) ? s / n : null; }
+    for (const r of rows) out.set(r, mean != null && fin(r[tfKey]) ? r[tfKey] - mean : null);
+  }
+  return out;
 }
 // The live re-run: the screener's own rules (sortedRows / thresholdRows) over the snapshot as it is
 // now, in the card's scope — minus the ★ pinning, which is the viewer's order, not the screen's.
 function screenRun(q) {
   let rows = [];
   for (const r of state.rows.values()) if (!r.delisted && (r.uni === "main") === (q.sc === "crypto")) rows.push(r);
+  // (-108) over the whole scope, before the filters: vs tape's median and the basket mean are the scope's
+  const tv = q.tf && SCREEN_TF_KEYS.has(q.sk) ? screenTfVals(rows, q) : null;
   if (q.grp && q.grp.length) { const g = new Set(q.grp); rows = rows.filter((r) => g.has(r.coin)); }
   const f = String(q.f || "").toUpperCase();
   if (f) rows = rows.filter((r) => String(r.ticker || "").toUpperCase().includes(f) || String(r.coin || "").toUpperCase().includes(f));
   const inside = (v, lo, hi) => (lo == null || (v != null && v >= lo)) && (hi == null || (v != null && v <= hi));
   rows = rows.filter((r) => inside(r.vol, q.vmin, q.vmax) && inside(r.oi, q.omin, q.omax));
   const col = COL_BY_KEY[q.sk], k = q.sk, dir = q.sd === "asc" ? 1 : -1;
-  if (col) rows.sort((a, b) => { const av = a[k], bv = b[k]; if (col.type === "str") return dir * String(av).localeCompare(String(bv));
+  if (col) rows.sort((a, b) => { const av = tv ? tv.get(a) : a[k], bv = tv ? tv.get(b) : b[k]; if (col.type === "str") return dir * String(av).localeCompare(String(bv));
     const an = (av == null || !isFinite(av)), bn = (bv == null || !isFinite(bv)); if (an && bn) return 0; if (an) return 1; if (bn) return -1; return dir * (av - bv); });
   return rows;
 }
@@ -360,7 +406,7 @@ function cardHtml(card, m) {
     body = chartBody(card, m);
   } else {
     const filt = card.filters || card.sort ? "<div class=\"filt\">" + esc(card.filters || "every row") + (card.sort ? " · sorted by <code>" + esc(card.sort) + "</code>" : "") + "</div>" : "";
-    if (card.live && card.q) {
+    if (card.live && card.q && !SCREEN_LIVE_REFUSE.includes(card.q.sk)) {
       // Live (build 2026.09.24-98): re-run on every paint of the card, over the snapshot this viewer
       // holds now; the capture stays underneath, labelled as what was shared.
       const live = screenRun(card.q), was = new Set(card.rows.map((r) => r.coin)), pass = new Set(live.map((r) => r.coin));
@@ -453,7 +499,7 @@ function sheetEl() {
     if (e.target.closest("#sh-send")) { shareSend(); return; }
   });
   sheet.addEventListener("input", (e) => { if (e.target.id === "sh-q") renderTargets(); });
-  sheet.addEventListener("change", (e) => { if (e.target.id === "sh-live" && cur) { cur.live = !!e.target.checked && !!cur.q; renderSheet(); } });
+  sheet.addEventListener("change", (e) => { if (e.target.id === "sh-live" && cur) { cur.live = !!e.target.checked && !screenLiveWhy(cur.q); renderSheet(); } });
   return sheet;
 }
 function shareClose() { if (!sheet) return; sheet.hidden = true; el("sharebg").hidden = true; overlayPop("share"); if (cur && cur._url) { try { URL.revokeObjectURL(cur._url); } catch (_) {} } cur = null; }
@@ -506,8 +552,9 @@ function renderSheet() {
   // Live is a screen's option, and only for a screen that carried its filters as data.
   const lv = el("sh-live"), lvl = el("sh-live-l");
   lvl.hidden = cur.kind !== "screen";
-  lv.disabled = !cur.q; lv.checked = !!(cur.q && cur.live);
-  lvl.title = cur.q ? "" : "this screen leans on your own \u2605 / noted / held list (or a drill too big to carry) \u2014 it can't re-run for anyone else";
+  const why = screenLiveWhy(cur.q);   // (-108) one reason string: a personal list, or a sort a re-run can't rebuild
+  lv.disabled = !!why; lv.checked = !why && !!cur.live;
+  lvl.title = why;
   el("sh-size").textContent = "card · " + (Math.round(JSON.stringify(cardWire(cur)).length / 100) / 10) + " KB"
     + (cur._png ? " + picture " + Math.max(1, Math.round(cur._png.size / 1024)) + " KB · existing conversations only" : "");
   renderTargets();

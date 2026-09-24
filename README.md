@@ -941,6 +941,25 @@ periods/yr), and the level map's structure and volume profile keep every UTC bar
   nonce; stale backup/`.atmp` temps are swept; a crash save cannot be overwritten by an in-flight
   async rename.
 
+**Fixes (build 2026.09.24-108, client).**
+- **Background tabs.** The SSE frame's `alertVer` now pulls the trigger log directly, so a hidden
+  tab (which pulls no snapshot unless it holds an in-browser rule) raises desktop notifications
+  for server triggers again. Foregrounding repaints the markets table even when the catch-up
+  pull lands a `dataTs` the tab already holds.
+- **Deploys.** A request for `/app.js`, `/styles.css` or `/js/*.js` whose `?v=` names another
+  build gets a 409 (no-store; the service worker keeps 200s only), never this build's bytes — a
+  lazy tab loaded across a deploy used to become a second, empty `core.js` instance. A lazy load
+  that fails once a new build is known offers the reload; a throwing module boot is retried by the
+  next click instead of being cached.
+- **Live screens** carry their timeframe (and ⬒ basket): vs S&P, vs tape, avg range and Δ vs ⬒
+  re-sort under the card's window, whatever the viewer shows. Sorts the re-run cannot rebuild
+  (RVOL, ΔOI, squeeze, carry, momentum) cannot be shared live; the box says why.
+- **Notes.** No `/api/notes` fetch without the notes feature, and a 403 is not retried each snapshot.
+- **Calls.** A side word between the ticker and its target or horizon ("$NVDA short to 150 in
+  2w", "$NVDA 2w short") decides the side without cancelling them; "in 2w" is a horizon; a word
+  the target contradicts is refused with the word named. Preview, stamp and target row count
+  days to the same deadline, rounded up.
+
 ## Optional: earnings calendar (Finnhub)
 
 The Earnings tab and the markets-table E badges need a free Finnhub API key: sign up at

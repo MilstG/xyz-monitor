@@ -812,6 +812,7 @@ function dmDrafts(){ try{ return JSON.parse(localStorage.getItem(DM_DRAFT_KEY)||
 const CALL_SHORT_BEFORE=/(^|\W)(short|shorting|sell|selling|fade|fading|bearish|bear|dump|dumping|puts|downside)(\W|$)/i;
 const CALL_SHORT_AFTER=/^[\s,:;\u2014-]*(short|puts|lower|down|bearish|dump)\b/i;
 const CALL_SELL_BEFORE=/(^|\W)(sell|selling|sold|write|writing)(\W|$)/i;
+const CALL_SIDE_AFTER=/^[\s,:;\u2014-]*(long|buy|buying|short|shorting|sell|selling)\b/i;   // (build 2026.09.24-108) a side word between the ticker and its horizon/target
 const CALL_MONTHS={jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,sept:8,oct:9,nov:10,dec:11};
 function dmCallRead(text,sym,nowMs){
   const t=String(text||''), S=String(sym||'').toUpperCase();
@@ -819,24 +820,27 @@ function dmCallRead(text,sym,nowMs){
   if(i<0) return {side:'long',sideWord:null,horizonMs:null,horizonWord:null};
   const before=t.slice(Math.max(0,i-40),i), after=t.slice(i+S.length+1,i+S.length+41);
   let side='long', sideWord=null;
-  const optAfter=/^[\s,:;\u2014-]*(?:\$?\d+(?:\.\d+)?\s*)?(puts|calls)\b/i.exec(after);
+  const optAfter=/^[\s,:;\u2014-]*(?:(sell|selling|sold|write|writing|buy|buying)\s+)?(?:\$?\d+(?:\.\d+)?\s*)?(puts|calls)\b/i.exec(after);
   if(optAfter){
-    const sold=CALL_SELL_BEFORE.exec(before);
-    const opt=optAfter[1].toLowerCase();
-    if(opt==='puts'){ side=sold?'long':'short'; sideWord=sold?sold[2]+' \u2026 puts':'puts'; }
-    else { side=sold?'short':'long'; sideWord=sold?sold[2]+' \u2026 calls':'calls'; }
+    const sb=CALL_SELL_BEFORE.exec(before);
+    const sold=optAfter[1]?(/^buy/i.test(optAfter[1])?null:optAfter[1]):sb?sb[2]:null;
+    const opt=optAfter[2].toLowerCase();
+    if(opt==='puts'){ side=sold?'long':'short'; sideWord=sold?sold+' \u2026 puts':'puts'; }
+    else { side=sold?'short':'long'; sideWord=sold?sold+' \u2026 calls':'calls'; }
   } else {
-    const b=CALL_SHORT_BEFORE.exec(before), a=CALL_SHORT_AFTER.exec(after);
+    const b=CALL_SHORT_BEFORE.exec(before), a=CALL_SHORT_AFTER.exec(after), w=CALL_SIDE_AFTER.exec(after);
     if(b){ side='short'; sideWord=b[2]; } else if(a){ side='short'; sideWord=a[1]; }
+    else if(w){ side=/^(long|buy)/i.test(w[1])?'long':'short'; sideWord=w[1]; }
   }
   const DAY=86400e3, now=Number.isFinite(+nowMs)?+nowMs:Date.now();
   let horizonMs=null, horizonWord=null;
   const days=(d)=>(d>=1&&d<=365?d*DAY:null);
   const endOfUtcDay=(y,m,d)=>Date.UTC(y,m,d+1)-1;
+  const lead=CALL_SIDE_AFTER.exec(after), ha=lead?after.slice(lead[0].length):after;
   let m;
-  if((m=/^\s*(\d{1,3})\s*(d|days?)\b/i.exec(after))){ horizonMs=days(+m[1]); horizonWord=horizonMs?m[0].trim():null; }
-  else if((m=/^\s*(\d{1,2})\s*(w|wks?|weeks?)\b/i.exec(after))){ horizonMs=days(+m[1]*7); horizonWord=horizonMs?m[0].trim():null; }
-  else if((m=/^\s*(\d{1,2})\s*(mo|months?)\b/i.exec(after))){ horizonMs=days(+m[1]*30); horizonWord=horizonMs?m[0].trim():null; }
+  if((m=/^\s*(?:in\s+)?(\d{1,3})\s*(d|days?)\b/i.exec(ha))){ horizonMs=days(+m[1]); horizonWord=horizonMs?m[0].trim():null; }
+  else if((m=/^\s*(?:in\s+)?(\d{1,2})\s*(w|wks?|weeks?)\b/i.exec(ha))){ horizonMs=days(+m[1]*7); horizonWord=horizonMs?m[0].trim():null; }
+  else if((m=/^\s*(?:in\s+)?(\d{1,2})\s*(mo|months?)\b/i.exec(ha))){ horizonMs=days(+m[1]*30); horizonWord=horizonMs?m[0].trim():null; }
   else if((m=/(?:^|\W)(a week|next week|this week)(?:\W|$)/i.exec(after))){ horizonMs=days(7); horizonWord=m[1]; }
   else if((m=/(?:^|\W)(a month|next month|this month)(?:\W|$)/i.exec(after))){ horizonMs=days(30); horizonWord=m[1]; }
   else if((m=/(?:^|\W)(eow|end of (?:the )?week|by friday)(?:\W|$)/i.exec(after))){
@@ -857,6 +861,10 @@ function dmCallRead(text,sym,nowMs){
       if(end<now) end=endOfUtcDay(d.getUTCFullYear()+1,mon,day);
       horizonMs=days(Math.min(365,Math.max(1,Math.ceil((end-now)/DAY)))); horizonWord=m[0].trim();
     }
+  }
+  if(!sideWord&&horizonWord&&!lead&&ha.trim().indexOf(horizonWord)===0){   // "$NVDA 2w short" (-108)
+    const tail=ha.slice(ha.indexOf(horizonWord)+horizonWord.length), w=CALL_SIDE_AFTER.exec(tail)||CALL_SHORT_AFTER.exec(tail);
+    if(w&&!/^(puts)$/i.test(w[1])){ side=/^(long|buy)/i.test(w[1])?'long':'short'; sideWord=w[1]; }
   }
   return {side,sideWord,horizonMs,horizonWord};
 }
@@ -918,7 +926,8 @@ function dmCallTarget(text,sym,markPx,nowMs,sideOverride,sessionRule){
   const t=String(text||''), S=String(sym||'').toUpperCase();
   const i=S?t.toUpperCase().indexOf('$'+S):-1;
   if(i<0) return null;
-  const after=t.slice(i+S.length+1,i+S.length+81);
+  const after0=t.slice(i+S.length+1,i+S.length+81), lead=CALL_SIDE_AFTER.exec(after0);   // (-108) read past a side word
+  const after=lead?after0.slice(lead[0].length):after0;
   const p=TG_PX.exec(after);
   if(!p) return null;
   const rest=after.slice(p[0].length);
@@ -943,7 +952,11 @@ function dmCallTarget(text,sym,markPx,nowMs,sideOverride,sessionRule){
   const stop=st?+st[1]*(st[2]?1000:1):null;
   const read=dmCallRead(t,S,now);
   const side=sideOverride==='long'||sideOverride==='short'?sideOverride:read.sideWord?read.side:(px<markPx?'short':'long');
-  if(side==='long'?px<=markPx:px>=markPx) return {ok:false,px,error:side+' to '+px+' is behind the mark ('+markPx+')'};
+  if(side==='long'?px<=markPx:px>=markPx){   // (-108) a word-decided side the target contradicts: refused, and the reason names the word
+    const why=sideOverride==='long'||sideOverride==='short'?' \u2014 the applied reading says '+side
+      :read.sideWord?' \u2014 \u201c'+read.sideWord+'\u201d makes it a '+side+', so the target has to sit '+(side==='long'?'above':'below')+' the mark':'';
+    return {ok:false,px,error:side+' to '+px+' is behind the mark ('+markPx+')'+why};
+  }
   if(stop!=null&&(side==='long'?stop>=markPx:stop<=markPx)) return {ok:false,px,error:'the stop ('+stop+') sits on the wrong side of the mark'};
   const word=(p[0]+rest.slice(0,Math.max(0,rest.indexOf(byWord))+byWord.length)).replace(/^[\s,:;—-]+/,'').replace(/[\s,.;:]+$/,'');
   const byDay=dated?new Date(now+horizonMs-DAY+1).toISOString().slice(0,10):null;   // (-104) the date a dated deadline names; null for "in 3w"
@@ -959,6 +972,10 @@ function dmTgRuleTxt(sr){
   return sr?'US-session name: a touch counts during the 09:30\u201316:00 ET cash session; off-hours only a 5-minute close through the level counts (a thin overnight/weekend wick is not a hit, nor a stop); a date deadline ends at that date\u2019s 16:00 ET cash close (13:00 on an early-close day; the last close before it when the exchange is shut)'
     :'any 5-minute touch counts, around the clock; a date deadline ends 24:00 UTC';
 }
+// (build 2026.09.24-108) Whole days until a deadline, rounded UP — the one count the composer's preview,
+// the stamp's "closes … (Nd)", the target row's "Nd left" and the calls list all show. The preview
+// said 22d (rounded) where the bubble said 21d (the stored horizon, rounded) for the same deadline.
+function dmDaysLeft(ts){ return Math.max(0,Math.ceil((ts-Date.now())/86400e3)); }
 // The composer's preview: what the send will stamp, which words decided it, and — when the words
 // decided nothing — an offer to ask the model. An applied reading is the SENDER's choice: it rides
 // the send as an explicit override and is dropped the moment the text changes.
@@ -974,7 +991,7 @@ function dmStampPreview(text){
   // same reader the server runs at send, against the same mark this line shows.
   const tg=dmCallTarget(text,m[1],r.px,undefined,ov&&ov.side?ov.side:null,dmTgSessionRule(r));
   const tgOk=tg&&tg.ok?tg:null;
-  const side=tgOk?tgOk.side:ov&&ov.side?ov.side:read.side, days=tgOk?Math.max(1,Math.round(((tgOk.by||0)>0?tgOk.by-Date.now():tgOk.horizonMs)/86400e3)):ov&&ov.days?ov.days:(read.horizonMs?Math.round(read.horizonMs/86400e3):7);
+  const side=tgOk?tgOk.side:ov&&ov.side?ov.side:read.side, days=tgOk?Math.max(1,(tgOk.by||0)>0?dmDaysLeft(tgOk.by):Math.ceil(tgOk.horizonMs/86400e3)):ov&&ov.days?ov.days:(read.horizonMs?Math.round(read.horizonMs/86400e3):7);
   const words=String(text).replace(/\$[A-Za-z][A-Za-z0-9.\-]{0,9}/,'').trim().split(/\s+/).filter(Boolean).length;
   // Vague = no direction word in a message long enough to have meant one. The horizon has an
   // honest default; the direction is the claim, and a defaulted direction is the wrong claim.
@@ -1361,7 +1378,7 @@ function dmStamp(m){
   const cl=m.call||null;
   const finalTxt=(cl&&cl.closed&&cl.final!=null)?'<span class="dm-tk-d '+(cl.final>0?'pos':(cl.final<0?'neg':'sec'))+'" title="final: direction-adjusted result at the close'+(cl.early?' (closed early by the author)':cl.tg&&cl.tg.res?' (the target resolved: '+cl.tg.res+')':' (the '+cl.h+'-day horizon)')+'">'+(cl.final>0?'+':'')+(cl.final*100).toFixed(1)+'% <i class="dm-tk-cl">closed</i></span>':null;
   const lifeTxt=!cl?'':cl.closed?(' \u00b7 closed '+dmDayShort(cl.closeTs)+(cl.closePx?' at '+fmtPx(cl.closePx):'')+(cl.early?' (early)':''))
-    :(' \u00b7 closes '+dmDayShort(cl.closeTs)+' ('+cl.h+'d)');
+    :(' \u00b7 closes '+dmDayShort(cl.closeTs)+' ('+dmDaysLeft(cl.closeTs)+'d)');   // (-108) days LEFT, the same count as the preview and the target row
   const sub=has?('sent at '+fmtPx(at)+(cl&&cl.closed?'':(live?' \u00b7 now '+fmtPx(now):' \u00b7 no longer listed'))+lifeTxt):'no mark at send';
   // The card is a door, not just a label: clicking it opens the market drawer for the name \u2014
   // same in-place drawer the earnings rows and news badges use, so no tab switch.
@@ -1395,7 +1412,7 @@ function dmTargetRow(m){
   const need=open&&end>0?tg.px/end-1:null;
   const pace=open&&prog!=null?(prog>=used?'<span class="pos">ahead</span> of its clock':'<span class="neg">behind</span> its clock'):'';
   const foot=open
-    ?(got!=null?got+'% there \u00b7 ':'')+Math.max(0,Math.ceil((tg.by-Date.now())/DAY))+'d left'+(pace?' \u00b7 '+pace:'')+(need!=null?' \u00b7 needs '+(need>=0?'+':'')+(need*100).toFixed(1)+'% more':'')
+    ?(got!=null?got+'% there \u00b7 ':'')+dmDaysLeft(tg.by)+'d left'+(pace?' \u00b7 '+pace:'')+(need!=null?' \u00b7 needs '+(need>=0?'+':'')+(need*100).toFixed(1)+'% more':'')
     :'resolved '+dmDayShort(tEnd)+(end>0?' at '+fmtPx(end):'')+' \u00b7 '+(res==='hit'?'closed at the target':res==='wrong'?'closed at the stop':res==='miss'?'closed at the deadline\u2019s close':'closed at the mark');
   const fill=prog==null?'':'<i class="dm-tg-fill '+(prog<0?'neg':'pos')+'" style="left:'+Math.min(dmTgPos(0),dmTgPos(prog)).toFixed(1)+'%;width:'+Math.abs(dmTgPos(prog)-dmTgPos(0)).toFixed(1)+'%"></i>';
   return '<div class="dm-tg"><div class="dm-tg-h"><span>\u2192 <b>'+fmtPx(tg.px)+'</b> by '+esc(dmDayShort(tg.by))+(tg.stop!=null?' \u00b7 <span class="neg">wrong at '+fmtPx(tg.stop)+'</span>':'')+'</span>'+pill+'</div>'
@@ -1797,7 +1814,7 @@ function dmCallsHtml(){
         +(c.side==='short'?'<span class="neg" title="short call">\u25bc</span>':'<span class="pos" title="long call">\u25b2</span>')+' '+esc(dmTkName(c.ref))+'</span>'
       +'<span class="dm-callb">'+(c.deleted?'<span class="dm-calldelmk">message deleted \u2014 the stamp stands</span>':esc(String(c.body||'').slice(0,120)))+'</span>'
       +'<span class="acc-mu">'+esc(c.sender)+' \u00b7 '+esc(c.kind==='dm'&&c.threadName===c.sender?'DM':c.threadName)+' \u00b7 '+dmWhen(c.ts)+'</span>'
-      +'<span class="dm-callst '+(c.closed?'sec':'pos')+'" title="'+(c.closed?('closed '+(c.early?'early ':'')+dmDayShort(c.closeTs)):('closes '+dmDayShort(c.closeTs)+' \u00b7 '+c.horizonD+'d horizon'))+'">'+(c.closed?(c.early?'closed \u2298':'closed'):'open \u00b7 '+Math.max(0,Math.ceil((c.closeTs-Date.now())/86400e3))+'d')+'</span>'
+      +'<span class="dm-callst '+(c.closed?'sec':'pos')+'" title="'+(c.closed?('closed '+(c.early?'early ':'')+dmDayShort(c.closeTs)):('closes '+dmDayShort(c.closeTs)+' \u00b7 '+c.horizonD+'d horizon'))+'">'+(c.closed?(c.early?'closed \u2298':'closed'):'open \u00b7 '+dmDaysLeft(c.closeTs)+'d')+'</span>'
       +'<span class="dm-callpx" title="the mark when it was sent">'+(c.refPx!=null?fmtPx(c.refPx):'\u2014')+'</span>'
       +'<span class="dm-callpx dm-callnow" title="the current mark">'+(c.px!=null?fmtPx(c.px):'\u2014')+'</span>'
       +'<span class="dm-callmv '+cls+'" title="price move since sent \u2014 colored by whether the '+(c.side||'long')+' is right">'+mv+'</span>'

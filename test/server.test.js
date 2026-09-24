@@ -311,11 +311,36 @@ test("modules: the entry is a module, every /js module is served stamped, precom
   assert.equal((await get("/js/core.js?v=" + VERSION, gus, { "if-none-match": core.headers.etag })).statusCode, 304);
   const br = await get("/js/markets.js?v=" + VERSION, gus, { "accept-encoding": "br" });
   assert.equal(br.headers["content-encoding"], "br", "modules ride the brotli-at-boot path");
+  // (build 2026.09.24-108) a stamp from another build is refused outright (409, no-store) — see fixes-108
   const stale = await get("/js/core.js?v=old", gus);
-  assert.equal(stale.statusCode, 200); assert.equal(stale.headers["cache-control"], "no-cache", "a stale stamp revalidates, never caches for a year");
+  assert.equal(stale.statusCode, 409); assert.equal(stale.headers["cache-control"], "no-store", "a stale stamp is never answered with this build's bytes, nor cached");
   const raw = require("fs").readFileSync(require("path").join(__dirname, "..", "public", "js", "markets.js"), "utf8");
   assert.ok(/from "\.\/core\.js"/.test(raw), "on disk the modules stay unstamped");
   assert.ok((await get("/js/markets.js", gus)).body.includes(`from "./core.js?v=${VERSION}"`), "and stamped on the wire");
+});
+
+test("modules -108: a stamped asset from ANOTHER build is a 409 (no-store); current, unstamped and the worker's cache rule are unchanged", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const { VERSION } = require("../server.js");
+  // The repro: a tab open across a deploy lazily imports charts.js with LAST build's stamp. It used
+  // to get THIS build's bytes, whose imports name core.js?v=<new> — a second core.js instance.
+  for (const u of ["/js/charts.js?v=2026.09.24-107", "/app.js?v=old", "/styles.css?v=old", "/js/core.js?v=" + VERSION + "&v=x", "/js/core.js?v="]) {
+    const r = await get(u, gus);
+    assert.equal(r.statusCode, 409, u); assert.equal(r.headers["cache-control"], "no-store", u + " is never cached");
+    assert.ok(!/immutable/.test(r.headers["cache-control"]));
+  }
+  for (const u of ["/js/charts.js?v=" + VERSION, "/app.js?v=" + VERSION, "/styles.css?v=" + VERSION]) {
+    const r = await get(u, gus);
+    assert.equal(r.statusCode, 200, u); assert.match(r.headers["cache-control"], /immutable/, u);
+  }
+  for (const u of ["/js/charts.js", "/app.js", "/styles.css", "/js/charts.js?x=1"]) assert.equal((await get(u, gus)).statusCode, 200, "no v, no refusal: " + u);
+  // the shell's own stamps are the current build, so a normal load never meets the 409
+  const shell = (await get("/", gus)).body;
+  const stamps = [...shell.matchAll(/(?:src|href)="[^"]*[?&]v=([^"&]+)"/g)].map((m) => m[1]);
+  assert.ok(stamps.length >= 3 && stamps.every((v) => v === VERSION), "every stamp in the shell is current: " + [...new Set(stamps)]);
+  // the worker keeps complete 200s only — a 409 passes through uncached
+  const sw = (await get("/sw.js", gus)).body;
+  assert.ok(sw.includes("if (res && res.status === 200 && res.type === \"basic\")"), "the service worker caches 200s only");
 });
 
 test("modules -103: lazy import() specifiers, modulepreload hints and the service worker all carry the build stamp", async () => {
@@ -933,7 +958,7 @@ test("retest study -96: /api/retest-study rides the Backtest tab's gate, answers
   assert.equal(d.scope, "stocks"); assert.equal(d.params.def, "touch"); assert.equal(d.params.cd, 10);
   assert.deepEqual(d.params.horizons, [1, 3, 5, 10, 20]);
   // (-107) the build and a per-boot nonce ride the tag: a restart never 304s onto another body
-  assert.match(r.headers.etag, /^W\/"rt-2026\.09\.24-107-[0-9a-z]+-stocks-touch-10-0-[0-9a-z]+-[^"]+"$/);
+  assert.match(r.headers.etag, /^W\/"rt-2026\.09\.24-108-[0-9a-z]+-stocks-touch-10-0-[0-9a-z]+-[^"]+"$/);
   assert.equal(r.headers["cache-control"], "no-cache");
   assert.equal((await get("/api/retest-study?u=stocks&def=touch&cd=10", gus, { "if-none-match": r.headers.etag })).statusCode, 304);
   const bad = JSON.parse((await get("/api/retest-study?u=moon&def=%3Cx%3E&cd=999", gus)).body);

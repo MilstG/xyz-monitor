@@ -76,12 +76,19 @@ function noteBadge(r){
   return `<span class="pit ${cls}" tabindex="0" role="button" data-pit="${esc(r.coin)}" title="${esc(t)}">`
     + NOTE_PIT_SVG + (d.n>1?`<i class="pn">${d.n}</i>`:'') + '</span>';
 }
+// (build 2026.09.24-108) A viewer without the notes feature (anonymous, a member the gate leaves
+// out) used to GET /api/notes on every snapshot render and every drawer open: state.notes stays null
+// on a 403, so notesStale() said "stale" forever and each one was another 403. Now the feature check
+// comes first, and a 403 is remembered for the page's life (the gate is decided per session).
+let _notesDenied=false;
+function notesAllowed(){ return !_notesDenied && featureOn('notes'); }
 async function loadNotes(force){
+  if(!notesAllowed()) return;
   if(_notesLoading) return _notesLoading;
   _notesLoading = (async()=>{
     try{ const d = await fetchJSON('/api/notes');
       if(d&&Array.isArray(d.notes)){ state.notes = d.notes; state.notesRev = d.rev; _notesLast = Date.now(); }
-    }catch(_){}
+    }catch(e){ if(e&&/HTTP 403/.test(e.message)) _notesDenied=true; }
     finally{ _notesLoading = null; }
   })();
   return _notesLoading;
@@ -90,6 +97,7 @@ async function loadNotes(force){
 // disagree with what we hold, a write happened somewhere (another browser, another admin) and the
 // bodies are refetched. Cheap: one comparison per render, one fetch only when they diverge.
 function notesStale(){
+  if(!notesAllowed()) return false;   // (-108) nothing to reconcile against a book this viewer may not read
   if(!state.notes||!state.rows) return true;
   for(const r of state.rows.values()) if(r.nt&&r.nt.n){
     if(notesFor(r.coin).length!==r.nt.n) return true;

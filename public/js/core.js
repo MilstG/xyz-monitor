@@ -363,13 +363,26 @@ function lazyMod(name){
     // Boot in name order (one per module today); a boot throwing is a module failing to load.
     for(const k of Object.keys(m).filter(k=>k.startsWith('__boot_')).sort()) m[k]();
     LAZY[name]=m; return m;
-  }, e=>{ delete _lazyP[name]; throw e; }));   // a failed fetch (offline blip) may be retried by the next click
+  }).catch(e=>{ delete _lazyP[name]; throw e; }));   // a failed fetch (offline blip) OR a throwing boot may be retried by the next click (build 2026.09.24-108: the boot's throw used to stay cached as the module's answer)
+}
+// (build 2026.09.24-108) A tab left open across a deploy imports its lazy module with LAST build's
+// stamp; the server now answers that stale ?v= with a 409 rather than this build's bytes (which
+// would import the new core.js as a second, empty module instance). Once the tab knows a new build
+// is live (alerts.js notifyNewBuild sets state.newBuild) a failed lazy load says so and offers the
+// reload — no amount of retrying fetches last build's module again.
+function lazyFailToast(name){
+  const w=typeof document!=='undefined'&&document.getElementById('toastwrap'); if(!w) return;
+  const t=document.createElement('div'); t.className='toast toast-sticky';
+  if(state.newBuild){
+    t.textContent='A new version is live — this tab ('+name+') needs a reload to load it. Click to reload.';
+    t.onclick=()=>{ try{ location.reload(); }catch(_){} };
+  } else { t.textContent='Could not load this tab ('+name+') — check the connection and try again'; t.onclick=()=>t.remove(); }
+  w.appendChild(t);
 }
 function lazyCall(name, fn, ...args){
   return lazyMod(name).then(m=>m[fn](...args)).catch(e=>{
     try{ console.error('lazy module '+name+'.'+fn+' failed', e); }catch(_){}
-    const w=typeof document!=='undefined'&&document.getElementById('toastwrap');
-    if(w){ const t=document.createElement('div'); t.className='toast toast-sticky'; t.textContent='Could not load this tab ('+name+') — check the connection and try again'; t.onclick=()=>t.remove(); w.appendChild(t); }
+    lazyFailToast(name);
   });
 }
 export { COL_BY_KEY, DAY, DEFAULT_HIDDEN, DEFAULT_ORDER, G, HOUR, LAYOUT_V, LAZY_IMPORTERS, LKEY, PKEY, RG_COLOR, RG_STORY, SCROLL_B, TF_MAP, TF_MS, activeRows, brkBar, claimDelta, clamp, closedDaily, detectBenchmark, el, esc, fmtFunding, fmtPct, fmtPrice, fmtUsd, inScope, isoUtc, lazyCall, lazyLoaded, lazyMod, lerp, liq24Cell, liveMark, maCell, median, mktGrp, momColor, overlayCloseAll, overlayCloseTop, overlayPop, overlayPush, overlayTop, parseAmount, pctTxt, recomputeChanges, regimeDetail, regimeMeter, regimeReadout, regimeTip, safeHref, scopeBench, sessCalOf, sessDaily, sessOffFor, sessionFold, setPrice, state, stdev, store, turnCell, vwapCell, yzVol };

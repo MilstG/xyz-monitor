@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.24-107";
+const VERSION = "2026.09.24-108";
 // (build 2026.09.24-107) Distinguishes this process from the last one in ETags built on
 // per-process counters (a restart must never 304 a client onto a different body).
 const BOOT_NONCE = Date.now().toString(36) + crypto.randomBytes(3).toString("hex");
@@ -2329,6 +2329,23 @@ async function buildServer() {
   // modules by literal specifier, and an unstamped lazy URL would be a SECOND module instance of a
   // file its eager neighbours import stamped — two copies of its state, and no immutable caching.
   const stampImports = (js) => js.replace(/((?:^|[\s;>(])import\s*(?:\(\s*|[^'"(]*?\s*from\s*)?["'])(\.{1,2}\/[^'"?]+\.js)(["'])/g, (m, a, spec, q) => a + spec + "?v=" + VERSION + q);
+  // (build 2026.09.24-108) A stamped asset request from ANOTHER build is refused, not answered with
+  // this build's bytes. The routes above ignore the query, so a tab open across a deploy that lazily
+  // imported ./charts.js?v=<old> got THIS build's charts.js, whose stamped imports name
+  // ./core.js?v=<new> — a second core.js instance with an empty state, and a tab that renders
+  // nothing. 409 (no-store: never cached, by the browser or the service worker, which keeps 200s only)
+  // makes the import fail; the client's lazy loader then offers the reload. Only when `v` is present
+  // and different: unstamped and current-stamp requests are exactly as before.
+  const STAMPED_ASSET = /^\/(?:app\.js|styles\.css|js\/[a-z0-9_-]+\.js)$/;
+  fastify.addHook("onRequest", async (req, reply) => {
+    const u = req.url, q = u.indexOf("?");
+    if (q < 0 || !STAMPED_ASSET.test(u.slice(0, q))) return;
+    const v = new URLSearchParams(u.slice(q + 1)).getAll("v");
+    if (!v.length || (v.length === 1 && v[0] === VERSION)) return;
+    reply.code(409).header("cache-control", "no-store").type("text/plain; charset=utf-8")
+      .send("stale build: this server is on " + VERSION + " \u2014 reload the page");
+    return reply;
+  });
   const CLIENT_MODULES = (() => { try { return fs.readdirSync(path.join(__dirname, "public", "js")).filter((f) => /^[a-z0-9_-]+\.js$/.test(f)).sort(); } catch (_) { return []; } })();
   const PRECOMP = (() => {
     const out = {};

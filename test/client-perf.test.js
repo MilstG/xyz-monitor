@@ -230,8 +230,9 @@ function lazyRig(importers) {
   const body = between(src("public/js/core.js"), "const LAZY={}, _lazyP={};", "\nexport {");
   const toasts = [];
   const document = { getElementById: () => ({ appendChild: (t) => toasts.push(t) }), createElement: () => ({}) };
-  const api = new Function("LAZY_IMPORTERS", "document", "console", body + "; return { lazyMod, lazyCall, lazyLoaded };")(importers, document, { error() {} });
-  return { api, toasts };
+  const state = {}, location = { reloads: 0, reload() { this.reloads++; } };
+  const api = new Function("LAZY_IMPORTERS", "document", "console", "state", "location", body + "; return { lazyMod, lazyCall, lazyLoaded };")(importers, document, { error() {} }, state, location);
+  return { api, toasts, state, location };
 }
 
 test("perf -103 lazy modules: one import per module, boots run once before the first call, failures retry", async () => {
