@@ -793,3 +793,26 @@ test("dm -95: /api/dm/targets reads the record narrowed to targets; the operator
   assert.ok(/const post = ACCOUNTS\.send\(r\.sender, null, r\.text, null, \{ thread: r\.thread, cmd: "target \$"/.test(srv) && /dmPoke\(post\.thread\); dmMirror\(post\.thread\);/.test(srv),
     "a resolution posts where the call was made, under its author, as a command result — the /alert road");
 });
+
+// ===== build 2026.09.24-96: the D1 retest study over the wire =========================================
+test("retest study -96: /api/retest-study rides the Backtest tab's gate, answers the pending body, and 304s on its walk signature", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const cara = jar(); cara.absorb(await post("/login", { handle: "cara", password: "yet-another-long-pw" }));
+  assert.equal((await get("/api/retest-study")).statusCode, 401, "the site gate first");
+  assert.equal((await get("/api/retest-study", cara)).statusCode, 403, "a member is refused while Backtest is admin");
+  const r = await get("/api/retest-study?u=stocks&def=touch&cd=10", gus);
+  assert.equal(r.statusCode, 200);
+  const d = JSON.parse(r.body);
+  assert.equal(d.pending, true, "no markets in this suite: the study says what it needs");
+  assert.equal(d.scope, "stocks"); assert.equal(d.params.def, "touch"); assert.equal(d.params.cd, 10);
+  assert.deepEqual(d.params.horizons, [1, 3, 5, 10, 20]);
+  assert.match(r.headers.etag, /^W\/"rt-stocks-touch-10-0-[0-9a-z]+"$/);
+  assert.equal(r.headers["cache-control"], "no-cache");
+  assert.equal((await get("/api/retest-study?u=stocks&def=touch&cd=10", gus, { "if-none-match": r.headers.etag })).statusCode, 304);
+  const bad = JSON.parse((await get("/api/retest-study?u=moon&def=%3Cx%3E&cd=999", gus)).body);
+  assert.ok(bad.scope === "stocks" && bad.params.def === "board" && bad.params.cd === 5, "junk normalises to the defaults");
+  const cx = await get("/api/retest-study?u=crypto", gus);
+  assert.notEqual(cx.headers.etag, r.headers.etag, "the universes never share a validator");
+  const C = require("../src/compute");
+  assert.ok(C.FEATURES.find((f) => f.key === "backtest").routes.includes("/api/retest-study"), "the manifest owns the route");
+});

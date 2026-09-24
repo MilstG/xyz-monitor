@@ -27,6 +27,7 @@ const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnP
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
 const { closedBars, closedLadder, emaLast, emaCrossOutcomes, emaCrossStudy, emaAlertState } = require("./compute");
 const { momPair, spearmanIC, duelStats, epResolve, epScore } = require("./compute");
+const { d1RetestEvents, d1RetestStudy, D1_RT_DEFS, D1_RT_COOLDOWNS, D1_RT_DEF_CD, D1_RT_HORIZONS, D1_RT_CELL_FLOOR } = require("./compute");
 const { hourlyPickTier, hourlyPickBetter } = require("./compute");
 const { parse13FInfotable, whaleBook, whaleDelta, whaleNameKey, whaleIssuerKey, whaleWindow, whaleQOfPeriod, whaleSeason, whale13FScale } = require("./compute");
 const { PTR_TICKERABLE, PTR_NO_TICKER } = require("./compute");
@@ -1280,7 +1281,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     for (const k of dr) {
       if (!k || !isFinite(+k.t) || !(+k.c > 0)) continue;
       const ov = byDay.get(Math.floor(+k.t / DAY));
-      if (ov) bars.push({ t: +k.t, c: +ov.c, h: +ov.h, l: +ov.l, v: ov.v > 0 ? +ov.v : (+k.v > 0 ? +k.v : 0) });
+      // tl (build 2026.09.24-96): this bar's h/l are the spine's TRUE extremes — additive, every
+      // earlier consumer reads t/c/h/l/v; the D1 retest study discloses its true-low coverage off it
+      if (ov) bars.push({ t: +k.t, c: +ov.c, h: +ov.h, l: +ov.l, v: ov.v > 0 ? +ov.v : (+k.v > 0 ? +k.v : 0), tl: true });
       else { const c = +k.c, h = +k.h; bars.push({ t: +k.t, c, h: isFinite(h) && h > 0 ? h : c, l: c, v: +k.v > 0 ? +k.v : 0 }); }
     }
     return bars;
@@ -4359,6 +4362,71 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         retest: rt ? { n: rt.n, overall: rt.overall, bySide: rt.bySide, cellFloor: rt.cellFloor } : null };
     }
     return sec;
+  }
+
+  // ---- D1 retest study (GET /api/retest-study, build 2026.09.24-96) ----------------------------
+  // The Backtest tab's panel: the Trend board's D1 RETEST replayed over every name's closed daily
+  // history, against the same names' stacked-but-not-retesting bars (compute.d1RetestEvents has
+  // the definition and the reasoning). Bars are the one merged daily source (mergedDailyBars,
+  // forming day trimmed by closedBars) so a "day" here is the day the level map, the EMA200 study
+  // and the emarts shadow already agree on — and its `tl` flag is how the panel knows which
+  // probes read a true low. Roster = the whole universe the Trend board ranks (not the equity-
+  // only study set): the badge fires on commodities and indices too, so the study reads them.
+  // Memo contract: each name walks BOTH definitions once per (dailyRaw object, daily-bucket
+  // object, UTC day) — the day is in the key because midnight closes a bar with no new fetch.
+  // Cooldown is applied at pool time (d1RetestCooldown), so switching it never re-walks a bar.
+  // The pooled body is cached per (scope, definition, cooldown) under a signature of the per-name
+  // walk versions; the ETag is that signature, so a poll is a 304 until a walk actually changed.
+  const D1RT_MIN_NAMES = 5, D1RT_EVENTS_CAP = 500;
+  let d1rtVer = 0;
+  const d1rtCache = new Map();   // "scope|def|cd" -> { sig, body }
+  function getD1Retest(scope, def, cd) {
+    scope = scope === "crypto" ? "crypto" : "stocks";
+    def = D1_RT_DEFS.includes(def) ? def : "board";
+    cd = D1_RT_COOLDOWNS.includes(+cd) ? +cd : D1_RT_DEF_CD;
+    const U = analyticsUniverse(scope);
+    const now = Date.now(), dayK = Math.floor(now / DAY);
+    const walked = [];
+    for (const r of U.roster()) {
+      const dr = r && r.dailyRaw;
+      if (!Array.isArray(dr) || !dr.length) continue;
+      // bucketsFor answers a FRESH [] for a name with no spine — memo on the spine's buckets only
+      // when there is a spine, or every poll would re-walk (and re-version) every spineless name
+      const db = Array.isArray(r.hourlyRaw) ? bucketsFor(r, 24) : null;
+      if (r._rtDr !== dr || r._rtDb !== db || r._rtDay !== dayK || !r._rtW) {
+        r._rtDr = dr; r._rtDb = db; r._rtDay = dayK;
+        const bars = closedBars(mergedDailyBars(r), DAY, now);
+        r._rtW = { board: d1RetestEvents(bars, { def: "board" }), touch: d1RetestEvents(bars, { def: "touch" }), last: bars.length ? +bars[bars.length - 1].t : 0 };
+        r._rtV = ++d1rtVer;
+      }
+      if (r._rtW[def].n < 60) continue;   // under ~3 months of closes the EMAs have barely seeded — not a contributor
+      walked.push(r);
+    }
+    let sig = scope + "|" + def + "|" + cd + "|";
+    for (const r of walked) sig += r.coin + ":" + r._rtV + ",";
+    let hsh = 2166136261;
+    for (let i = 0; i < sig.length; i++) { hsh ^= sig.charCodeAt(i); hsh = Math.imul(hsh, 16777619); }
+    const key = scope + "-" + def + "-" + cd + "-" + walked.length + "-" + (hsh >>> 0).toString(36);
+    const ck = scope + "|" + def + "|" + cd, hit = d1rtCache.get(ck);
+    if (hit && hit.key === key) return hit.body;
+    const params = { def, cd, defs: D1_RT_DEFS, cooldowns: D1_RT_COOLDOWNS, horizons: D1_RT_HORIZONS,
+      fast: 13, slow: 21, win: 3, cellFloor: D1_RT_CELL_FLOOR, minNames: D1RT_MIN_NAMES };
+    let body;
+    if (walked.length < D1RT_MIN_NAMES) body = { ts: now, dataTs: 0, key, scope, pending: true, count: walked.length, need: D1RT_MIN_NAMES, params };
+    else {
+      const st = d1RetestStudy(walked.map((r) => ({ coin: r.coin, ticker: r.ticker || r.coin, cand: r._rtW[def].cand, ctl: r._rtW[def].ctl })),
+        { cd, horizons: D1_RT_HORIZONS, cellFloor: D1_RT_CELL_FLOOR });
+      let bars = 0, lastT = 0;
+      for (const r of walked) { bars += r._rtW[def].n; if (r._rtW.last > lastT) lastT = r._rtW.last; }
+      body = { ts: now, dataTs: lastT, key, scope, params, count: walked.length, bars,
+        names: st.names, side: st.side, byName: st.byName,
+        eventsTotal: st.events.length,
+        // newest first, capped: the table and the CSV read these; the aggregate above read all
+        events: st.events.slice(0, D1RT_EVENTS_CAP).map((e) => ({ coin: e.coin, ticker: e.ticker, t: e.t, side: e.side,
+          c: e.c, e13: e.e13, e21: e.e21, tl: e.tl, sd: e.sd, f: e.f, v: e.v })) };
+    }
+    d1rtCache.set(ck, { key, body });
+    return body;
   }
 
   // ---- session anatomy (served in sections.anatomy) ------------------------------------------
@@ -14824,6 +14892,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     voidEarnPrint,
     getTrend,
     getTrendPair,
+    getD1Retest,   // D1 retest study (Backtest tab, build 2026.09.24-96)
     getActionable,
     getTriggers,
     getPush,

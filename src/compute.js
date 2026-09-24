@@ -6138,7 +6138,7 @@ const FEATURES = [
   { key: "dm",         kind: "tab", label: "Messages",    def: "public", routes: ["/api/dm"] },
   { key: "report",     kind: "tab", label: "AI Report",   def: "public", routes: ["/api/ai-report", "/api/ai-reports"] },
   { key: "actionable", kind: "tab", label: "Actionable",  def: "admin",  routes: ["/api/actionable"] },
-  { key: "backtest",   kind: "tab", label: "Backtest",    def: "admin",  routes: ["/api/duel"] },
+  { key: "backtest",   kind: "tab", label: "Backtest",    def: "admin",  routes: ["/api/duel", "/api/retest-study"] },   // -96: the D1 retest study rides the tab's gate
   // FOCUS (build 2026.08.15-01): the frozen-at-open 6-seat tradeable watchlist. Admin while it
   // soaks — same doctrine as baskets/actionable. One route; the chart's 1m fetch rides
   // /api/candles under the pinned markets key, so gating focus can never strand a chart request.
@@ -9431,3 +9431,199 @@ module.exports.ccittTiff = ccittTiff;
 module.exports.ocrPtrRows = ocrPtrRows;
 module.exports.ocrCheckboxForm = ocrCheckboxForm;
 module.exports.PTR_NO_TICKER = PTR_NO_TICKER;
+
+// ===== D1 retest study (build 2026.09.24-96) ====================================================
+// The Trend board's RETEST badge, asked the study question: when the DAILY rung of a stacked
+// ribbon pulled back into the 13/21 zone and the close held, what did the next 1-20 closes do —
+// and was that any better than simply being in the same stacked trend on a bar that did NOT
+// retest? The Backtest tab's panel renders this; nothing here trades (the live claim is still
+// tretest / tretestdn in the ledger, and it earns its own record out of sample).
+//
+// Reuse, not a second definition: the per-bar state is trendState() on the bar's own close
+// against EMAs walked bar-by-bar with emaLast's exact SMA-seed construction (the stackedRun walk),
+// and the 'board' probe is trendLadder's own test — the extreme of the last TREND_RETEST_BARS bars
+// reaching EMA13 while the close holds the EMA21 side — evaluated on CLOSED bars, which is what
+// the closed-bar alert lane (closedLadder) already calls the truth. The one thing the board has
+// that this walk does not is the other three rungs: this is the D1 rung alone, which the panel
+// says out loud (the hourly spine is ~180d/90d deep, the daily history 370d — a 4-rung replay
+// would halve the sample for rungs that mostly agree with D1 on a pullback anyway).
+//
+// The two open decisions from the mockup ship as controls rather than being settled by fiat:
+//   definition  'board'  — ladder-verbatim: the 3-bar extreme probed the zone. A single probe
+//                          keeps the badge lit for up to three closes, so it fires in runs.
+//               'touch'  — first touch: THIS bar's own extreme probed and the prior bar's did not.
+//                          One event per pullback by construction.
+//   cooldown    closed bars after a kept event during which the same name and side cannot fire
+//               again. Suppressed events are counted, never silently dropped.
+// The control is every stacked bar of the same side whose probe did NOT hold, from the same names
+// over the same days — so "excess" is the retest's edge over the trend it rides, not over zero.
+// Outcomes are signed with the side (a short that falls scores POSITIVE), in % and in σ units of
+// the name's trailing D1_RT_SD_BARS-bar daily volatility (walk-forward: no bar after the event).
+// Void = the event bar's own EMA21 (the tretest void), touched by a later bar's extreme inside the
+// horizon. Daily lows exist only where the hourly spine overlays the daily history; a bar without
+// one reads its close as its low, which can only UNDER-count probes and voids — `tl` on each event
+// says whether its probe window carried true extremes, and the panel prints the share.
+const D1_RT_FAST = 13, D1_RT_SLOW = 21;
+const D1_RT_HORIZONS = [1, 3, 5, 10, 20];
+const D1_RT_COOLDOWNS = [0, 3, 5, 10, 20];
+const D1_RT_DEF_CD = 5;                      // one trading week: a 'board' run is at most 3 closes, so 5 folds it with room
+const D1_RT_DEFS = ["board", "touch"];
+const D1_RT_CELL_FLOOR = 30;                 // under this many events a cell publishes n, never a rate
+const D1_RT_SD_BARS = 60, D1_RT_SD_MIN = 20;
+
+// Walk one name's CLOSED daily bars ([{t, c, h?, l?, tl?}] ascending; tl = the bar carries a true
+// low/high). Returns every candidate event (pre-cooldown) and the control accumulators per side.
+function d1RetestEvents(bars, opts) {
+  opts = opts || {};
+  const def = D1_RT_DEFS.includes(opts.def) ? opts.def : "board";
+  const H = Array.isArray(opts.horizons) && opts.horizons.length ? opts.horizons : D1_RT_HORIZONS;
+  const out = { n: 0, cand: [], ctl: { long: H.map(() => ({ n: 0, hit: 0, sum: 0, sumSd: 0, nSd: 0 })), short: H.map(() => ({ n: 0, hit: 0, sum: 0, sumSd: 0, nSd: 0 })) } };
+  if (!Array.isArray(bars) || bars.length < TREND_MIN_BARS) return out;
+  const B = [];
+  for (const k of bars) {
+    if (!k) continue;
+    const c = +k.c; if (!(c > 0) || !isFinite(+k.t)) continue;
+    const l = k.l != null && +k.l > 0 ? Math.min(+k.l, c) : c, h = k.h != null && +k.h > 0 ? Math.max(+k.h, c) : c;
+    B.push({ t: +k.t, c, l, h, tl: !!k.tl });
+  }
+  const n = B.length; out.n = n;
+  if (n < TREND_MIN_BARS) return out;
+  const aF = 2 / (D1_RT_FAST + 1), aS = 2 / (D1_RT_SLOW + 1);
+  const eF = new Array(n).fill(null), eS = new Array(n).fill(null);
+  let f = 0, s = 0, sF = 0, sS = 0;
+  for (let i = 0; i < n; i++) {
+    const c = B[i].c;
+    if (i < D1_RT_FAST) { sF += c; if (i === D1_RT_FAST - 1) f = sF / D1_RT_FAST; } else f = aF * c + (1 - aF) * f;
+    if (i < D1_RT_SLOW) { sS += c; if (i === D1_RT_SLOW - 1) s = sS / D1_RT_SLOW; } else s = aS * c + (1 - aS) * s;
+    // emaLast's honesty floor: an EMA is published from max(span+5, TREND_MIN_BARS) bars, so the
+    // walk's first event sits exactly where the live ladder would first have drawn the rung
+    if (i + 1 >= Math.max(D1_RT_SLOW + 5, TREND_MIN_BARS)) { eF[i] = f; eS[i] = s; }
+  }
+  const W = TREND_RETEST_BARS;
+  // the probe for side L at bar i: 'board' reads the extreme of the last W bars, 'touch' this bar only
+  const probe = (i, L) => {
+    if (eF[i] == null) return false;
+    if (def === "touch") return L ? B[i].l <= eF[i] : B[i].h >= eF[i];
+    for (let j = Math.max(0, i - W + 1); j <= i; j++) if (L ? B[j].l <= eF[i] : B[j].h >= eF[i]) return true;
+    return false;
+  };
+  for (let i = 0; i < n; i++) {
+    if (eF[i] == null || !(eS[i] > 0)) continue;
+    const st = trendState(B[i].c, eF[i], eS[i]);
+    if (st !== "up" && st !== "down") continue;
+    const L = st === "up", side = L ? "long" : "short", dir = L ? 1 : -1;
+    // walk-forward σ: trailing daily returns ending AT this close, never after it
+    let sd = null;
+    if (i >= D1_RT_SD_MIN) {
+      const r = [];
+      for (let j = Math.max(1, i - D1_RT_SD_BARS + 1); j <= i; j++) r.push((B[j].c / B[j - 1].c - 1) * 100);
+      sd = retStd(r, D1_RT_SD_MIN);
+    }
+    let ev = probe(i, L) && (L ? B[i].c > eS[i] : B[i].c < eS[i]);
+    if (ev && def === "touch" && i > 0 && eF[i - 1] != null && probe(i - 1, L)) ev = false;   // not the first touch: the episode already fired
+    const fwd = H.map((h) => (i + h < n ? (dir * (B[i + h].c / B[i].c - 1)) * 100 : null));
+    if (!ev) {
+      // control: a stacked bar of the same side whose probe did not hold (a mid-episode 'touch'
+      // repeat is neither — it is the same pullback, so it joins neither pool)
+      if (probe(i, L)) continue;
+      const acc = out.ctl[side];
+      for (let k = 0; k < H.length; k++) {
+        const v = fwd[k]; if (v == null) continue;
+        const a = acc[k]; a.n++; a.sum += v; if (v > 0) a.hit++;
+        if (sd > 0) { a.sumSd += v / sd; a.nSd++; }
+      }
+      continue;
+    }
+    let tl = true;
+    for (let j = def === "touch" ? i : Math.max(0, i - W + 1); j <= i; j++) if (!B[j].tl) tl = false;
+    const vd = H.map((h) => {
+      if (i + h >= n) return null;
+      for (let j = i + 1; j <= i + h; j++) if (L ? B[j].l <= eS[i] : B[j].h >= eS[i]) return true;
+      return false;
+    });
+    out.cand.push({ i, t: B[i].t, side, c: B[i].c, e13: +eF[i].toPrecision(6), e21: +eS[i].toPrecision(6), tl,
+      sd: sd > 0 ? +sd.toFixed(3) : null,
+      f: fwd.map((v) => (v == null ? null : +v.toFixed(3))), v: vd });
+  }
+  return out;
+}
+
+// Cooldown over one name's candidates: a kept event arms a `cd`-bar quiet period for its side.
+function d1RetestCooldown(cand, cd) {
+  cd = Math.max(0, Math.floor(+cd || 0));
+  const last = { long: -Infinity, short: -Infinity }, kept = [];
+  let suppressed = 0;
+  for (const e of cand || []) {
+    if (e.i - last[e.side] <= cd) { suppressed++; continue; }
+    last[e.side] = e.i; kept.push(e);
+  }
+  return { kept, suppressed };
+}
+
+// Pool the per-name walks into the published study. names: [{coin, ticker, cand, ctl}] (from
+// d1RetestEvents). Per side and horizon: event n / hit / mean / median / σ-mean / void rate, the
+// control's n / hit / mean / σ-mean, and the excess of each — rates under the floor are null.
+function d1RetestStudy(names, opts) {
+  opts = opts || {};
+  const H = Array.isArray(opts.horizons) && opts.horizons.length ? opts.horizons : D1_RT_HORIZONS;
+  const cd = opts.cd != null ? opts.cd : D1_RT_DEF_CD, floor = opts.cellFloor || D1_RT_CELL_FLOOR;
+  const r3 = (v) => (v == null || !isFinite(v) ? null : +v.toFixed(3));
+  const all = [], byName = [];
+  const sides = { long: { n: 0, suppressed: 0, tl: 0 }, short: { n: 0, suppressed: 0, tl: 0 } };
+  const ctl = { long: H.map(() => ({ n: 0, hit: 0, sum: 0, sumSd: 0, nSd: 0 })), short: H.map(() => ({ n: 0, hit: 0, sum: 0, sumSd: 0, nSd: 0 })) };
+  for (const nm of names || []) {
+    const { kept, suppressed } = d1RetestCooldown(nm.cand, cd);
+    let nl = 0, ns = 0, lastE = null;
+    for (const e of kept) {
+      all.push(Object.assign({ coin: nm.coin, ticker: nm.ticker || nm.coin }, e));
+      if (e.side === "long") nl++; else ns++;
+      sides[e.side].n++; if (e.tl) sides[e.side].tl++;
+      lastE = e;
+    }
+    if (suppressed) { const k2 = new Set(kept); for (const e of nm.cand) if (!k2.has(e)) sides[e.side].suppressed++; }
+    if (kept.length) byName.push({ coin: nm.coin, ticker: nm.ticker || nm.coin, long: nl, short: ns, lastT: lastE.t, lastSide: lastE.side });
+    for (const sd of ["long", "short"]) {
+      const src = nm.ctl && nm.ctl[sd];
+      if (!src) continue;
+      for (let k = 0; k < H.length && k < src.length; k++) {
+        const a = ctl[sd][k], b = src[k];
+        a.n += b.n; a.hit += b.hit; a.sum += b.sum; a.sumSd += b.sumSd; a.nSd += b.nSd;
+      }
+    }
+  }
+  const out = { horizons: H, cd, cellFloor: floor, names: byName.length, side: {} };
+  for (const sd of ["long", "short"]) {
+    const ev = all.filter((e) => e.side === sd), cells = {};
+    H.forEach((h, k) => {
+      const f = ev.map((e) => e.f[k]).filter((v) => v != null);
+      const fs = ev.filter((e) => e.f[k] != null && e.sd > 0).map((e) => e.f[k] / e.sd);
+      const vd = ev.map((e) => e.v[k]).filter((v) => v != null);
+      const c = ctl[sd][k], on = f.length >= floor, con = c.n >= floor;
+      const mean = on ? f.reduce((a, b) => a + b, 0) / f.length : null;
+      const meanSd = on && fs.length ? fs.reduce((a, b) => a + b, 0) / fs.length : null;
+      const hit = on ? f.filter((v) => v > 0).length / f.length : null;
+      const cMean = con ? c.sum / c.n : null, cHit = con ? c.hit / c.n : null, cSd = con && c.nSd ? c.sumSd / c.nSd : null;
+      cells[h] = { n: f.length, hit: r3(hit), mean: r3(mean), med: on ? r3(median(f)) : null, meanSd: r3(meanSd),
+        void: on && vd.length ? r3(vd.filter(Boolean).length / vd.length) : null,
+        ctl: { n: c.n, hit: r3(cHit), mean: r3(cMean), meanSd: r3(cSd) },
+        exHit: hit != null && cHit != null ? r3(hit - cHit) : null,
+        exMean: mean != null && cMean != null ? r3(mean - cMean) : null,
+        exSd: meanSd != null && cSd != null ? r3(meanSd - cSd) : null };
+    });
+    out.side[sd] = { n: sides[sd].n, suppressed: sides[sd].suppressed, tl: sides[sd].tl, cells };
+  }
+  all.sort((a, b) => b.t - a.t || (a.ticker < b.ticker ? -1 : 1));
+  byName.sort((a, b) => (b.long + b.short) - (a.long + a.short) || b.lastT - a.lastT);
+  out.events = all;
+  out.byName = byName;
+  return out;
+}
+
+module.exports.D1_RT_HORIZONS = D1_RT_HORIZONS;
+module.exports.D1_RT_COOLDOWNS = D1_RT_COOLDOWNS;
+module.exports.D1_RT_DEF_CD = D1_RT_DEF_CD;
+module.exports.D1_RT_DEFS = D1_RT_DEFS;
+module.exports.D1_RT_CELL_FLOOR = D1_RT_CELL_FLOOR;
+module.exports.d1RetestEvents = d1RetestEvents;
+module.exports.d1RetestCooldown = d1RetestCooldown;
+module.exports.d1RetestStudy = d1RetestStudy;

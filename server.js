@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.24-95";
+const VERSION = "2026.09.24-96";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -2281,6 +2281,17 @@ async function buildServer() {
   // so serveCached's dataTs ETag makes this a 304 for nearly every poll.
   fastify.get("/api/duel", (req, reply) =>
     serveCached(req, reply, poller.getDuel(), { ts: 0, dataTs: 0, minN: 60, scopes: {} }));
+  // D1 retest study (build 2026.09.24-96): the Trend board's D1 RETEST replayed over every name's
+  // closed daily history vs the same names' stacked-but-not-retesting bars. Gated with the
+  // Backtest tab (its manifest routes), admin while it soaks. ?u= scope, ?def= board|touch,
+  // ?cd= cooldown bars — anything else normalises to the defaults server-side. The ETag is the
+  // poller's walk signature (scope, definition, cooldown and every contributing name's walk
+  // version), so a poll is a 304 until a closed bar actually changed what the study reads.
+  fastify.get("/api/retest-study", (req, reply) => {
+    const q = req.query || {};
+    const body = poller.getD1Retest(q.u === "crypto" ? "crypto" : "stocks", String(q.def || ""), q.cd);
+    return sendCachedBody(req, reply, body, 'W/"rt-' + body.key + '"');
+  });
   // EMA 13/21 trend ladder (D1 · H12 · H4 · H1) — ranked long/short leaderboards per universe.
   fastify.get("/api/trend", (req, reply) => {
     const q = req.query || {};

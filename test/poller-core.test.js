@@ -2983,3 +2983,119 @@ test("callTarget: the client's copy reads every case exactly as the server does"
   for (const t of texts) for (const side of [null, "long", "short"])
     assert.deepEqual(clientTarget(t, "HOOD", 113.9, now, side), callTarget(t, "HOOD", 113.9, now, side), "parity: " + t + " / " + side);
 });
+
+// ===== build 2026.09.24-96: D1 retest study — the walk, the cooldown, the pool, the poller's cache ====
+test("d1RetestEvents: the ladder's D1 probe on closed bars — board fires in runs, touch once per pullback, lows gate it, the control excludes probes", () => {
+  const { d1RetestEvents, d1RetestCooldown, D1_RT_HORIZONS } = require("../src/compute");
+  const DAY = 86400e3;
+  // A steady ~+0.4%/day (alternating +0.3/+0.5 so σ exists) with every 10th bar's LOW wicking 4% under its close (true extremes), closes
+  // untouched: the ribbon stays stacked up and each wick probes EMA13 while the close holds.
+  const mk = (n, tl) => { const b = []; let c = 100;
+    for (let i = 0; i < n; i++) { c *= i % 2 ? 1.005 : 1.003; b.push({ t: i * DAY, c, h: c * 1.001, l: i % 10 === 5 ? c * 0.96 : c * 0.999, tl }); } return b; };
+  const bars = mk(120, true);
+  const board = d1RetestEvents(bars, { def: "board" }), touch = d1RetestEvents(bars, { def: "touch" });
+  assert.equal(board.n, 120);
+  assert.ok(touch.cand.length > 0 && touch.cand.every((e) => e.side === "long" && (e.i % 10) === 5), "touch fires on the wick bar itself: " + touch.cand.map((e) => e.i));
+  assert.ok(touch.cand.every((e) => e.tl), "every probe read a true low");
+  // board = the 3-bar window: the wick bar and the two after it
+  const idx = new Set(board.cand.map((e) => e.i));
+  for (const e of touch.cand) for (const k of [0, 1, 2]) if (e.i + k < 120) assert.ok(idx.has(e.i + k), "board run covers wick+" + k);
+  assert.equal(board.cand.length, idx.size);
+  // no event before emaLast would have published the EMAs (max(slow+5, 26) bars)
+  assert.ok(Math.min(...board.cand.map((e) => e.i)) >= 25);
+  // the cooldown folds the run: cd 0 keeps all, cd 5 keeps exactly the wick bars
+  assert.equal(d1RetestCooldown(board.cand, 0).kept.length, board.cand.length);
+  const cd5 = d1RetestCooldown(board.cand, 5);
+  assert.deepEqual(cd5.kept.map((e) => e.i), touch.cand.map((e) => e.i), "cd 5 leaves one event per pullback");
+  assert.equal(cd5.suppressed, board.cand.length - touch.cand.length, "suppressed are counted, not dropped");
+  // outcomes: signed %, one per horizon, null where the horizon runs past the data
+  const e0 = touch.cand[0];
+  assert.equal(e0.f.length, D1_RT_HORIZONS.length);
+  assert.ok(Math.abs(e0.f[0] - 0.3) < 0.01, "+1d after a wick bar (odd index) is the +0.3% even day: " + e0.f[0]);
+  assert.ok(e0.sd > 0 && e0.e13 > e0.e21 && e0.c > e0.e13, "σ, EMAs and the held close ride along");
+  assert.deepEqual(e0.v, D1_RT_HORIZONS.map(() => false), "no later low reaches the event's EMA21");
+  const last = touch.cand[touch.cand.length - 1];
+  assert.ok(last.f.includes(null), "an event near the edge leaves its long horizons open");
+  // control: stacked bars whose probe did NOT hold — a board-window bar is never a control bar
+  const stacked = 120 - 25, ctl1 = board.ctl.long[0].n;
+  assert.ok(ctl1 > 0 && ctl1 < stacked - board.cand.length + 1, "control excludes the retest bars");
+  assert.equal(board.ctl.short[0].n, 0, "no down-stack on a rising tape");
+  // closes-only history: the close stands in for the low, so the wick is invisible — no touch fires
+  const flat = mk(120, false).map((k) => ({ t: k.t, c: k.c }));
+  assert.equal(d1RetestEvents(flat, { def: "touch" }).cand.length, 0, "no low, no probe");
+  // the short mirror: a falling tape whose highs wick up into the ribbon
+  const dn = []; let c = 100;
+  for (let i = 0; i < 120; i++) { c *= 0.996; dn.push({ t: i * DAY, c, l: c * 0.999, h: i % 10 === 5 ? c * 1.04 : c * 1.001, tl: true }); }
+  const s = d1RetestEvents(dn, { def: "touch" });
+  assert.ok(s.cand.length > 0 && s.cand.every((e) => e.side === "short" && e.f[0] > 0), "a short that falls scores positive");
+  // junk in, nothing out
+  assert.equal(d1RetestEvents(null).cand.length, 0);
+  assert.equal(d1RetestEvents(bars.slice(0, 20)).cand.length, 0, "under TREND_MIN_BARS");
+  assert.equal(d1RetestEvents(bars, { def: "nonsense" }).cand.length, board.cand.length, "an unknown definition is the board's");
+});
+
+test("d1RetestStudy: pools names, applies the cooldown, publishes nothing under the floor, excess is event minus control", () => {
+  const { d1RetestEvents, d1RetestStudy } = require("../src/compute");
+  const DAY = 86400e3, names = [];
+  for (let k = 0; k < 6; k++) {
+    const b = []; let c = 50 + k;
+    for (let i = 0; i < 200; i++) { c *= 1.004; b.push({ t: i * DAY, c, h: c * 1.001, l: (i + k) % 10 === 5 ? c * 0.96 : c * 0.999, tl: i > 100 }); }
+    names.push(Object.assign({ coin: "xyz:N" + k, ticker: "N" + k }, d1RetestEvents(b, { def: "board" })));
+  }
+  const st = d1RetestStudy(names, { cd: 5, cellFloor: 30 });
+  const L = st.side.long;
+  assert.equal(st.names, 6);
+  assert.ok(L.n >= 90 && L.suppressed > 0, `events ${L.n}, suppressed ${L.suppressed}`);
+  assert.ok(L.tl > 0 && L.tl < L.n, "the true-low share is partial by construction");
+  const c5 = L.cells[5];
+  assert.ok(c5.n >= 30 && c5.hit === 1 && c5.void === 0, JSON.stringify(c5));
+  assert.ok(Math.abs(c5.exMean - +(c5.mean - c5.ctl.mean).toFixed(3)) <= 0.002, "excess = event mean − control mean");
+  assert.ok(Math.abs(c5.exHit - +(c5.hit - c5.ctl.hit).toFixed(3)) <= 0.002);
+  assert.equal(st.side.short.n, 0);
+  assert.equal(st.side.short.cells[5].hit, null, "an empty side publishes no rate");
+  // the floor: raise it past n and every rate goes null, n stays
+  const hi = d1RetestStudy(names, { cd: 5, cellFloor: 10000 });
+  assert.equal(hi.side.long.cells[5].n, c5.n);
+  assert.equal(hi.side.long.cells[5].mean, null); assert.equal(hi.side.long.cells[5].exSd, null);
+  // newest first; byName ranks by event count
+  for (let i = 1; i < st.events.length; i++) assert.ok(st.events[i - 1].t >= st.events[i].t);
+  assert.equal(st.byName.length, 6);
+  assert.ok(st.byName.every((x) => x.long > 0 && x.short === 0 && x.lastSide === "long"));
+  // cd 0 keeps the whole board run
+  assert.ok(d1RetestStudy(names, { cd: 0, cellFloor: 30 }).side.long.n > L.n);
+});
+
+test("getD1Retest: pending under five names, cached per (scope, definition, cooldown), params normalised, events capped newest-first", () => {
+  const { createPoller } = require("../src/poller");
+  const DAY = 86400e3;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const d0 = Math.floor(Date.now() / DAY);
+  // closes-only dailyRaw (the real feed's shape): a dip close under EMA13 recovered the next day is
+  // what a board probe looks like without true lows
+  const seed = (k) => { const daily = []; let c = 100 + k;
+    for (let i = 0; i < 200; i++) { c *= i % 10 === 8 ? 0.97 : i % 10 === 9 ? 1.045 : 1.003; daily.push({ t: (d0 - 200 + i) * DAY, c, h: c * 1.005 }); }
+    p.seedRowNow("RT" + k, { px: c, uni: "xyz", vol: 1e6, dailyRaw: daily }); };
+  for (let k = 0; k < 4; k++) seed(k);
+  const pend = p.getD1Retest("stocks", "board", 5);
+  assert.equal(pend.pending, true); assert.equal(pend.count, 4); assert.equal(pend.need, 5);
+  assert.ok(pend.params && pend.params.cooldowns.includes(5) && pend.params.defs.includes("touch"), "the controls' options ride the pending body");
+  seed(4); seed(5);
+  const b = p.getD1Retest("stocks", "board", 5);
+  assert.ok(!b.pending && b.count === 6 && b.names === 6, JSON.stringify({ c: b.count, n: b.names }));
+  assert.ok(b.side.long.n > 0 && b.side.long.suppressed > 0, "board runs fold under the cooldown");
+  assert.equal(b.side.long.tl, 0, "no spine: every probe read closes");
+  assert.equal(p.getD1Retest("stocks", "board", 5), b, "an unchanged tape serves the same body (the ETag's stable identity)");
+  assert.equal(p.getD1Retest("stocks", "board", "5").key, b.key, "the query string's cd normalises");
+  const odd = p.getD1Retest("stocks", "bogus", 7);
+  assert.equal(odd.params.def, "board"); assert.equal(odd.params.cd, 5, "unknown values fall back to the defaults");
+  assert.notEqual(p.getD1Retest("stocks", "board", 0).key, b.key, "each cooldown has its own body and validator");
+  assert.equal(p.getD1Retest("stocks", "touch", 5).side.long.n, 0, "first touch needs a true low the closes-only feed cannot show");
+  assert.equal(p.getD1Retest("crypto", "board", 5).pending, true, "the universes never mix");
+  for (let i = 1; i < b.events.length; i++) assert.ok(b.events[i - 1].t >= b.events[i].t, "newest first");
+  assert.ok(b.events.length <= 500 && b.eventsTotal >= b.events.length);
+  assert.ok(!("i" in b.events[0]) && b.events[0].ticker && Array.isArray(b.events[0].f), "the wire event drops the walk index");
+  const pol = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes("const bars = closedBars(mergedDailyBars(r), DAY, now);"), "the study reads the one merged daily source, forming day trimmed");
+  assert.ok(/if \(ov\) bars\.push\(\{ t: \+k\.t, c: \+ov\.c, h: \+ov\.h, l: \+ov\.l, v: [^\n]*, tl: true \}\);/.test(pol), "overlay bars flag their true extremes");
+});

@@ -7,7 +7,7 @@
 // their original order (the entry's calls come last), under "use strict".
 const fs = require("fs"), path = require("path");
 const CLIENT_MODULES = ["core", "base", "data", "markets", "corr", "drawer", "prefs", "alerts", "admin", "positioning", "backtest", "charts",
-  "triggers", "actionable", "calendar", "notes", "trend", "sectors", "drawdown", "share", "nav", "terminal", "report", "focus", "funds", "insiders", "messages", "access"];
+  "triggers", "actionable", "calendar", "notes", "trend", "sectors", "drawdown", "retest", "share", "nav", "terminal", "report", "focus", "funds", "insiders", "messages", "access"];
 function declassify(js) {
   return js.split("\n").filter((l) => !/^import (\{[^}]*\} from )?"\.\/(js\/)?[a-z]+\.js";$/.test(l) && !/^export \{ [^}]* \};$/.test(l))
     .map((l) => l.replace(/^export function __boot_/, "function __boot_")).join("\n");

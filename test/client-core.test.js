@@ -2718,3 +2718,56 @@ test("targets -95: the stamp grows a target row — progress, time used, stop ti
   const pl = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   assert.ok(pl.includes("+ dgTg(x) + (x.deleted ?") && pl.includes("+ dgTgRes(x)).join(") && pl.includes('" \\u00b7 targets " + e.tg.hit + "/" + e.tg.miss + "/" + e.tg.wrong'), "the digest carries targets");
 });
+
+// ===== build 2026.09.24-96: the D1 retest study panel ================================================
+test("retest panel -96: renders the server's cells as served — floor, control, excess, events — and is wired into the Backtest tab", () => {
+  const fs = require("fs"), path = require("path");
+  const app = require("./_client").clientSource();
+  const a = app.indexOf("const RT_KEY="), b = app.indexOf("function attachRetestControls(");
+  assert.ok(a > 0 && b > a, "retest panel block not found in the client source");
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const isoUtc = (ts, x, y) => new Date(+ts).toISOString().slice(x, y);
+  const state = { scope: "stocks", view: "backtest" };
+  const api = new Function("store", "state", "esc", "isoUtc", "sHead", "sCap", "fetchJSON", "drawBacktest",
+    app.slice(a, b) + "; return { RT, rtMemo, rtKey, renderRetestSection, rtRow };")(
+    { get: () => null, set() {} }, state, esc, isoUtc, (t, d) => `<h>${t} — ${d}</h>`, (t) => `<cap>${t}</cap>`, async () => ({}), () => {});
+  assert.deepEqual([api.RT.side, api.RT.def, api.RT.cd], ["long", "board", 5], "defaults: long, the board's definition, a 5-bar cooldown");
+  assert.ok(api.renderRetestSection().includes("Study not served yet"), "no payload: an honest empty state");
+  const cell = (n, over) => Object.assign({ n, hit: 0.61, mean: 1.234, med: 0.9, meanSd: 0.42, void: 0.18,
+    ctl: { n: 900, hit: 0.55, mean: 0.8, meanSd: 0.3 }, exHit: 0.06, exMean: 0.434, exSd: 0.12 }, over || {});
+  const T = Date.UTC(2026, 8, 21);
+  api.rtMemo.set(api.rtKey(), { at: Date.now(), pending: false, data: {
+    scope: "stocks", key: "k", count: 40, names: 31, bars: 12345, dataTs: T, eventsTotal: 2,
+    params: { def: "board", cd: 5, defs: ["board", "touch"], cooldowns: [0, 3, 5, 10, 20], horizons: [1, 3, 5, 10, 20], cellFloor: 30 },
+    side: { long: { n: 64, suppressed: 11, tl: 16, cells: { 1: cell(64), 3: cell(64), 5: cell(64), 10: cell(20, { hit: null, mean: null, med: null, meanSd: null, void: null, exHit: null, exMean: null, exSd: null }), 20: cell(64, { exSd: -0.05 }) } },
+      short: { n: 0, suppressed: 0, tl: 0, cells: {} } },
+    byName: [{ coin: "xyz:NVDA", ticker: "NVDA", long: 5, short: 0, lastT: T, lastSide: "long" }],
+    events: [{ coin: "xyz:NVDA", ticker: "NVDA", t: T, side: "long", c: 181.2, e13: 179.9, e21: 176.4, tl: true, sd: 2.1, f: [0.5, 1.1, null, null, null], v: [false, false, null, null, null] },
+      { coin: "xyz:<b>", ticker: "<b>", t: T - 86400e3, side: "long", c: 10, e13: 9.9, e21: 9.5, tl: false, sd: 3, f: [1, 1, 2.5, 3, 4], v: [false, true, true, true, true] }] } });
+  const html = api.renderRetestSection();
+  assert.ok(html.includes("<b>64</b> long events across <b>31</b> of 40 names"), "status line counts from the payload");
+  assert.ok(html.includes("11 suppressed by the 5d cooldown") && html.includes("25% on true extremes"), "suppression and true-low share disclosed");
+  assert.ok(html.includes("through the 2026-09-21 UTC close"), "the data edge is a UTC day");
+  assert.ok(html.includes('<td class="pos">+6pp</td><td class="pos">+0.43%</td><td class="pos">+0.12σ</td>'), "excess columns render as served");
+  assert.ok(html.includes('<td class="neg">-0.05σ</td>'), "a negative excess reads red");
+  assert.ok(/<td>\+10d<\/td><td>20<\/td><td class="dim2" colspan="5"[^>]*>under floor<\/td>/.test(html), "a sub-floor cell publishes its n and nothing else");
+  assert.ok(html.includes('<span class="sec">open</span>'), "an unresolved horizon says open, not zero");
+  assert.ok(html.includes("&lt;b&gt;") && !html.includes("<td><b></td>"), "tickers are escaped");
+  assert.ok(html.includes('data-rtd="touch"') && html.includes('data-rtc="20"') && html.includes('data-rts="short"') && html.includes('id="rtCsv"'), "controls from the payload's own option lists");
+  assert.ok(html.includes("CSV carries the newest") === false, "no cap note when every event shipped");
+  api.RT.side = "short";
+  assert.ok(api.renderRetestSection().includes("No short events under this definition and cooldown."), "the empty side says so");
+  api.RT.side = "long";
+  // wiring
+  assert.ok(require("./_client").CLIENT_MODULES.includes("retest"), "the suite's module list carries retest");
+  assert.ok(fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8").includes('import "./js/retest.js";'), "the entry loads the module");
+  assert.ok(app.includes("+renderDuelSection()+renderRetestSection();"), "the panel sits under the score duel");
+  assert.ok(app.includes("attachBtControls(); attachRetestControls(); attachLineHover(); loadDuelData(); loadRetestStudy(); }"), "drawBacktest wires and loads it");
+  assert.ok(app.includes("fetchJSON(`/api/retest-study?u=${state.scope==='crypto'?'crypto':'stocks'}&def="), "the scope rides the query");
+  assert.ok(app.includes("'fwd_'+h+'d_pct'") && app.includes("downloadCSV(`d1-retest-${state.scope}-${RT.def}-cd${RT.cd}.csv`, out)"), "CSV: one column per horizon, named by the choices");
+  assert.ok(/backtest:`[\s\S]*?<div class="hlp-h">D1 retest study<\/div>/.test(app), "the ? explainer covers the panel");
+  const docs = fs.readFileSync(path.join(__dirname, "..", "public", "docs.html"), "utf8");
+  assert.ok(docs.includes("<li><b>D1 retest study</b>"), "the manual's Backtest section covers it");
+  const feat = fs.readFileSync(path.join(__dirname, "..", "docs", "xyz-monitor-features.html"), "utf8");
+  assert.ok(!feat.includes('"designed, not yet built"') && feat.includes('{nm:"D1 retest study",sc:"adm",fd:"built'), "the features page marks it built");
+});

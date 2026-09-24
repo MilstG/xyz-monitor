@@ -527,7 +527,7 @@ test("server route manifest: every load-bearing API route is registered exactly 
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const routes = ["/api/snapshot", "/api/daily", "/api/analytics", "/api/duel", "/api/trend", "/api/signals",
     "/api/earnings", "/api/series", "/api/ledger", "/api/candles", "/api/corr-crypto", "/api/derivs", "/api/fundamentals", "/api/ai-report", "/api/ai-reports", "/api/health",
-    "/api/actionable", "/api/triggers",
+    "/api/actionable", "/api/triggers", "/api/retest-study",
     "/api/export/ledger", "/api/news", "/api/news/channels", "/api/alerts", "/api/alerts/rules",
     "/manifest.webmanifest", "/icon.svg", "/sw.js"];
   for (const r of routes) {
@@ -1395,7 +1395,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract â€
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.24-95"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.24-96"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);

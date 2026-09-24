@@ -77,6 +77,29 @@ instant, and the per-IP rate limit stops being a per-user problem.
   25 rows a page. Presets or any date in the last year; a name listed after the anchor is drawn
   with a dashed ring and marked *late*. The same study as a sortable table with CSV. A client-side study over `/api/daily`, no route of its own. Ships
   admin-only. The design mock is `docs/xyz-monitor-return-drawdown-mock.html`.
+- **D1 retest study** (`/api/retest-study`, build 2026.09.24-96) — the Trend board's D1 **RETEST**
+  replayed over every closed day the server holds, on the Backtest tab under the score duel: does
+  the pullback into a stacked daily ribbon beat the trend it rides? An event is the ladder's own D1
+  test on closed bars — EMA13/21 walked bar by bar with `emaLast`'s construction, the ribbon stacked
+  (`trendState` up/down), a probe of the 13/21 zone while the close holds the EMA21 side; the short
+  mirror for rallies. The design's two open decisions ship as controls rather than being settled by
+  fiat: the **definition** (*board* = ladder-verbatim, the last 3 bars' extreme reached EMA13, which
+  keeps the badge lit for up to three closes; *first touch* = this bar probed and the one before
+  did not) and the **cooldown** (0 / 3 / 5 / 10 / 20 closed bars per name and side, default 5;
+  suppressed events are counted). The **control** is every stacked bar of the same side whose probe
+  did not hold, from the same names over the same days, so the excess column is the retest's edge
+  over simply being in the trend, not over zero. Per horizon (+1/3/5/10/20d): n, hit, mean, median
+  and σ-mean (the name's trailing 60-bar daily σ, walk-forward), the void rate (the event bar's own
+  EMA21 — the tretest void — touched inside the horizon), the control's n/hit/mean and the excess;
+  cells under 30 events publish n only. Bars are `mergedDailyBars` (370d both universes, forming
+  day trimmed) — true lows exist only where the hourly spine overlays the daily history (now
+  flagged `tl`), a close stands in for the low before that, which can only under-count probes and
+  voids, and the panel prints the true-extreme share (*first touch* needs true lows to fire at
+  all). D1 rung only — the board's other three rungs are not replayed. Walked once per name per
+  (daily history, spine buckets, UTC day), pooled per (scope, definition, cooldown) and served
+  through `sendCachedBody` under a walk-signature ETag; gated with the Backtest tab. The panel lists
+  the most active names and the latest events (click for the drawer) and exports the newest 500
+  events as CSV. Study tier: the live claim is still `tretest` / `tretestdn` in the ledger.
 - **Persistence** — OI *and* funding history are written to the `/data` volume and survive restarts; the computed feature cache is persisted too, so redeploys serve a warm table instantly.
 - **Staleness** — the snapshot carries the last successful poll time; the status dot turns amber if the server's data goes stale (poller stalled).
 - **Deep links** — the URL reflects the current tab and open ticker (`#sectors`, `#t=<coin>`), so links are shareable.

@@ -21,6 +21,7 @@ import { drawSessions } from "./positioning.js";
 import { openReportView } from "./report.js";
 import { renderSectors } from "./sectors.js";
 import { openDrawdown, renderDrawdown } from "./drawdown.js";
+import { attachRetestControls, loadRetestStudy, renderRetestSection } from "./retest.js";
 import { openTrend, renderSignals, renderTrend } from "./trend.js";
 
 // ===== Strategy backtest — client-side, cross-sectional long/short on the daily returns already loaded =====
@@ -688,7 +689,7 @@ function renderBacktest(){
     ? `<b>Overnight hold.</b> Each night buy the book at the 16:00 ET close and sell at the next 09:30 ET open (Fri→Mon over the weekend), flat during the cash session — ${structTxt}${mode==='set'?` of the ${picked.length} picked names`:''}, ${wtTxt}. The book round-trips every night, so it pays the ${p.cost}bp taker fee twice a night (that's the big drag here), plus the funding accrued over each hold. Gross is price-only; the gross↔net gap is fees + funding. Uses the close→open boundary holds from the hourly spine${res.ovCov>0?'':' — not loaded yet, so this is empty until the server ships them'}. Shaded = out-of-sample. Slippage not modeled.${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`
     : `Each rebalance, rank ${mode==='set'?`the ${picked.length} picked names`:'the universe'} by ${BT_SIGNALS[p.signal].toLowerCase()} and go ${structTxt}, ${wtTxt}, held to the next rebalance. Net of a ${p.cost}bp market-order taker fee on turnover and the actual funding each position pays or earns while held${res.fundCov>0?'':' — funding not loaded yet, so this is price-only until the server ships it'}. Gross line is price-only; the gross↔net gap is your funding + fee drag. Shaded region is out-of-sample. In-sample-selected, slippage not yet modeled — the test runs on exactly the daily history this server ships${cr?' (crypto: ~90d, BTC benchmark, 365d annualization)':''}.${mvarNote}${mode==='set'?` <b>Custom universe:</b> ranks run only among the ${picked.length} names you picked, so the tails are ${Math.max(1,Math.floor(picked.length*p.quantile))} name per side — a sketch, not a cross-section.`:''} <b>Hover</b> the curve. Not a live trade signal.`;
   const vbCap=res.eqvb?` The dashed <b>\u2b12 ${esc(res.vbName)}</b> line is that basket's price-only EW daily index over the same days \u2014 no costs, no funding, a comparison yardstick that never enters the stats; basket gap days (sub-floor coverage) compound flat.`:'';
-  return head+controls+stats+(res.single?btPositionPanel(res):btBookPanel(res.book))+leg+sCard(btCurveSvg(res,splitIdx))+sCap(cap+vbCap)+renderDuelSection();
+  return head+controls+stats+(res.single?btPositionPanel(res):btBookPanel(res.book))+leg+sCard(btCurveSvg(res,splitIdx))+sCap(cap+vbCap)+renderDuelSection()+renderRetestSection();   // -96: the D1 retest study under the duel
 }
 // ===== Score duel — MOM vs MOM+ on daily forward rank IC (build 2026.07.24-07) =====
 // The adjudicator for the candidate column. Server-computed record (/api/duel): once per UTC
@@ -797,7 +798,7 @@ function attachBtControls(){
     state.backtest.picks=state.backtest.picks.filter(c=>c!==x.dataset.btx); drawBacktest(); }));
   const cp=el('btClearPick'); if(cp) cp.addEventListener('click',()=>{ state.backtest.picks=[]; drawBacktest(); });
 }
-function drawBacktest(){ const host=el('backtest-body'); if(!host) return; host.innerHTML=renderBacktest(); attachBtControls(); attachLineHover(); loadDuelData(); }
+function drawBacktest(){ const host=el('backtest-body'); if(!host) return; host.innerHTML=renderBacktest(); attachBtControls(); attachRetestControls(); attachLineHover(); loadDuelData(); loadRetestStudy(); }
 async function renderBacktest_load(){ drawBacktest(); if(![...state.rows.values()].some(r=>r.daily)){ await loadDaily(); if(state.view==='backtest') drawBacktest(); } }
 
 function updateBenchNote(){ const bn=el('benchnote'); if(!bn) return;

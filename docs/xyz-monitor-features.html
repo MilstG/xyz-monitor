@@ -431,8 +431,14 @@ const TREE=[
   pts:["The incumbent momentum score against the variant family, tracked as a daily information-coefficient record",
   "Persisted on the volume, so the record carries across deploys rather than restarting at zero every push",
   "Variant multipliers: OI corroboration (funding agreement scales the flow story), funding-crowding haircut at 31d extremes, volume participation — each bounded, so participation only nudges"]},
- {nm:"D1 retest study",sc:"adm",fd:"designed, not yet built",
-  pts:["Mockup delivered; open decisions are cooldown length and the exact event definition"]},
+ {nm:"D1 retest study",sc:"adm",fd:"built — the Trend board's D1 RETEST replayed over every closed day (build 2026.09.24-96)",
+  lead:"Under the score duel: does the pullback into a stacked daily ribbon beat the trend it rides?",
+  pts:["The event is the ladder's own D1 test on <b>closed</b> bars — EMA13/21 walked bar by bar, ribbon stacked, the 13/21 zone probed while the close holds EMA21 (short mirror for rallies)",
+  "The two open decisions ship as controls: definition <b>board</b> (ladder-verbatim 3-bar probe, fires in runs) or <b>first touch</b> (one event per pullback), and a <b>cooldown</b> of 0 / 3 / 5 / 10 / 20 bars per name and side — suppressed events are counted",
+  "Control = every stacked bar of the same side whose probe did not hold, same names, same days — the <b>excess σ</b> column is the edge over simply being in the trend",
+  "Per horizon (+1/3/5/10/20d): hit, mean, median, σ-mean, void rate (the event bar's EMA21 touched), control and excess; cells under 30 events publish n only",
+  "Server-computed off the merged daily bars (true lows where the spine covers, disclosed as a share); cached per (scope, definition, cooldown) behind an ETag; latest events click through to the drawer; CSV export"],
+  why:"The daily lows the probe needs exist only server-side, and a D1-only replay is disclosed as such — the board's other three rungs are not reconstructed. Study tier: the live claim stays tretest / tretestdn in the ledger."},
 ]},
 
 {g:"Alerts",n:"one stream, two consumers",items:[
