@@ -1,0 +1,393 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Admin Usage Stats</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ── tokens lifted verbatim from public/styles.css (build 2026.09.24-108) ── */
+:root{
+  color-scheme:dark;
+  --bg:#0E1116; --panel:#151A21; --panel2:#1B222B; --border:#262E39;
+  --text:#E8E3D7; --muted:#8A93A0; --faint:#4C5662; --dim:#7A8592;
+  --accent:#E3A53C; --accent-dim:#8a6a28; --blue:#6f93c9;
+  --up:#46B97E; --down:#E5604D; --grid:#1A212A;
+  --mono:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;
+  --disp:'Space Grotesk',system-ui,sans-serif;
+  --fs-2xs:10px; --fs-xs:11px; --fs-sm:12px; --fs-md:13px; --fs-lg:15px; --fs-xl:20px;
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:20px;
+  --r-1:4px; --r-2:7px; --r-3:10px;
+  --ctl-h:28px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:var(--disp);-webkit-font-smoothing:antialiased;font-feature-settings:"tnum" 1}
+body{padding:22px 16px 70px;max-width:1180px;margin:0 auto}
+.pos{color:var(--up)} .neg{color:var(--down)} .sec{color:var(--muted)} .na{color:var(--faint)}
+b{font-weight:600}
+/* ── mock frame (same furniture as the other docs/ mocks) ── */
+.mockhd{border-bottom:1px solid var(--border);padding-bottom:16px;margin-bottom:22px}
+.eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin:0 0 8px}
+h1{font-size:27px;font-weight:700;letter-spacing:-.4px;margin:0 0 10px;text-wrap:balance}
+.lede{color:var(--muted);font-size:13.5px;line-height:1.62;max-width:78ch;margin:0 0 12px}
+.lede b{color:var(--text);font-weight:500}
+.mockchip{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--blue);border:1px solid var(--blue);border-radius:3px;padding:2px 7px;opacity:.9}
+.frame{border:1px dashed var(--accent-dim);border-radius:12px;padding:18px 18px 20px;margin:0 0 8px;position:relative}
+.frame::before{content:"live prototype · synthetic data";position:absolute;top:-8px;left:16px;background:var(--bg);padding:0 7px;font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent-dim)}
+.frame.member::before{content:"what a member sees · Account"}
+.s-sec{margin:34px 0 12px;font-size:13px;line-height:1.4}
+.s-sec .t{color:var(--accent);font-weight:600;letter-spacing:.3px}
+.s-sec .d{color:var(--muted);font-weight:400;font-size:12px}
+.notegrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+.notecard{background:var(--panel);border:1px solid var(--border);border-radius:9px;padding:14px 16px}
+.notecard h3{font-size:12.5px;margin:0 0 8px;color:var(--text);font-weight:600;letter-spacing:.2px}
+.notecard p,.notecard li{margin:0;font-size:11.5px;line-height:1.65;color:var(--muted)}
+.notecard p+p{margin-top:8px}
+.notecard ul{margin:6px 0 0;padding-left:16px}
+.notecard code{font-family:var(--mono);font-size:10.5px;color:var(--blue)}
+.notecard em{color:var(--text);font-style:normal;font-weight:500}
+.notecard.q{border-color:var(--accent-dim)}
+.notecard.q h3{color:var(--accent)}
+.cap{color:var(--muted);font-size:11.5px;margin:10px 2px 0;line-height:1.6;max-width:110ch}
+.cap b{color:var(--text)}
+
+/* ══════════ the Admin tab's own furniture (styles.css .adm-fold / .seg / .btn / .acc-chip) ══════════ */
+.adm-fold{border:1px solid var(--border);border-radius:var(--r-3);background:var(--panel);margin:0 0 var(--sp-2)}
+.adm-foldhd{display:flex;align-items:center;gap:var(--sp-2);width:100%;background:none;border:0;color:var(--text);font:inherit;font-size:var(--fs-lg);font-weight:600;padding:var(--sp-3) var(--sp-3);cursor:pointer;text-align:left}
+.adm-foldhd .c{color:var(--accent);font-size:var(--fs-sm)}
+.adm-foldsub{font-size:var(--fs-sm);color:var(--muted);font-weight:400;margin-left:var(--sp-1)}
+.adm-foldbody{padding:0 var(--sp-3) var(--sp-3)}
+.adm-fold.closed .adm-foldbody{display:none}
+.row{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-2);margin:0 0 var(--sp-3)}
+.row .right{margin-left:auto;display:flex;gap:var(--sp-2);align-items:center;flex-wrap:wrap}
+.seg{display:inline-flex;align-items:center;gap:2px;background:var(--panel2);border:1px solid var(--border);border-radius:var(--r-2);padding:2px;height:var(--ctl-h)}
+.seg .lbl{font-size:var(--fs-xs);color:var(--muted);padding:0 6px}
+.seg button{background:transparent;border:none;color:var(--muted);font-family:var(--mono);font-size:var(--fs-sm);padding:0 9px;height:100%;border-radius:5px;cursor:pointer}
+.seg button.on{background:var(--accent);color:#1a1205;font-weight:600}
+.btn{background:var(--panel2);border:1px solid var(--border);color:var(--text);font-family:var(--disp);font-size:var(--fs-sm);height:var(--ctl-h);padding:0 10px;border-radius:var(--r-2);cursor:pointer}
+.chip{display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:var(--fs-2xs);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);border:1px solid var(--border);border-radius:var(--r-1);padding:1px 6px;white-space:nowrap}
+.chip.on{color:var(--up);border-color:rgba(70,185,126,.45)}
+.chip.warn{color:var(--accent);border-color:var(--accent-dim)}
+.chip.bad{color:var(--down);border-color:rgba(229,96,77,.5)}
+.dm-sh{font-family:var(--mono);font-size:var(--fs-2xs);letter-spacing:.12em;text-transform:uppercase;color:var(--dim);margin:var(--sp-4) 0 var(--sp-2)}
+
+/* KPI strip */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:var(--sp-2);margin:0 0 var(--sp-3)}
+.kpi{background:var(--panel2);border:1px solid var(--border);border-radius:var(--r-2);padding:var(--sp-2) var(--sp-3)}
+.kpi .k{font-size:var(--fs-2xs);letter-spacing:.1em;text-transform:uppercase;color:var(--dim);font-family:var(--mono)}
+.kpi .v{font-family:var(--mono);font-size:var(--fs-xl);font-weight:500;margin:2px 0 0}
+.kpi .s{font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted)}
+.kpi .v .live{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--up);margin-right:6px;vertical-align:middle;box-shadow:0 0 0 3px rgba(70,185,126,.18)}
+
+/* charts */
+.grid2{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:var(--sp-3)}
+@media (max-width:820px){.grid2{grid-template-columns:minmax(0,1fr)}}
+.card{background:var(--panel2);border:1px solid var(--border);border-radius:var(--r-2);padding:var(--sp-3)}
+.card h4{margin:0 0 2px;font-size:var(--fs-md);font-weight:600}
+.card .sub{font-size:var(--fs-xs);color:var(--muted);margin:0 0 var(--sp-2)}
+svg{display:block;width:100%;height:auto}
+.axis{font-family:var(--mono);font-size:10px;fill:var(--dim)}
+.legend{display:flex;gap:var(--sp-3);font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted);margin-top:var(--sp-1)}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+
+/* tables */
+.tw{overflow-x:auto;border:1px solid var(--border);border-radius:var(--r-2)}
+table{width:100%;border-collapse:collapse;font-size:var(--fs-sm)}
+th{font-family:var(--mono);font-size:var(--fs-2xs);letter-spacing:.08em;text-transform:uppercase;color:var(--dim);font-weight:500;text-align:left;padding:7px 10px;border-bottom:1px solid var(--border);background:var(--panel2);white-space:nowrap;cursor:pointer;user-select:none}
+th.n,td.n{text-align:right}
+th.sorted{color:var(--accent)}
+td{padding:6px 10px;border-bottom:1px solid var(--grid);white-space:nowrap}
+td.n{font-family:var(--mono)}
+tr:last-child td{border-bottom:0}
+tbody tr:hover{background:rgba(255,255,255,.02)}
+tbody tr.sel{background:rgba(227,165,60,.07)}
+.bar{display:inline-block;height:6px;border-radius:3px;background:var(--accent);vertical-align:middle;opacity:.85}
+.bar.b{background:var(--blue)}
+.handle{font-weight:600}
+.handle .you{font-family:var(--mono);font-size:var(--fs-2xs);color:var(--accent);margin-left:4px}
+.muted{color:var(--muted)}
+.mono{font-family:var(--mono)}
+
+/* member drawer */
+.drawer{margin-top:var(--sp-3);border:1px solid var(--accent-dim);border-radius:var(--r-2);background:var(--panel2);padding:var(--sp-3)}
+.drawer .hd{display:flex;align-items:baseline;gap:var(--sp-2);flex-wrap:wrap;margin-bottom:var(--sp-2)}
+.drawer .hd .t{font-size:var(--fs-lg);font-weight:700}
+.drawer .hd .right{margin-left:auto}
+.audit{font-family:var(--mono);font-size:var(--fs-xs);color:var(--accent);background:rgba(227,165,60,.08);border:1px solid var(--accent-dim);border-radius:var(--r-1);padding:4px 8px;margin:0 0 var(--sp-3)}
+.mix{display:flex;height:10px;border-radius:5px;overflow:hidden;margin:4px 0 6px}
+.mixleg{display:flex;flex-wrap:wrap;gap:4px 12px;font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted)}
+.mixleg i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:4px}
+.funnel .fr{display:grid;grid-template-columns:150px 1fr 70px;gap:var(--sp-2);align-items:center;margin:0 0 6px;font-size:var(--fs-sm)}
+.funnel .fr .v{font-family:var(--mono);text-align:right;color:var(--muted)}
+.funnel .track{background:var(--bg);border-radius:3px;height:8px;overflow:hidden}
+.funnel .track span{display:block;height:100%;background:var(--up);opacity:.8}
+.cohort td{text-align:center;font-family:var(--mono);font-size:var(--fs-xs);padding:5px 6px}
+.cohort td:first-child{text-align:left;color:var(--muted)}
+.health{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:var(--sp-2)}
+.flag{font-size:var(--fs-xs);color:var(--muted);margin-top:6px}
+.flag b{color:var(--accent);font-weight:500}
+@media (max-width:560px){.funnel .fr{grid-template-columns:110px 1fr 56px}}
+</style>
+
+<div class="mockhd">
+  <p class="eyebrow">xyz-monitor · admin · usage · proposal after build 2026.09.24-108</p>
+  <h1>Usage: who uses the site, and how</h1>
+  <p class="lede">A new <b>Usage</b> fold in the Admin tab. Today the only usage signal is <b><code style="font-family:var(--mono);color:var(--blue)">user.lastSeen</code></b>, and it only moves on DM, alert, push and AI calls, so someone who reads the Markets table all day looks inactive. This proposal adds a <b>small first-party beacon</b> that records <b>which tab is on screen and for how long</b>, plus counts of a short, fixed list of actions. It rolls that up into <b>daily aggregates</b> and shows the operator reach, time spent, adoption and retention. Following the site's existing rule for operator power, <b>members are told, can see their own numbers, and every per-member drill-in is audited</b>.</p>
+  <span class="mockchip">◆ mock · the prototype below runs on synthetic data, nothing is wired</span>
+</div>
+
+<div class="s-sec"><span class="t">1 · The Usage fold</span> <span class="d">— sits between "Access" and "All messages". Click a member row to open their drill-in. Range and audience toggles are live.</span></div>
+
+<div class="frame">
+  <div class="adm-fold" id="fold">
+    <button class="adm-foldhd" id="foldhd"><span class="c">▾</span>Usage<span class="adm-foldsub" id="foldsub">14 active today · 21 this week · stickiness 52%</span></button>
+    <div class="adm-foldbody">
+      <div class="row">
+        <div class="seg" id="range"><span class="lbl">range</span><button data-r="7">7d</button><button data-r="30" class="on">30d</button><button data-r="90">90d</button></div>
+        <div class="seg" id="aud"><span class="lbl">who</span><button data-a="members" class="on">members</button><button data-a="all">+ public</button></div>
+        <div class="right"><span class="chip on">beacon on</span><span class="chip">retention 90d</span><button class="btn">CSV</button></div>
+      </div>
+
+      <div class="kpis" id="kpis"></div>
+
+      <div class="grid2">
+        <div class="card">
+          <h4>Active people per day</h4>
+          <p class="sub" id="dauSub">distinct members with ≥1 minute on screen · public visitors counted by anonymous browser id</p>
+          <svg id="dau" viewBox="0 0 640 170" preserveAspectRatio="none" role="img" aria-label="daily active users"></svg>
+          <div class="legend"><span><i style="background:var(--accent)"></i>members</span><span id="pubLeg"><i style="background:var(--blue)"></i>public</span><span><i style="background:var(--muted);height:2px;vertical-align:3px"></i>7-day mean</span></div>
+        </div>
+        <div class="card">
+          <h4>When people are here</h4>
+          <p class="sub">minutes on screen by weekday × hour (ET), whole range</p>
+          <svg id="heat" viewBox="0 0 330 170" role="img" aria-label="activity heatmap"></svg>
+          <p class="flag">peak <b>Tue 09:00–10:00 ET</b> · <b>71%</b> of screen time is 08:00–16:00 ET</p>
+        </div>
+      </div>
+
+      <p class="dm-sh">Tabs · reach and time</p>
+      <div class="tw"><table id="tabs"><thead><tr>
+        <th data-k="name">tab</th><th class="n" data-k="reach">members used</th><th class="n" data-k="hours">hours</th><th class="n" data-k="med">median min / user</th><th class="n" data-k="delta">vs prior</th><th data-k="gate">gate</th>
+      </tr></thead><tbody></tbody></table></div>
+      <p class="cap">Reach is the share of active members who opened the tab at least once in the range. A tab that is <b>admin-only or public but reaches under 10%</b> gets a "quiet" flag, so the gate and nav-group decisions in Feature visibility can be made from data instead of guesswork.</p>
+
+      <div class="grid2" style="margin-top:var(--sp-3)">
+        <div class="card funnel">
+          <h4>Feature adoption</h4>
+          <p class="sub">members who did it at least once in range (of 21 active)</p>
+          <div id="funnel"></div>
+        </div>
+        <div class="card">
+          <h4>Retention by join week</h4>
+          <p class="sub">% of each week's new members active in week N after joining</p>
+          <div class="tw" style="border:0"><table class="cohort" id="cohort"></table></div>
+        </div>
+      </div>
+
+      <p class="dm-sh">Members</p>
+      <div class="tw"><table id="members"><thead><tr>
+        <th data-k="h">member</th><th data-k="seen">last active</th><th class="n" data-k="days">active days</th><th class="n" data-k="mins">min / active day</th><th data-k="top">top tabs</th><th data-k="dev">device</th><th class="n" data-k="trend">trend</th>
+      </tr></thead><tbody></tbody></table></div>
+      <div id="drawer"></div>
+
+      <p class="dm-sh">Client health</p>
+      <div class="health">
+        <div class="card"><h4>First paint → table</h4><p class="sub">p50 / p75 across members, this build</p><div class="kpi" style="border:0;padding:0;background:none"><div class="v">0.9s <span class="muted" style="font-size:var(--fs-md)">/ 1.6s</span></div><div class="s pos">−0.4s vs build -102 (lazy modules)</div></div></div>
+        <div class="card"><h4>JS errors</h4><p class="sub">window.onerror + unhandledrejection, deduped by message</p><div class="kpi" style="border:0;padding:0;background:none"><div class="v">3 <span class="muted" style="font-size:var(--fs-md)">distinct · 11 hits</span></div><div class="s">top: <span class="neg">corr.js:188 · Cannot read 'c' of undefined</span> · 2 members</div></div></div>
+        <div class="card"><h4>Stale builds</h4><p class="sub">members whose open tab is behind the deploy</p><div class="kpi" style="border:0;padding:0;background:none"><div class="v">2</div><div class="s">both on -106, reload toast shown</div></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="s-sec"><span class="t">2 · What the member sees</span> <span class="d">— the same numbers about themselves, in Account. No surprises: the notice sits next to the Messages read-through notice.</span></div>
+<div class="frame member">
+  <div class="card" style="max-width:640px">
+    <h4>Your usage</h4>
+    <p class="sub">The operator can see this summary for every member: which tabs you open and for how long, and how many times you use a few features (calls, alerts, shares, exports). It never records what you search, which filters you set, or which tickers you look at. Viewing it is logged in the admin audit.</p>
+    <div class="kpis" style="margin-top:var(--sp-2)">
+      <div class="kpi"><div class="k">active days · 30d</div><div class="v">19</div></div>
+      <div class="kpi"><div class="k">time on screen</div><div class="v">11.4h</div></div>
+      <div class="kpi"><div class="k">top tab</div><div class="v" style="font-size:var(--fs-lg);padding-top:5px">Markets</div></div>
+    </div>
+    <div class="row" style="margin:0"><span class="chip on">sharing usage</span><button class="btn">Pause for me</button><span class="muted" style="font-size:var(--fs-xs)">pausing stops the beacon for this account; the operator sees "paused"</span></div>
+  </div>
+</div>
+
+<div class="s-sec"><span class="t">3 · How it is measured</span> <span class="d">— the data model is deliberately smaller than the question.</span></div>
+<div class="notegrid">
+  <div class="notecard"><h3>The beacon: visible time per tab, nothing else</h3>
+    <p>The client keeps an accumulator <code>{tab → visible ms}</code>. It ticks only while <code>document.visibilityState==='visible'</code> and there was input in the last 5 minutes, so an idle wall monitor doesn't count as 8 hours. It flushes with <code>navigator.sendBeacon('/api/usage')</code> every 60s and on <code>pagehide</code>. The hook point is <code>showView</code> (<code>public/js/backtest.js</code>), which every tab switch already goes through.</p>
+    <p>Actions are a <em>fixed allowlist</em> of counters, <code>call · target · alert · share · csv · ask · ai-report · drawer-open</code>, incremented where each feature already lives. No free text, no tickers, no filter state.</p></div>
+  <div class="notecard"><h3>Storage: daily aggregates, not an event log</h3>
+    <p>One table in <code>src/accounts.js</code>:</p>
+    <p><code>usage_day(day, uid, kind, key, n, ms)</code>, primary key <code>(day, uid, kind, key)</code>, where <code>kind</code> is <code>tab | act | dev | perf</code>. The server upserts in memory and flushes every 60s. At about 30 members × 25 tabs × 90 days that is roughly 70k rows, which is trivial for SQLite.</p>
+    <p>After the retention window (default 90 days) rows fold into <code>uid=0</code> sitewide totals, so the long-run tab trend survives and the per-person history does not.</p></div>
+  <div class="notecard"><h3>Public visitors</h3>
+    <p>Signed-out viewers get a random id in <code>localStorage</code> (<code>uid=-1</code> bucket, id hashed server-side with a daily salt). That is enough for "distinct visitors per day" without IPs, fingerprinting or cookies that follow anyone off-site. It is off by default behind the <em>+ public</em> toggle's server flag.</p></div>
+  <div class="notecard"><h3>What the numbers mean</h3>
+    <ul>
+      <li><em>Active</em>: at least 60s of visible time that day (ET day, to match the rest of the site).</li>
+      <li><em>Stickiness</em>: mean daily active ÷ distinct active in the range.</li>
+      <li><em>Reach</em>: share of active members who opened the tab.</li>
+      <li><em>Device</em>: coarse class from the UA plus a PWA flag (<code>display-mode: standalone</code>), never the raw UA.</li>
+      <li><em>Online now</em>: already known server-side (<code>dmOnline()</code> / SSE), so it's free.</li>
+    </ul></div>
+  <div class="notecard"><h3>Client health rides the same pipe</h3>
+    <p>The beacon also carries <code>perf</code> (time from navigation to the first table paint) and deduped <code>onerror</code>/<code>unhandledrejection</code> messages with file:line, keyed by build. That turns "works on my machine" into a panel. The lazy-module and 409 stale-build work from builds -103 and -108 becomes measurable instead of assumed.</p></div>
+  <div class="notecard"><h3>Cost and the event loop</h3>
+    <p>With about 20 concurrent members at one beacon a minute, that's one small POST per 3s. Handling is an in-memory map increment, and the flush is one prepared-statement upsert batch inside a transaction every 60s. Reads are served through <code>sendCachedBody</code> keyed on the flush generation, like every other admin payload. No new dependencies.</p></div>
+</div>
+
+<div class="s-sec"><span class="t">4 · Privacy: the same rule as the read-through</span> <span class="d">— operator power is disclosed and audited (README: "a record of when they did is what keeps it accountable rather than silent").</span></div>
+<div class="notegrid">
+  <div class="notecard"><h3>Disclosed</h3><p>A line in the member guide, in Account ("Your usage"), and once as a dismissible notice after the deploy. The Account card shows the member exactly the summary the operator sees about them.</p></div>
+  <div class="notecard"><h3>Audited</h3><p>The sitewide panels (KPIs, tabs, adoption, cohorts, heatmap) are aggregates and aren't logged. <em>Opening one member's drill-in</em> writes <code>dm_audit(action='view-usage', detail=handle)</code>, which shows in the same read log as the message read-through.</p></div>
+  <div class="notecard"><h3>Not collected, by design</h3><p>Search text, filters, column layouts, which tickers someone looks at, and anything typed. Per-ticker interest is useful, but it is also what a member would least expect the operator to watch. If wanted, it goes in only as <em>sitewide</em> counts with no uid (see open questions).</p></div>
+</div>
+
+<div class="s-sec"><span class="t">5 · Decisions for you</span> <span class="d">— the mock assumes the first option in each.</span></div>
+<div class="notegrid">
+  <div class="notecard q"><h3>Per-member detail, or aggregates only?</h3><p><em>Assumed: per-member, audited.</em> The alternative is aggregates only, with no member table. That's more private, but you lose "who stopped coming", which is most of the value in a small invite-only group.</p></div>
+  <div class="notecard q"><h3>Can members pause it?</h3><p><em>Assumed: yes, visible as "paused".</em> This costs some completeness but keeps trust, and it matches the Messages disclosure tone. The alternative is disclosure only, with no opt-out.</p></div>
+  <div class="notecard q"><h3>Track public (signed-out) visitors?</h3><p><em>Assumed: off by default.</em> Turn it on if public reach matters for deciding which features to un-gate. It needs a daily-salted anonymous id and no IP storage.</p></div>
+  <div class="notecard q"><h3>Sitewide ticker interest?</h3><p><em>Assumed: no.</em> If yes: drawer opens per ticker counted with no uid, which gives a "most looked-at names" list for the Focus and Earnings desks.</p></div>
+  <div class="notecard q"><h3>Retention window</h3><p><em>Assumed: 90 days per member</em>, then only anonymous sitewide totals remain. 30 days is enough for "who's active". 180 days lets cohorts run longer.</p></div>
+</div>
+
+<div class="s-sec"><span class="t">6 · Build plan</span> <span class="d">— three builds, each shippable.</span></div>
+<div class="notegrid">
+  <div class="notecard"><h3>Build A · beacon + core panel</h3><p><code>usage_day</code> table and migration, <code>POST /api/usage</code> (sendBeacon, same-origin, size-capped, one per 30s per uid), in-memory accumulate plus a 60s flush, <code>GET /api/admin/usage?r=</code>, the KPI strip, the daily active chart, the tabs table, the members table, the Account "Your usage" card, and the disclosure. Tests: accumulator visibility and idle rules, the upsert rollup, admin-only route, and the audit write on drill-in.</p></div>
+  <div class="notecard"><h3>Build B · adoption, cohorts, heatmap</h3><p>Action counters at the existing call sites (<code>callTarget</code>, alert create, share, CSV, ask, AI report), the funnel, join-week cohorts (from <code>user.createdAt</code>, which already exists), the weekday × hour heatmap in ET, the retention fold job, and the pause toggle.</p></div>
+  <div class="notecard"><h3>Build C · client health</h3><p>Perf and error fields on the beacon, deduped by message and build, the health cards, and a "quiet tab" flag feeding Feature visibility. Optionally: public visitors and sitewide ticker interest, depending on the decisions above.</p></div>
+</div>
+
+<script>
+/* ── synthetic data: deterministic so the mock looks the same on every load ── */
+let seed=7; const rnd=()=>{ seed=(seed*16807)%2147483647; return (seed-1)/2147483646; };
+const TABS=[
+  ['Markets','public',96,142,38],['Trend','public',71,38,14],['Charts','public',64,31,12],['Earnings','public',62,22,9],
+  ['Messages','members',58,29,11],['Signals','public',47,17,8],['Actionable','public',44,14,7],['Correlation','public',33,9,6],
+  ['Sectors','public',30,7,5],['Funding','public',26,6,5],['Backtest','admin',9,4,11],['Drawdown','admin',8,2,6],
+  ['Congress','public',7,1.2,3],['Insiders','public',6,1.1,4],['Housing','admin',3,.4,3],['Liquidity','admin',2,.3,3]
+];
+const MEMBERS=['gus','ana','marco','lee','priya','tom','sofia','raj','kate','diego','mia','omar','june','ben','ivy','nils','zoe','kai','lena','max','rui','ada'];
+const DEV=['desktop','desktop','PWA · iOS','desktop','mobile','desktop','PWA · Android','desktop'];
+const mem=MEMBERS.map((h,i)=>{
+  const days=Math.max(1,Math.round(30*Math.pow(rnd(),.6)*(i<4?1:.85)));
+  const mins=Math.round(8+rnd()*70*(days/30+.3));
+  const seenH=i<14?Math.round(rnd()*20):Math.round(24*(3+rnd()*20));
+  const t=TABS.slice(0,8).map(x=>[x[0],x[3]*rnd()]).sort((a,b)=>b[1]-a[1]).slice(0,3).map(x=>x[0]);
+  return {h,you:i===0,days,mins,seen:seenH,top:t,dev:DEV[i%DEV.length],trend:Math.round((rnd()-.4)*80),paused:h==='omar'};
+});
+const fmtSeen=h=>h<1?'<span class="pos">online now</span>':h<24?h+'h ago':Math.round(h/24)+'d ago';
+
+let R=30, AUD='members';
+const series=n=>{ const out=[]; for(let d=0;d<n;d++){ const dow=(d+3)%7, wk=dow<5; const base=wk?13:6; out.push({m:Math.max(2,Math.round(base+rnd()*6+d*0.04)),p:Math.round((wk?22:9)+rnd()*12)}); } return out; };
+const SER={7:series(7),30:series(30),90:series(90)};
+
+function kpis(){
+  const s=SER[R]; const dau=s.map(x=>x.m+(AUD==='all'?x.p:0)); const mean=dau.reduce((a,b)=>a+b,0)/dau.length;
+  const distinct=AUD==='all'?21+Math.round(mean*2.4):21;
+  const K=[
+    ['<span class="live"></span>online now','4',AUD==='all'?'+ 7 public':'members with an open tab'],
+    ['active today',String(dau[dau.length-1]),'≥60s on screen'],
+    ['active · '+R+'d',String(distinct),AUD==='all'?'21 of 24 members + '+(distinct-21)+' public':'of 24 members'],
+    ['stickiness',Math.round(mean/distinct*100)+'%','mean daily ÷ '+R+'d active'],
+    ['median / day','34 min','per active member'],
+    ['new members','3','in range · 2 still active'],
+  ];
+  document.getElementById('kpis').innerHTML=K.map(k=>`<div class="kpi"><div class="k">${k[0]}</div><div class="v">${k[1]}</div><div class="s">${k[2]}</div></div>`).join('');
+}
+function dau(){
+  const s=SER[R], W=640,H=170,P={l:26,r:6,t:8,b:20}; const n=s.length;
+  const vals=s.map(x=>x.m+(AUD==='all'?x.p:0)); const max=Math.max(...vals)*1.1;
+  const bw=(W-P.l-P.r)/n, y=v=>H-P.b-(v/max)*(H-P.t-P.b);
+  let g='';
+  for(const t of [0,.5,1]){ const v=Math.round(max*t); g+=`<line x1="${P.l}" x2="${W-P.r}" y1="${y(v)}" y2="${y(v)}" stroke="#1A212A"/><text class="axis" x="${P.l-4}" y="${y(v)+3}" text-anchor="end">${v}</text>`; }
+  s.forEach((x,i)=>{ const X=P.l+i*bw+bw*.12, w=bw*.76;
+    g+=`<rect x="${X}" y="${y(x.m)}" width="${w}" height="${H-P.b-y(x.m)}" fill="#E3A53C" opacity=".85" rx="1.5"><title>day ${i+1}: ${x.m} members${AUD==='all'?', '+x.p+' public':''}</title></rect>`;
+    if(AUD==='all') g+=`<rect x="${X}" y="${y(x.m+x.p)}" width="${w}" height="${y(x.m)-y(x.m+x.p)}" fill="#6f93c9" opacity=".7" rx="1.5"/>`;
+  });
+  let pts=[]; vals.forEach((v,i)=>{ const a=vals.slice(Math.max(0,i-6),i+1); const m=a.reduce((p,q)=>p+q,0)/a.length; pts.push(`${P.l+i*bw+bw/2},${y(m)}`); });
+  g+=`<polyline points="${pts.join(' ')}" fill="none" stroke="#8A93A0" stroke-width="1.5"/>`;
+  const step=R===7?1:R===30?7:14; for(let i=0;i<n;i+=step) g+=`<text class="axis" x="${P.l+i*bw+bw/2}" y="${H-5}" text-anchor="middle">-${n-1-i}d</text>`;
+  document.getElementById('dau').innerHTML=g;
+  document.getElementById('pubLeg').style.display=AUD==='all'?'':'none';
+}
+function heat(){
+  const days=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'], W=330, cw=12, ch=19, x0=30, y0=6; let g='';
+  for(let d=0;d<7;d++){ g+=`<text class="axis" x="${x0-5}" y="${y0+d*ch+13}" text-anchor="end">${days[d]}</text>`;
+    for(let h=0;h<24;h++){ const wk=d<5; const bell=Math.exp(-Math.pow((h-11.5)/(wk?3.4:5),2)); const v=Math.min(1,(wk?1:.35)*bell*(.75+rnd()*.5)+(h===9&&d===1?.25:0));
+      g+=`<rect x="${x0+h*cw}" y="${y0+d*ch}" width="${cw-1.5}" height="${ch-2}" rx="2" fill="#E3A53C" fill-opacity="${(0.06+v*.9).toFixed(2)}"><title>${days[d]} ${String(h).padStart(2,'0')}:00 ET</title></rect>`; } }
+  for(const h of [0,6,12,18]) g+=`<text class="axis" x="${x0+h*cw}" y="${y0+7*ch+10}">${String(h).padStart(2,'0')}</text>`;
+  document.getElementById('heat').innerHTML=g;
+}
+let tabSort={k:'hours',d:-1};
+function tabs(){
+  const sc=R/30; const rows=TABS.map(t=>({name:t[0],gate:t[1],reach:t[2],hours:+(t[3]*sc).toFixed(1),med:t[4],delta:Math.round((rnd()-.45)*40)}));
+  rows.sort((a,b)=>{ const A=a[tabSort.k],B=b[tabSort.k]; return (A>B?1:A<B?-1:0)*tabSort.d; });
+  const maxH=Math.max(...rows.map(r=>r.hours));
+  document.querySelector('#tabs tbody').innerHTML=rows.map(r=>{ const quiet=r.reach<10;
+    return `<tr><td>${r.name}${quiet?' <span class="chip warn">quiet</span>':''}</td>
+      <td class="n">${r.reach}% <span class="bar b" style="width:${r.reach*.5}px"></span></td>
+      <td class="n">${r.hours}h <span class="bar" style="width:${(r.hours/maxH)*60}px"></span></td>
+      <td class="n">${r.med}</td><td class="n ${r.delta>=0?'pos':'neg'}">${r.delta>=0?'+':''}${r.delta}%</td>
+      <td><span class="chip ${r.gate==='admin'?'warn':r.gate==='members'?'':'on'}">${r.gate}</span></td></tr>`; }).join('');
+  document.querySelectorAll('#tabs th').forEach(th=>th.classList.toggle('sorted',th.dataset.k===tabSort.k));
+}
+function funnel(){
+  const F=[['opened Markets',21],['made a call',14],['set a target',9],['created an alert',11],['linked Telegram',8],['push enabled',6],['shared a card',10],['exported CSV',4],['ran AI report',5]];
+  document.getElementById('funnel').innerHTML=F.map(f=>`<div class="fr"><span>${f[0]}</span><span class="track"><span style="width:${f[1]/21*100}%"></span></span><span class="v">${f[1]} · ${Math.round(f[1]/21*100)}%</span></div>`).join('');
+}
+function cohort(){
+  const C=[['Aug 3',4,[100,75,75,50,50,50,50,50]],['Aug 10',3,[100,100,67,67,67,33,33]],['Aug 17',5,[100,80,60,60,60,40]],['Aug 24',2,[100,50,50,50,50]],['Aug 31',3,[100,67,67,67]],['Sep 7',4,[100,75,75]],['Sep 14',2,[100,100]],['Sep 21',3,[100]]];
+  let h='<tr><th>joined</th><th class="n">n</th>'+[1,2,3,4,5,6,7,8].map(w=>`<th class="n">w${w}</th>`).join('')+'</tr>';
+  for(const c of C){ h+=`<tr><td>${c[0]}</td><td>${c[1]}</td>`+[0,1,2,3,4,5,6,7].map(i=>{ const v=c[2][i]; return v==null?'<td></td>':`<td style="background:rgba(70,185,126,${(v/100*.55).toFixed(2)})">${v}</td>`; }).join('')+'</tr>'; }
+  document.getElementById('cohort').innerHTML=h;
+}
+let memSort={k:'days',d:-1}, sel=null;
+function members(){
+  const rows=[...mem].sort((a,b)=>{ const A=a[memSort.k],B=b[memSort.k]; const v=Array.isArray(A)?0:(A>B?1:A<B?-1:0); return memSort.k==='seen'?-v*memSort.d:v*memSort.d; });
+  document.querySelector('#members tbody').innerHTML=rows.map(m=>{ const gone=m.seen>24*10;
+    return `<tr data-h="${m.h}" class="${sel===m.h?'sel':''}" style="cursor:pointer">
+      <td><span class="handle">${m.h}</span>${m.you?'<span class="you">you</span>':''}${m.paused?' <span class="chip">paused</span>':''}${gone?' <span class="chip bad">lapsed</span>':''}</td>
+      <td class="mono">${m.paused?'<span class="na">—</span>':fmtSeen(m.seen)}</td>
+      <td class="n">${m.paused?'—':m.days+' <span class="bar" style="width:'+m.days*1.6+'px"></span>'}</td>
+      <td class="n">${m.paused?'—':m.mins}</td>
+      <td class="muted">${m.paused?'':m.top.join(' · ')}</td>
+      <td class="muted mono" style="font-size:var(--fs-xs)">${m.dev}</td>
+      <td class="n ${m.trend>=0?'pos':'neg'}">${m.paused?'':(m.trend>=0?'+':'')+m.trend+'%'}</td></tr>`; }).join('');
+  document.querySelectorAll('#members th').forEach(th=>th.classList.toggle('sorted',th.dataset.k===memSort.k));
+  document.querySelectorAll('#members tbody tr').forEach(tr=>tr.onclick=()=>{ sel=sel===tr.dataset.h?null:tr.dataset.h; members(); drawer(); });
+}
+function drawer(){
+  const el=document.getElementById('drawer'); if(!sel){ el.innerHTML=''; return; }
+  const m=mem.find(x=>x.h===sel);
+  if(m.paused){ el.innerHTML=`<div class="drawer"><div class="hd"><span class="t">${m.h}</span><span class="chip">paused</span></div><p class="muted" style="margin:0;font-size:var(--fs-sm)">${m.h} paused usage sharing. Only "joined" and message-derived counts are shown in Access.</p></div>`; return; }
+  const cols=['#E3A53C','#6f93c9','#46B97E','#8A93A0','#E5604D','#4C5662'];
+  const mix=[['Markets',44],['Trend',18],['Charts',14],['Earnings',9],['Messages',8],['other',7]];
+  let spark=''; const W=300,H=40; let pts=[]; for(let i=0;i<30;i++){ const v=rnd()<m.days/30?10+rnd()*m.mins:0; pts.push([i,v]); }
+  const mx=Math.max(...pts.map(p=>p[1]),1); spark=pts.map(p=>`<rect x="${p[0]*10}" y="${H-p[1]/mx*H}" width="8" height="${Math.max(1,p[1]/mx*H)}" fill="${p[1]?'#E3A53C':'#262E39'}" rx="1"/>`).join('');
+  const now=new Date(); const stamp=now.toISOString().slice(0,16).replace('T',' ');
+  el.innerHTML=`<div class="drawer">
+    <div class="hd"><span class="t">${m.h}</span><span class="muted mono" style="font-size:var(--fs-xs)">joined Aug 12 · invited by gus · ${m.dev}</span><span class="right"><button class="btn" id="dclose">close</button></span></div>
+    <div class="audit">⚑ logged: "view-usage ${m.h}" at ${stamp} UTC. Shows in All messages → read log</div>
+    <div class="grid2">
+      <div><p class="dm-sh" style="margin-top:0">minutes per day · 30d</p><svg viewBox="0 0 300 40" preserveAspectRatio="none" style="height:60px">${spark}</svg></div>
+      <div><p class="dm-sh" style="margin-top:0">tab mix</p><div class="mix">${mix.map((x,i)=>`<span style="width:${x[1]}%;background:${cols[i]}"></span>`).join('')}</div>
+        <div class="mixleg">${mix.map((x,i)=>`<span><i style="background:${cols[i]}"></i>${x[0]} ${x[1]}%</span>`).join('')}</div></div>
+    </div>
+    <p class="dm-sh">features · 30d</p>
+    <div class="row" style="margin:0"><span class="chip on">calls 12</span><span class="chip on">targets 4</span><span class="chip on">alerts 3</span><span class="chip">shares 0</span><span class="chip on">telegram linked</span><span class="chip">push off</span><span class="chip">AI reports 0</span></div>
+  </div>`;
+  document.getElementById('dclose').onclick=()=>{ sel=null; members(); drawer(); };
+}
+function all(){ kpis(); dau(); heat(); tabs(); funnel(); cohort(); members(); drawer(); }
+document.getElementById('range').onclick=e=>{ const b=e.target.closest('button'); if(!b) return; R=+b.dataset.r; document.querySelectorAll('#range button').forEach(x=>x.classList.toggle('on',x===b)); seed=7; all(); };
+document.getElementById('aud').onclick=e=>{ const b=e.target.closest('button'); if(!b) return; AUD=b.dataset.a; document.querySelectorAll('#aud button').forEach(x=>x.classList.toggle('on',x===b)); kpis(); dau(); };
+document.querySelectorAll('#tabs th').forEach(th=>th.onclick=()=>{ tabSort=tabSort.k===th.dataset.k?{k:th.dataset.k,d:-tabSort.d}:{k:th.dataset.k,d:-1}; tabs(); });
+document.querySelectorAll('#members th').forEach(th=>th.onclick=()=>{ if(th.dataset.k==='top') return; memSort=memSort.k===th.dataset.k?{k:th.dataset.k,d:-memSort.d}:{k:th.dataset.k,d:-1}; members(); });
+document.getElementById('foldhd').onclick=()=>{ const f=document.getElementById('fold'); f.classList.toggle('closed'); f.querySelector('.c').textContent=f.classList.contains('closed')?'▸':'▾'; };
+all();
+</script>
