@@ -941,6 +941,21 @@ periods/yr), and the level map's structure and volume profile keep every UTC bar
   nonce; stale backup/`.atmp` temps are swept; a crash save cannot be overwritten by an in-flight
   async rename.
 
+**Accuracy (build 2026.09.24-108): post-earnings drift runs on the study's reaction.** The
+`pead` shadow still read the -104 convention: the print day's own UTC bar against the bar before
+(or, with the hourly spine, the print-time price → +24h), so a Friday AMC reaction ended on
+Saturday's perp print and the 1.5σ gate and the 3-session entry window ran off a different bar
+than the reaction the Earnings tab reports. `detectPead` now uses `compute.earnReactWindow`: the
+reaction is the last cash close before the print → the first cash close after it (BMO/DMH the
+prior close → the print day's; AMC the print day's close → the next session's, Friday → Monday;
+holidays and 13:00 half days via `usDayStatus`), entry opens after the reaction session's (`rsD`)
+close, and freshness counts US sessions since it (weekends no longer age a signal). Exact closes
+come off the hourly spine, which waits up to 3h for the bell bar; without it, BMO/DMH fall back to
+session bars and AMC does not fire (that window spans two sessions). Untimed (TBD) prints no longer
+fire. **The trigger changed under the same event type:** `pead` ledger records opened before this
+build used the old reaction; records from -108 carry `ew` (`cash` / `daily`, the price tier), so
+the accrued record splits cleanly on its presence — read pre- and post-108 fires as two samples.
+
 ## Optional: earnings calendar (Finnhub)
 
 The Earnings tab and the markets-table E badges need a free Finnhub API key: sign up at

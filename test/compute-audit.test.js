@@ -46,16 +46,18 @@ test("audit 2/A: earnReactionCurve anchors at the ET print time; earnReactionsFo
   assert.equal(C.earnPrintUtc({ d: "2026-09-02", s: "AMC" }), t16);
   assert.equal(C.earnPrintUtc({ d: "2026-09-02", s: "BMO" }), C.etWallToUtc(2026, 9, 2, 6, 0));
   assert.equal(C.earnPrintUtc({ d: "2026-09-02", s: "TBD" }), null);
-  // detectPead: a flat daily tape hides a reaction the hourly anchor sees (+6% off the 16:00 close)
+  // detectPead (re-pinned -108): a flat daily tape hides a reaction the hourly spine sees. The print
+  // is a FRIDAY AMC (2026-08-28), so its window is Friday's 16:00 ET close -> Monday 08-31's close
+  // (earnReactWindow) — the old +24h anchor landed on Saturday.
   const base = Date.UTC(2026, 7, 1), dly = []; for (let i = 0; i < 30; i++) dly.push({ t: base + i * DAY, c: 100, o: 100 });
-  const pd = dly[27], pt = C.etWallToUtc(2026, 8, 28, 16, 0);   // dly[27] is 2026-08-28
+  const pd = dly[27], pt = C.etWallToUtc(2026, 8, 28, 16, 0), pm = C.etWallToUtc(2026, 8, 31, 16, 0);   // dly[27] is 2026-08-28
   assert.equal(new Date(pd.t).toISOString().slice(0, 10), "2026-08-28");
-  const hs2 = []; for (let t = pt - 48 * HOUR; t < pt + 60 * HOUR; t += HOUR) hs2.push([t, 0, 0, 0, t + HOUR <= pt ? 100 : 106, 1]);
+  const hs2 = []; for (let t = pt - 48 * HOUR; t < pm + 12 * HOUR; t += HOUR) hs2.push([t, 0, 0, 0, t + HOUR <= pt ? 100 : 106, 1]);
   const pr = [{ t: "X", d: "2026-08-28", s: "AMC" }];
-  assert.equal(C.detectPead(pr, dly, 107, 2), null, "daily bars are flat: nothing to drift from");
-  const pead = C.detectPead(pr, dly, 107, 2, hs2, pt + 30 * HOUR);
-  assert.ok(pead && pead.side === "long" && pead.mv === 6, "hourly anchor: +6% from the 16:00 ET close to +24h");
-  assert.equal(C.detectPead(pr, dly, 107, 2, hs2, pt + 20 * HOUR), null, "+24h has not printed: back to the (flat) daily read");
+  assert.equal(C.detectPead(pr, dly, 107, 2, null, pm + 2 * HOUR), null, "daily bars only: an AMC session-bar window spans two sessions — no fire");
+  const pead = C.detectPead(pr, dly, 107, 2, hs2, pm + 2 * HOUR);
+  assert.ok(pead && pead.side === "long" && pead.mv === 6 && pead.src === "cash", "hourly anchors: +6% from Friday's 16:00 ET close to Monday's");
+  assert.equal(C.detectPead(pr, dly, 107, 2, hs2, pt + 30 * HOUR), null, "Saturday: the reaction session (Monday) has not closed");
 });
 
 test("audit 4: the 5m archive resolves a 09:30 ET anchor; hourly alone reads the 09:00 close and says approx", () => {
