@@ -12,9 +12,12 @@
 // input + 5 min, so there is no timer to drift and nothing to count while the page sleeps.
 //
 // Flush: navigator.sendBeacon('/api/usage') every 60s and on pagehide / visibilitychange→hidden.
-// The server takes one beacon per member per 30s, so a flush inside that gap keeps its minutes and
-// rides the next one (hidden time never counts, so holding them costs nothing). Signed-out
-// visitors never beacon; a paused member never beacons.
+// A flush inside 30s of the last one keeps its minutes and rides the next one (hidden time never
+// counts, so holding them costs nothing) — except pagehide, which cannot wait. (build 2026.09.24-110
+// follow-up) The beacon carries `s`, a random id minted once per page load; the server gates per
+// (member, s), so two tabs or devices never drop each other's minutes, and a beacon that arrives
+// inside the gap (the pagehide one) is held and merged server-side instead of refused — still
+// clamped to wall time (src/usage-gate.js). Signed-out visitors never beacon; a paused member never beacons.
 //
 // (build 2026.09.24-110) The same beacon carries three more things, and still nothing typed:
 //   acts  counts of the two actions that happen only in the browser — a CSV export and a ticker
@@ -25,6 +28,8 @@
 //         because nobody was looking, which says nothing about speed).
 //   errs  window.onerror / unhandledrejection, deduped here by message + file:line: the message
 //         cut to 200 characters and the file reduced to this site's path. No stack, no locals.
+//         (-110 follow-up) Quoted text in the message ('…', "…", `…`) is replaced by an ellipsis
+//         before anything leaves the page (the server does it again).
 //   b     the build this tab runs (its first snapshot's stamp): the operator's stale-build count.
 import { el, esc, state } from "./core.js";
 
@@ -44,7 +49,21 @@ function usTake(a,now){ usSettle(a,now); const out={}; for(const k in a.acc){ co
 function usGive(a,tabs){ for(const k in tabs) a.acc[k]=(a.acc[k]||0)+tabs[k]; }   // a flush that could not go out puts its minutes back
 
 // ---- the live instance -------------------------------------------------------------------------
-const US={acc:null,lastSent:0,paused:false,me:null,mine:null,busy:false,
+// (-110 follow-up) The page session id: random, per page load, never stored — the server's rate-gate key.
+function usSid(){ try{ const a=new Uint8Array(9); crypto.getRandomValues(a); return Array.from(a,x=>(x%36).toString(36)).join('')+Date.now().toString(36).slice(-3); }catch(_){ return Math.random().toString(36).slice(2,14).padEnd(12,'0'); } }
+// (-110 follow-up) Quoted substrings out of an error message: each '…', "…" or `…` run becomes its
+// quotes around an ellipsis; an unclosed quote hides the rest; don't/can't stay. Same rule as the server.
+function usUnquote(m){
+  const s=String(m==null?'':m); let out='';
+  for(let i=0;i<s.length;i++){ const c=s[i];
+    if(c!=="'"&&c!=='"'&&c!=='`'){ out+=c; continue; }
+    if(c==="'"&&/\w/.test(s[i-1]||'')&&/\w/.test(s[i+1]||'')){ out+=c; continue; }
+    const j=s.indexOf(c,i+1);
+    if(j<0){ out+=c+'\u2026'; break; }
+    out+=c+'\u2026'+c; i=j; }
+  return out;
+}
+const US={acc:null,lastSent:0,paused:false,me:null,mine:null,busy:false,sid:usSid(),
   acts:{}, perf:null, perfDone:false, hiddenSeen:false, errs:new Map()};   // (-110) counters, the paint sample, errors
 const US_ACTS_CLIENT=new Set(['csv','drawer-open']), US_ERR_MAX=20, US_ERRS_PER_BEACON=5, US_BODY_MAX=3800;
 function usSignedIn(){ return !!(typeof window!=='undefined'&&window.__ME&&window.__ME.uid); }
@@ -68,7 +87,7 @@ function usErrLoc(file){
 }
 function usageErr(msg,file,line){
   if(US.paused||!usSignedIn()) return;
-  const m=Array.from(String(msg==null?'':msg)).slice(0,200).join('')||'(no message)', f=usErrLoc(file), l=Math.max(0,Math.trunc(+line||0));
+  const m=Array.from(usUnquote(String(msg==null?'':msg).slice(0,800))).slice(0,200).join('')||'(no message)', f=usErrLoc(file), l=Math.max(0,Math.trunc(+line||0));
   const k=m+'\u0001'+f+':'+l;
   const e=US.errs.get(k);
   if(e){ e.c=Math.min(50,e.c+1); return; }
@@ -93,7 +112,7 @@ function usageFlush(force){
   const acts=US.acts, hasActs=Object.keys(acts).length>0;
   const errs=[...US.errs.values()].filter(e=>e.c>0).slice(0,US_ERRS_PER_BEACON);
   if(tot<1000&&!hasActs&&US.perf==null&&!errs.length){ usGive(US.acc,tabs); return false; }   // under a second is not worth a request
-  const out={tabs,pwa:usPwa()};
+  const out={tabs,pwa:usPwa(),s:US.sid};
   const b=state.bootBuild||state.build; if(b) out.b=String(b);
   if(hasActs) out.acts=acts;
   if(US.perf!=null&&b) out.perf=US.perf;
@@ -141,7 +160,8 @@ function usageCardHtml(){
   const k=(lbl,val)=>'<div class="us-kpi"><div class="k">'+lbl+'</div><div class="v">'+val+'</div></div>';
   const top=d&&d.tabs&&d.tabs[0]?esc(d.tabs[0].label):'—';
   return '<div class="dm-sh" style="padding:0 0 6px">Your usage</div>'
-    +'<div class="us-disc">The operator can see this summary for every member: which tabs you open, for how long, and from what kind of device; how many times you use a few features (calls, targets, alerts, shares, CSV exports, asks, AI reports, ticker drawer opens, linking Telegram, turning on push — the count only, never which ticker); and, to catch bugs, how long the page took to first show the markets table and any JavaScript errors it hit (the error message and file:line, nothing you typed). It never records what you search, which filters you set, or which tickers you look at. Opening your detail is logged in the admin audit. Kept '+((d&&d.keepDays)||30)+' days, then only sitewide totals remain — except a yes/no per week you were active (for join-week retention), kept about six months.</div>'
+    // (build 2026.09.24-110 follow-up) everything the member guide (docs.html) lists, in the same order
+    +'<div class="us-disc">The operator can see this summary for every member: which tabs you open and for how long (only while the page is visible and you have used it in the last five minutes); roughly which hour of the week that was (Eastern time); the kind of device (desktop, mobile or tablet, installed or not); how many times you use a few features (calls, targets, alerts, shares, CSV exports, asks, AI reports, ticker drawer opens, linking Telegram, turning on push — the count only, never which ticker); and, to catch bugs, how long the page took to first show the markets table, which build your tab is running, and any JavaScript errors it hit (the error message with quoted text removed, cut to 200 characters, and file:line). It never records what you search, which filters or columns you set, or which tickers you look at. Opening your detail is logged in the admin audit. Kept '+((d&&d.keepDays)||30)+' days, then only sitewide totals remain — except a yes/no per week you were active (for join-week retention), kept 8 weeks.</div>'
     +(d&&d.ok&&!paused?'<div class="us-kpis">'+k('active days · '+(d.keepDays||30)+'d',String(d.activeDays||0))+k('on screen',usFmtH(d.ms||0))+k('top tab',top)+'</div>'
       +((d.acts||[]).some(a=>a.n>0)?'<div class="us-acts">'+(d.acts||[]).filter(a=>a.n>0).map(a=>'<span class="acc-chip on">'+esc(US_ACT_CHIP[a.key]||a.key)+' '+(+a.n||0)+'</span>').join('')+'</div>':''):'')
     +'<div class="us-row"><span class="acc-chip'+(paused?'':' on')+'">'+(paused?'paused':'sharing usage')+'</span>'
@@ -169,4 +189,4 @@ async function usagePause(on){
   }catch(_){ }
   US.busy=false; usageMeLoad();
 }
-export { US, usAcc, usCounting, usGive, usInput, usSetTab, usSetVis, usSettle, usTake, usageAct, usageCardHtml, usageErr, usageFirstPaint, usageFlush, usageMeLoad, usagePaint, usagePause, usageView };
+export { US, usUnquote, usAcc, usCounting, usGive, usInput, usSetTab, usSetVis, usSettle, usTake, usageAct, usageCardHtml, usageErr, usageFirstPaint, usageFlush, usageMeLoad, usagePaint, usagePause, usageView };

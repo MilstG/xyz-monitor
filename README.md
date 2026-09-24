@@ -557,8 +557,10 @@ instant, and the per-IP rate limit stops being a per-user problem.
     of each week's joiners active in week N after joining. Because per-member daily rows fold away
     after 30 days, activity is also kept as a **weekly-active bit** (`kind='wk'`, `day = key =` that
     week's Monday, `n = 1`, no time): a member is active in a week when any one day had a minute on
-    screen. It is the one per-member kind **exempt from the 30-day fold**, and it is kept **26
-    weeks**, then deleted. Weeks before the first bit on record read "not measured", never 0.
+    screen. It is the one per-member kind **exempt from the 30-day fold**, and it is kept **8
+    weeks** (plus the week in progress — the owner's minimal-retention call; it was 26), then
+    deleted. The table shows the last 9 join weeks, w0..w8. Weeks before the first bit on record
+    read "not measured", never 0.
   - **When people are here**: screen time by weekday × hour in ET (`kind='hr'`, key
     `<dow>-<hh>`, dow 0 = Sunday), bucketed by the hour the beacon arrived (DST-correct via
     `Intl`); it folds after 30 days like the tab rows.
@@ -575,7 +577,26 @@ instant, and the per-IP rate limit stops being a per-user problem.
     other than the server's `VERSION` (in memory).
   - **"Quiet" tabs**: Admin → Feature visibility marks a tab that reached under 10% of the members
     active in the last 30 days (same numbers as the fold's reach column; `GET /api/features` now
-    carries `usage`).
+    carries `usage`, memoized on the flush generation).
+  - **Follow-up fixes** (build 2026.09.24-110 follow-up):
+    - **Known-build gate**: the server notes its `VERSION` at every boot in `usage_build` (the
+      current build + the 3 before it are kept). A beacon's `b` is believed only when it is one of
+      those; otherwise the beacon keeps its screen time and counters and loses `perf` and `errs`.
+      On top of the 200-per-build cap, `usage_err` holds at most **500 rows overall** (the
+      least-recently-seen is evicted) and a member may introduce at most **20 new distinct errors
+      per ET day**. The summary reads error texts only for the five it shows, from this build and
+      the previous one; the previous build is the most recent *known* build other than this one
+      with at least 5 first-paint samples in range.
+    - **Quoted text removed** from error messages ('…', "…", `…` become an ellipsis in quotes; an
+      unclosed quote hides the rest) in the browser and again on the server, before storing.
+    - **Held early beacons** (`src/usage-gate.js`): the gate is per (member, page session `s`, a
+      random per-page-load id). A beacon inside a session's 30s gap — the pagehide flush — is
+      answered 204, held, and merged into that session's next accepted beacon, or released by the
+      60s flush (and at shutdown) if none comes. Accepted time is clamped to the session's wall
+      time since its last accepted beacon (≤ 2 min), and per member to a budget refilling at 2×
+      wall time (capped at 4 min, starting at 2 min): however many session ids a client invents, a
+      member is never credited more than 2 min + 2× the wall time elapsed. At most 8 sessions per
+      member and 5000 held payloads server-wide (beyond that: 429).
   - The drill-in (still audited as `view-usage`) gains the member's **features row**; the member's
     own card shows the same counters and says plainly that perf and errors are collected.
   - **Public (signed-out) visitors stay off**, and the anonymous-visitor id path is

@@ -179,14 +179,16 @@ test("-109 /api/usage: signed-out is a no-op; a member's beacon is validated, cl
   const iphone = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148";
   const b1 = await post("/api/usage", JSON.stringify({ tabs: { markets: 200000, "<script>": 5000, bogus: 5000 }, pwa: true }), bob, { "content-type": "text/plain;charset=UTF-8", "user-agent": iphone });
   assert.equal(b1.statusCode, 204);
-  assert.equal((await post("/api/usage", { tabs: { markets: 5000 } }, bob)).statusCode, 429, "one accepted beacon per 30s");
+  // (-110 follow-up) inside the 30s gap: held (204) and merged into the next accepted beacon, not refused
+  assert.equal((await post("/api/usage", { tabs: { markets: 5000 } }, bob)).statusCode, 204, "an early beacon is held, not a 429");
+  assert.equal(JSON.parse((await get("/api/usage/me", bob)).body).ms, 120000, "held: nothing recorded yet");
   skew += 40000;
-  // 40s of wall time since the last accepted one: 120s claimed is scaled down to 40s, proportionally
+  // 40s of wall time since the last accepted one: the held 5s + the 120s claimed are scaled down to 40s, proportionally
   assert.equal((await post("/api/usage", { tabs: { markets: 60000, trend: 60000 }, pwa: true }, bob, { "user-agent": iphone })).statusCode, 204);
   const me = JSON.parse((await get("/api/usage/me", bob)).body);
   assert.equal(me.ok, true);
-  assert.equal(me.ms, 120000 + 40000);
-  assert.deepEqual(me.tabs.map((t) => [t.key, t.ms]), [["markets", 140000], ["trend", 20000]]);
+  assert.equal(me.ms, 120000 + 40000, "still never more than the wall time");
+  assert.deepEqual(me.tabs.map((t) => [t.key, t.ms]), [["markets", 120000 + Math.floor(65000 * 40000 / 125000)], ["trend", Math.floor(60000 * 40000 / 125000)]]);
   assert.ok(!me.tabs.some((t) => t.key === "bogus" || t.key === "<script>"));
   assert.deepEqual(me.devices.map((d) => d.key), ["mobile-pwa"], "coarse class + PWA flag, never the UA");
   assert.equal(me.activeDays, 1); assert.equal(me.keepDays, 30); assert.equal(me.paused, false);
@@ -283,7 +285,8 @@ test("-109 beacon: flushes through sendBeacon, keeps minutes inside the 30s gap,
     U.__boot_usage_1();
     t += 45000;
     assert.equal(U.usageFlush(false), true);
-    assert.deepEqual(sent[0], ["/api/usage", { tabs: { markets: 45000 }, pwa: true }]);
+    assert.match(sent[0][1].s, /^[0-9a-z]{12}$/, "(-110 follow-up) the per-page-load session id");
+    assert.deepEqual(sent[0], ["/api/usage", { tabs: { markets: 45000 }, pwa: true, s: U.US.sid }]);
     t += 10000; U.usageView("trend"); t += 5000;
     assert.equal(U.usageFlush(false), false, "inside the server's 30s gap: held, not dropped");
     t += 30000;

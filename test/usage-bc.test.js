@@ -137,7 +137,7 @@ test("-110 cohorts: join-week retention off the weekly bit; not-yet weeks and pr
   // SQLite's Monday and the JS Monday agree
   for (const row of A._db.prepare("SELECT day FROM usage_day WHERE kind = 'wk'").all()) assert.equal(weekOf(row.day), row.day);
   const C = A.usageSummary({ r: 7, tabs: TABS, now }).cohorts;
-  assert.equal(C.weeks, 8); assert.equal(C.rows.length, 8);
+  assert.equal(C.weeks, 9); assert.equal(C.rows.length, 9, "(-110 follow-up) w0..w8 over the last 9 join weeks");
   const row = (mon) => C.rows.find((x) => x.mon === mon);
   const w2 = row(W(2));
   assert.equal(w2.n, 2); assert.equal(w2.cur, 2);
@@ -148,7 +148,7 @@ test("-110 cohorts: join-week retention off the weekly bit; not-yet weeks and pr
   // eve: her join week is older than the per-member window, yet her cohort reads from the bits
   const eveJoin = weekOf(etDayStr(now - 41 * DAY));
   const er = row(eveJoin);
-  assert.ok(er && er.n === 1, "eve's cohort is inside the 8-week table");
+  assert.ok(er && er.n === 1, "eve's cohort is inside the 9-row table");
   const k = Math.round((new Date(eveOld) - new Date(eveJoin)) / (7 * DAY));
   assert.equal(er.cells[k], 1, "active in the week of the folded day");
   assert.equal(er.cells[er.cur], 1, "and active this week");
@@ -160,24 +160,31 @@ test("-110 cohorts: join-week retention off the weekly bit; not-yet weeks and pr
   // paused members are left out of their cohort
   A.setUsagePaused(U2, true);
   assert.equal(A.usageSummary({ r: 7, tabs: TABS, now }).cohorts.rows.find((x) => x.mon === W(2)).n, 1);
-  // the bits age out at ~six months
-  A._db.prepare("INSERT INTO usage_day (day, uid, kind, key, n, ms) VALUES (?,?,?,?,1,0)").run("2020-01-06", U1, "wk", "2020-01-06");
+  // (-110 follow-up) the bits age out after 8 weeks (plus the week in progress): W(8) stays, W(9) goes
+  const ins = A._db.prepare("INSERT OR IGNORE INTO usage_day (day, uid, kind, key, n, ms) VALUES (?,?,?,?,1,0)");
+  for (const d of ["2020-01-06", W(8), W(9), W(26)]) ins.run(d, U1, "wk", d);
   A.usageRetain(now);
-  assert.equal(A._db.prepare("SELECT COUNT(*) AS n FROM usage_day WHERE kind = 'wk' AND day = '2020-01-06'").get().n, 0);
+  const has = (d) => A._db.prepare("SELECT COUNT(*) AS n FROM usage_day WHERE kind = 'wk' AND day = ?").get(d).n;
+  assert.equal(has("2020-01-06"), 0); assert.equal(has(W(26)), 0, "no longer six months"); assert.equal(has(W(9)), 0, "nine weeks back: gone");
+  assert.equal(has(W(8)), 1, "eight weeks back: kept — the oldest cohort's w0");
+  assert.equal(A.USAGE_WK_KEEP_DAYS, 56);
   A.close();
 });
 
 // ---- C: perf and errors at the store ---------------------------------------------------------------
-test("-110 perf: first-paint samples bucket into a histogram; p50/p75 per build; the previous build is the latest other one", () => {
+test("-110 perf: first-paint samples bucket into a histogram; p50/p75 per build; the previous build is the latest KNOWN other one with enough samples", () => {
   const now = Date.now();
   const A = withMembers([[U1, "ann", now - 90 * DAY], [U2, "bob", now - 90 * DAY]]);
+  // (-110 follow-up) the deploy order, as the server's boot calls would note it
+  A.usageBuildSeen("B0", now - 9 * DAY); A.usageBuildSeen("B1", now - 5 * DAY); A.usageBuildSeen("B2", now - DAY);
+  assert.deepEqual(A.usageBuilds(), ["B2", "B1", "B0"]);
   assert.deepEqual([850, 1999, 2100, 4990, 7400, 90000].map(A.usagePerfBucket), [800, 1900, 2000, 4750, 7000, 30000]);
   for (const v of [800, 850, 1200, 3000]) A.usageRecord(U1, {}, null, now, { build: "B2", perf: v });
-  A.usageRecord(U2, {}, null, now - 2 * DAY, { build: "B1", perf: 2500 });
+  for (let i = 0; i < 5; i++) A.usageRecord(U2, {}, null, now - 2 * DAY, { build: "B1", perf: 2500 });
   A.usageRecord(U2, {}, null, now - 3 * DAY, { build: "B0", perf: 9000 });
   const H = A.usageSummary({ r: 7, tabs: TABS, now, build: "B2", stale: 3 }).health;
   assert.deepEqual(H.perf.cur, { build: "B2", n: 4, p50: 850, p75: 1250 }, "bucket midpoints");
-  assert.equal(H.perf.prev.build, "B1", "the most recently seen other build");
+  assert.equal(H.perf.prev.build, "B1", "the previous known build");
   assert.equal(H.perf.prev.p50, 2625);
   assert.equal(H.stale, 3);
   assert.equal(A.usageSummary({ r: 7, tabs: TABS, now, build: "B9" }).health.perf.cur, null, "no samples on the running build yet");
@@ -187,6 +194,7 @@ test("-110 perf: first-paint samples bucket into a histogram; p50/p75 per build;
 test("-110 errors: keyed by build|file:line|hash, text in usage_err, capped at 200 distinct per build, members counted, pruned with the window", () => {
   const now = Date.now();
   const A = withMembers([[U1, "ann", now - 90 * DAY], [U2, "bob", now - 90 * DAY]]);
+  A.usageBuildSeen("B2", now - 2 * DAY); A.usageBuildSeen("B3", now - DAY);   // (-110 follow-up) both served
   const e1 = { msg: "Cannot read properties of undefined (reading 'c')", loc: "/js/corr.js:188", c: 3 };
   A.usageRecord(U1, {}, null, now, { build: "B2", errs: [e1] });
   A.usageRecord(U2, {}, null, now, { build: "B2", errs: [Object.assign({}, e1, { c: 1 })] });
@@ -201,8 +209,9 @@ test("-110 errors: keyed by build|file:line|hash, text in usage_err, capped at 2
   assert.deepEqual(H.errors.top[0], { build: "B2", loc: "/js/corr.js:188", msg: e1.msg, hits: 4, members: 2 });
   assert.equal(H.errors.top[1].msg, "<img src=x onerror=alert(1)>", "stored as data — escaping is every reader's job");
   // the cap: 200 distinct per build, the 201st dropped (and nothing stored for it); other builds unaffected
-  for (let i = 0; i < 205; i++) A.usageRecord(U1, {}, null, now, { build: "B3", errs: [{ msg: "e" + i, loc: "/js/y.js:" + i, c: 1 }] });
-  const r = A.usageRecord(U1, {}, null, now, { build: "B3", errs: [{ msg: "one more", loc: "/js/z.js:9", c: 1 }] });
+  // (spread over days: one member may introduce only 20 new distinct errors per ET day)
+  for (let i = 0; i < 205; i++) A.usageRecord(U1, {}, null, now - Math.floor(i / 20) * DAY, { build: "B3", errs: [{ msg: "e" + i, loc: "/js/y.js:" + i, c: 1 }] });
+  const r = A.usageRecord(U2, {}, null, now, { build: "B3", errs: [{ msg: "one more", loc: "/js/z.js:9", c: 1 }] });
   assert.equal(r.errDropped, 1); assert.equal(r.stored, false);
   A.usageFlush();
   assert.equal(A._db.prepare("SELECT COUNT(*) AS n FROM usage_err WHERE build = 'B3'").get().n, A.USAGE_ERR_CAP);
@@ -212,11 +221,14 @@ test("-110 errors: keyed by build|file:line|hash, text in usage_err, capped at 2
   A._db.prepare("UPDATE usage_err SET lastAt = ? WHERE build = 'B3'").run(now - 40 * DAY);
   const ret = A.usageRetain(now);
   assert.equal(ret.errs, A.USAGE_ERR_CAP);
-  assert.ok(A.usageRecord(U1, {}, null, now, { build: "B3", errs: [{ msg: "fresh", loc: "/js/q.js:1", c: 1 }] }).errs === 1, "and the cap frees up again");
+  assert.ok(A.usageRecord(U2, {}, null, now, { build: "B3", errs: [{ msg: "fresh", loc: "/js/q.js:1", c: 1 }] }).errs === 1, "and the cap frees up again");
   A.close();
 });
 
 // ---- the HTTP boundary -------------------------------------------------------------------------------
+// (-110 follow-up) This deployment served build -109 before the current one: the server believes a
+// beacon's stamp only for builds it noted at boot. Seeded into the same accounts.db the server opens.
+{ const A0 = openAccounts(DATA); A0.usageBuildSeen("2026.09.24-109", Date.now() - 7 * DAY); A0.close(); }
 const { buildServer } = require("../server.js");
 const JSONH = { "content-type": "application/json" };
 function jar() {
@@ -285,7 +297,10 @@ test("-110 beacon: client-only counters are allowlisted and clamped; perf and er
   assert.ok(E.top.some((e) => e.loc === "/js/c.js:0"), "an absurd line number reads as 0");
   assert.equal(E.distinct, 5, "at most five errors per beacon (the first five, after dedupe: app, b, c, empty, f)");
   assert.ok(E.top.some((e) => e.msg === "(no message)" && e.loc === "?:0"));
-  assert.equal(d.health.perf.prev && d.health.perf.prev.build, "2026.09.24-109", "the sample landed under the tab's build");
+  // (-110 follow-up) one sample under -109 is not enough to be the paint comparison (5 are), but its
+  // errors show: this build and the one before it
+  assert.equal(d.health.perf.prev, null, "a previous build needs 5 samples to be compared against");
+  assert.deepEqual(d.health.errors.builds, [VERSION, "2026.09.24-109"]);
   assert.equal(d.health.stale, 1, "bob's tab runs an older build");
   assert.equal(d.health.build, VERSION);
   // a current-build beacon clears it; a bad build string carries no perf and no errors
@@ -346,7 +361,7 @@ test("-110 admin payload + quiet flag: funnel, heat, cohorts and health ride /ap
   const d = JSON.parse((await get("/api/admin/usage?r=30", gus)).body);
   assert.ok(Array.isArray(d.funnel) && d.funnel.length === 10);
   assert.ok(d.heat && d.heat.ms.length === 7 && d.heat.ms[0].length === 24 && d.heat.total > 0);
-  assert.ok(d.cohorts && d.cohorts.rows.length === 8);
+  assert.ok(d.cohorts && d.cohorts.rows.length === 9);
   assert.ok(d.health && d.health.errors && "stale" in d.health);
   const m = JSON.parse((await get("/api/admin/usage/member?h=bob", gus)).body);
   assert.ok(Array.isArray(m.acts) && m.acts.find((a) => a.key === "csv").n === 50, "the drill-in's features row");

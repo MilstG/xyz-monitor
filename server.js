@@ -6,6 +6,7 @@ const zlib = require("zlib");
 const gzipAsync = require("util").promisify(zlib.gzip);   // -08: threadpool gzip for the cached-serve path
 const Fastify = require("fastify");
 const { openStore } = require("./src/store");
+const { createUsageGate } = require("./src/usage-gate");
 const { createPoller } = require("./src/poller");
 const { openAccounts, PW_MIN: ACCOUNT_PW_MIN, DM_MAX_LEN: ACCOUNT_DM_MAX,
   FILE_MAX: ACCOUNT_DM_FILE_MAX } = require("./src/accounts");
@@ -144,6 +145,9 @@ const store = openStore(DATA_DIR);
 // this is market data, none of it is on the 15s path, and all of it wants transactions rather
 // than the whole-file tmp+rename discipline the JSON caches use.
 const ACCOUNTS = openAccounts(DATA_DIR, { sessionDays: SESSION_DAYS });
+// (build 2026.09.24-110 follow-up) This deployment serves VERSION: it joins the short known-builds
+// list (the current build + the 3 before it) a usage beacon's build stamp is checked against.
+try { ACCOUNTS.usageBuildSeen(VERSION); } catch (_) {}
 // The legacy-door secrets, keyed by the accounts' random secret so they are never guessable. The
 // old derivation hashed `xyzmon-session|user|password` directly: with SITE_PASSWORD unset (the
 // documented open posture) that was a constant anyone could recompute, and a forged legacy token
@@ -209,6 +213,7 @@ let poller = null;
 // inside buildServer before this, which made the shutdown loop a swallowed ReferenceError: streams
 // were never closed on SIGTERM and the deploy notice they carry never went out.
 let SSE_REGISTRY = null;
+let USAGE_SWEEP = null;   // (build 2026.09.24-110 follow-up) buildServer's usage sweep, for main() and shutdown
 
 // Weak ETag from the payload's data version so an unchanged snapshot revalidates to 304
 // (browsers polling every 30s get a tiny empty response instead of the full table).
@@ -1525,14 +1530,18 @@ async function buildServer() {
   // the anonymous-visitor bucket is deliberately NOT built (the owner decided: off; build -110 kept
   // it that way rather than ship an id path nobody switched on).
   const USAGE_PUBLIC = process.env.USAGE_PUBLIC === "1";
-  const USAGE_MIN_GAP_MS = 30000;          // one accepted beacon per member per 30s
+  const USAGE_MIN_GAP_MS = 30000;          // one accepted beacon per member PAGE SESSION per 30s; earlier ones are held (-110 follow-up)
   const USAGE_MAX_FLUSH_MS = 120000;       // a beacon never claims more than 2 min of screen time
   const USAGE_TABS = () => require("./src/compute").FEATURES.filter((f) => f.kind === "tab").map((f) => {
     const g = require("./src/compute").featureState(poller.getFlags(), f.key);
     return { key: f.key, label: f.label, gate: f.key === "dm" && g === "public" ? "members" : g };   // Messages needs an account whatever its flag
   });
   const USAGE_TAB_KEYS = new Set(require("./src/compute").FEATURES.filter((f) => f.kind === "tab").map((f) => f.key));
-  const usageLast = new Map();             // uid -> ts of the last ACCEPTED beacon (in memory: a restart only loosens one gap)
+  // (build 2026.09.24-110 follow-up) The rate gate, per (member, page session): an early beacon is
+  // HELD and merged into the session's next accepted one (or released by the 60s flush), never
+  // dropped; accepted time is clamped to the session's wall time and a per-member budget of 2×
+  // wall time. The whole design and its bounds: src/usage-gate.js.
+  const usageGate = createUsageGate({ minGapMs: USAGE_MIN_GAP_MS, maxFlushMs: USAGE_MAX_FLUSH_MS });
   function usageDevice(ua, pwa) {
     const s = String(ua || "");
     const cls = /iPad|Tablet|PlayBook|Silk|Android(?!.*Mobile)/i.test(s) ? "tablet" : /Mobi|iPhone|iPod|Android/i.test(s) ? "mobile" : "desktop";
@@ -1543,6 +1552,8 @@ async function buildServer() {
   //         counter is incremented server-side at its own authenticated call, so the beacon may
   //         not claim them; each count is clamped to USAGE_MAX_ACTS.
   //   b     the build this tab runs (its first snapshot's stamp) — the stale-build count reads it.
+  //         (-110 follow-up) perf and errs are kept only when b is a build this deployment served.
+  //   s     (-110 follow-up) a random id minted once per page load: the rate gate's session key.
   //   perf  ms from navigation start to the first markets-table paint, once per page load.
   //   errs  [{m, f, l, c}]: deduped client-side by message + file:line; the message is cut to 200
   //         characters, the file to a same-site path (never a query string), c = hits (clamped).
@@ -1562,10 +1573,27 @@ async function buildServer() {
     const line = Math.trunc(Number(l));
     return s + ":" + (Number.isFinite(line) && line > 0 && line < 1e7 ? line : 0);
   }
-  // Validate + clamp one beacon body against the member's last accepted beacon. Returns
-  // {tabs, pwa, acts, build, perf, errs} (any possibly empty) or {error}. text/plain is what
-  // sendBeacon sends a string as.
-  function usageClamp(body, lastTs, now) {
+  // (build 2026.09.24-110 follow-up) Quoted text in an error message is often the user's data (a
+  // JSON.parse of a pasted value, a selector built from input): each '…', "…" or `…` run is replaced
+  // by its quotes around an ellipsis, and an unclosed quote hides everything after it. The browser
+  // does the same before sending (public/js/usage.js usUnquote); this is the one that counts.
+  function usageUnquote(m) {
+    const s = String(m == null ? "" : m);
+    let out = "";
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (c !== "'" && c !== '"' && c !== "`") { out += c; continue; }
+      if (c === "'" && /\w/.test(s[i - 1] || "") && /\w/.test(s[i + 1] || "")) { out += c; continue; }   // don't, can't
+      const j = s.indexOf(c, i + 1);
+      if (j < 0) { out += c + "\u2026"; break; }                                                          // unclosed: hide the rest
+      out += c + "\u2026" + c; i = j;
+    }
+    return out;
+  }
+  // Validate one beacon body. Returns {tabs, pwa, acts, build, rawBuild, sid, perf, errs} (any
+  // possibly empty) or {error}; the wall-time clamp is the gate's (usage-gate.js). text/plain is
+  // what sendBeacon sends a string as.
+  function usageClamp(body) {
     let b = body;
     if (typeof b === "string") { try { b = JSON.parse(b); } catch (_) { return { error: "bad json" }; } }
     if (!b || typeof b !== "object" || Array.isArray(b)) return { error: "bad body" };
@@ -1578,10 +1606,8 @@ async function buildServer() {
       if (!Number.isFinite(ms) || ms <= 0) continue;
       tabs[k] = ms; tot += ms;
     }
-    // The whole beacon may not claim more screen time than wall time has passed since the last one
-    // this member got accepted (first beacon after a boot: the 2-minute ceiling alone).
-    const cap = Math.min(USAGE_MAX_FLUSH_MS, lastTs ? Math.max(0, now - lastTs) : USAGE_MAX_FLUSH_MS);
-    if (tot > cap) { const f = cap / tot; for (const k of Object.keys(tabs)) tabs[k] = Math.floor(tabs[k] * f); }
+    // (-110 follow-up) No claim above the 2-minute ceiling even before the gate's wall-time clamp.
+    if (tot > USAGE_MAX_FLUSH_MS) { const f = USAGE_MAX_FLUSH_MS / tot; for (const k of Object.keys(tabs)) tabs[k] = Math.floor(tabs[k] * f); }
     const acts = {};
     if (b.acts && typeof b.acts === "object" && !Array.isArray(b.acts)) {
       for (const [k, v] of Object.entries(b.acts)) {
@@ -1590,7 +1616,12 @@ async function buildServer() {
         if (Number.isFinite(n) && n > 0) acts[k] = Math.min(USAGE_MAX_ACTS, n);
       }
     }
-    const build = typeof b.b === "string" && /^[0-9A-Za-z.\-]{1,32}$/.test(b.b) ? b.b : null;
+    // (-110 follow-up) The stamp is BELIEVED (perf and errors kept under it) only when it is a build
+    // this deployment served; otherwise the beacon keeps its screen time and counters, and loses
+    // those two. The well-formed raw stamp still feeds the in-memory stale-build count.
+    const rawBuild = typeof b.b === "string" && /^[0-9A-Za-z.\-]{1,32}$/.test(b.b) ? b.b : null;
+    const build = rawBuild && ACCOUNTS.usageBuildKnown(rawBuild) ? rawBuild : null;
+    const sid = typeof b.s === "string" && /^[0-9A-Za-z]{8,24}$/.test(b.s) ? b.s : "";
     const pv = Math.round(Number(b.perf));
     const perf = build && Number.isFinite(pv) && pv > 0 && pv <= 120000 ? pv : null;
     const errs = [];
@@ -1599,7 +1630,7 @@ async function buildServer() {
       for (const e of b.errs.slice(0, USAGE_MAX_ERRS * 4)) {   // dedupe first, then keep the first five
         if (errs.length >= USAGE_MAX_ERRS) break;
         if (!e || typeof e !== "object") continue;
-        const msg = usageClean(e.m, USAGE_ERR_MSG) || "(no message)";
+        const msg = usageClean(usageUnquote(String(e.m == null ? "" : e.m).slice(0, 4 * USAGE_ERR_MSG)), USAGE_ERR_MSG) || "(no message)";
         const loc = usageLoc(e.f, e.l);
         const c = Math.trunc(Number(e.c));
         const k = loc + "\u0001" + msg;
@@ -1607,21 +1638,27 @@ async function buildServer() {
         errs.push({ msg, loc, c: Number.isFinite(c) && c > 0 ? Math.min(USAGE_MAX_ACTS, c) : 1 });
       }
     }
-    return { tabs, pwa: b.pwa === true, acts, build, perf, errs: build ? errs : [] };
+    return { tabs, pwa: b.pwa === true, acts, build, rawBuild, sid, perf, errs: build ? errs : [] };
+  }
+  function usageStore(uid, p, now) {
+    const r = ACCOUNTS.usageRecord(uid, p.tabs, p.dev, now, { acts: p.acts, build: p.build, perf: p.perf, errs: p.errs });
+    if (r.stored) ACCOUNTS.touch(uid);
+    return r;
   }
   fastify.post("/api/usage", { bodyLimit: 4 * 1024 }, (req, reply) => {
     reply.header("cache-control", "no-store");
     const me = meOf(req);
     if (!me) return reply.code(204).send();                 // signed out: nothing is collected (public tracking is OFF; the visitor id is deliberately not built)
     if (ACCOUNTS.usagePaused(me.uid)) return reply.code(204).send();
-    const now = Date.now(), last = usageLast.get(me.uid) || 0;
-    if (last && now - last < USAGE_MIN_GAP_MS) return reply.code(429).header("retry-after", String(Math.ceil((USAGE_MIN_GAP_MS - (now - last)) / 1000))).send();
-    const c = usageClamp(req.body, last, now);
+    const now = Date.now();
+    const c = usageClamp(req.body);
     if (c.error) return reply.code(400).send({ ok: false, error: c.error });
-    if (c.build) usageBuild.set(me.uid, { build: c.build, at: now });
-    const r = ACCOUNTS.usageRecord(me.uid, c.tabs, usageDevice(req.headers["user-agent"], c.pwa), now,
-      { acts: c.acts, build: c.build, perf: c.perf, errs: c.errs });
-    if (r.stored) { usageLast.set(me.uid, now); ACCOUNTS.touch(me.uid); }
+    if (c.rawBuild) usageBuild.set(me.uid, { build: c.rawBuild, at: now });
+    c.dev = usageDevice(req.headers["user-agent"], c.pwa);
+    // (-110 follow-up) held early beacons get the same 204: sendBeacon never sees the answer anyway
+    const g = usageGate.offer(me.uid, c.sid, c, now, (uid, p) => usageStore(uid, p, now));
+    if (g.busy) return reply.code(429).header("retry-after", String(Math.ceil(USAGE_MIN_GAP_MS / 1000))).send();
+    if (g.accept) usageStore(me.uid, g.accept, now);
     return reply.code(204).send();
   });
   // Members whose last beacon inside the hour came from a build other than this one: tabs still
@@ -1637,12 +1674,27 @@ async function buildServer() {
   }
   // Reach per tab over the full 30-day window, for Admin → Feature visibility (build 2026.09.24-110).
   // quiet = under 10% of the members active in the window opened it at all.
+  // (-110 follow-up) GET /api/features calls this on every read: memoized on the flush generation,
+  // the tab list (gates move with the flags) and the hour (the 30-day window rolls), and computed
+  // with the summary's lite mode (no cohorts, no error texts).
+  let usageReachMemo = null;
   function usageReach() {
-    const s = ACCOUNTS.usageSummary({ r: ACCOUNTS.USAGE_KEEP_DAYS, tabs: USAGE_TABS() });
+    if (ACCOUNTS.usagePending()) ACCOUNTS.usageFlush();
+    const tl = USAGE_TABS();
+    const key = [ACCOUNTS.usageGen(), JSON.stringify(tl), Math.floor(Date.now() / 3600000)].join("|");
+    if (usageReachMemo && usageReachMemo.key === key) return usageReachMemo.val;
+    const s = ACCOUNTS.usageSummary({ r: ACCOUNTS.USAGE_KEEP_DAYS, tabs: tl, lite: true });
     const tabs = {};
     for (const t of s.tabs) tabs[t.key] = { users: t.users, reach: t.reach, quiet: t.reach != null && t.reach < 0.1 && s.kpi.activeRange > 0 };
-    return { r: s.r, active: s.kpi.activeRange, tabs };
+    const val = { r: s.r, active: s.kpi.activeRange, tabs };
+    usageReachMemo = { key, val };
+    return val;
   }
+  // (-110 follow-up) Held early beacons whose page never sent a follow-up land on the regular flush.
+  // `all` (shutdown) releases every held payload, past its gap or not — clamped all the same.
+  function usageSweep(now, all) { const t = now != null ? now : Date.now(); usageGate.sweep(t, (uid, p) => usageStore(uid, p, t), all); }
+  USAGE_SWEEP = usageSweep;   // main()'s 60s flush and shutdown reach it here (buildServer's scope)
+  fastify.decorate("usageSweep", usageSweep);
   // Server-side action counters (build 2026.09.24-110): one call per authenticated action, a no-op
   // for a signed-out caller, a paused member or a word outside the allowlist (accounts.js decides).
   const usageActFor = (uid, key) => { try { if (uid) ACCOUNTS.usageAct(uid, key); } catch (_) {} };
@@ -1655,7 +1707,7 @@ async function buildServer() {
     reply.header("cache-control", "no-store");
     const me = dmMe(req, reply); if (!me) return;
     const r = ACCOUNTS.setUsagePaused(me.uid, !!(req.body || {}).paused);
-    if (r.ok && r.paused) usageLast.delete(me.uid);
+    if (r.ok && r.paused) usageGate.forget(me.uid);
     return r;
   });
   fastify.get("/api/dm/sync", (req, reply) => {
@@ -3693,7 +3745,7 @@ async function main() {
   // (build 2026.09.24-109) Usage: the pending beacon minutes land every 60s in one transaction
   // (and once more from ACCOUNTS.close() at shutdown); once a day, rows past the 30-day window
   // fold into the sitewide bucket and the per-member rows go.
-  setInterval(() => { try { ACCOUNTS.usageFlush(); } catch (e) { log("usage flush FAILED: " + (e && e.message)); } }, 60 * 1000).unref();
+  setInterval(() => { try { if (USAGE_SWEEP) USAGE_SWEEP(); } catch (e) { log("usage sweep FAILED: " + (e && e.message)); } try { ACCOUNTS.usageFlush(); } catch (e) { log("usage flush FAILED: " + (e && e.message)); } }, 60 * 1000).unref();
   const usageRetain = () => { try { const r = ACCOUNTS.usageRetain(); if (r.dropped) log(`usage retention: ${r.dropped} per-member row(s) before ${r.cut} folded into sitewide totals`); } catch (e) { log("usage retention FAILED: " + (e && e.message)); } };
   setTimeout(usageRetain, 2 * 60 * 1000).unref();
   setInterval(usageRetain, 24 * 3600 * 1000).unref();
@@ -3732,6 +3784,7 @@ async function shutdown() {
   try { store.close(); } catch (_) {}
   // (build 2026.09.24-107) a backup mid-VACUUM gets a moment to land; past it, close() drops its .tmp
   try { if (ACCOUNTS.backupDrain) await ACCOUNTS.backupDrain(3000); } catch (_) {}
+  try { if (USAGE_SWEEP) USAGE_SWEEP(null, true); } catch (_) {}   // (build 2026.09.24-110 follow-up) held beacons land first
   try { ACCOUNTS.close(); } catch (_) {}   // checkpoints the WAL so a redeploy never leaves -wal/-shm behind
   process.exit(0);
 }

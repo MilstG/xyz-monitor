@@ -412,6 +412,15 @@ CREATE TABLE IF NOT EXISTS usage_err (
   firstAt INTEGER NOT NULL,
   lastAt INTEGER NOT NULL
 ) STRICT;
+-- (build 2026.09.24-110 follow-up) The builds this deployment has actually SERVED, newest last:
+-- the server notes its VERSION at every boot and only the last USAGE_BUILDS_KEEP stay. A beacon's
+-- build stamp is believed only when it is one of these — a client-chosen string can no longer mint
+-- a fresh 200-error / perf-histogram bucket per request. usage_err is further capped at 500 rows
+-- in total (least-recently-seen evicted) and 20 new distinct errors per member per ET day.
+CREATE TABLE IF NOT EXISTS usage_build (
+  build TEXT PRIMARY KEY,
+  at INTEGER NOT NULL
+) STRICT;
 `);
 
   // ---- migration from the pair-columns schema --------------------------------------------------
@@ -2518,7 +2527,16 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   const USAGE_ACTS = ["call", "target", "alert", "share", "csv", "ask", "ai-report", "drawer-open", "telegram-link", "push-enable"];
   const USAGE_ACT_SET = new Set(USAGE_ACTS);
   const USAGE_ERR_CAP = 200;         // distinct error rows kept per build; the 201st new one is dropped
-  const USAGE_WK_KEEP_DAYS = 182;    // the weekly-active bits (kind 'wk'): about six months, then gone
+  // (build 2026.09.24-110 follow-up) the owner asked for minimal retention: the weekly-active bits
+  // (kind 'wk') keep the week in progress plus the 8 before it — enough for a w0..w8 cohort table —
+  // then go. Was 182 days (26 weeks).
+  const USAGE_WK_KEEP_DAYS = 56;
+  const USAGE_WK_COHORTS = 9;        // cohort rows (join weeks) and cells (w0..w8)
+  // (build 2026.09.24-110 follow-up) error-row bounds on top of the per-build cap
+  const USAGE_ERR_TOTAL = 500;       // distinct usage_err rows overall; the least-recently-seen is evicted
+  const USAGE_ERR_NEW_PER_DAY = 20;  // NEW distinct errors one member may introduce per ET day
+  const USAGE_BUILDS_KEEP = 4;       // the current build + the 3 before it (what a beacon's b may be)
+  const USAGE_PREV_MIN_N = 5;        // first-paint samples a previous build needs to be the comparison
   const US = {
     up: db.prepare(`INSERT INTO usage_day (day, uid, kind, key, n, ms) VALUES (?,?,?,?,?,?)
       ON CONFLICT(day, uid, kind, key) DO UPDATE SET n = n + excluded.n, ms = ms + excluded.ms`),
@@ -2542,19 +2560,40 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     wkDrop: db.prepare("DELETE FROM usage_day WHERE kind = 'wk' AND day < ?"),
     errUp: db.prepare(`INSERT INTO usage_err (key, build, loc, msg, firstAt, lastAt) VALUES (?,?,?,?,?,?)
       ON CONFLICT(key) DO UPDATE SET lastAt = MAX(lastAt, excluded.lastAt)`),
-    errAll: db.prepare("SELECT key, build, loc, msg FROM usage_err"),
+    errIdx: db.prepare("SELECT key, build, lastAt FROM usage_err"),   // (-110 follow-up) <= USAGE_ERR_TOTAL rows by construction
+    errOne: db.prepare("SELECT key, build, loc, msg FROM usage_err WHERE key = ?"),
+    errDel: db.prepare("DELETE FROM usage_err WHERE key = ?"),
     errPrune: db.prepare("DELETE FROM usage_err WHERE lastAt < ?"),
+    buildUp: db.prepare("INSERT INTO usage_build (build, at) VALUES (?, ?) ON CONFLICT(build) DO NOTHING"),
+    buildAll: db.prepare("SELECT build, at FROM usage_build ORDER BY at DESC, build DESC"),
+    buildDel: db.prepare("DELETE FROM usage_build WHERE build = ?"),
   };
   let usagePend = new Map(), usageErrPend = new Map(), usageGeneration = 0;
-  // build -> Set(error key): what the per-build cap counts against, pending rows included.
-  let usageErrKnown = new Map();
+  // (build 2026.09.24-110 follow-up) Every error row there is (stored or pending): key -> {build,
+  // lastAt}, plus a per-build count. Bounded by USAGE_ERR_TOTAL, so holding it is cheap and the cap
+  // checks never touch SQLite. Evicted keys wait in usageErrDel for the next flush's DELETE.
+  let usageErrIdx = new Map(), usageErrPerBuild = new Map(), usageErrDel = new Set();
+  const usageErrNewToday = new Map();   // uid -> {day, n}: new distinct errors introduced today
   function usageErrReload() {
-    usageErrKnown = new Map();
-    const add = (b, k) => { if (!usageErrKnown.has(b)) usageErrKnown.set(b, new Set()); usageErrKnown.get(b).add(k); };
-    for (const r of US.errAll.all()) add(r.build, r.key);
-    for (const r of usageErrPend.values()) add(r.build, r.key);
+    usageErrIdx = new Map(); usageErrPerBuild = new Map();
+    const add = (k, b, at) => { if (usageErrIdx.has(k)) return; usageErrIdx.set(k, { build: b, lastAt: at }); usageErrPerBuild.set(b, (usageErrPerBuild.get(b) || 0) + 1); };
+    for (const r of US.errIdx.all()) if (!usageErrDel.has(r.key)) add(r.key, r.build, r.lastAt);
+    for (const r of usageErrPend.values()) add(r.key, r.build, r.lastAt);
   }
   usageErrReload();
+  // (-110 follow-up) The known builds, newest first. usageBuildSeen is the server's boot call.
+  let usageBuildList = US.buildAll.all().map((r) => r.build);
+  function usageBuildSeen(build, now) {
+    if (typeof build !== "string" || !build) return usageBuildList.slice();
+    const t = now != null ? now : Date.now();
+    // Re-deploying the same build keeps its first-seen time; a new one goes to the front.
+    US.buildUp.run(build, Math.max(t, ...US.buildAll.all().map((r) => r.at + 1)));
+    const all = US.buildAll.all().map((r) => r.build);
+    for (const b of all.slice(USAGE_BUILDS_KEEP)) US.buildDel.run(b);
+    usageBuildList = all.slice(0, USAGE_BUILDS_KEEP);
+    return usageBuildList.slice();
+  }
+  const usageBuildKnown = (b) => typeof b === "string" && usageBuildList.includes(b);
   // Calendar arithmetic on the ET day STRING (UTC-anchored, so DST can never skip or repeat a day).
   const usageDayShift = (d, n) => new Date(Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)) + n * 864e5).toISOString().slice(0, 10);
   // The Monday of the ET week holding day d (weeks run Monday..Sunday).
@@ -2584,13 +2623,30 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     const cur = usagePend.get(k);
     if (cur) { cur.n += n; cur.ms += ms; } else usagePend.set(k, { day, uid, kind, key, n, ms });
   }
-  // One error sighting: its key, or null when this build already holds USAGE_ERR_CAP distinct ones.
+  // One error sighting: its key, or null when it would be a NEW distinct error and this build already
+  // holds USAGE_ERR_CAP, or this member already introduced USAGE_ERR_NEW_PER_DAY new ones today.
+  // (-110 follow-up) Past USAGE_ERR_TOTAL rows overall, the least-recently-seen row is evicted.
   // e = {msg, loc} already truncated and cleaned by the server; the text is never trusted anywhere.
-  function usageErrNote(build, e, now) {
+  function usageErrNote(uid, build, e, now) {
     const key = build + "|" + e.loc + "|" + crypto.createHash("sha1").update(e.msg).digest("hex").slice(0, 12);
-    let set = usageErrKnown.get(build);
-    if (!set) { set = new Set(); usageErrKnown.set(build, set); }
-    if (!set.has(key)) { if (set.size >= USAGE_ERR_CAP) return null; set.add(key); }
+    const known = usageErrIdx.get(key);
+    if (known) known.lastAt = Math.max(known.lastAt, now);
+    else {
+      if ((usageErrPerBuild.get(build) || 0) >= USAGE_ERR_CAP) return null;
+      const day = usageToday(now), q = usageErrNewToday.get(uid);
+      if (q && q.day === day && q.n >= USAGE_ERR_NEW_PER_DAY) return null;
+      if (!q || q.day !== day) usageErrNewToday.set(uid, { day, n: 1 }); else q.n++;
+      if (usageErrNewToday.size > 5000) usageErrNewToday.clear();   // a bound, not a policy: members are far fewer
+      while (usageErrIdx.size >= USAGE_ERR_TOTAL) {
+        let old = null, oldAt = Infinity;
+        for (const [k, x] of usageErrIdx) if (x.lastAt < oldAt) { old = k; oldAt = x.lastAt; }
+        const x = usageErrIdx.get(old);
+        usageErrIdx.delete(old); usageErrPerBuild.set(x.build, usageErrPerBuild.get(x.build) - 1);
+        usageErrPend.delete(old); usageErrDel.add(old);
+      }
+      usageErrIdx.set(key, { build, lastAt: now }); usageErrPerBuild.set(build, (usageErrPerBuild.get(build) || 0) + 1);
+      usageErrDel.delete(key);
+    }
     const p = usageErrPend.get(key);
     if (p) p.lastAt = Math.max(p.lastAt, now);
     else usageErrPend.set(key, { key, build, loc: e.loc, msg: e.msg, firstAt: now, lastAt: now });
@@ -2611,10 +2667,12 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     const x = extra || {};
     let acts = 0, perf = 0, errs = 0, errDropped = 0;
     for (const [k, n] of Object.entries(x.acts || {})) if (USAGE_ACT_SET.has(k) && n > 0) { usageAdd(uid, day, "act", k, n, 0); acts += n; }
-    const build = typeof x.build === "string" && x.build ? x.build : "?";
-    if (x.perf > 0) { usageAdd(uid, day, "perf", build + "|" + usagePerfBucket(x.perf), 1, Math.round(x.perf)); perf = 1; }
-    for (const e of x.errs || []) {
-      const key = usageErrNote(build, e, t);
+    // (-110 follow-up) perf and errors only under a build this deployment served (the server checks
+    // too); anything else keeps its screen time and counters and loses the rest.
+    const build = usageBuildKnown(x.build) ? x.build : null;
+    if (build && x.perf > 0) { usageAdd(uid, day, "perf", build + "|" + usagePerfBucket(x.perf), 1, Math.round(x.perf)); perf = 1; }
+    for (const e of build ? x.errs || [] : []) {
+      const key = usageErrNote(uid, build, e, t);
       if (key) { usageAdd(uid, day, "err", key, e.c, 0); errs += e.c; } else errDropped++;
     }
     return { ok: true, stored: tot > 0 || acts > 0 || perf > 0 || errs > 0, ms: tot, acts, perf, errs, errDropped };
@@ -2629,12 +2687,13 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     return true;
   }
   function usageFlush() {
-    if (!usagePend.size && !usageErrPend.size) return 0;
-    const rows = [...usagePend.values()], errs = [...usageErrPend.values()];
-    usagePend = new Map(); usageErrPend = new Map();
+    if (!usagePend.size && !usageErrPend.size && !usageErrDel.size) return 0;
+    const rows = [...usagePend.values()], errs = [...usageErrPend.values()], dels = [...usageErrDel];
+    usagePend = new Map(); usageErrPend = new Map(); usageErrDel = new Set();
     db.exec("BEGIN IMMEDIATE");
     try {
       for (const r of rows) US.up.run(r.day, r.uid, r.kind, r.key, r.n, Math.round(r.ms));
+      for (const k of dels) US.errDel.run(k);   // (-110 follow-up) evicted past USAGE_ERR_TOTAL
       for (const e of errs) US.errUp.run(e.key, e.build, e.loc, e.msg, e.firstAt, e.lastAt);
       // (-110) the weekly bits for every week this flush touched (from the Monday of its oldest day)
       let wkFrom = null;
@@ -2646,6 +2705,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       // put them back: a failed flush must not lose the minute it was carrying
       for (const r of rows) usageAdd(r.uid, r.day, r.kind, r.key, r.n, r.ms);
       for (const x of errs) if (!usageErrPend.has(x.key)) usageErrPend.set(x.key, x);
+      for (const k of dels) if (usageErrIdx.has(k) === false) usageErrDel.add(k);
       throw e;
     }
     usageGeneration++;
@@ -2662,7 +2722,8 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     let dropped, errs;
     try {
       US.wkFill.run("0000-00-00");
-      US.wkDrop.run(usageDayShift(usageToday(t), -USAGE_WK_KEEP_DAYS));
+      // (-110 follow-up) whole weeks: the Monday USAGE_WK_KEEP_DAYS before this week's is the oldest kept
+      US.wkDrop.run(usageDayShift(usageWeekOf(usageToday(t)), -USAGE_WK_KEEP_DAYS));
       US.fold.run(cut); dropped = Number(US.drop.run(cut).changes || 0);
       errs = Number(US.errPrune.run(t - USAGE_KEEP_DAYS * 864e5).changes || 0);
       db.exec("COMMIT");
@@ -2726,7 +2787,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     // (-110) actions per key: the members who did it (in range) and the hits; the ET heat grid;
     // first-paint histograms per build (+ the last day each build was seen); errors per key.
     const actWho = new Map(), actHits = new Map(), heat = Array.from({ length: 7 }, () => new Array(24).fill(0));
-    const perfHist = new Map(), perfLast = new Map(), errHits = new Map(), errWho = new Map();
+    const perfHist = new Map(), errHits = new Map(), errWho = new Map(), errRows = [];
     const bump = (m, k, v) => m.set(k, (m.get(k) || 0) + v);
     const addTo = (m, k, v) => { if (!m.has(k)) m.set(k, new Set()); m.get(k).add(v); };
     for (const row of US.range.all(pFrom, today)) {
@@ -2744,10 +2805,10 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
         if (m && +m[2] < 24) heat[+m[1]][+m[2]] += row.ms;
       } else if (row.kind === "perf") {
         const i = row.key.lastIndexOf("|"), b = row.key.slice(0, i), bin = +row.key.slice(i + 1);
+        if (!usageBuildKnown(b)) continue;   // (-110 follow-up) only builds this deployment served
         if (!perfHist.has(b)) perfHist.set(b, new Map());
         bump(perfHist.get(b), bin, row.n);
-        if (!perfLast.has(b) || perfLast.get(b) < row.day) perfLast.set(b, row.day);
-      } else if (row.kind === "err") { bump(errHits, row.key, row.n); if (row.uid !== USAGE_SITE) addTo(errWho, row.key, row.uid); }
+      } else if (row.kind === "err" && !o.lite) errRows.push(row);   // (-110 follow-up) kept to the two builds below
     }
     const activeOn = new Map();   // day -> Set(uid)
     const uActive = new Map();    // uid -> {days, ms}
@@ -2798,18 +2859,27 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       const v = heat[d][h]; heatTot += v; if (h >= 8 && h < 16) core += v;
       if (v > 0 && (!peak || v > peak.ms)) peak = { dow: d, h, ms: v };
     }
-    // (-110) Client health. First paint: this build against the most recently seen other one.
+    // (-110) Client health. First paint: this build against the previous one.
+    // (-110 follow-up) "Previous" = the most recent KNOWN build (the deploy order the server noted)
+    // other than this one with at least USAGE_PREV_MIN_N samples in range — never whatever string a
+    // beacon sent last.
     const build = o.build || null;
-    let prev = null;
-    for (const [b, last] of perfLast) if (b !== build && (!prev || last > perfLast.get(prev) || (last === perfLast.get(prev) && b > prev))) prev = b;
     const perfOf = (b) => { const h = b && perfHist.get(b); if (!h) return null; let n = 0; for (const v of h.values()) n += v; return { build: b, n, p50: usagePct(h, 0.5), p75: usagePct(h, 0.75) }; };
-    const errText = new Map(US.errAll.all().map((e) => [e.key, e]));
-    for (const e of usageErrPend.values()) if (!errText.has(e.key)) errText.set(e.key, e);
-    const errs = [...errHits].map(([k, hits]) => {
-      const t = errText.get(k) || {};
+    const prev = usageBuildList.find((b) => b !== build && (perfOf(b) || { n: 0 }).n >= USAGE_PREV_MIN_N) || null;
+    // Errors: only those of this build and the one deployed before it (known builds only, whatever
+    // their paint samples); the text is read for the five shown.
+    const errBuilds = new Set([build, usageBuildList.find((b) => b !== build)].filter(Boolean));
+    for (const row of errRows) {
+      if (!errBuilds.has(row.key.slice(0, row.key.indexOf("|")))) continue;
+      bump(errHits, row.key, row.n); if (row.uid !== USAGE_SITE) addTo(errWho, row.key, row.uid);
+    }
+    const errAll = [...errHits].map(([k, hits]) => ({ k, hits, members: (errWho.get(k) || new Set()).size }))
+      .sort((a, b) => b.hits - a.hits || b.members - a.members);
+    const errs = errAll.slice(0, 5).map(({ k, hits, members }) => {
+      const t = usageErrPend.get(k) || US.errOne.get(k) || {};
       const parts = k.split("|");
-      return { build: t.build || parts[0], loc: t.loc || parts[1] || "?", msg: t.msg != null ? t.msg : "(message not kept)", hits, members: (errWho.get(k) || new Set()).size };
-    }).sort((a, b) => b.hits - a.hits || b.members - a.members);
+      return { build: t.build || parts[0], loc: t.loc || parts[1] || "?", msg: t.msg != null ? t.msg : "(message not kept)", hits, members };
+    });
     return { ok: true, r, today, days, keepDays: USAGE_KEEP_DAYS, priorKept, gen: usageGeneration,
       kpi: { online: members.filter((u) => online.has(u.uid)).length,
         activeToday: activeOn.has(today) ? activeOn.get(today).size : 0,
@@ -2819,9 +2889,9 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
         newMembers: newMembers.length, newActive: newMembers.filter((u) => uActive.has(u.uid)).length },
       series, tabs: tabRows, members: memberRows,
       funnel, heat: { ms: heat, total: heatTot, peak, coreShare: heatTot ? core / heatTot : null },
-      cohorts: usageCohorts(today, members, 8),
+      cohorts: o.lite ? null : usageCohorts(today, members, USAGE_WK_COHORTS),
       health: { build, perf: { cur: perfOf(build), prev: perfOf(prev) },
-        errors: { distinct: errs.length, hits: errs.reduce((s, e) => s + e.hits, 0), top: errs.slice(0, 5) },
+        errors: { distinct: errAll.length, hits: errAll.reduce((s, e) => s + e.hits, 0), top: errs, builds: [...errBuilds] },
         stale: o.stale != null ? o.stale : null, errCap: USAGE_ERR_CAP } };
   }
   // One member's last USAGE_KEEP_DAYS days: minutes per day, tab mix, device mix. Shared by the
@@ -2974,6 +3044,9 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     usageGen: () => usageGeneration, usagePending: () => usagePend.size, USAGE_KEEP_DAYS,
     // (build 2026.09.24-110) action counters, the allowlist, and the perf bucket (exported for the tests)
     usageAct, USAGE_ACTS, USAGE_ERR_CAP, usagePerfBucket, usageHourKey,
+    // (build 2026.09.24-110 follow-up) the known-build gate and the error-row bounds
+    usageBuildSeen, usageBuildKnown, usageBuilds: () => usageBuildList.slice(),
+    USAGE_ERR_TOTAL, USAGE_ERR_NEW_PER_DAY, USAGE_WK_KEEP_DAYS, USAGE_PREV_MIN_N,
     pendingEscalations, markEscalated,
     setPxHistory,
     // browser push subscriptions — stored here, delivered by the server (which holds the keys)

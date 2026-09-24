@@ -88,7 +88,7 @@ function uaFunnelHtml(D){
 }
 // Retention by join week: rows = the ET weeks members joined in, cells = share active N weeks later.
 function uaCohortHtml(C){
-  const rows=(C&&C.rows)||[], W=(C&&C.weeks)||8;
+  const rows=(C&&C.rows)||[], W=(C&&C.weeks)||9;
   let h='<thead><tr><th>joined (week of)</th><th class="n">n</th>';
   for(let w=0;w<W;w++) h+='<th class="n">w'+w+'</th>';
   h+='</tr></thead><tbody>';
@@ -126,7 +126,7 @@ function uaHealthHtml(H){
     +(E.top||[]).map(e=>'<tr><td class="mono">'+esc(e.build)+'</td><td class="mono">'+esc(e.loc)+'</td><td class="us-emsg">'+esc(e.msg)+'</td><td class="n">'+(+e.hits||0)+'</td><td class="n">'+(+e.members||0)+'</td></tr>').join('')
     +'</tbody></table></div>':'';
   return '<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Client health</div><div class="us-health">'+perf+errs+stale+'</div>'+list
-    +'<div class="acc-note">Error text is whatever the browser reported, cut to 200 characters; at most '+(+H.errCap||200)+' distinct errors are kept per build. Public (signed-out) visitors are not tracked: the flag is off and the anonymous-visitor path is deliberately not built.</div>';
+    +'<div class="acc-note">Error text is whatever the browser reported, with quoted text removed and cut to 200 characters; only builds this deployment served count, at most '+(+H.errCap||200)+' distinct errors are kept per build (500 overall, 20 new per member per day), and this card shows this build and the previous one. Public (signed-out) visitors are not tracked: the flag is off and the anonymous-visitor path is deliberately not built.</div>';
 }
 
 // ---- the daily-active chart: bars per ET day + the trailing 7-day mean ---------------------------
@@ -210,7 +210,7 @@ function uaRender(){
     +uaFunnelHtml(D)+'</div>'
     +'<div class="us-card"><h4>Retention by join week</h4><div class="sub">% of each ET week’s new members active (a minute on screen on any day) in week N after joining; w0 is the join week</div>'
     +'<div class="us-tw" style="border:0">'+uaCohortHtml(C)+'</div>'
-    +'<div class="us-flag">Per-member daily rows fold away after '+(D.keepDays||30)+' days; these cells read a separate yes/no-per-week bit kept '+Math.round((C.keepDays||182)/7)+' weeks'
+    +'<div class="us-flag">Per-member daily rows fold away after '+(D.keepDays||30)+' days; these cells read a separate yes/no-per-week bit kept '+Math.round((C.keepDays||56)/7)+' weeks (plus the week in progress)'
     +(C.since?', on record since the week of '+esc(uaDay(C.since)):'')+'. “·” = not measured (before the beacon, or a week still to come).</div></div></div>';
   const tval=(t,k)=>k==='label'?t.label.toLowerCase():k==='gate'?t.gate:t[k];
   const tRows=uaSorted(D.tabs||[],UA.tsort,tval), maxMs=Math.max(1,...(D.tabs||[]).map(t=>t.ms));
