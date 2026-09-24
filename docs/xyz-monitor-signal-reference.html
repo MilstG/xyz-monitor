@@ -352,7 +352,7 @@
 
 <div class="sig-card" id="pead"><h4>Post-earnings drift <span class="id">pead</span> <span class="pill both">DIRECTIONAL</span><span class="pill sh">SHADOW</span><span class="pill eq">XYZ ONLY</span></h4>
 <div class="grid">
-<span class="lb">Trigger</span><span>An earnings reaction <b>≥1.5σ</b> of the name's own daily vol; entered only <b>after the reaction session completes</b> (≥1 bar past the reaction index), within <b>3 sessions</b> of it, drifting WITH the move. The print day's own bar is the reaction bar for BMO and AMC alike (an AMC print is measured against the pre-print reference, and with the hourly spine anchored at 16:00 ET, +24h) — same convention as <code>earnReactionsFor</code>.</span>
+<span class="lb">Trigger</span><span>An earnings reaction <b>≥1.5σ</b> of the name's own daily vol; entered only <b>after the reaction session's cash close</b>, within <b>3 sessions</b> of it, drifting WITH the move. The reaction is the study's own <code>earnReactWindow</code> (since build -121): the <b>last cash close before the print → the first cash close after it</b> — BMO/DMH the prior close → the print day's, AMC the print day's close → the next session's (Friday → Monday; holidays and 13:00 half days via <code>usDayStatus</code>). Exact 16:00/13:00 closes off the hourly spine; without it, session bars for BMO/DMH only (a daily-tier AMC window spans two sessions and never fires). TBD prints never fire. Fires before -121 used the print day's own UTC bar (or hourly +24h); <code>ew</code> marks the new trigger.</span>
 <span class="lb">Measure</span><span>Horizon <b>10d</b>, R. Stop = 1σ back through the reaction close against the drift; target = <b>half the reaction magnitude</b> further from the mark — drift scales with the surprise, mechanically. <code>emv</code> stamps the frozen reaction move %. Accrues at earnings-season pace.</span>
 </div></div>
 
@@ -493,7 +493,7 @@
 <tr><td>fnd / fndP</td><td>funding rate at fire · percentile vs own 31d hourly (≥96 samples)</td></tr>
 <tr><td>oi5 / rngP / mktR</td><td>5d OI change % · position in 30d range (0=low, 1=high) · benchmark 24h move % (BTC / SPX proxy)</td></tr>
 <tr><td>ses / hod / dow</td><td>session bucket (xyz: rth/on/wknd) · UTC hour-of-day bucket (crypto: asia/eu/us/late) · UTC day-of-week (0=Sun)</td></tr>
-<tr><td>gw / emv / rm</td><td>gapfade void width (1.0/1.5σ) · pead frozen reaction move % · airead authoring model</td></tr>
+<tr><td>gw / emv / ew / rm</td><td>gapfade void width (1.0/1.5σ) · pead frozen reaction move % · pead reaction price tier (cash/daily; absent = pre-121 trigger) · airead authoring model</td></tr>
 </table>
 
 <h2 id="tuning">Tuning index — every knob in one table</h2>

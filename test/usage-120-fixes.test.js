@@ -347,7 +347,7 @@ test("-120 HTTP toggle off: the public gate's held beacons are discarded at once
 // ---- 6. words and pins ----------------------------------------------------------------------------------------------------------------
 test("-120 words: the comment states the owner's later decision; the notice, the card, the manual and README say 'not linked' and k ≥ 3", () => {
   const sv = src("server.js");
-  assert.ok(sv.includes('const VERSION = "2026.09.25-120"'));
+  assert.ok(sv.includes('const VERSION = "2026.09.25-121"'));
   assert.ok(sv.includes("later reversed it — public counting is ON BY DEFAULT, the") && sv.includes("admin toggle in the Usage fold (usage_cfg.publicOn) switches it, and env USAGE_PUBLIC=0 forces it"));
   const u = src("public/js/usage.js");
   assert.ok(u.includes("a visit is not linked across days, and days with fewer than 3 visitors aren’t shown."));

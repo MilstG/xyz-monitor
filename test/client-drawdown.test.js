@@ -163,7 +163,7 @@ test("drawdown tab: wired end to end — manifest, markup, routing, scope, dispa
   for (const pin of [".rvd-title", ".rvd-sub", ".rvd-head", ".rvd-tbl", ".rvdsvg.hv .rvd-dot:not(.hot)", ".rvd-legend i.late", ".rvd-late"])
     assert.ok(css.includes(pin), "css pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.25-120"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.25-121"'), "build stamp");
   // the renderer's contract with the DOM: closes only, the caption says so, and the CSV carries the dates
   const src = fs.readFileSync(path.join(__dirname, "..", "public", "js", "drawdown.js"), "utf8");
   assert.ok(src.includes("Max drawdown = the deepest close-to-close fall from any running peak inside the window — a wick below the close is not counted.") && src.includes("Max drawdown = the deepest fall from the running peak of daily HIGHS to a later daily LOW"), "the caption discloses which drawdown is shown (-105: intraday default, close-to-close toggle)");

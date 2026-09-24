@@ -571,7 +571,7 @@ test("-120 disclosure: README, the manual (API reference, the note, the env var)
   assert.ok(docs.includes("<code>POST /api/admin/usage/public</code>") && docs.includes("<tr><td><code>USAGE_PUBLIC</code></td>"));
   assert.ok(/Built in build 2026\.09\.25-120/.test(mock) && mock.includes("<h3>Public visitors, cookieless</h3>"), "the mock marks it built");
   const sv = src("server.js");
-  assert.ok(sv.includes('const VERSION = "2026.09.25-120"'));
+  assert.ok(sv.includes('const VERSION = "2026.09.25-121"'));
   assert.ok(sv.includes("const v = usagePub.admit(clientIp(req), ua, String(req.headers.host || \"\"), now);"), "the key's IP is clientIp(): TRUST_PROXY decides, never wider");
   assert.ok(sv.includes('if (!me) return usagePublicBeacon(req, reply);'));
 });

@@ -1864,39 +1864,51 @@ function regime200(closes, px) {
 }
 
 // Post-earnings drift (xyz only): a reaction bigger than 1.5x the name's own daily σ tends to
-// keep drifting its own way for weeks — entered AFTER the reaction session is complete (there
-// is at least one bar past the reaction index), within 3 sessions of it, drifting WITH the
-// move. Its print->reaction-bar convention is the -104 one: on UTC-day bars the print day's
-// OWN bar is the reaction bar for BMO and AMC alike (its 00:00Z close sits hours after a 16:05
-// ET print — see the timing note above earnPrintUtc); the reference is the bar before it. (The
-// reaction STUDY moved to earnReactWindow's cash-close window in build 2026.09.24-106; this live
-// ledger event keeps its own trigger definition, which its accrued out-of-sample record is pinned to.)
-// `hourly` (optional, packed or object rows) + `now` anchor a BMO/AMC print at its ET time and
-// take the +24h close as the reaction close once it has printed, the daily bars otherwise.
+// keep drifting its own way for weeks — entered AFTER the reaction session's close, within 3
+// sessions of it, drifting WITH the move. (build 2026.09.25-121) The reaction is the study's own:
+// earnReactWindow's last cash close before the print -> the first cash close after it (BMO/DMH:
+// the prior close -> the print day's; AMC: the print day's close -> the next session's, so a
+// Friday AMC reacts into Monday's close, never a Saturday perp print; holidays skipped, 13:00 on
+// a half day). The reaction session is w.rsD and entry opens at w.post, its close. Before -121
+// this ledger event read the print day's own UTC bar against the bar before (or an hourly +24h
+// off earnPrintUtc), so the 1.5σ gate and the 3-session entry window ran off a different bar
+// than the study reports; fires from -121 carry `ew` (the price tier) to split the record.
+// Prices: the hourly spine's exact closes (an hourly bar closing ON the anchor — anchorPrice,
+// approx=false); a spine still missing the bell bar waits EARN_BELL_WAIT for it. Without the
+// spine, the session-bar fallback (earnReactDaily) for BMO/DMH; a daily-tier AMC window spans
+// two sessions (see earnPrintReaction's `wide`), so it never fires. Untimed (TBD) prints have no
+// window and never fire. `opts.off` = the market's sessOffFn for that fallback (default US).
 // Stop = 1σ back through the reaction close against the drift; target = half the reaction
 // magnitude further, from the mark — drift scales with the surprise, mechanically.
-function detectPead(prints, daily, px, sd30, hourly, now) {
+// Returns { side, mv, d, stop, target, src ("cash" | "daily") } or null.
+function detectPead(prints, daily, px, sd30, hourly, now, opts) {
   if (!Array.isArray(prints) || !prints.length || !Array.isArray(daily) || daily.length < 25) return null;
   if (!(px > 0) || !(sd30 > 0)) return null;
-  const dayOf = (t) => { const x = new Date(t); return x.getUTCFullYear() + "-" + String(x.getUTCMonth() + 1).padStart(2, "0") + "-" + String(x.getUTCDate()).padStart(2, "0"); };
-  const idxByDay = new Map();
-  for (let i = 0; i < daily.length; i++) if (daily[i] && Number.isFinite(daily[i].c)) idxByDay.set(dayOf(daily[i].t), i);
+  const nowMs = now == null ? Date.now() : now, today = Math.floor(nowMs / DAY);
+  const isSess = (d) => { const x = new Date(d * DAY); return usDayStatus(x.getUTCFullYear(), x.getUTCMonth() + 1, x.getUTCDate()) !== 2; };
   let best = null;
   for (const pr of prints) {
-    const pi = idxByDay.get(pr.d);
-    if (pi == null) continue;
-    const ri = pi;                                         // the print day's own bar carries the reaction
-    if (ri <= 0 || ri >= daily.length - 1) continue;      // reaction session must be COMPLETE
-    if (ri < daily.length - 4) continue;                   // and fresh: within 3 sessions of now
-    if (!best || ri > best.ri) best = { pr, ri };
+    const w = earnReactWindow(pr);
+    if (!w || !(w.post <= nowMs)) continue;               // TBD, or the reaction session has not closed
+    let after = 0;                                         // sessions begun since the reaction session
+    for (let d = w.rsD + 1; d <= today && after < 4; d++) if (isSess(d)) after++;
+    if (after > 3) continue;                               // fresh: within 3 sessions of it
+    if (!best || w.rsD > best.w.rsD) best = { pr, w };
   }
   if (!best) return null;
-  let c1 = best.ri < daily.length ? daily[best.ri].c : null, c0 = daily[best.ri - 1].c;
-  if (hourly) {
-    const nowMs = now == null ? Date.now() : now, t0 = earnPrintUtc(best.pr);
-    const hs = t0 != null && t0 + 24 * HOUR <= nowMs ? packedRows(hourly) : [];
-    const p0 = hs.length ? priceAsOf(hs, t0, 3 * HOUR) : null, p1 = p0 > 0 ? priceAsOf(hs, t0 + 24 * HOUR, 3 * HOUR) : null;
-    if (p0 > 0 && p1 > 0) { c0 = p0; c1 = p1; }
+  const { pr, w } = best;
+  let c0 = null, c1 = null, src = null;
+  const hs = hourly ? packedRows(hourly) : [];
+  if (hs.length) {
+    const a0 = anchorPrice(hs, null, w.pre, 3 * HOUR), a1 = anchorPrice(hs, null, w.post, 3 * HOUR);
+    if (a0.px > 0 && !a0.approx && a1.px > 0 && !a1.approx) { c0 = a0.px; c1 = a1.px; src = "cash"; }
+    else if (nowMs - w.post < EARN_BELL_WAIT) return null;   // the bell bar has not landed yet
+  }
+  if (src == null) {
+    if (w.s === "AMC") return null;                        // two sessions on session bars: not one reaction
+    const dd = earnReactDaily(pr, daily, opts && opts.off);
+    if (!dd || !dd.post || !(dd.post.t + DAY <= nowMs)) return null;
+    c0 = dd.ref.c; c1 = dd.post.c; src = "daily";
   }
   if (!Number.isFinite(c1) || !Number.isFinite(c0) || !(c0 > 0)) return null;
   const mv = (c1 - c0) / c0 * 100;
@@ -1904,8 +1916,8 @@ function detectPead(prints, daily, px, sd30, hourly, now) {
   const up = mv > 0, sgn = up ? 1 : -1;
   const stop = c1 * (1 - sgn * sd30 / 100), target = px * (1 + sgn * Math.abs(mv) / 200);
   if (up ? !(stop < px && target > px) : !(stop > px && target < px && target > 0)) return null;
-  return { side: up ? "long" : "short", mv: +mv.toFixed(2), d: best.pr.d,
-    stop: +stop.toPrecision(6), target: +target.toPrecision(6) };
+  return { side: up ? "long" : "short", mv: +mv.toFixed(2), d: pr.d,
+    stop: +stop.toPrecision(6), target: +target.toPrecision(6), src };
 }
 
 // ---- intraday liquidity sweep (5m microstructure) ------------------------------------------
