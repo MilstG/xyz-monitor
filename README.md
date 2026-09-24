@@ -601,6 +601,51 @@ instant, and the per-IP rate limit stops being a per-user problem.
     own card shows the same counters and says plainly that perf and errors are collected.
   - **Public (signed-out) visitors stay off**, and the anonymous-visitor id path is
     **deliberately not built** — the flag still acknowledges and drops.
+- **Usage: deploy/gate markers, post-deploy regression alerts, error triage**
+  (build 2026.09.24-111) — the Usage fold starts answering "did that change help or hurt?":
+  - **Deploy & gate markers**: a small `usage_mark(at, kind, detail)` table — operator config
+    history, **no uid**, pruned at **90 days** (gate/menu rows also capped at 400). `deploy` is written
+    the first time a build boots (`usage_build.at` already is the build's first-seen time: a
+    re-deploy keeps it), `gate` (`<feature>=<state>`) when a `POST /api/features` write moves the
+    resolved state, `nav` (`<view>><group>`, or `#<group>` for a rename — the label is not kept) on a
+    successful `POST /api/nav-groups`. They are vertical lines on the daily-active chart and a
+    **Deploys & gate changes** list; a tab change carries that tab's **reach before vs after** (members
+    who opened it ÷ members active, the tab table's own definition) over the 7 ET days before the
+    change day and the 7 after it — or the days since, labelled `Nd`; the change day is in neither;
+    "small n" under 5 active members; windows clipped to the 30-day per-member retention.
+  - **Post-deploy regression alert**: the beacon now says `ld: 1` on a page load's first beacon
+    (`kind='load'`, key = build; once per page session at the gate, ≤ 200 per member per day; builds
+    before this one fall back to their first-paint sample count). Once the current build has **≥ 20
+    page loads or 2h live**, main()'s 60s flush compares it with the previous known build that had
+    traffic: **new distinct errors** (a file + message signature the previous build never hit) hit by
+    **≥ 2 members**; **error hits per page load ≥ 3×** (≥ 20 loads on both, ≥ 10 hits now; zero hits
+    before counts as one); **p75 first paint ≥ 30% AND ≥ 300ms slower** (≥ 10 samples each). Each
+    condition sends **one** alert per build through the ops lane (`poller.pushOps`: the operator's
+    Telegram and push, like every server-health alert); the dedupe is a `usage_mark` `alert` row, so
+    a restart never re-sends (and the chart shows it). The browser-supplied message loses `<>&`
+    before it rides a Telegram message. The health cards gain **Post-deploy check**: "build -111:
+    OK", "collecting 7 / 20 page loads", or "regression: …".
+  - **Error triage**: one row per distinct error **signature** (`<file>|<message hash>` — the
+    build and line dropped, so a bug keeps its row across deploys and line moves): first/last build,
+    first/last seen, hits, **members affected (a count, never who)**, and a **resolve** toggle —
+    `POST /api/admin/usage/errors {sig, resolved}` (admin-only, refused cross-site like every POST,
+    by signature only). Resolving stamps the error's latest build (`usage_triage`); a hit from a
+    **newer** build (deploy order) reopens it flagged **regressed**, while stale tabs on the old build
+    do not. The list rides `GET /api/admin/usage` (`health.triage`); every string is escaped.
+  - **Heatmap by the hour the minutes were spent**: the client splits its visible spans at
+    clock-hour boundaries and sends `h: {UTC hour index -> ms}` (an ET hour is a whole UTC hour);
+    the gate keeps only hours overlapping the beacon's own wall-time window (since the session's
+    last accepted beacon, ≤ 2 min, ± 1 min for clock skew) and scales them to the accepted time;
+    anything uncovered lands in the arrival hour, the old rule.
+  - **Stale builds survive restarts**: the last build per member is kept in `usage_last` (one row
+    per member, written by the 60s flush, pruned after a day) instead of a server map.
+  - **Monthly trend rows**: `kind='mo'` (day = `YYYY-MM-01`, key = `YYYY-MM`) keeps **one total per
+    member per month — screen time and active days, nothing else** — incrementally at each flush,
+    exempt from the 30-day fold, kept for **this month and the previous one** (2 months), then
+    deleted. At 30d, where the prior range is already folded, a member's "trend" compares this
+    month's screen time per covered day with last month's (blank until both cover a week). The first
+    open backfills them from the kept daily rows and notes the first day covered. Disclosed on the
+    member's card (which now lists their months), in the member guide and here.
 - **Admin panel folds** — the panel had grown to eight full-height boxes, so reaching the one you
   wanted meant scrolling past the seven you did not. Every segment is now a collapsed row naming
   what is inside it, with an expand-all/collapse-all control. Each fold wraps its box from

@@ -2915,3 +2915,11 @@ tr[data-wlsep] td:first-child{position:relative} tr[data-wlsep] td:first-child::
 .us-hv .acc-mu{font-size:var(--fs-md)}
 .us-hs{font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted);overflow-wrap:anywhere}
 .us-errs td.us-emsg{white-space:normal;overflow-wrap:anywhere;min-width:220px}
+/* (build 2026.09.24-111) deploy & gate markers, the triage list */
+.us-mk{stroke-width:1.5;stroke-dasharray:3 2}
+.us-mk-dep{stroke:var(--blue);background:var(--blue)}
+.us-mk-gate{stroke:var(--accent);background:var(--accent)}
+.us-mk-alert{stroke:var(--down);background:var(--down)}
+.us-mkdot{display:inline-block;width:3px;height:10px;border-radius:1px;margin-right:6px;vertical-align:-1px}
+.us-tbl tr.us-res td{opacity:.6}
+.us-tri td .btn{padding:2px 8px}

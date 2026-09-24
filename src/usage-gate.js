@@ -21,8 +21,16 @@
 // `maxSids` sessions (the least recently accepted is evicted; its held payload is released
 // first), and at most `maxHeld` payloads are held server-wide (beyond that: 429, the old answer).
 // Everything is in memory: a restart forgets the gates, which loosens at most one beacon.
+//
+// (build 2026.09.24-111) Two more fields ride through:
+//   hrs   the beacon's minutes per clock hour ({UTC hour index -> ms}; ET hours are whole UTC hours).
+//         At accept, only hours overlapping THIS accept's wall-time window survive — from the
+//         session's last accepted beacon (at most maxFlushMs back) to now, widened by hrSlackMs on
+//         both sides for a browser clock that is a little off — and they are scaled down to the
+//         accepted screen time. What they leave uncovered lands in the arrival hour (accounts.js).
+//   load  "this is the page load's first beacon": let through once per page session.
 
-const DEF = { minGapMs: 30000, maxFlushMs: 120000, uidRate: 2, maxSids: 8, maxHeld: 5000, idleMs: 15 * 60000, maxActs: 50, maxErrs: 5 };
+const DEF = { minGapMs: 30000, maxFlushMs: 120000, uidRate: 2, maxSids: 8, maxHeld: 5000, idleMs: 15 * 60000, maxActs: 50, maxErrs: 5, hrSlackMs: 60000, maxHrs: 8 };
 
 function createUsageGate(opts) {
   const o = Object.assign({}, DEF, opts || {});
@@ -31,7 +39,7 @@ function createUsageGate(opts) {
   const budget = new Map();   // uid -> {avail, ts}
   let heldN = 0;
 
-  const empty = (p) => !p || (!Object.keys(p.tabs || {}).length && !Object.keys(p.acts || {}).length && p.perf == null && !(p.errs || []).length);
+  const empty = (p) => !p || (!Object.keys(p.tabs || {}).length && !Object.keys(p.acts || {}).length && p.perf == null && !(p.errs || []).length && !p.load);
   // Merge a newer payload `b` into an older held one `a` (same page session, so the same build).
   function merge(a, b) {
     if (!a) return b;
@@ -39,11 +47,15 @@ function createUsageGate(opts) {
       build: b.build || a.build, rawBuild: b.rawBuild || a.rawBuild, perf: a.perf != null ? a.perf : b.perf, errs: (a.errs || []).map((e) => Object.assign({}, e)) };
     for (const [k, v] of Object.entries(b.tabs || {})) out.tabs[k] = Math.min(1e9, (out.tabs[k] || 0) + v);
     for (const [k, v] of Object.entries(b.acts || {})) out.acts[k] = Math.min(o.maxActs, (out.acts[k] || 0) + v);
+    // (-111) hour buckets add up (bounded to maxHrs hours); a page load stays a page load
+    out.hrs = Object.assign({}, a.hrs);
+    for (const [k, v] of Object.entries(b.hrs || {})) if (k in out.hrs || Object.keys(out.hrs).length < o.maxHrs) out.hrs[k] = Math.min(1e9, (out.hrs[k] || 0) + v);
+    out.load = !!(a.load || b.load);
     for (const e of b.errs || []) {
       const x = out.errs.find((y) => y.loc === e.loc && y.msg === e.msg);
       if (x) x.c = Math.min(o.maxActs, x.c + e.c); else if (out.errs.length < o.maxErrs) out.errs.push(Object.assign({}, e));
     }
-    if (a.build && b.build && a.build !== b.build) { out.perf = b.perf; out.errs = (b.errs || []).slice(); }   // never mix builds
+    if (a.build && b.build && a.build !== b.build) { out.perf = b.perf; out.errs = (b.errs || []).slice(); out.load = !!b.load; }   // never mix builds
     return out;
   }
   // Accept `p` for session `s` at `now`: clamp to the session's wall time and the member's budget.
@@ -57,7 +69,19 @@ function createUsageGate(opts) {
     const cap = Math.min(sidCap, b.avail);
     if (tot > cap) { const f = cap / tot; tot = 0; for (const k of Object.keys(tabs)) { tabs[k] = Math.floor(tabs[k] * f); tot += tabs[k]; } }
     b.avail = Math.max(0, b.avail - tot);
-    const out = Object.assign({}, p, { tabs });
+    // (-111) the hour buckets: this accept's window only, then no more than the accepted time
+    const hrs = {};
+    let hs = 0;
+    const lo = now - sidCap - o.hrSlackMs, hi = now + o.hrSlackMs;
+    for (const [k, v] of Object.entries(p.hrs || {}).slice(0, o.maxHrs)) {
+      const h = Number(k);
+      if (!Number.isInteger(h) || !(v > 0) || (h + 1) * 3600e3 <= lo || h * 3600e3 > hi) continue;
+      hrs[h] = v; hs += v;
+    }
+    if (hs > tot) { for (const k of Object.keys(hrs)) hrs[k] = Math.floor(hrs[k] * tot / hs); }
+    const load = !!p.load && !s.loaded;
+    if (load) s.loaded = true;
+    const out = Object.assign({}, p, { tabs, hrs, load });
     if (!empty(out)) s.last = now;
     return out;
   }
@@ -81,7 +105,7 @@ function createUsageGate(opts) {
         if (y.held && release) { const h = y.held; y.held = null; heldN--; release(uid, accept(y, h, now)); }
         drop(old);
       }
-      s = { uid, sid: sid || "", last: 0, held: null };
+      s = { uid, sid: sid || "", last: 0, held: null, loaded: false };
       sess.set(k, s); set.add(k); byUid.set(uid, set);
     }
     if (s.last && now - s.last < o.minGapMs) {

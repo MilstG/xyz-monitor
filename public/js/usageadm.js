@@ -7,9 +7,14 @@
 // retention, the drill-in's features row, and client health. Error messages come from BROWSERS —
 // any member (or anything injected into their page) can make one say anything — so the message,
 // the file:line and the build all go through esc() like every other string here, never raw.
+// (build 2026.09.24-111) Deploy & gate markers on the daily-active chart plus their list with the
+// affected tab's reach before/after; the post-deploy verdict card; the error triage list with a
+// resolve toggle (POST /api/admin/usage/errors — the only write this fold makes, by signature).
+// Marker details are operator config (feature keys, build stamps) and still go through esc().
 import { el, esc } from "./core.js";
 
-const UA={r:7,data:null,err:null,loading:false,loadedAt:0,msort:{k:'days',d:-1},tsort:{k:'ms',d:-1},sel:null,detail:null,wired:false};
+const UA={r:7,data:null,err:null,loading:false,loadedAt:0,msort:{k:'days',d:-1},tsort:{k:'ms',d:-1},sel:null,detail:null,wired:false,
+  triBusy:null,triErr:null};   // (-111) the triage toggle in flight, and its last error
 const UA_STALE_MS=60000;
 
 async function uaLoad(){
@@ -30,6 +35,19 @@ async function uaOpenMember(h){
     UA.detail=r.ok?Object.assign(d,{viewedAt:Date.now()}):{error:d.error||('HTTP '+r.status)};
   }catch(e){ UA.detail={error:String(e&&e.message||e)}; }
   if(UA.sel===h) uaRender();
+}
+// (build 2026.09.24-111) Resolve / reopen one distinct error. The server answers with the new state;
+// the fold then reloads (the triage list rides the usage payload, whose cache key the toggle bumped).
+async function uaTriage(sig,on){
+  if(UA.triBusy) return;
+  UA.triBusy=sig; UA.triErr=null; uaRender();
+  try{
+    const r=await fetch('/api/admin/usage/errors',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({sig,resolved:!!on})});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok||!d.ok) UA.triErr=d.error||('HTTP '+r.status);
+  }catch(e){ UA.triErr=String(e&&e.message||e); }
+  UA.triBusy=null;
+  await uaLoad();
 }
 // Opened by access.js whenever the Usage fold is open (lazyCall). Refetches at most once a minute —
 // the server's own aggregates only move on its 60s flush.
@@ -120,17 +138,83 @@ function uaHealthHtml(H){
   const errs=kc('JS errors','window.onerror + unhandledrejection, deduped by message and file:line',
     (E.distinct||0)+' <span class="acc-mu">distinct · '+(E.hits||0)+' hits</span>',
     top?'top: <span class="neg">'+esc(top.loc)+' · '+esc(top.msg)+'</span> · '+(+top.members||0)+' member'+(top.members===1?'':'s'):'none in range');
-  const stale=kc('Stale builds','members whose open tab runs an older build (last beacon inside the hour)',
+  const stale=kc('Stale builds','members whose open tab runs an older build (last beacon inside the hour; kept across restarts)',
     H.stale==null?'—':String(H.stale), H.stale?'the new-version toast offers them the reload':'everyone online is on '+esc(H.build||'this build'));
-  const list=(E.top||[]).length?'<div class="us-tw" style="margin-top:var(--sp-2)"><table class="us-tbl us-errs"><thead><tr><th>build</th><th>file:line</th><th>message</th><th class="n">hits</th><th class="n">members</th></tr></thead><tbody>'
+  // (-111) with a triage list in the payload, it replaces the top-five table (it carries the same rows and more)
+  const list=!H.triage&&(E.top||[]).length?'<div class="us-tw" style="margin-top:var(--sp-2)"><table class="us-tbl us-errs"><thead><tr><th>build</th><th>file:line</th><th>message</th><th class="n">hits</th><th class="n">members</th></tr></thead><tbody>'
     +(E.top||[]).map(e=>'<tr><td class="mono">'+esc(e.build)+'</td><td class="mono">'+esc(e.loc)+'</td><td class="us-emsg">'+esc(e.msg)+'</td><td class="n">'+(+e.hits||0)+'</td><td class="n">'+(+e.members||0)+'</td></tr>').join('')
     +'</tbody></table></div>':'';
-  return '<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Client health</div><div class="us-health">'+perf+errs+stale+'</div>'+list
+  return '<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Client health</div><div class="us-health">'+uaRegressCard(H.regress,kc)+perf+errs+stale+'</div>'+list+uaTriageHtml(H.triage)
     +'<div class="acc-note">Error text is whatever the browser reported, with quoted text removed and cut to 200 characters; only builds this deployment served count, at most '+(+H.errCap||200)+' distinct errors are kept per build (500 overall, 20 new per member per day), and this card shows this build and the previous one. Public (signed-out) visitors are not tracked: the flag is off and the anonymous-visitor path is deliberately not built.</div>';
 }
 
+// ---- (build 2026.09.24-111) the post-deploy verdict, error triage, deploy & gate markers ---------------
+const uaShort=(b)=>{ const m=/-(\d+)$/.exec(String(b||'')); return m?'-'+m[1]:String(b||'?'); };
+function uaCondWord(c){
+  if(!c) return '';
+  if(c.kind==='new-errors') return (+c.n||0)+' new error'+(c.n===1?'':'s')+' hit by ≥2 members';
+  if(c.kind==='err-rate') return 'errors per page load '+(+c.x||0).toFixed(1)+'×';
+  if(c.kind==='perf') return 'p75 first paint +'+Math.round(((+c.p75||0)/(+c.p75Prev||1)-1)*100)+'% ('+uaSec(c.p75)+' vs '+uaSec(c.p75Prev)+')';
+  return String(c.kind||'');
+}
+function uaRegressCard(V,kc){
+  if(!V) return '';
+  const sb=esc(uaShort(V.build)), vs=V.prev?' vs build '+esc(uaShort(V.prev)):'';
+  let v, s;
+  if(V.state==='regression'){ v='<span class="neg">regression</span>'; s='<span class="neg">regression: '+(V.conds||[]).map(c=>esc(uaCondWord(c))).join(' · ')+'</span>'+vs+' · alerted once per condition'; }
+  else if(V.state==='ok'){ v='<span class="pos">build '+sb+': OK</span>'; s=(+V.loads||0)+' page loads'+vs+': no new errors, error rate and p75 within bounds'; }
+  else if(V.state==='no-baseline'){ v='<span class="pos">build '+sb+': OK</span>'; s='no earlier build with traffic to compare against'; }
+  else if(V.state==='collecting'){ v='build '+sb+': collecting'; s=(+V.loads||0)+' / '+(+(V.need&&V.need.loads)||20)+' page loads — decides at that many, or '+Math.round(((V.need&&V.need.ageMs)||7200000)/3600000)+'h after the deploy'; }
+  else { v='—'; s='this build is not in the known-builds list'; }
+  return kc('Post-deploy check','this build against the previous known one: new errors (≥2 members), errors per page load (≥3×), p75 paint (≥30% and ≥0.3s)',v,s);
+}
+const uaWhen=(ms)=>{ if(!ms) return '—'; try{ return new Date(ms).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false}); }catch(_){ return '—'; } };
+function uaTriageHtml(T){
+  if(!T) return '';
+  const rows=T.rows||[];
+  if(!rows.length) return '<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Error triage</div><div class="acc-note" style="margin:0">No errors on record.</div>';
+  const st=(e)=>e.resolved?'<span class="acc-chip">resolved</span>':e.regressed?'<span class="acc-chip warn" title="resolved, then hit again on a newer build">regressed · '+esc(uaShort(e.regressedBuild))+'</span>':'<span class="acc-chip on">open</span>';
+  return '<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Error triage · '+(+T.open||0)+' open of '+(+T.total||0)+'</div>'
+    +(UA.triErr?'<div class="acc-note neg" style="margin:0 0 var(--sp-1)">could not update — '+esc(UA.triErr)+'</div>':'')
+    +'<div class="us-tw"><table class="us-tbl us-errs us-tri"><thead><tr><th>state</th><th>file:line · message</th><th>builds</th><th>first seen</th><th>last seen</th><th class="n">hits</th><th class="n">members</th><th></th></tr></thead><tbody>'
+    +rows.map(e=>'<tr'+(e.resolved?' class="us-res"':'')+'><td>'+st(e)+'</td>'
+      +'<td class="us-emsg"><span class="mono">'+esc(e.loc)+'</span> · '+esc(e.msg)+'</td>'
+      +'<td class="mono">'+esc(uaShort(e.firstBuild))+(e.lastBuild!==e.firstBuild?' → '+esc(uaShort(e.lastBuild)):'')+'</td>'
+      +'<td class="mono">'+esc(uaWhen(e.firstAt))+'</td><td class="mono">'+esc(uaWhen(e.lastAt))+'</td>'
+      +'<td class="n">'+(+e.hits||0)+'</td><td class="n">'+(+e.members||0)+'</td>'
+      +'<td><button type="button" class="btn" data-uatri="'+esc(e.sig)+'" data-on="'+(e.resolved?'0':'1')+'"'+(UA.triBusy?' disabled':'')+'>'+(UA.triBusy===e.sig?'…':e.resolved?'reopen':'resolve')+'</button></td></tr>').join('')
+    +'</tbody></table></div>'
+    +'<div class="acc-note">One row per distinct error (file + message, across builds and line moves). Members is a count, never who. Resolving stamps the latest build it was seen on; a hit from a newer build reopens it as “regressed”, while stale tabs on the old build do not.</div>';
+}
+function uaMarkWord(m){
+  const d=String(m.detail||'');
+  if(m.kind==='deploy') return 'deploy · build '+d;
+  if(m.kind==='gate'){ const i=d.indexOf('='); return 'gate · '+(m.tabLabel||(i>=0?d.slice(0,i):d))+' → '+(i>=0?d.slice(i+1):'?'); }
+  if(m.kind==='nav'){ if(d[0]==='#') return 'menu renamed · '+d.slice(1); const i=d.indexOf('>'); return 'menu · '+(m.tabLabel||(i>=0?d.slice(0,i):d))+' moved to '+(i>=0?d.slice(i+1):'?'); }
+  if(m.kind==='alert'){ const i=d.lastIndexOf('|'); return 'regression alert · build '+(i>=0?uaShort(d.slice(0,i))+' · '+d.slice(i+1):d); }
+  return m.kind+' · '+d;
+}
+function uaReachCell(w,pending){
+  if(!w) return '<span class="na">'+(pending?'from tomorrow':'folded')+'</span>';
+  const notes=[]; if(w.days<7) notes.push((w.days)+'d'); if(w.active<5) notes.push('small n');
+  return uaPct(w.reach)+' <span class="acc-mu">'+(+w.users||0)+'/'+(+w.active||0)+'</span>'+(notes.length?' <span class="acc-chip warn">'+notes.join(' · ')+'</span>':'');
+}
+function uaMarksHtml(D){
+  const M=D.marks; if(!M) return '';
+  const head='<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Deploys &amp; gate changes</div>';
+  if(!M.length) return head+'<div class="acc-note" style="margin:0">No deploys or gate changes in the last 90 days.</div>';
+  return head+'<div class="us-tw"><table class="us-tbl us-marks"><thead><tr><th>when</th><th>change</th><th class="n">reach · 7d before</th><th class="n">after</th><th class="n">Δ</th></tr></thead><tbody>'
+    +M.map(m=>{ const tab=!!m.tab, b=m.before, a=m.after;
+      const dd=tab&&b&&a&&b.reach!=null&&a.reach!=null?Math.round((a.reach-b.reach)*100):null;
+      return '<tr><td class="mono">'+esc(uaWhen(m.at))+'</td><td><i class="us-mkdot '+(m.kind==='deploy'?'us-mk-dep':m.kind==='alert'?'us-mk-alert':'us-mk-gate')+'"></i>'+esc(uaMarkWord(m))+'</td>'
+        +(tab?'<td class="n">'+uaReachCell(b,false)+'</td><td class="n">'+uaReachCell(a,!a)+'</td><td class="n">'+(dd==null?'<span class="na">—</span>':'<span class="'+(dd>=0?'pos':'neg')+'">'+(dd>=0?'+':'')+dd+' pts</span>')+'</td>'
+          :'<td class="n na" colspan="3">'+(m.kind==='deploy'?'see Client health':'')+'</td>')+'</tr>'; }).join('')
+    +'</tbody></table></div>'
+    +'<div class="acc-note">Reach = members who opened the tab ÷ members active (≥1 min on screen) in the window: the 7 ET days before the change day against the 7 after it, or the days since (“Nd”); the change day itself is in neither. “small n” = under 5 active members. Windows are clipped to the '+(D.keepDays||30)+'-day per-member retention. Markers are operator config history (no member data), kept 90 days.</div>';
+}
+
 // ---- the daily-active chart: bars per ET day + the trailing 7-day mean ---------------------------
-function uaDauSvg(series){
+function uaDauSvg(series,marks){
   const W=640,H=150,P={l:26,r:6,t:8,b:20}, n=series.length||1;
   const max=Math.max(1,...series.map(x=>x.n))*1.15, bw=(W-P.l-P.r)/n, y=v=>H-P.b-(v/max)*(H-P.t-P.b);
   let g='';
@@ -139,6 +223,11 @@ function uaDauSvg(series){
     g+='<rect class="us-barf" x="'+X.toFixed(1)+'" y="'+y(x.n).toFixed(1)+'" width="'+w.toFixed(1)+'" height="'+(H-P.b-y(x.n)).toFixed(1)+'" rx="1.5"><title>'+esc(x.day)+': '+x.n+' active</title></rect>'; });
   const pts=series.map((x,i)=>{ const a=series.slice(Math.max(0,i-6),i+1); const m=a.reduce((p,q)=>p+q.n,0)/a.length; return (P.l+i*bw+bw/2).toFixed(1)+','+y(m).toFixed(1); });
   if(pts.length>1) g+='<polyline class="us-mean" points="'+pts.join(' ')+'"/>';
+  // (-111) deploy & gate markers: a vertical line at the start of the ET day each one happened on
+  const col=new Map(series.map((x,i)=>[x.day,i]));
+  for(const m of (marks||[])){ const i=col.get(m.day); if(i==null) continue;
+    const X=(P.l+i*bw+0.5).toFixed(1), cls=m.kind==='deploy'?'us-mk-dep':m.kind==='alert'?'us-mk-alert':'us-mk-gate';
+    g+='<line class="us-mk '+cls+'" x1="'+X+'" x2="'+X+'" y1="'+P.t+'" y2="'+(H-P.b)+'"><title>'+esc(uaMarkWord(m))+'</title></line>'; }
   const step=n<=7?1:7;
   for(let i=n-1;i>=0;i-=step) g+='<text class="us-axis" x="'+(P.l+i*bw+bw/2).toFixed(1)+'" y="'+(H-5)+'" text-anchor="middle">'+esc(uaDay(series[i].day))+'</text>';
   return '<svg class="us-svg" viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none" role="img" aria-label="active members per day">'+g+'</svg>';
@@ -200,8 +289,9 @@ function uaRender(){
     +kp('median / day',K.medMinPerDay==null?'—':uaMin(K.medMinPerDay)+' min','per active member-day')
     +kp('new members',String(K.newMembers||0),'in range · '+(K.newActive||0)+' active')+'</div>';
   const dau='<div class="us-grid2"><div class="us-card"><h4>Active people per day</h4><div class="sub">distinct members with ≥1 minute on screen that ET day</div>'
-    +uaDauSvg(D.series||[])
-    +'<div class="us-legend"><span><i class="c0"></i>members</span><span><i class="us-legmean"></i>7-day mean</span></div></div>'
+    +uaDauSvg(D.series||[],D.marks||[])
+    +'<div class="us-legend"><span><i class="c0"></i>members</span><span><i class="us-legmean"></i>7-day mean</span>'
+    +((D.marks||[]).length?'<span><i class="us-mkdot us-mk-dep"></i>deploy</span><span><i class="us-mkdot us-mk-gate"></i>gate / menu</span><span><i class="us-mkdot us-mk-alert"></i>regression alert</span>':'')+'</div></div>'
     // (build 2026.09.24-110) when people are here
     +'<div class="us-card"><h4>When people are here</h4><div class="sub">minutes on screen by weekday × hour (ET), whole range</div>'
     +uaHeatSvg(D.heat)+uaHeatNote(D.heat)+'</div></div>';
@@ -227,7 +317,7 @@ function uaRender(){
         +'<td><span class="acc-chip'+(t.gate==='admin'?' on':t.gate==='off'?' warn':'')+'">'+esc(t.gate)+'</span></td></tr>'; }).join('')
     +'</tbody></table></div>'
     +'<div class="acc-note">Reach is the share of members active in the range who opened the tab at all. Under 10% gets a “quiet” flag — evidence for the gate and menu decisions in Features (Feature visibility shows the same flag at 30 days).'
-    +(D.priorKept?'':' “vs prior” compares sitewide hours with the '+D.r+' days before; per-member history older than '+(D.keepDays||30)+' days is folded away, so member trends are blank at this range.')+'</div>';
+    +(D.priorKept?'':' “vs prior” compares sitewide hours with the '+D.r+' days before. Per-member history older than '+(D.keepDays||30)+' days is folded away, so at this range a member’s trend compares this month’s screen time per day with last month’s (a small monthly total per member, kept 2 months; blank until both months cover a week'+(D.moDays?' — now '+(+D.moDays.cur||0)+'d and '+(+D.moDays.prev||0)+'d':'')+').')+'</div>';
   const me=(window.__ME&&window.__ME.handle)||'';
   const mval=(m,k)=>m.paused&&k!=='handle'&&k!=='lastSeen'?null:k==='handle'?m.handle:k==='top'?null:m[k];
   const mRows=uaSorted(D.members||[],UA.msort,mval);
@@ -247,7 +337,7 @@ function uaRender(){
       +'<td class="n">'+(m.paused?'':uaDelta(m.trend))+'</td></tr>').join('')
     +'</tbody></table></div>'+uaDetailHtml()
     +'<div class="acc-note">“Lapsed” = no activity for more than 10 days. Opening a member’s detail is logged (All messages → Read log); these sitewide numbers are not. Members see their own summary, and can pause it, in Messages.</div>';
-  box.innerHTML='<div class="us-row">'+seg+chips+'</div>'+kpis+dau+tabs+adopt+members+uaHealthHtml(D.health);
+  box.innerHTML='<div class="us-row">'+seg+chips+'</div>'+kpis+dau+uaMarksHtml(D)+tabs+adopt+members+uaHealthHtml(D.health);
 }
 
 function uaWire(){
@@ -258,6 +348,7 @@ function uaWire(){
     const r=e.target.closest('[data-uar]');
     if(r){ const v=+r.dataset.uar; if(v!==UA.r){ UA.r=v; uaLoad(); } return; }
     if(e.target.closest('[data-uarefresh]')){ uaLoad(); return; }
+    const tri=e.target.closest('[data-uatri]'); if(tri){ uaTriage(tri.dataset.uatri,tri.dataset.on==='1'); return; }   // (-111)
     if(e.target.closest('[data-uaclose]')){ UA.sel=null; UA.detail=null; uaRender(); return; }
     const th=e.target.closest('[data-uat]'); if(th){ sortBy(UA.tsort,th.dataset.uat); uaRender(); return; }
     const mh=e.target.closest('[data-uam]'); if(mh){ sortBy(UA.msort,mh.dataset.uam); uaRender(); return; }
@@ -265,4 +356,4 @@ function uaWire(){
   });
   box.addEventListener('keydown',(e)=>{ const row=e.target.closest&&e.target.closest('[data-uah]'); if(row&&e.key==='Enter') uaOpenMember(row.dataset.uah); });
 }
-export { UA, openUsageAdm, uaCohortHtml, uaDauSvg, uaFunnelHtml, uaHealthHtml, uaHeatSvg, uaRender };
+export { UA, openUsageAdm, uaCohortHtml, uaDauSvg, uaFunnelHtml, uaHealthHtml, uaHeatSvg, uaMarksHtml, uaRegressCard, uaRender, uaTriage, uaTriageHtml };

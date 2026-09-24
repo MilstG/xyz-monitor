@@ -15,7 +15,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.24-110";
+const VERSION = "2026.09.24-111";
 // (build 2026.09.24-107) Distinguishes this process from the last one in ETags built on
 // per-process counters (a restart must never 304 a client onto a different body).
 const BOOT_NONCE = Date.now().toString(36) + crypto.randomBytes(3).toString("hex");
@@ -214,6 +214,7 @@ let poller = null;
 // were never closed on SIGTERM and the deploy notice they carry never went out.
 let SSE_REGISTRY = null;
 let USAGE_SWEEP = null;   // (build 2026.09.24-110 follow-up) buildServer's usage sweep, for main() and shutdown
+let USAGE_REGRESS = null;   // (build 2026.09.24-111) buildServer's post-deploy regression check, for main()'s 60s flush
 
 // Weak ETag from the payload's data version so an unchanged snapshot revalidates to 304
 // (browsers polling every 30s get a tiny empty response instead of the full table).
@@ -1024,7 +1025,13 @@ async function buildServer() {
   fastify.post("/api/features", { bodyLimit: 8 * 1024 }, async (req, reply) => {
     reply.header("cache-control", "no-store");
     const b = req.body || {};
-    const r = poller.setFlag(String(b.key || ""), String(b.state || ""), isAdmin(req));
+    const key = String(b.key || "");
+    let was = null;
+    try { was = require("./src/compute").featureState(poller.getFlags(), key); } catch (_) {}
+    const r = poller.setFlag(key, String(b.state || ""), isAdmin(req));
+    // (build 2026.09.24-111) a write that MOVED the resolved gate is a marker on the Usage chart
+    // (operator config history: no uid); a same-state write is not a change.
+    if (r.ok && r.state !== was) { try { ACCOUNTS.usageMark("gate", key + "=" + r.state); } catch (_) {} }
     return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : r.error === "write-failed" ? 503 : 400)).send(r);
   });
 
@@ -1039,6 +1046,9 @@ async function buildServer() {
     const r = b.view != null
       ? poller.setNavViewGroup(String(b.view || ""), String(b.group || ""), isAdmin(req))
       : poller.setNavGroupLabel(String(b.key || ""), String(b.label == null ? "" : b.label), isAdmin(req));
+    // (build 2026.09.24-111) Usage markers: a tab moved ('<view>><group>') or a menu renamed ('#<group>';
+    // the label itself is not kept)
+    if (r.ok) { try { ACCOUNTS.usageMark("nav", b.view != null ? String(b.view) + ">" + String(b.group || "") : "#" + String(b.key || "")); } catch (_) {} }
     return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : r.error === "write-failed" ? 503 : 400)).send(r);
   });
 
@@ -1558,9 +1568,16 @@ async function buildServer() {
   //   errs  [{m, f, l, c}]: deduped client-side by message + file:line; the message is cut to 200
   //         characters, the file to a same-site path (never a query string), c = hits (clamped).
   //         Browser-supplied text: stored as data, escaped by every reader, never interpreted.
+  //   h     (build 2026.09.24-111) the beacon's minutes per clock hour, {UTC hour index -> ms} (an ET
+  //         hour is a whole UTC hour): the heatmap's buckets. Shape-checked here (integer keys, at
+  //         most 8, positive ms, each ≤ 2 min); the gate keeps only the hours of the beacon's own
+  //         wall-time window and scales them to the accepted time (usage-gate.js).
+  //   ld    (-111) 1 on a page load's first beacon: the regression check's page-load count, under a
+  //         known build only, once per page session (the gate) and ≤ 200 per member per day.
   const USAGE_BEACON_ACTS = new Set(["csv", "drawer-open"]);
-  const USAGE_MAX_ACTS = 50, USAGE_MAX_ERRS = 5, USAGE_ERR_MSG = 200, USAGE_ERR_LOC = 120;
-  const usageBuild = new Map();            // uid -> {build, at}: the last beacon's build (in memory: an hour is the window)
+  const USAGE_MAX_ACTS = 50, USAGE_MAX_ERRS = 5, USAGE_ERR_MSG = 200, USAGE_ERR_LOC = 120, USAGE_MAX_HRS = 8;
+  // (build 2026.09.24-111) The last beacon's build per member now lives in accounts.js (usageLastBuild),
+  // written with the 60s flush, so a restart no longer zeroes the stale-build count.
   const USAGE_STALE_MS = 3600 * 1000;
   // Strip control characters (and the bidi/zero-width ones a hostile message would use to lie about
   // what it says) — the text still goes through esc() everywhere it is shown.
@@ -1638,10 +1655,18 @@ async function buildServer() {
         errs.push({ msg, loc, c: Number.isFinite(c) && c > 0 ? Math.min(USAGE_MAX_ACTS, c) : 1 });
       }
     }
-    return { tabs, pwa: b.pwa === true, acts, build, rawBuild, sid, perf, errs: build ? errs : [] };
+    const hrs = {};
+    if (b.h && typeof b.h === "object" && !Array.isArray(b.h)) {
+      for (const [k, v] of Object.entries(b.h).slice(0, USAGE_MAX_HRS)) {
+        if (!/^\d{1,9}$/.test(k)) continue;
+        const ms = Math.round(Number(v));
+        if (Number.isFinite(ms) && ms > 0) hrs[k] = Math.min(USAGE_MAX_FLUSH_MS, ms);
+      }
+    }
+    return { tabs, pwa: b.pwa === true, acts, build, rawBuild, sid, perf, errs: build ? errs : [], hrs, load: !!build && b.ld === 1 };
   }
   function usageStore(uid, p, now) {
-    const r = ACCOUNTS.usageRecord(uid, p.tabs, p.dev, now, { acts: p.acts, build: p.build, perf: p.perf, errs: p.errs });
+    const r = ACCOUNTS.usageRecord(uid, p.tabs, p.dev, now, { acts: p.acts, build: p.build, perf: p.perf, errs: p.errs, hrs: p.hrs, load: p.load });
     if (r.stored) ACCOUNTS.touch(uid);
     return r;
   }
@@ -1653,7 +1678,7 @@ async function buildServer() {
     const now = Date.now();
     const c = usageClamp(req.body);
     if (c.error) return reply.code(400).send({ ok: false, error: c.error });
-    if (c.rawBuild) usageBuild.set(me.uid, { build: c.rawBuild, at: now });
+    if (c.rawBuild) ACCOUNTS.usageLastBuild(me.uid, c.rawBuild, now);   // (-111) persisted with the flush
     c.dev = usageDevice(req.headers["user-agent"], c.pwa);
     // (-110 follow-up) held early beacons get the same 204: sendBeacon never sees the answer anyway
     const g = usageGate.offer(me.uid, c.sid, c, now, (uid, p) => usageStore(uid, p, now));
@@ -1662,16 +1687,9 @@ async function buildServer() {
     return reply.code(204).send();
   });
   // Members whose last beacon inside the hour came from a build other than this one: tabs still
-  // running an old bundle after a deploy (the reload toast is what fixes them).
-  function usageStale(now) {
-    const t = now != null ? now : Date.now();
-    let n = 0;
-    for (const [uid, x] of usageBuild) {
-      if (t - x.at > USAGE_STALE_MS) { usageBuild.delete(uid); continue; }
-      if (x.build !== VERSION && !ACCOUNTS.usagePaused(uid)) n++;
-    }
-    return n;
-  }
+  // running an old bundle after a deploy (the reload toast is what fixes them). (-111) Counted from
+  // the persisted per-member row, so it survives the restart that the deploy itself is.
+  const usageStale = (now) => ACCOUNTS.usageStale(VERSION, now != null ? now : Date.now(), USAGE_STALE_MS);
   // Reach per tab over the full 30-day window, for Admin → Feature visibility (build 2026.09.24-110).
   // quiet = under 10% of the members active in the window opened it at all.
   // (-110 follow-up) GET /api/features calls this on every read: memoized on the flush generation,
@@ -2361,6 +2379,47 @@ async function buildServer() {
     if (!r.ok) return reply.code(404).send(r);
     return r;
   });
+  // (build 2026.09.24-111) Error triage: the operator marks one distinct error (its signature —
+  // '<file>|<message hash>', never text) resolved or open again. Admin-only; like every POST here it
+  // is refused cross-site before any handler runs (the Sec-Fetch-Site hook) and rides SameSite=Lax
+  // cookies. The list itself is in GET /api/admin/usage (health.triage); a toggle bumps its cache key.
+  fastify.post("/api/admin/usage/errors", { bodyLimit: 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    if (!adminOnly(req, reply)) return;
+    const b = req.body || {};
+    const r = ACCOUNTS.usageTriageSet(typeof b.sig === "string" ? b.sig : "", b.resolved === true);
+    if (!r.ok) return reply.code(r.error === "no such error" ? 404 : 400).send(r);
+    return r;
+  });
+  // (build 2026.09.24-111) The post-deploy regression check, on main()'s 60s usage flush: once this
+  // build is ready (≥ 20 page loads or 2h live), each condition that holds against the previous
+  // known build is sent ONCE — through the ops lane (poller.pushOps: the ring, the operator's
+  // Telegram and push, like every other server-health alert). The dedupe is a usage_mark row, so a
+  // restart never re-sends. The alert names a file:line and counts; the browser-supplied message
+  // goes out with markup characters removed (it rides a Telegram HTML message).
+  const usageRegWord = (c) => {
+    const tg = (x) => String(x == null ? "" : x).replace(/[<>&]/g, " ").slice(0, 120);
+    if (c.kind === "new-errors") return c.n + " new error" + (c.n === 1 ? "" : "s") + " hit by \u2265" + ACCOUNTS.USAGE_REG.errMembers + " members \u2014 top: "
+      + tg(c.top.loc) + (c.top.msg ? " \u00b7 " + tg(c.top.msg) : "") + " (" + c.top.members + " members, " + c.top.hits + " hits)";
+    if (c.kind === "err-rate") return "error hits per page load up " + c.x.toFixed(1) + "\u00d7 (" + c.rate.toFixed(2) + " vs " + (c.ratePrev || 0).toFixed(2) + ", " + c.hits + " hits in " + c.loads + " loads)";
+    if (c.kind === "perf") return "p75 first paint " + (c.p75 / 1000).toFixed(1) + "s vs " + (c.p75Prev / 1000).toFixed(1) + "s (+" + Math.round((c.p75 / c.p75Prev - 1) * 100) + "%)";
+    return c.kind;
+  };
+  function usageRegressTick(now) {
+    const t = now != null ? now : Date.now();
+    const v = ACCOUNTS.usageRegress(VERSION, t);
+    ACCOUNTS.usageTriageSweep(t);   // a resolved error that recurred on a newer build reopens even while nobody looks
+    let sent = 0;
+    if (v.state === "regression") for (const c of v.conds) {
+      if (!ACCOUNTS.usageAlertOnce(VERSION, c.kind, t)) continue;
+      sent++;
+      if (poller && poller.pushOpsNow) poller.pushOpsNow("usage: regression on build " + VERSION, usageRegWord(c) + " \u2014 vs build " + v.prev + ". Admin \u00b7 Usage \u00b7 Client health.", "warn");
+      log("usage regression alert (" + c.kind + "): build " + VERSION + " vs " + v.prev);
+    }
+    return { state: v.state, sent };
+  }
+  USAGE_REGRESS = usageRegressTick;
+  fastify.decorate("usageRegressTick", usageRegressTick);
   // ===== /alert: threshold rules written in a conversation (build 2026.09.21-83) ==================
   // The same line works in a chat's composer and at the Telegram bot. A rule written IN a
   // conversation is bound to it: when it fires, the fire posts there under its author's name
@@ -3745,7 +3804,8 @@ async function main() {
   // (build 2026.09.24-109) Usage: the pending beacon minutes land every 60s in one transaction
   // (and once more from ACCOUNTS.close() at shutdown); once a day, rows past the 30-day window
   // fold into the sitewide bucket and the per-member rows go.
-  setInterval(() => { try { if (USAGE_SWEEP) USAGE_SWEEP(); } catch (e) { log("usage sweep FAILED: " + (e && e.message)); } try { ACCOUNTS.usageFlush(); } catch (e) { log("usage flush FAILED: " + (e && e.message)); } }, 60 * 1000).unref();
+  setInterval(() => { try { if (USAGE_SWEEP) USAGE_SWEEP(); } catch (e) { log("usage sweep FAILED: " + (e && e.message)); } try { ACCOUNTS.usageFlush(); } catch (e) { log("usage flush FAILED: " + (e && e.message)); }
+    try { if (USAGE_REGRESS) USAGE_REGRESS(); } catch (e) { log("usage regression check FAILED: " + (e && e.message)); } }, 60 * 1000).unref();   // (build 2026.09.24-111)
   const usageRetain = () => { try { const r = ACCOUNTS.usageRetain(); if (r.dropped) log(`usage retention: ${r.dropped} per-member row(s) before ${r.cut} folded into sitewide totals`); } catch (e) { log("usage retention FAILED: " + (e && e.message)); } };
   setTimeout(usageRetain, 2 * 60 * 1000).unref();
   setInterval(usageRetain, 24 * 3600 * 1000).unref();

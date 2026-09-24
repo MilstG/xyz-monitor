@@ -31,22 +31,33 @@
 //         (-110 follow-up) Quoted text in the message ('…', "…", `…`) is replaced by an ellipsis
 //         before anything leaves the page (the server does it again).
 //   b     the build this tab runs (its first snapshot's stamp): the operator's stale-build count.
+// (build 2026.09.24-111) And two more:
+//   h     the same minutes split by the clock hour they were spent in ({UTC hour index -> ms}; an ET
+//         hour is a whole UTC hour, so the server maps each to its ET weekday × hour): the heatmap no
+//         longer buckets by when the beacon ARRIVED. The server keeps only the hours of the beacon's
+//         own wall-time window and never more than the screen time it accepted.
+//   ld    1 on the page load's first beacon that carries the build: page loads per build, the
+//         denominator of the operator's post-deploy error-rate check. A count, nothing else.
 import { el, esc, state } from "./core.js";
 
 const US_IDLE_MS=5*60000, US_FLUSH_MS=60000, US_GAP_MS=30000, US_INPUT_THROTTLE=1000;
 // ---- the accumulator (pure: every entry point takes `now`, so the tests drive it with a fake clock) ----
-function usAcc(now,tab,vis){ const a={acc:{},tab:tab||null,vis:vis!==false,lastIn:now,since:null}; a.since=usCounting(a,now)?now:null; return a; }
+function usAcc(now,tab,vis){ const a={acc:{},hr:{},tab:tab||null,vis:vis!==false,lastIn:now,since:null}; a.since=usCounting(a,now)?now:null; return a; }
 function usCounting(a,now){ return !!(a.tab&&a.vis&&now-a.lastIn<US_IDLE_MS); }
 // Close the open segment: count [since, min(now, lastInput+idle)], then reopen it if still counting.
+// (-111) The same span is also split at clock-hour boundaries into a.hr (hour index -> ms).
+function usHrAdd(a,from,to){ let x=from; while(x<to){ const h=Math.floor(x/3600000), e=Math.min(to,(h+1)*3600000); a.hr[h]=(a.hr[h]||0)+(e-x); x=e; } }
 function usSettle(a,now){
-  if(a.since!=null&&a.tab){ const end=Math.min(now,a.lastIn+US_IDLE_MS); if(end>a.since) a.acc[a.tab]=(a.acc[a.tab]||0)+(end-a.since); }
+  if(a.since!=null&&a.tab){ const end=Math.min(now,a.lastIn+US_IDLE_MS); if(end>a.since){ a.acc[a.tab]=(a.acc[a.tab]||0)+(end-a.since); usHrAdd(a,a.since,end); } }
   a.since=usCounting(a,now)?now:null; }
 function usSetTab(a,tab,now){ usSettle(a,now); a.tab=tab||null; a.since=usCounting(a,now)?now:null; }
 function usSetVis(a,vis,now){ usSettle(a,now); a.vis=!!vis; a.since=usCounting(a,now)?now:null; }
 function usInput(a,now){ if(now-a.lastIn<US_INPUT_THROTTLE&&a.since!=null) return; usSettle(a,now); a.lastIn=now; a.since=usCounting(a,now)?now:null; }
 // Hand over what has accumulated (whole ms, zero tabs dropped) and start a fresh map.
 function usTake(a,now){ usSettle(a,now); const out={}; for(const k in a.acc){ const v=Math.round(a.acc[k]); if(v>0) out[k]=v; } a.acc={}; return out; }
-function usGive(a,tabs){ for(const k in tabs) a.acc[k]=(a.acc[k]||0)+tabs[k]; }   // a flush that could not go out puts its minutes back
+// (-111) The hour split of what usTake just handed over (call right after it): whole ms, empties dropped.
+function usTakeHr(a){ const out={}; for(const k in a.hr){ const v=Math.round(a.hr[k]); if(v>0) out[k]=v; } a.hr={}; return out; }
+function usGive(a,tabs,hr){ for(const k in tabs) a.acc[k]=(a.acc[k]||0)+tabs[k]; for(const k in (hr||{})) a.hr[k]=(a.hr[k]||0)+hr[k]; }   // a flush that could not go out puts its minutes back
 
 // ---- the live instance -------------------------------------------------------------------------
 // (-110 follow-up) The page session id: random, per page load, never stored — the server's rate-gate key.
@@ -64,7 +75,8 @@ function usUnquote(m){
   return out;
 }
 const US={acc:null,lastSent:0,paused:false,me:null,mine:null,busy:false,sid:usSid(),
-  acts:{}, perf:null, perfDone:false, hiddenSeen:false, errs:new Map()};   // (-110) counters, the paint sample, errors
+  acts:{}, perf:null, perfDone:false, hiddenSeen:false, errs:new Map(),   // (-110) counters, the paint sample, errors
+  ldSent:false};   // (-111) this page load has been counted
 const US_ACTS_CLIENT=new Set(['csv','drawer-open']), US_ERR_MAX=20, US_ERRS_PER_BEACON=5, US_BODY_MAX=3800;
 function usSignedIn(){ return !!(typeof window!=='undefined'&&window.__ME&&window.__ME.uid); }
 function usNow(){ return Date.now(); }
@@ -107,13 +119,15 @@ function usageFlush(force){
   if(!US.acc||US.paused||!usSignedIn()) return false;
   const now=usNow();
   if(!force&&US.lastSent&&now-US.lastSent<US_GAP_MS) return false;   // inside the server's gap: keep accumulating
-  const tabs=usTake(US.acc,now);
+  const tabs=usTake(US.acc,now), hr=usTakeHr(US.acc);
   let tot=0; for(const k in tabs) tot+=tabs[k];
   const acts=US.acts, hasActs=Object.keys(acts).length>0;
   const errs=[...US.errs.values()].filter(e=>e.c>0).slice(0,US_ERRS_PER_BEACON);
-  if(tot<1000&&!hasActs&&US.perf==null&&!errs.length){ usGive(US.acc,tabs); return false; }   // under a second is not worth a request
+  if(tot<1000&&!hasActs&&US.perf==null&&!errs.length){ usGive(US.acc,tabs,hr); return false; }   // under a second is not worth a request
   const out={tabs,pwa:usPwa(),s:US.sid};
+  if(tot>0&&Object.keys(hr).length) out.h=hr;
   const b=state.bootBuild||state.build; if(b) out.b=String(b);
+  if(b&&!US.ldSent) out.ld=1;
   if(hasActs) out.acts=acts;
   if(US.perf!=null&&b) out.perf=US.perf;
   if(errs.length&&b) out.errs=errs.map(e=>({m:e.m,f:e.f,l:e.l,c:e.c}));
@@ -122,8 +136,8 @@ function usageFlush(force){
   let sent=false;
   try{ if(navigator.sendBeacon) sent=navigator.sendBeacon('/api/usage',body); }catch(_){ sent=false; }
   if(!sent){ try{ fetch('/api/usage',{method:'POST',body,keepalive:true,headers:{'content-type':'text/plain'}}).catch(()=>{}); sent=true; }catch(_){ } }
-  if(!sent){ usGive(US.acc,tabs); return false; }
-  US.acts={}; if(out.perf!=null) US.perf=null;
+  if(!sent){ usGive(US.acc,tabs,hr); return false; }
+  US.acts={}; if(out.perf!=null) US.perf=null; if(out.ld) US.ldSent=true;
   for(const e of (out.errs||[])){ const x=US.errs.get(e.m+'\u0001'+e.f+':'+e.l); if(x) x.c=0; }   // sent once; later hits ride as a count
   US.lastSent=now; return true;
 }
@@ -154,6 +168,12 @@ function usFmtH(ms){ const m=ms/60000; return m<60?Math.round(m)+' min':(m/60).t
 // (-110) The feature counters as the member's card names them (the drill-in shows the same row).
 const US_ACT_CHIP={call:'calls',target:'targets',alert:'alerts',share:'shares',csv:'CSV exports',ask:'asks','ai-report':'AI reports',
   'drawer-open':'drawer opens','telegram-link':'Telegram links','push-enable':'push turned on'};
+// (build 2026.09.24-111) The monthly rows kept about this member, shown as kept: this month and last.
+function usMonthsHtml(d){
+  const m=(d&&d.months)||[]; if(!m.length) return '';
+  const nm=(k)=>{ try{ return new Date(String(k)+'-15T12:00:00Z').toLocaleDateString('en-US',{month:'long',timeZone:'UTC'}); }catch(_){ return String(k); } };
+  return '<div class="us-disc" style="margin:0 0 6px">'+m.map(x=>esc(nm(x.key))+': '+usFmtH(+x.ms||0)+' · '+(+x.days||0)+' active day'+(x.days===1?'':'s')).join(' — ')+'</div>';
+}
 function usageCardHtml(){
   if(!usSignedIn()) return '';
   const d=US.mine, paused=US.paused;
@@ -161,8 +181,9 @@ function usageCardHtml(){
   const top=d&&d.tabs&&d.tabs[0]?esc(d.tabs[0].label):'—';
   return '<div class="dm-sh" style="padding:0 0 6px">Your usage</div>'
     // (build 2026.09.24-110 follow-up) everything the member guide (docs.html) lists, in the same order
-    +'<div class="us-disc">The operator can see this summary for every member: which tabs you open and for how long (only while the page is visible and you have used it in the last five minutes); roughly which hour of the week that was (Eastern time); the kind of device (desktop, mobile or tablet, installed or not); how many times you use a few features (calls, targets, alerts, shares, CSV exports, asks, AI reports, ticker drawer opens, linking Telegram, turning on push — the count only, never which ticker); and, to catch bugs, how long the page took to first show the markets table, which build your tab is running, and any JavaScript errors it hit (the error message with quoted text removed, cut to 200 characters, and file:line). It never records what you search, which filters or columns you set, or which tickers you look at. Opening your detail is logged in the admin audit. Kept '+((d&&d.keepDays)||30)+' days, then only sitewide totals remain — except a yes/no per week you were active (for join-week retention), kept 8 weeks.</div>'
+    +'<div class="us-disc">The operator can see this summary for every member: which tabs you open and for how long (only while the page is visible and you have used it in the last five minutes); roughly which hour of the week that was (Eastern time); the kind of device (desktop, mobile or tablet, installed or not); how many times you use a few features (calls, targets, alerts, shares, CSV exports, asks, AI reports, ticker drawer opens, linking Telegram, turning on push — the count only, never which ticker); and, to catch bugs, how long the page took to first show the markets table, which build your tab is running, how many times you load the page, and any JavaScript errors it hit (the error message with quoted text removed, cut to 200 characters, and file:line). It never records what you search, which filters or columns you set, or which tickers you look at. Opening your detail is logged in the admin audit. Kept '+((d&&d.keepDays)||30)+' days, then only sitewide totals remain — except a yes/no per week you were active (for join-week retention), kept 8 weeks, and one total per month (minutes on screen and active days, for month-over-month trends), kept for this month and last.</div>'
     +(d&&d.ok&&!paused?'<div class="us-kpis">'+k('active days · '+(d.keepDays||30)+'d',String(d.activeDays||0))+k('on screen',usFmtH(d.ms||0))+k('top tab',top)+'</div>'
+      +usMonthsHtml(d)
       +((d.acts||[]).some(a=>a.n>0)?'<div class="us-acts">'+(d.acts||[]).filter(a=>a.n>0).map(a=>'<span class="acc-chip on">'+esc(US_ACT_CHIP[a.key]||a.key)+' '+(+a.n||0)+'</span>').join('')+'</div>':''):'')
     +'<div class="us-row"><span class="acc-chip'+(paused?'':' on')+'">'+(paused?'paused':'sharing usage')+'</span>'
     +'<button type="button" class="dm-tool" data-uspause="'+(paused?'0':'1')+'"'+(US.busy?' disabled':'')+'>'+(paused?'Resume':'Pause for me')+'</button></div>'
@@ -189,4 +210,4 @@ async function usagePause(on){
   }catch(_){ }
   US.busy=false; usageMeLoad();
 }
-export { US, usUnquote, usAcc, usCounting, usGive, usInput, usSetTab, usSetVis, usSettle, usTake, usageAct, usageCardHtml, usageErr, usageFirstPaint, usageFlush, usageMeLoad, usagePaint, usagePause, usageView };
+export { US, usUnquote, usAcc, usCounting, usGive, usHrAdd, usInput, usSetTab, usSetVis, usSettle, usTake, usTakeHr, usageAct, usageCardHtml, usageErr, usageFirstPaint, usageFlush, usageMeLoad, usagePaint, usagePause, usageView };

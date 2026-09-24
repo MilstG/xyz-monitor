@@ -286,7 +286,8 @@ test("-109 beacon: flushes through sendBeacon, keeps minutes inside the 30s gap,
     t += 45000;
     assert.equal(U.usageFlush(false), true);
     assert.match(sent[0][1].s, /^[0-9a-z]{12}$/, "(-110 follow-up) the per-page-load session id");
-    assert.deepEqual(sent[0], ["/api/usage", { tabs: { markets: 45000 }, pwa: true, s: U.US.sid }]);
+    // (-111) the same minutes split by clock hour (UTC hour index 0 here: t starts at 1,000,000 ms)
+    assert.deepEqual(sent[0], ["/api/usage", { tabs: { markets: 45000 }, pwa: true, s: U.US.sid, h: { 0: 45000 } }]);
     t += 10000; U.usageView("trend"); t += 5000;
     assert.equal(U.usageFlush(false), false, "inside the server's 30s gap: held, not dropped");
     t += 30000;
