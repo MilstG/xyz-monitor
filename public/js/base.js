@@ -34,6 +34,8 @@ const COLS=[
   {key:'h1', label:'1h', type:'num', td:r=>`<td class="${scCls(r)}"${shade(r.h1,2.5)}>${pctInner(r.h1)}</td>`},
   {key:'h4', label:'4h', type:'num', td:r=>`<td class="${scCls(r)}"${shade(r.h4,4)}>${pctInner(r.h4)}</td>`},
   {key:'d1', label:'24h', type:'num', tip:'Rolling 24-hour change: live mark vs Hyperliquid\u2019s prevDayPx (the price ~24h ago), so the window slides continuously \u2014 at 3pm it measures against yesterday 3pm, not the day boundary. For "since today started" see D open.', td:r=>`<td${shade(r.d1,5)}>${pctInner(r.d1)}</td>`},
+  {key:'vcc', label:'vs close', type:'num', tip:'Change vs the LAST US CASH CLOSE: live mark vs the perp\u2019s price at the most recent 16:00 ET close (13:00 on an early-close day; exchange holidays skipped) \u2014 the equity desk\u2019s "on the day" number. Unlike 24h (Hyperliquid\u2019s rolling prevDayPx, which on a Monday measures against Sunday), this always anchors on a real session close: over a weekend it is the move since Friday\u2019s bell. US equity/index rows only \u2014 crypto and foreign-home listings dash. Hover for the close. Hidden by default \u2014 enable it here in the column menu.',
+    td:r=>vccCell(r,'vcc')},
   {key:'dopen', label:'D open', type:'num', tip:'% change since the open of the current UTC day. Perps trade continuously, so today\u2019s open IS the prior day\u2019s close from the daily-close series \u2014 same convention as M open / Y open. Contrast with 24h, which is a rolling window; this one anchors on the day boundary. Hover for the exact open price. Dash while daily history backfills \u2014 honest null, never a guess.', td:r=>dopenCell(r)},
   {key:'hopen', label:'H open', type:'num', tip:'% change since the current UTC hour opened \u2014 what the forming 1h candle shows on a chart, vs the rolling 1h column. Anchors at :00 and resets there by construction, so it reads small early in the hour: that\u2019s the anchor, not a data gap. Hover for the exact open. Dash while the hourly spine catches up to the boundary \u2014 honest null, never a stale anchor. Hidden by default \u2014 enable it here in the column menu.', td:r=>anchOpenCell(r,'hopen','hopenPx','current UTC hour',1.5)},
   {key:'h4open', label:'4h open', type:'num', tip:'% change since the current UTC 4h bucket opened (00/04/08/12/16/20) \u2014 the forming 4h candle\u2019s read on a chart, vs the rolling 4h column. Resets at each bucket boundary by construction. Hover for the exact open. Dash while the spine catches up \u2014 honest null, never a stale anchor. Hidden by default \u2014 enable it here in the column menu.', td:r=>anchOpenCell(r,'h4open','h4openPx','current UTC 4h bucket',2.5)},
@@ -45,6 +47,8 @@ const COLS=[
   {key:'trend', label:'30d trend', type:'num', tip:'30-day price path (sparkline). Sorts by 30-day % change.', td:r=>trendCell(r)},
   {key:'rs', label:'vs S&P', type:'num', tip:'Excess return vs the S&P 500 perp over the window (this market % − S&P %).',
     td:r=>`<td${shade(r.rs,8)}>${rsCell(r)}</td>`},
+  {key:'rscc', label:'vs S&P (close)', type:'num', tip:'Excess return vs the S&P 500 perp since the LAST US CASH CLOSE: this row\u2019s vs-close move minus the S&P\u2019s own vs-close move \u2014 the session-anchored twin of vs S&P, which follows the window selector. US equity/index rows only. Hidden by default \u2014 enable it here in the column menu.',
+    td:r=>vccCell(r,'rscc')},
   {key:'vstape', label:'vs tape', type:'num', def:'desc', tip:'This market\u2019s window return minus the UNIVERSE MEDIAN return \u2014 relative strength against the whole tape, not a benchmark. On a red tape, sort descending: the names above zero are holding stronger than the rest. Same reference as DownCap/Hit%, so today\u2019s read and the 31d character read line up one-to-one.',
     td:r=>`<td${shade(r.vstape,8)}>${vsTapeCell(r)}</td>`},
   {key:'dvb', label:'\u0394 vs \u2b12', type:'num', def:'desc',
@@ -96,6 +100,11 @@ const COLS=[
   {key:'turn', label:'OI/Vol', type:'num', def:'desc', tip:'Open interest \u00f7 24h volume: how large standing positioning is relative to the flow that could move it. High (\u22652) = stale, crowded positioning \u2014 fragile to squeezes and unwinds, reads well next to the Squeeze and \u0394OI columns. Low (<0.5) = fresh churn, positions turn over within the day.',
     td:r=>turnCell(r)},
 ];
+function vccCell(r,k){ const v=r[k];
+  if(v==null||!isFinite(v)) return `<td><span class="na" title="${r.uni==='main'||r.hm?'US equity/index rows only \u2014 this name has no US cash close':'the last US cash close has not loaded yet'}">\u2014</span></td>`;
+  const c=r.cashClose, when=c&&c.t?new Date(c.t).toLocaleString('en-US',{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',timeZone:'America/New_York'})+' ET':'';
+  const t=k==='vcc'?`mark ${fmtPrice(r.px)} vs ${fmtPrice(c&&c.px)} at the last US cash close${when?' ('+when+')':''}`:`vs-close move ${v>=0?'+':''}${v.toFixed(2)}pp over the S&P\u2019s since the last US cash close${when?' ('+when+')':''}`;
+  return `<td${shade(v,5)}><span class="${v>=0?'pos':'neg'}" title="${esc(t)}">${v>=0?'+':''}${v.toFixed(2)}%</span></td>`; }
 function vsvwapCell(r){ const v=r.vsvwap;
   if(v==null||!isFinite(v)) return '<td><span class="na" title="fills in once hourly history loads (\u226410 min after deploy)">\u2014</span></td>';
   return `<td${shade(v,15)}><span class="${v>=0?'pos':'neg'}" title="mark ${v>=0?'above':'below'} the 30d VWAP (${fmtPrice(r.vwap30)})">${v>=0?'+':''}${v.toFixed(1)}%</span></td>`; }

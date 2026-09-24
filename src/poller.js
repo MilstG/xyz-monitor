@@ -2,7 +2,7 @@
 // Owns all Hyperliquid I/O. Polls the universe, backfills candle history, samples OI,
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, candleWeight, fundingWeight, createUniverseSocket, createCoinalyze } = require("./hyperliquid");
-const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly, closedDailyCloses } = require("./compute");
+const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly, closedDailyCloses, dailyBeta, premSessionBaseline } = require("./compute");
 const { claimGeometryOk, clusterDays, evMeta, capPerUniverse, detectCascExhaust, latestCascade, tradeableNow } = require("./compute");
 const { sectorAuditDecide, mergeSectorAudit, sectorAuditDue } = require("./compute");
 const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFeatures, featureCounts, featureSettable, featureScopeVis, coinScope, scopeFilterSignals, scopeFilterActionable, scopeEventVisible, epLatSplit } = require("./compute");
@@ -541,14 +541,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       while (r.premH.length && r.premH[0][0] < cut) r.premH.shift();
     }
   }
-  function premBaseline(r) {
-    const h = r.premH;
-    if (!h || h.length < 100) return null;   // ~17h of samples minimum before we trust a z-score
-    let s = 0; for (const [, v] of h) s += v;
-    const m = s / h.length;
-    let q = 0; for (const [, v] of h) q += (v - m) * (v - m);
-    const sd = Math.sqrt(q / (h.length - 1));
-    return sd > 0.5 ? { m, sd, n: h.length } : null;   // degenerate flat baselines are useless
+  // (build 2026.09.24-104) Per-session robust baseline (compute.premSessionBaseline): cash-open vs
+  // cash-closed samples kept apart, median/MAD×1.4826, z against the bucket for the session state NOW,
+  // pooled when that bucket is thin. Session names only (the ET-anchored xyz roster); crypto and a
+  // foreign-home listing pool. Replaces one 7-day mean/sd over both regimes.
+  function premBaseline(r, now) {
+    return premSessionBaseline(r.premH, now == null ? Date.now() : now, { sessionRule: r.uni !== "main" && !homeMkt(r.ticker, r.uni) });
   }
 
   function computeDoi(r) {
@@ -1742,7 +1740,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
   }
   function buildDaily() {
-    const daily = {}, funding = {}, overnight = {}, liveClose = {}, oi = {};
+    const daily = {}, funding = {}, overnight = {}, liveClose = {}, oi = {}, cashClose = {};
     let ohlcN = 0, oiN = 0;   // sig terms: names whose latest tuple carries a high, and total OI points — so OHLC upgrades and OI growth bust the cache despite unchanged bar counts
     const nowMs = Date.now();
     const offHours = computeOffHours(nowMs);   // kept here too for client compatibility; the snapshot copy is the fresh one
@@ -1774,6 +1772,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
     const sig = coins + ":" + lens + ":" + (offHours.closed ? 1 : 0) + ":" + Object.keys(HOME_MKTS).map((k) => (offHoursBy[k].closed ? 1 : 0)).join("") + ":" + ohlcN + ":" + oiN;   // session flips bust it — the US one AND each home market's (a KRX close must refresh SMSN's liveClose even while NYSE is open)
     if (dailyCache && sig === dailySig) return;   // unchanged — keep the OBJECT so serialize/gzip caches stay warm + 304s flow
+    let lastCash = null;   // the most recent US cash session that has closed (-104)
+    for (const ses of marketSessions(nowMs - 8 * DAY, nowMs)) if (ses.close <= nowMs) lastCash = ses;
     for (let i = 0; i < act.length; i++) {
       const r = act[i];
       const hs = getHourly(r.coin);   // normalized array spine [[t,o,h,l,c,v], ...]; the boundary engine + priceAsOf are array-indexed
@@ -1793,11 +1793,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         if (r._ovClose && r._ovClose.length) overnight[r.coin] = r._ovClose;
         const oh = hmk ? offHoursBy[hmk] : offHours;
         if (oh.closed) { const pc = priceAsOf(hs, oh.closeT, 3 * HOUR); if (pc > 0) liveClose[r.coin] = +pc.toFixed(8); }  // price at the last close, for the live in-progress gap
+        // (build 2026.09.24-104) The LAST US cash close (16:00 ET, 13:00 on a half day; holidays
+        // skipped) whatever the session state — liveClose exists only while closed. The board's
+        // "vs cash close" column reads the mark against it; 24h keeps Hyperliquid's rolling
+        // prevDayPx, which on a Monday is Sunday's price. US session names only.
+        if (!hmk && lastCash) { const pc = priceAsOf(hs, lastCash.close, 3 * HOUR); if (pc > 0) cashClose[r.coin] = [lastCash.close, +pc.toFixed(8)]; }
       }
     }
     dailySig = sig; dailyVer = Math.max(Date.now(), dailyVer + 1);   // content changed -> new ETag + fresh object; monotonic: two content changes in one ms must not share an ETag
     if (crypto) buildDailyMain(daily, funding, oi);
-    dailyCache = { ts: Date.now(), dataTs: dailyVer, daily, funding, overnight, offHours, offHoursBy, liveClose, oi };
+    dailyCache = { ts: Date.now(), dataTs: dailyVer, daily, funding, overnight, offHours, offHoursBy, liveClose, cashClose, oi };
   }
 
   // ---- signal engine (served at /api/signals) ---------------------------------------------
@@ -3551,7 +3556,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         const prem = (r.px / r.oracle - 1) * 1e4, z = (prem - pb.m) / pb.sd;
         if (Math.abs(z) >= 2 && Math.abs(prem) >= 5) {
           const evd = evidence(null, "prem", null, undefined, r.uni);
-          const sig = mkSignal(r, "prem", `${prem >= 0 ? "+" : ""}${prem.toFixed(1)}bp vs oracle (${z >= 0 ? "+" : ""}${z.toFixed(1)}\u03c3 of its 7d baseline)`,
+          const sig = mkSignal(r, "prem", `${prem >= 0 ? "+" : ""}${prem.toFixed(1)}bp vs oracle (${z >= 0 ? "+" : ""}${z.toFixed(1)}\u03c3 of its 7d ${pb.bucket === "open" ? "cash-session " : pb.bucket === "closed" ? "off-hours " : ""}baseline)`,
             (Math.abs(z) - 2) * 12 + 18, evd,
             { horizon: rOff && rOff.closed ? "cash market closed \u2014 live off-hours price discovery" : EV_META.prem.horizon });
           sig.play = playbook("prem", { prem, oracle: r.oracle, closed: !!(rOff && rOff.closed) });
@@ -9726,28 +9731,18 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     try {
       const benchC = uni === "crypto" ? MAIN_BENCH : benchCoin;
       const b = benchC != null ? rows.get(benchC) : null;
-      const bd = b && Array.isArray(b.dailyRaw) ? b.dailyRaw.filter((k) => Number.isFinite(+k.c)).map((k) => +k.c) : [];
-      if (bd.length >= 22 && closes.length >= 22) {
-        const n = Math.min(bd.length, closes.length, 61);
-        const ra = [], rb = [];
-        for (let i = 1; i < n; i++) {
-          const a0 = closes[closes.length - n + i - 1], a1 = closes[closes.length - n + i];
-          const b0 = bd[bd.length - n + i - 1], b1 = bd[bd.length - n + i];
-          if (a0 > 0 && b0 > 0) { ra.push(a1 / a0 - 1); rb.push(b1 / b0 - 1); }
-        }
-        if (ra.length >= 20) {
-          const mb = rb.reduce((a, x) => a + x, 0) / rb.length, ma = ra.reduce((a, x) => a + x, 0) / ra.length;
-          let cov = 0, varb = 0;
-          for (let i = 0; i < ra.length; i++) { cov += (ra[i] - ma) * (rb[i] - mb); varb += (rb[i] - mb) * (rb[i] - mb); }
-          if (varb > 0) {
-            const beta = cov / varb;
-            const own7 = pctOf(px, r.ref && r.ref.p7d);
-            const bch7 = pctOf(b.px, b.ref && b.ref.p7d);
-            if (own7 != null && bch7 != null)
-              ctx.vsBenchmark = { beta: +beta.toFixed(2), own7dPct: own7, bench7dPct: bch7,
-                betaExplainedPct: +(beta * bch7).toFixed(2), idiosyncraticPct: +(own7 - beta * bch7).toFixed(2) };
-          }
-        }
+      // (build 2026.09.24-104) The board's β, from the one shared definition (compute.dailyBeta):
+      // 90d log returns keyed by UTC day, forming bar dropped. The old block paired closes by array
+      // index, so one missing bar in either series shifted every pair by a day, and read simple
+      // returns over <= 60 bars — the brief's β disagreed with the β column beside it.
+      const bt = b && Array.isArray(b.dailyRaw) ? dailyBeta(daily, b.dailyRaw, { days: 90, now }) : null;
+      if (bt) {
+        const beta = bt.beta;
+        const own7 = pctOf(px, r.ref && r.ref.p7d);
+        const bch7 = pctOf(b.px, b.ref && b.ref.p7d);
+        if (own7 != null && bch7 != null)
+          ctx.vsBenchmark = { beta: +beta.toFixed(2), own7dPct: own7, bench7dPct: bch7,
+            betaExplainedPct: +(beta * bch7).toFixed(2), idiosyncraticPct: +(own7 - beta * bch7).toFixed(2) };
       }
     } catch (_) {}
     // -- live signals + frozen claim anchors ------------------------------------------------------

@@ -298,12 +298,12 @@ instant, and the per-IP rate limit stops being a per-user problem.
   Telegram would also require the bot to be an admin, and the reacting person could not be
   attributed; files over the Bot API's 20 MB download limit cannot be fetched at all.
 - **Pre-earnings setup card** (build 2026.09.24-100) — `/api/earnings/setups`: one card per
-  name reporting within the next **5 US sessions** (weekends skipped; exchange holidays are not
-  modeled, so a holiday week cards a name a day early). Each card combines (1) the reaction study
+  name reporting within the next **5 US sessions** (weekends and US exchange holidays skipped —
+  the same calendar the gap engine uses). Each card combines (1) the reaction study
   — typical (median) |move|, avg, up/down split, gap-and-hold vs gap-and-fade, sample size, the
   +24h anchor median; (2) positioning into the print — live funding (APR) and its percentile vs
   the name's own 31d hourly history, OI change over the run-up (the last 7 calendar days ≈ 5
-  sessions, off the sampled OI history), mark-vs-oracle premium with its z vs the 7d baseline;
+  sessions, off the sampled OI history), mark-vs-oracle premium with its robust z vs the 7d baseline for the current session state;
   (3) the run-up — the live mark vs the close 7 days back, against this name's median drift over
   the same window before its past prints (≥ 3 prints with a hole-free 7-day spine); (4) implied
   vs typical — the typical print move over the CURRENT usual daily move (mean |close-to-close|,
@@ -446,10 +446,18 @@ instant, and the per-IP rate limit stops being a per-user problem.
   never a wrong target. Server and client run a byte-identical reader (`compute.callTarget` /
   `dmCallTarget`, held in step by a test). **Resolution** runs once a minute (`targetSweep`):
   hits are intraday and misses are at the close — a hit or a stop is the first 5-minute bar
-  (from the archive the level scanner reads) that opened after the send and touched the level,
-  then the live mark for the bar still forming; a bar that touches both is `wrong`, the reading
-  that does not flatter the author; a miss is the first daily close at or past the deadline,
-  exactly the close a plain call's horizon reads. The result is written once (`tgRes`, `tgAt`,
+  (from the archive the level scanner reads) that opened after the send and reached the level,
+  then the live mark for the bar still forming; a bar that reaches both is `wrong`, the reading
+  that does not flatter the author. For **US session names** (the ET-anchored xyz roster —
+  equities, indices; not crypto, not a foreign-home listing) a bar reaches a level by a touch
+  during the 09:30–16:00 ET cash session, and off-hours only by a 5-minute **close through** it
+  (a thin overnight/weekend wick is neither a hit nor a stop; the live mark counts in session
+  only), and a date deadline ("by Oct 15", friday, eom) ends at that date's **16:00 ET cash
+  close** (13:00 on an early-close day; a weekend or holiday date ends at the last close before
+  it), with the miss priced at the last 5-minute close at the bell. Crypto keeps any touch,
+  around the clock, and a date ends 24:00 UTC; a relative horizon ("in 3w") runs from the send.
+  Otherwise a miss is the first daily close at or past the deadline, exactly the close a plain
+  call's horizon reads. The composer preview and the open pill state the rule for the name. The result is written once (`tgRes`, `tgAt`,
   `closePx` = the target, the stop or that close) and posts into the conversation the call was
   made in, under its author's name, as a command result — the road a bound `/alert` fire takes, so
   a synced phone mirrors it and nothing new rides the wire. A bar cursor makes a sweep O(new bars)
@@ -459,8 +467,7 @@ instant, and the per-IP rate limit stops being a per-user problem.
   and the median days to a hit — beside the % record, never instead of it; the desk digest names
   each open target's level and progress and the binary record. `GET /api/dm/targets` reads the
   record narrowed to targets; `POST /api/dm/targets` is the operator's resolve-now. Not in this
-  cut: per-member time zones (a date deadline ends at 24:00 UTC, as horizons already do), and a
-  close-through rule for hits (a one-bar wick through the level is a hit).
+  cut: per-member time zones.
 - **The calls record** (`/api/dm/calls`) — every price-stamped message in one place, with the move
   since it was sent and a per-person summary. This is what the stamp was FOR: without somewhere to
   read them together, each call died in the conversation it was made in. Calls carry a
@@ -788,6 +795,37 @@ instance its neighbours would import); the eager graph drops to 1.47 MB raw, and
 stamps the build into `sw.js`, and activate purges other builds' caches); `/api/*`, HTML and
 unversioned URLs are never intercepted. Not done here, and the next step on first-load bytes: a
 minify/bundle build step (no new dependencies were in scope for this pass).
+
+**Accuracy (build 2026.09.24-104).** Seven measurements corrected to agree with their own
+definitions:
+- **AMC reaction, client = server.** The Earnings tab scored an AMC print's reaction on the bar
+  AFTER the print day (a +20% pop read as the next day's +0.8%); it now runs a port of the
+  server's `earnPrintReaction` rule — the print day's own UTC bar (it closes 00:00Z, hours after a
+  16:05 ET print) vs the last close before it, "so far" against the mark while that bar is open —
+  held to the server by a parity test (BMO, AMC, Friday AMC, forming, missing bar).
+- **Backtest annualization.** Sharpe and the vol target annualized equities at √252 while the
+  return series has one entry per UTC day, weekends included (~365/yr): Sharpe was understated
+  ~1.2× and the vol target oversized the book. Both now use the series' own observed periods per
+  year (bars ÷ span); crypto stays 365. The caption states the number.
+- **AI-context β.** The brief's `vsBenchmark` β paired closes by array index (one missing bar
+  shifted every pair a day) over ≤ 60 simple returns; it now uses `compute.dailyBeta`, the
+  board's own definition (90d log returns keyed by UTC day, ≥ 20 pairs) with the forming bar
+  dropped, pinned to the client's `computeBeta` by a parity test.
+- **Holiday-aware earnings sessions.** `earnSessionsAhead` skips US exchange holidays (the gap
+  engine's calendar), not only weekends, and an AMC print on a 13:00 ET early-close day (Jul 3,
+  the Friday after Thanksgiving, Christmas Eve) anchors at 13:00, not 16:00.
+- **Session-true call targets.** A date deadline on a US session name ends at that date's cash
+  close; a hit or a stop needs an in-session touch or an off-hours 5m close through the level
+  (details under Messages above). Crypto is unchanged.
+- **Premium z per session.** The mark-vs-oracle premium's z-score (the `prem` signal, the
+  pre-earnings card) pooled cash-open and cash-closed samples into one 7-day mean/sd. The two
+  regimes now keep separate baselines — median and MAD×1.4826, robust to the dislocations being
+  scored — and z uses the one for the current session state (pooled when that bucket has < 60
+  samples; crypto and foreign-home names pool).
+- **vs cash close.** A new (hidden by default) **vs close** column: the mark vs the last US cash
+  close (16:00 ET, 13:00 on a half day, holidays skipped), shipped on `/api/daily` as
+  `cashClose`, and a **vs S&P (close)** twin — the row's vs-close move minus the S&P's. The 24h
+  column keeps its meaning (Hyperliquid's rolling `prevDayPx`, which on a Monday is Sunday's).
 
 ## Optional: earnings calendar (Finnhub)
 

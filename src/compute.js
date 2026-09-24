@@ -727,6 +727,78 @@ function closedDailyCloses(closes, now) {
   const last = closes[closes.length - 1];
   return last && Number.isFinite(+last[0]) && +last[0] + DAY > (now == null ? Date.now() : now) ? closes.slice(0, -1) : closes;
 }
+// ---- premium baseline, per session state (build 2026.09.24-104) -------------------------------------
+// The mark-vs-oracle premium of an xyz perp lives two lives: during the US cash session the oracle
+// tracks a live book and the premium hugs zero; with the cash market shut the perp IS the price
+// discovery and the premium swings wide. One pooled 7-day mean/sd mixed the two, so a normal
+// off-hours premium read rich vs a baseline dominated by quiet session hours (and a real session
+// dislocation hid inside the off-hours spread). Now: samples split by whether the US cash session
+// was open at their timestamp (marketSessions — holidays and early closes included), each bucket's
+// centre = MEDIAN and scale = MAD × 1.4826 (σ-consistent, robust to the dislocations being scored),
+// and z uses the bucket matching `now`. A bucket with < minBucket samples (default 60 ≈ 10h at the
+// 10-min cadence) or a degenerate scale falls back to the pooled robust baseline; pooled needs
+// >= minPooled (100) samples. `sessionRule` false (crypto, a foreign-home listing) = pooled only.
+// samples: [[ts, bp], ...] oldest first. Returns { m, sd, n, bucket: "open"|"closed"|"pooled" } | null.
+function premRobust(vals, floor) {
+  const n = vals.length; if (!n) return null;
+  const a = vals.slice().sort((x, y) => x - y), med = (xs) => (xs.length % 2 ? xs[(xs.length - 1) / 2] : (xs[xs.length / 2 - 1] + xs[xs.length / 2]) / 2);
+  const m = med(a), dev = a.map((v) => Math.abs(v - m)).sort((x, y) => x - y), sd = med(dev) * 1.4826;
+  return sd > floor ? { m, sd, n } : null;
+}
+function premSessionBaseline(samples, nowMs, opts) {
+  const o = opts || {}, minPooled = o.minPooled || 100, minBucket = o.minBucket || 60, floor = o.floor == null ? 0.5 : o.floor;
+  if (!Array.isArray(samples) || samples.length < minPooled) return null;   // ~17h of samples before a z means anything
+  const all = [];
+  for (const x of samples) if (x && Number.isFinite(+x[1])) all.push(+x[1]);
+  if (all.length < minPooled) return null;
+  const pooled = premRobust(all, floor);
+  if (!o.sessionRule) return pooled && Object.assign(pooled, { bucket: "pooled" });
+  const now = nowMs == null ? Date.now() : nowMs;
+  const t0 = +samples[0][0], ses = marketSessions(Math.min(t0, now), Math.max(+samples[samples.length - 1][0], now));
+  let si = 0;
+  const isOpen = (t) => { while (si < ses.length && ses[si].close <= t) si++; return si < ses.length && t >= ses[si].open; };
+  const open = [], closed = [];
+  for (const x of samples) if (x && Number.isFinite(+x[1])) (isOpen(+x[0]) ? open : closed).push(+x[1]);
+  const openNow = ses.some((s) => now >= s.open && now < s.close);
+  const bucket = openNow ? open : closed;
+  const b = bucket.length >= minBucket ? premRobust(bucket, floor) : null;
+  if (b) return Object.assign(b, { bucket: openNow ? "open" : "closed" });
+  return pooled && Object.assign(pooled, { bucket: "pooled" });
+}
+// ---- board β, shared (build 2026.09.24-104) ------------------------------------------------------
+// The SAME definition as the Markets board's β column (public/js/data.js computeBeta over corr.js
+// dailyReturns): log returns between consecutive usable closes, each KEYED BY THE UTC DAY of the
+// later bar; pair only the days both series have; keep days >= floor(now/DAY) - days (default 90);
+// >= minN (20) pairs; β = cov/var(bench), r2 = cov²/(var·var). Server readers (the AI context's
+// vsBenchmark) used to pair closes by array INDEX — one missing bar in either series silently
+// shifted every pair by a day — over simple returns on <= 60 bars. Keying by day fixes the
+// alignment; `dropForming` (default true) drops a bar still open at `now` (t + DAY > now), since a
+// partial day's return is not a daily return. rows: [{t, c}] oldest first (c may be a string).
+function dailyLogReturnsByDay(rows) {
+  const m = new Map(); let prev = null;
+  if (!Array.isArray(rows)) return m;
+  for (const k of rows) {
+    const c = k ? parseFloat(k.c) : NaN, t = k ? +k.t : NaN;
+    if (!Number.isFinite(c) || !Number.isFinite(t)) continue;
+    if (prev != null && prev > 0 && c > 0) m.set(Math.floor(t / DAY), Math.log(c / prev));
+    prev = c;
+  }
+  return m;
+}
+function dailyBeta(rowsA, rowsB, opts) {
+  const o = opts || {}, now = o.now == null ? Date.now() : o.now, L = o.days || 90, minN = o.minN || 20;
+  const closed = (rows) => (o.dropForming === false || !Array.isArray(rows)) ? rows
+    : rows.filter((k) => k && Number.isFinite(+k.t) && +k.t + DAY <= now);
+  const mr = dailyLogReturnsByDay(closed(rowsA)), mb = dailyLogReturnsByDay(closed(rowsB));
+  const cutoff = Math.floor(now / DAY) - L, xs = [], ys = [];
+  for (const [d, vb] of mb) { if (d < cutoff) continue; const va = mr.get(d); if (va !== undefined) { xs.push(vb); ys.push(va); } }
+  const n = xs.length; if (n < minN) return null;
+  let sx = 0, sy = 0; for (let i = 0; i < n; i++) { sx += xs[i]; sy += ys[i]; }
+  const mx = sx / n, my = sy / n; let cov = 0, vx = 0, vy = 0;
+  for (let i = 0; i < n; i++) { const dx = xs[i] - mx, dy = ys[i] - my; cov += dx * dy; vx += dx * dx; vy += dy * dy; }
+  if (vx <= 0) return null;
+  return { beta: cov / vx, r2: vy > 0 ? (cov * cov) / (vx * vy) : 0, n };
+}
 // Trailing 30-return σ at bar i of a studyBars array (bars carry .c). Null with fewer than 15.
 function fwdRet(closes, i, k) {
   if (i + k >= closes.length) return null;
@@ -4133,7 +4205,7 @@ module.exports = {
   HOME_MKTS, homeCalCovered, homeCalHorizon, homeDayStatus, homeWallToUtc, homeMarketSessions,
   homeCashAnchors, homeClosedWindows, homeOvernightAnchors, homeWeekendAnchors,
   utcDayAnchors, cryptoWeekendAnchors,
-  usDayStatus, marketSessions, closedWindows,
+  usDayStatus, marketSessions, closedWindows, dailyBeta, dailyLogReturnsByDay, premSessionBaseline,
   summarizeEvents, retStd, dailyRets, intrabarCross, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
   EV_META, playbook, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, LVL_MAP_W, emaCrossOutcomes, emaCrossStudy, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, dipReclaim, detectLevels, nextLevelAbove, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
   // EMA trend ladder (Trend tab)
@@ -4632,17 +4704,22 @@ function mergeEarnPrints(prev, incoming, nowMs, maxAgeDays) {
 // print (the 20:00 ET close already carried the after-hours reaction), so an AMC reaction was
 // measured as the following day's drift and a +20% print read as +0.8%.
 // With an HOURLY spine the print is anchored at its ET wall time (etWallToUtc + priceAsOf):
-// AMC at 16:00 ET (the cash close; prints land minutes after), BMO at 06:00 ET (before essentially
-// every pre-market print — anchoring later risks a POST-print reference, the exact defect this
+// AMC at the cash close (16:00 ET, 13:00 on an early-close day; prints land minutes after), BMO
+// at 06:00 ET (before essentially every pre-market print — anchoring later risks a POST-print reference, the exact defect this
 // replaces; the price is that +1h reads a mostly pre-print hour for a 07:30 printer). DMH/TBD
 // have no known time and take the daily convention only.
-const EARN_ANCHOR_H = { AMC: 16, BMO: 6 };
+const EARN_ANCHOR_H = { AMC: 16, BMO: 6 }, EARN_EARLY_CLOSE_H = 13;
 function earnPrintUtc(print, opts) {
   if (!print || typeof print.d !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(print.d)) return null;
   const o = opts || {};
-  const h = print.s === "AMC" ? (o.amcHour == null ? EARN_ANCHOR_H.AMC : o.amcHour) : print.s === "BMO" ? (o.bmoHour == null ? EARN_ANCHOR_H.BMO : o.bmoHour) : null;
+  const y = +print.d.slice(0, 4), mo = +print.d.slice(5, 7), d = +print.d.slice(8, 10);
+  // (build 2026.09.24-104) AMC anchors at the ACTUAL cash close: 13:00 ET on an early-close half
+  // day (Jul 3, the Friday after Thanksgiving, Christmas Eve — usDayStatus 1), else 16:00. A 16:00
+  // anchor on a half day read three post-close hours into the reference.
+  const amcDef = usDayStatus(y, mo, d) === 1 ? EARN_EARLY_CLOSE_H : EARN_ANCHOR_H.AMC;
+  const h = print.s === "AMC" ? (o.amcHour == null ? amcDef : o.amcHour) : print.s === "BMO" ? (o.bmoHour == null ? EARN_ANCHOR_H.BMO : o.bmoHour) : null;
   if (h == null) return null;
-  return etWallToUtc(+print.d.slice(0, 4), +print.d.slice(5, 7), +print.d.slice(8, 10), Math.floor(h), Math.round((h % 1) * 60));
+  return etWallToUtc(y, mo, d, Math.floor(h), Math.round((h % 1) * 60));
 }
 // ---- study A: earnings reaction curve ---------------------------------------------------------
 // For each past print with a known ET time (BMO/AMC), the price AT the print anchor from the hourly
@@ -4757,6 +4834,7 @@ module.exports.earnReactionsFor = earnReactionsFor;
 module.exports.earnReactionCurve = earnReactionCurve;
 module.exports.earnPrintUtc = earnPrintUtc;
 module.exports.EARN_ANCHOR_H = EARN_ANCHOR_H;
+module.exports.EARN_EARLY_CLOSE_H = EARN_EARLY_CLOSE_H;
 // ---- pre-earnings setup card (build 2026.09.24-100) -------------------------------------------
 // One card per name reporting within EARN_SETUP_SESSIONS US sessions: the reaction study (what a
 // print usually does), the positioning going INTO it (funding + its own-history percentile, OI
@@ -4767,18 +4845,20 @@ module.exports.EARN_ANCHOR_H = EARN_ANCHOR_H;
 // Every block that cannot be computed says so in a `why` string; a missing number is never a zero.
 // Run-up window: 5 US sessions ~ 7 calendar days. The perp's daily spine is 24/7 UTC days, so the
 // window is measured in CALENDAR days on the spine (the same bars the study reads) and labeled in
-// sessions for the reader. Session counting skips weekends only — exchange holidays are not
-// modeled, so a holiday week reads one session long (conservative: a name is carded a day early).
+// sessions for the reader. Session counting skips weekends AND US exchange holidays (usDayStatus,
+// build 2026.09.24-104 — a holiday week used to read one session long and card a name a day early).
 const EARN_SETUP_SESSIONS = 5, EARN_RUNUP_D = 7;
 // Whole US sessions between the current ET day and the print date: 0 = reports today, 1 = next
-// weekday, ... null for a passed or malformed date.
+// trading day, ... null for a passed or malformed date.
 function earnSessionsAhead(dateStr, nowMs) {
   const diff = earnDayDiff(dateStr, nowMs);
   if (diff == null || diff < 0) return null;
   const t = etDayStr(nowMs);
   const base = Date.UTC(+t.slice(0, 4), +t.slice(5, 7) - 1, +t.slice(8, 10));
   let n = 0;
-  for (let k = 1; k <= diff; k++) { const wd = new Date(base + k * DAY).getUTCDay(); if (wd !== 0 && wd !== 6) n++; }
+  // (build 2026.09.24-104) Exchange holidays skip like weekends — the calendar above (usDayStatus)
+  // decides; an early-close half day is still a session.
+  for (let k = 1; k <= diff; k++) { const x = new Date(base + k * DAY); if (usDayStatus(x.getUTCFullYear(), x.getUTCMonth() + 1, x.getUTCDate()) !== 2) n++; }
   return n;
 }
 // Run-up read off the daily spine ([{t, c}], UTC days, oldest first) and the live mark:
@@ -6081,6 +6161,7 @@ module.exports.callRead = callRead;
 const TG_NUM = "\\$?(\\d+(?:\\.\\d+)?)\\s*(k)?(?![\\w%/]|\\.\\d)";
 const TG_PX = new RegExp("^[\\s,:;\\u2014-]*((?:(?:goes|going|heading|headed|runs?|back)\\s+)?(?:to|\\u2192|->|target(?:ing)?|tgt)\\s*)?" + TG_NUM, "i");
 const TG_STOP = new RegExp("(?:^|\\W)(?:unless|stop(?:\\s+at)?|(?:wrong|invalid(?:ated)?)\\s+(?:under|over|above|below|at|if))\\s+" + TG_NUM, "i");
+const TG_DATED = /^(?:by\b|eo[wmy]\b|end of|year[ -]?end)/i;   // callRead's DATE words (vs relative horizons like "30d", "next week")
 function callTarget(text, sym, markPx, nowMs, sideOverride) {
   const t = String(text || ""), S = String(sym || "").toUpperCase();
   const i = S ? t.toUpperCase().indexOf("$" + S) : -1;
@@ -6092,18 +6173,18 @@ function callTarget(text, sym, markPx, nowMs, sideOverride) {
   if (/^\s*(puts|calls)\b/i.test(rest)) return null;            // "$HOOD 100 puts" is a strike
   const px = +p[2] * (p[3] ? 1000 : 1);
   const DAY = 86400e3, now = Number.isFinite(+nowMs) ? +nowMs : Date.now();
-  let horizonMs = null, byWord = null, m;
+  let horizonMs = null, byWord = null, dated = false, m;
   const days = (d) => (d >= 1 && d <= 365 ? d * DAY : null);
   if ((m = /(?:^|\W)in\s+(\d{1,3})\s*(d|days?|w|wks?|weeks?|mo|months?)\b/i.exec(rest))) {
     const u = m[2].toLowerCase(), n = +m[1];
     horizonMs = days(u[0] === "d" ? n : u[0] === "w" ? n * 7 : n * 30); byWord = horizonMs ? m[0].replace(/^\W/, "").trim() : null;
   } else if ((m = /(?:^|\W)by\s+(\d{4})-(\d{2})-(\d{2})\b/i.exec(rest))) {
     const end = Date.UTC(+m[1], +m[2] - 1, +m[3] + 1) - 1;
-    if (new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])).getUTCDate() === +m[3] && end > now) { horizonMs = days(Math.max(1, Math.ceil((end - now) / DAY))); byWord = horizonMs ? m[0].replace(/^\W/, "").trim() : null; }
+    if (new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])).getUTCDate() === +m[3] && end > now) { horizonMs = days(Math.max(1, Math.ceil((end - now) / DAY))); byWord = horizonMs ? m[0].replace(/^\W/, "").trim() : null; dated = !!horizonMs; }
   } else {
     // Every other date word is callRead's own: the rest of the sentence read as if it followed the ticker.
     const r = callRead("$" + S + " " + rest, S, now);
-    if (r.horizonMs) { horizonMs = r.horizonMs; byWord = r.horizonWord; }
+    if (r.horizonMs) { horizonMs = r.horizonMs; byWord = r.horizonWord; dated = TG_DATED.test(byWord); }
   }
   // A bare number with no target word and no deadline is prose ("$HOOD 2 weeks", "$NVDA 3 more"),
   // not a failed target: stay silent. A target word with no deadline is an attempt — say what's missing.
@@ -6116,9 +6197,53 @@ function callTarget(text, sym, markPx, nowMs, sideOverride) {
   if (side === "long" ? px <= markPx : px >= markPx) return { ok: false, px, error: side + " to " + px + " is behind the mark (" + markPx + ")" };
   if (stop != null && (side === "long" ? stop >= markPx : stop <= markPx)) return { ok: false, px, error: "the stop (" + stop + ") sits on the wrong side of the mark" };
   const word = (p[0] + rest.slice(0, Math.max(0, rest.indexOf(byWord)) + byWord.length)).replace(/^[\s,:;\u2014-]+/, "").replace(/[\s,.;:]+$/, "");
-  return { ok: true, px, stop, side, horizonMs, word };
+  // byDay (build 2026.09.24-104): the calendar DATE a dated deadline names ("by Oct 15", friday, eom,
+  // year end, an ISO date) — the UTC day the rounded-up horizon was measured to; null for a relative
+  // horizon ("in 3w"). The server ends a dated deadline at that date's US cash close for session
+  // names (callTargetDeadline); the horizon stays the fallback.
+  const byDay = dated ? new Date(now + horizonMs - DAY + 1).toISOString().slice(0, 10) : null;
+  return { ok: true, px, stop, side, horizonMs, word, byDay };
 }
 module.exports.callTarget = callTarget;
+// ---- session-true call targets (build 2026.09.24-104) ------------------------------------------------
+// A DATE deadline on a session name (the ET-anchored xyz roster: US equities, indices and the rest —
+// not crypto, not a foreign-home listing) ends at that date's US CASH CLOSE, 16:00 ET, or 13:00 ET on
+// an early-close day, from the same calendar as the gap engine (usDayStatus). A date the exchange is
+// shut (weekend, holiday) ends at the last cash close before it — "by Sat Oct 17" is Friday's close.
+// Crypto (and a foreign-home name) keeps 24:00 UTC of the date. Null when there is no date, or the
+// close already passed at `now` (the caller keeps the horizon it had). Returns the deadline in ms.
+function callTargetDeadline(byDay, sessionRule, nowMs) {
+  if (typeof byDay !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(byDay)) return null;
+  const now = Number.isFinite(+nowMs) ? +nowMs : Date.now();
+  let y = +byDay.slice(0, 4), mo = +byDay.slice(5, 7), d = +byDay.slice(8, 10);
+  let end;
+  if (!sessionRule) end = Date.UTC(y, mo - 1, d + 1);
+  else {
+    let st = usDayStatus(y, mo, d), k = 0;
+    while (st === 2 && k++ < 10) { ({ y, mo, d } = shiftWall(y, mo, d, -1)); st = usDayStatus(y, mo, d); }
+    if (st === 2) return null;
+    end = etWallToUtc(y, mo, d, st === 1 ? 13 : 16, 0);
+  }
+  return end > now ? end : null;
+}
+// Does one 5-minute bar [ts, o, h, l, c] reach `level` for a session name? During the US cash session
+// a TOUCH counts (h/l); off-hours — the thin overnight/weekend book, where a one-print wick is not
+// the market agreeing — only a bar that CLOSES through the level counts. `up` = the level sits above
+// (a long target, a short's stop). `sessions` = marketSessions() covering the bar. A non-session name
+// (crypto) keeps any touch. The resolver applies it to targets and stops alike.
+function callBarReaches(bar, level, up, sessionRule, sessions) {
+  const ts = +bar[0], hi = +bar[2], lo = +bar[3], c = +bar[4];
+  const touch = up ? hi >= level : lo <= level;
+  if (!touch || !sessionRule || inCashSession(ts, sessions)) return touch;
+  return Number.isFinite(c) && c > 0 && (up ? c >= level : c <= level);
+}
+function inCashSession(ts, sessions) {
+  if (Array.isArray(sessions)) for (const s of sessions) if (ts >= s.open && ts < s.close) return true;
+  return false;
+}
+module.exports.callTargetDeadline = callTargetDeadline;
+module.exports.callBarReaches = callBarReaches;
+module.exports.inCashSession = inCashSession;
 
 module.exports.cardText = cardText;
 module.exports.cardTitle = cardTitle;

@@ -180,6 +180,7 @@ function applyDaily(d){ if(!d||!d.daily) return;
     r.daily=Array.isArray(arr)?arr.map(p=>({t:p[0], c:p[1], h:p[2], v:p[3]})):r.daily;   // h/v are additive tuple columns (2026.07.24-04) — absent on an older server, undefined here
     if(d.oi && Array.isArray(d.oi[coin])){ r.dailyOI=d.oi[coin]; r._doi=null; }
     r.closePx=(d.liveClose && d.liveClose[coin]>0)?d.liveClose[coin]:null;   // price at the last close, for the live in-progress gap
+    { const cc=d.cashClose&&d.cashClose[coin]; r.cashClose=(Array.isArray(cc)&&cc[1]>0)?{t:cc[0],px:cc[1]}:null; }   // (-104) the last US cash close, any session state — "vs cash close" 
     if(d.funding && Array.isArray(d.funding[coin])){ r.dailyFund=d.funding[coin].map(p=>({t:p[0], f:p[1]})); r._dfund=null; }
     if(d.overnight && Array.isArray(d.overnight[coin])){ r.overnight=d.overnight[coin].map(p=>({t:p[0], g:p[1], f:p[2]})); r._dov=null;
       const cut=Date.now()-30*DAY; let eq=1, n=0;                    // 30d cumulative off-hours drift (tooltip)
@@ -356,6 +357,12 @@ function computeMomentum(r){
   }
   return {mom:100*Math.tanh(coreA/1.5), momp:100*Math.tanh(coreB/1.5), why:why.length?why.join(' · '):null};
 }
+// Δ% of the live mark vs the last US cash close; undefined for crypto, a foreign-home name (its close
+// is not the US one) or while the close has not shipped.
+function vsCashClose(r){
+  if(!r||r.uni==='main'||r.hm||!r.cashClose||!(r.cashClose.px>0)||!(r.px>0)||!isFinite(r.px)) return undefined;
+  return (r.px/r.cashClose.px-1)*100;
+}
 function computeDerived(){
   const tfKey=TF_MAP[state.tf]||'d1';
   const bX=state.benchCoin?state.rows.get(state.benchCoin):null, bM=state.benchMain?state.rows.get(state.benchMain):null;
@@ -368,7 +375,13 @@ function computeDerived(){
     for(const u of ['xyz','main']){ const a=acc[u]; if(a.length>=5){ a.sort((x,y)=>x-y);
       tapeMed[u]=a.length%2?a[(a.length-1)/2]:(a[a.length/2-1]+a[a.length/2])/2; } } }
   state._tapeMed=tapeMed;
+  const bXcc=bX?vsCashClose(bX):null;   // (-104) the S&P's own move vs its last cash close, for the RS variant
   for(const r of state.rows.values()){ if(r.delisted)continue;
+    // vs cash close (build 2026.09.24-104): the mark vs the LAST US cash close (16:00 ET; 13:00 on a
+    // half day; holidays skipped), the equity trader's "change on the day". 24h stays Hyperliquid's
+    // rolling prevDayPx — on a Monday that is Sunday's price, not Friday's close.
+    r.vcc=vsCashClose(r);
+    r.rscc=(r.vcc==null||!state.benchCoin||r.uni==='main')?undefined:(r.coin===state.benchCoin?0:(bXcc!=null?r.vcc-bXcc:undefined));
     // vs tape: this market's window return minus the universe median — the live counterpart of
     // DownCap/Hit% (same reference), and the direct read for "holding stronger than the rest".
     { const tm=tapeMed[r.uni==='main'?'main':'xyz'], a=r[tfKey];

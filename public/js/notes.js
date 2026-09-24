@@ -700,25 +700,35 @@ function earnRecentList(){
   return [...m.values()];
 }
 // Per-print reaction move for a reported row, computed from the daily closes already in the
-// browser and mirroring the reaction study's convention EXACTLY: BMO/DMH prints score their own
-// UTC daily candle, AMC prints the next one (the perp trades through weekends, so a Friday AMC
-// print lands on Saturday's candle). The live day-move column would be WRONG here — that is
-// today's move, not the reaction to a print one or two days old. Null-honest: a reaction candle
-// still forming reads "so far"; one not opened or not retained yet is stated, never zeroed.
+// browser with the SERVER's rule (compute.earnPrintReaction, daily branch — build 2026.09.24-104;
+// a parity test runs both on the same fixtures): the last close BEFORE the print day against the
+// print day's own UTC bar, for BMO and AMC alike. That bar closes 00:00Z — hours after a 16:05 ET
+// print — so it already carries the after-hours reaction; the old AMC rule (the NEXT bar vs the
+// print day's close) measured the following day's drift and read a +20% pop as +0.8%. The live
+// day-move column would be WRONG here — that is today's move, not the reaction to a print one or
+// two days old. Null-honest: a print bar still forming (or not on the spine yet) reads "so far"
+// against the live mark; no usable close before the print is stated, never zeroed.
+function earnReactPct(e, cl, px, now){
+  if(!e||typeof e.d!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(e.d)||!Array.isArray(cl)||!cl.length) return null;
+  const dayOf=(t)=>{ const x=new Date(t); return x.getUTCFullYear()+'-'+String(x.getUTCMonth()+1).padStart(2,'0')+'-'+String(x.getUTCDate()).padStart(2,'0'); };
+  const live=Number.isFinite(px)&&px>0?px:null;
+  let ref=null, pb=null;
+  for(const k of cl){ const c=k?parseFloat(k.c):NaN; if(!Number.isFinite(c)) continue;
+    const d=dayOf(k.t); if(d<e.d) ref=c; else if(d===e.d){ pb={t:+k.t,c}; break; } else break; }
+  if(!(ref>0)) return null;
+  if(Date.UTC(+e.d.slice(0,4),+e.d.slice(5,7)-1,+e.d.slice(8,10))>now) return null;
+  if(pb&&Number.isFinite(pb.t)&&pb.t+DAY<=now) return { pct:+((pb.c-ref)/ref*100).toFixed(1), state:'final' };
+  if(live!=null) return { pct:+((live-ref)/ref*100).toFixed(1), state:'forming' };
+  return null;
+}
 function earnReactHtml(e){
   const r=state.rows.get(e.coin), cl=r&&r.daily;
   const dash=(why)=>`<span class="earn-live sec" data-tip="${esc(why)}">reaction —</span>`;
   if(!cl||cl.length<2) return dash('reaction pending — daily candles for this name are not loaded in the browser yet');
-  const dayOf=(t)=>{ const x=new Date(t); return x.getUTCFullYear()+'-'+String(x.getUTCMonth()+1).padStart(2,'0')+'-'+String(x.getUTCDate()).padStart(2,'0'); };
-  let pi=-1; for(let i=0;i<cl.length;i++){ if(dayOf(cl[i].t)===e.d){ pi=i; break; } }
-  if(pi<0) return dash('the print date is outside the retained daily candle window');
-  const ri=e.s==='AMC'?pi+1:pi;
-  if(ri<=0||ri>=cl.length) return dash('the reaction candle (the session after an AMC print) has not opened yet');
-  const c1=parseFloat(cl[ri].c), c0=parseFloat(cl[ri-1].c);
-  if(!isFinite(c1)||!isFinite(c0)||c0<=0) return dash('reaction candle retained but its closes are not usable yet');
-  const mv=(c1-c0)/c0*100;
-  const live=ri===cl.length-1&&dayOf(cl[ri].t)===dayOf(Date.now());
-  const tip=`the print's own reaction move — ${e.s==='AMC'?'the daily candle AFTER the report (AMC prints land after the close)':'the report day\u2019s own daily candle'} vs the prior close, same convention as the reaction study (UTC candles; the perp trades through weekends)${live?'. That candle is STILL OPEN \u2014 this is the move so far, not a settled print':''}`;
+  const rx=earnReactPct(e, cl, r&&parseFloat(r.px), Date.now());
+  if(!rx) return dash('no usable close before the print in the retained daily candle window, or no live mark yet');
+  const mv=rx.pct, live=rx.state==='forming';
+  const tip=`the print's own reaction move — the report day’s own UTC daily candle vs the last close before the print (${e.s==='AMC'?'an AMC print lands ~16:05 ET, inside that candle, which closes 00:00Z':'a pre-market print trades on its own day'}), same convention as the reaction study and the server brief (the perp trades through weekends)${live?'. That candle is STILL OPEN — this is the move so far against the live mark, not a settled print':''}`;
   return `<span class="earn-live" data-tip="${esc(tip)}"><b class="${mv>=0?'pos':'neg'}">${mv>=0?'+':''}${mv.toFixed(1)}%</b><span class="sec"> reaction${live?' so far':''}</span></span>`;
 }
 // Void-control wiring for reported rows: confirm, POST the tombstone, reload the payload (the

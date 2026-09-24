@@ -1853,3 +1853,51 @@ test("targets -95: a long-unswept target catches up a month of archive a pass, a
   const r = A.targetSweep(c.ts + 45 * DAY);
   assert.ok(r.length === 1 && r[0].res === "hit" && r[0].at === c.ts + 40 * DAY, "pass two finds the bar that hit, before the live stop: " + JSON.stringify(r));
 });
+
+// ===== build 2026.09.24-104: session-true call targets ============================================
+// A date deadline on a US session name ends at that date's cash close (not 24:00 UTC, not the send
+// time rounded up to whole days); an off-hours wick is not a hit (nor a stop) — only an in-session
+// touch or an off-hours 5m CLOSE through the level; a crypto target keeps any touch and 24:00 UTC.
+test("targets -104: session names — deadline at the cash close, in-session touch or off-hours close-through, stops alike; crypto unchanged", async () => {
+  const { marketSessions, closedWindows, etParts, callTargetDeadline } = require("../src/compute");
+  const marks = { "xyz:HOOD": 100, "xyz:PLTR": 50, "xyz:AMD": 150, BTC: 100 };
+  const A = freshAccounts(marks);
+  const { g, l } = await seedTwo(A);
+  const T = A.threadFor(g.uid, l.uid, true).id;
+  const resolve = (x) => (x === "BTC" ? "BTC" : marks["xyz:" + x] ? "xyz:" + x : null);
+  const DAY = 86400e3, MIN = 60e3;
+  const bars = {};
+  A.setBarSource((coin, from, to) => (bars[coin] || []).filter((b) => b[0] >= from && b[0] <= to));
+  A.setPxHistory(() => null);
+  const ymd = (t) => new Date(t).toISOString().slice(0, 10);
+  const day20 = ymd(Date.now() + 20 * DAY);
+  const eq = A.send(g.uid, null, "$HOOD to 125 by " + day20 + " stop 90", resolve, { thread: T }).message;
+  const exp = callTargetDeadline(day20, true, eq.ts);
+  assert.equal(eq.call.tg.by, exp, "the deadline is the cash close the calendar names");
+  const et = etParts(exp);
+  assert.ok((et.h === 16 || et.h === 13) && et.mi === 0, "…16:00 ET (13:00 on a half day): " + JSON.stringify(et));
+  const cr = A.send(g.uid, null, "$BTC to 125 by " + day20, resolve, { thread: T }).message;
+  assert.equal(cr.call.tg.by, Date.parse(day20 + "T00:00:00Z") + DAY, "crypto keeps 24:00 UTC of the date — exact, not rounded from the send time");
+  const pl = A.send(g.uid, null, "$PLTR to 60 by " + day20 + " unless 45", resolve, { thread: T }).message;
+  const amd = A.send(g.uid, null, "$AMD to 170 by " + day20, resolve, { thread: T }).message;
+  // An off-hours window after the send, and the next cash session.
+  const t0 = eq.ts;
+  const win = closedWindows(t0, t0 + 10 * DAY)[0];
+  const ses = marketSessions(t0, t0 + 10 * DAY).find((s) => s.open >= win.exit);
+  const off = Math.ceil((win.enter + 2 * 3600e3) / (5 * MIN)) * 5 * MIN, inS = Math.ceil((ses.open + 30 * MIN) / (5 * MIN)) * 5 * MIN;
+  // HOOD: an off-hours wick to 126 that closes at 110 (not a hit), then an in-session touch of 125.
+  bars["xyz:HOOD"] = [[off, 105, 126, 104, 110], [inS, 110, 125.5, 109, 112]];
+  // PLTR: an off-hours wick through the STOP that closes back above it (not wrong), then an off-hours bar that CLOSES through 60.
+  bars["xyz:PLTR"] = [[off, 50, 52, 44, 49], [off + 10 * MIN, 55, 61, 54, 60.5]];
+  // AMD: only an off-hours wick to the target — stays open.
+  bars["xyz:AMD"] = [[off, 150, 171, 149, 160]];
+  const out = A.targetSweep(inS + 30 * MIN);
+  const by = (id) => out.find((r) => r.id === id);
+  assert.ok(by(eq.id) && by(eq.id).res === "hit" && by(eq.id).at === inS, "the off-hours wick is skipped; the in-session touch hits: " + JSON.stringify(out));
+  assert.ok(by(pl.id) && by(pl.id).res === "hit" && by(pl.id).at === off + 10 * MIN, "the off-hours stop wick is not wrong; the off-hours close through the target is a hit");
+  assert.equal(by(amd.id), undefined, "an off-hours wick alone never hits");
+  // Crypto: the same wick is a hit (any touch, around the clock).
+  bars.BTC = [[off, 100, 126, 99, 101]];
+  const c2 = A.targetSweep(inS + 31 * MIN);
+  assert.ok(c2.length === 1 && c2[0].id === cr.id && c2[0].res === "hit" && c2[0].at === off, JSON.stringify(c2));
+});

@@ -143,7 +143,8 @@ function firstTickerRef(body) {
   return m ? m[1].toUpperCase() : "";
 }
 
-const { callRead, callTarget } = require("./compute");
+const { callRead, callTarget, callTargetDeadline, callBarReaches, inCashSession, marketSessions } = require("./compute");
+const { homeMkt } = require("./sectors");
 
 function openAccounts(dataDir, opts) {
   const options = opts || {};
@@ -1441,6 +1442,10 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   function setBarSource(fn) { if (typeof fn === "function") bars5m = fn; }
   const TG_BAR_MS = 5 * 60e3, TG_SCAN_MS = 3 * CALL_DAY, TG_SCAN_PASS = 10;
   const tgTk = (ref) => String(ref || "").replace(/^xyz:/, "");
+  // Session names (build 2026.09.24-104): the ET-anchored xyz roster — US equities, indices and the
+  // rest the gap engine anchors on the US session. Crypto (main dex) and a foreign-home listing
+  // (KRX/TSE/HKEX/SSE — its cash session is not the US one) keep 24:00 UTC and any touch.
+  const tgSessionRule = (ref) => /^xyz:/.test(String(ref || "")) && !homeMkt(tgTk(ref), "xyz");
   const tgNum = (v) => String(+(+v).toPrecision(6));
   const tgDay = (ts) => { try { return new Date(ts).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }); } catch (_) { return ""; } };
   const tgPct = (v) => (v >= 0 ? "+" : "\u2212") + Math.abs(v * 100).toFixed(1) + "%";
@@ -1477,7 +1482,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     const out = [];
     for (const m of S.tgOpen.all()) {
       const long = m.side !== "short", by = m.ts + callHorizonOf(m), upTo = Math.min(now, by);
-      const stop = m.tgStop > 0 ? m.tgStop : null;
+      const stop = m.tgStop > 0 ? m.tgStop : null, sr = tgSessionRule(m.ref);
       let res = null, at = null, px = null, seen = m.tgSeen || 0;
       // The archive is read in TG_SCAN_MS windows, at most TG_SCAN_PASS of them per target per
       // pass, so a year-long target first scanned after an outage costs a month of bars a minute
@@ -1492,13 +1497,17 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
         caughtUp = scanTo >= upTo;
         let bars;
         try { bars = bars5m(m.ref, Math.max(m.ts, seen + 1), scanTo) || []; } catch (_) { bars = []; }
+        const ses = sr && bars.length ? marketSessions(Math.max(m.ts, seen + 1), scanTo) : null;
         for (const b of bars) {
           const ts = +b[0], hi = +b[2], lo = +b[3];
           // Only bars that OPENED after the send: the bar the call was sent inside carries prices
           // from before it. The live-mark leg below covers that sliver.
           if (!(ts >= m.ts) || ts <= seen || ts > scanTo || !(hi > 0) || !(lo > 0)) continue;
-          if (stop != null && (long ? lo <= stop : hi >= stop)) { res = "wrong"; at = ts; px = stop; break; }
-          if (long ? hi >= m.tgPx : lo <= m.tgPx) { res = "hit"; at = ts; px = m.tgPx; break; }
+          // (build 2026.09.24-104) Session names: a touch counts in the US cash session, off-hours
+          // only a 5m CLOSE through the level — so an off-hours bar is judged once it has closed.
+          if (sr && ts + TG_BAR_MS > now && !inCashSession(ts, ses)) continue;
+          if (stop != null && callBarReaches(b, stop, !long, sr, ses)) { res = "wrong"; at = ts; px = stop; break; }
+          if (callBarReaches(b, m.tgPx, long, sr, ses)) { res = "hit"; at = ts; px = m.tgPx; break; }
           if (ts + TG_BAR_MS <= now) seen = ts;
         }
         // A stretch the archive has nothing for (a coin the 5m lane does not keep, a gap) is
@@ -1506,7 +1515,9 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
         // written it by then — so the cursor never sticks.
         if (!res && !caughtUp) seen = Math.max(seen, scanTo);
       }
-      if (!res && caughtUp && now <= by) {
+      // The live mark is an unclosed bar: for a session name it only counts inside the cash session
+      // (off-hours the closed 5m bars decide, a minute later at most).
+      if (!res && caughtUp && now <= by && (!sr || inCashSession(now, marketSessions(now, now)))) {
         const live = markFor(m.ref);
         if (live > 0) {
           if (stop != null && (long ? live <= stop : live >= stop)) { res = "wrong"; at = now; px = stop; }
@@ -1514,7 +1525,12 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
         }
       }
       if (!res && caughtUp && now > by) {
-        const p = pxHistory(m.ref, by);
+        // A session name's deadline IS a cash close: the miss prices at the last 5m close at or
+        // before it (the tape at the bell), else the first daily close past it as before.
+        let p = null;
+        if (sr) { let bs; try { bs = bars5m(m.ref, by - 6 * 3600e3, by) || []; } catch (_) { bs = []; }
+          for (const b of bs) if (+b[0] + TG_BAR_MS <= by && +b[4] > 0) p = +b[4]; }
+        if (!(p > 0)) p = pxHistory(m.ref, by);
         if (p != null && isFinite(p) && p > 0) { res = "miss"; at = by; px = p; }
       }
       if (res) {
@@ -1657,7 +1673,11 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     const tg = ref && sym && refPx > 0 && !cardJson ? callTarget(text, sym, refPx, now, o.callSide === "short" || o.callSide === "long" ? o.callSide : null) : null;
     const tgOk = tg && tg.ok ? tg : null;
     if (tgOk) side = tgOk.side;
-    const callH = ref && sym ? (tgOk ? tgOk.horizonMs : oDays >= 1 && oDays <= CALL_MAX_D ? oDays * CALL_DAY : callHorizonFromText(text, sym)) : null;
+    // (build 2026.09.24-104) A DATE deadline ends at that date's US cash close for a session name
+    // (24:00 UTC for crypto) — exact, not rounded up to whole days from the send; the rounded
+    // horizon stays the fallback (a relative "in 3w", or a close that already passed).
+    const tgBy = tgOk ? callTargetDeadline(tgOk.byDay, tgSessionRule(ref), now) : null;
+    const callH = ref && sym ? (tgOk ? (tgBy ? tgBy - now : tgOk.horizonMs) : oDays >= 1 && oDays <= CALL_MAX_D ? oDays * CALL_DAY : callHorizonFromText(text, sym)) : null;
     const id = Number(S.msgIns.run(t.id, fromUid, now, text, ref, refPx, side, null, file ? file.id : null, o.via || null, replyTo, cmd, cmdAi, cardJson, callH,
       tgOk ? tgOk.px : null, tgOk ? tgOk.stop : null).lastInsertRowid);
     S.thrTouch.run(id, now, t.id);

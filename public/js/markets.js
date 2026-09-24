@@ -20,7 +20,7 @@ import { sectorShort } from "./sectors.js";
 let renderQueued=false;
 function scheduleRender(){ if(renderQueued)return; renderQueued=true; requestAnimationFrame(()=>{renderQueued=false; render(); if(mktPaintable()) updateMovers();}); }
 function scCls(r){ return (r.candleTs && (Date.now()-r.candleTs>2*state.refreshMs+60000)) ? 'stale':''; }
-const XYZ_ONLY_COLS=new Set(['gap']);   // session-anchored concepts — a 24/7 market has none
+const XYZ_ONLY_COLS=new Set(['gap','vcc','rscc']);   // session-anchored concepts — a 24/7 market has none (vcc/rscc: build 2026.09.24-104)
 const MAIN_ONLY_COLS=new Set(['cascT','liq24']);   // aggregated-CEX derivs context — exists only for the crypto universe
 // Migration adjacency: when a stored order predates a column that belongs beside another
 // (momp beside mom), move it there instead of leaving it appended at the table's far edge.

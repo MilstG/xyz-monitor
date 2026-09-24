@@ -279,7 +279,7 @@ test("backtest v2 manifest: seventeen-signal roster, scope seam, data gates, sec
   assert.ok(s.includes("if((r.uni==='main')!==cr) return false;"), "scope-aware universe filter missing");
   assert.ok(s.includes("const bC=scopeBench(), bench=bC?state.rows.get(bC):null;"), "scoped benchmark missing from btMatrix");
   assert.ok(s.includes("p.holdWindow==='on' && state.scope!=='crypto'"), "crypto must not run the overnight hold");
-  assert.ok(s.includes("function btAnn()") && s.includes("state.scope==='crypto'?365:BT_ANN"), "scope-aware annualization missing");
+  assert.ok(s.includes("function btAnn(days){ if(state.scope==='crypto') return 365;"), "scope-aware annualization missing (crypto 365, equities by observed periods/yr — build 2026.09.24-104)");
   assert.ok(s.includes("if(state.view==='backtest') drawBacktest();"), "scope flip must re-run the open tab");
   // the tab is un-gated for crypto in BOTH gates (visibility + navigation)
   assert.equal((s.match(/const CRYPTO_VIEWS=new Set\(/g) || []).length, 1, "exactly one crypto scope list may exist (it replaced showView's inline gate in -05)");

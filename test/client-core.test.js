@@ -2686,11 +2686,17 @@ test("targets -95: the stamp grows a target row — progress, time used, stop ti
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "js", "messages.js"), "utf8");
   // The row, run for real against four wire shapes: open & ahead, hit, wrong, missed.
   const src = app.slice(app.indexOf("const DM_TG_ZERO="), app.indexOf("function dmDayShort(ts){"));
-  const row = new Function("fmtPx", "esc", "dmDayShort", src + "\nreturn dmTargetRow;")((v) => String(v), (s) => String(s), () => "Oct 15");
+  // (-104) the pill states the resolution rule for the name: the two rule helpers ride along, with a row map.
+  const ruleSrc = app.slice(app.indexOf("function dmTgSessionRule(r){"), app.indexOf("// The composer's preview:"));
+  const rowsM = new Map([["xyz:HOOD", { coin: "xyz:HOOD", uni: "xyz" }], ["BTC", { coin: "BTC", uni: "main" }]]);
+  const row = new Function("fmtPx", "esc", "dmDayShort", "state", ruleSrc + src + "\nreturn dmTargetRow;")((v) => String(v), (s) => String(s), () => "Oct 15", { rows: rowsM });
   const DAY = 86400e3, now = Date.now(), ts = now - 6 * DAY;
   const base = { refPx: 100, side: "long", ts, px: 106 };
   const open = row(Object.assign({}, base, { call: { closed: false, tg: { px: 110, stop: 95, by: ts + 20 * DAY, res: null, at: null } } }));
   assert.ok(/dm-tg-pill open/.test(open) && /60% there/.test(open) && /14d left/.test(open), open);
+  assert.ok(/any 5-minute touch counts/.test(open), "an unknown/crypto ref states the around-the-clock rule");
+  const eqOpen = row(Object.assign({}, base, { ref: "xyz:HOOD", call: { closed: false, tg: { px: 110, stop: 95, by: ts + 20 * DAY, res: null, at: null } } }));
+  assert.ok(/US-session name: a touch counts during the 09:30/.test(eqOpen) && /5-minute close through the level/.test(eqOpen) && /16:00 ET cash close/.test(eqOpen), "a US session name states the session-true rule (build 2026.09.24-104)");
   assert.ok(/<span class="pos">ahead<\/span> of its clock/.test(open), "60% of the move in 30% of the time is ahead of its clock");
   assert.ok(/needs \+3\.8% more/.test(open), "and says what is left to go");
   assert.ok(/class="dm-tg-fill pos" style="left:25\.0%;width:45\.0%"/.test(open), "the bar runs from the zero line 60% of the way to the target");

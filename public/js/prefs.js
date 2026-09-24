@@ -26,6 +26,7 @@ function loadPrefs(){ let p; try{ p=JSON.parse(store.get(PKEY)||'null'); }catch(
       colAdjacent(v,'m5','px'); colAdjacent(v,'m15','m5');   // the intraday pair migrates in next to Price, ahead of 1h
       colAdjacent(v,'hopen','dopen'); colAdjacent(v,'h4open','hopen'); colAdjacent(v,'h12open','h4open');   // the anchored-open trio migrates in next to D open
       colAdjacent(v,'pos','oi');   // the position column migrates in next to OI
+      colAdjacent(v,'vcc','d1'); colAdjacent(v,'rscc','rs');   // (-104) the cash-close pair migrates in next to 24h / vs S&P
       state.colOrder=v; }
     if(Array.isArray(p.colHidden)) state.colHidden=new Set(p.colHidden.filter(k=>COL_BY_KEY[k]));
   }
@@ -137,6 +138,7 @@ function applyLayout(name){ const s=name!=null?state.layouts.list[name]:null;
   colAdjacent(ord,'m5','px'); colAdjacent(ord,'m15','m5');
   colAdjacent(ord,'hopen','dopen'); colAdjacent(ord,'h4open','hopen'); colAdjacent(ord,'h12open','h4open');
   colAdjacent(ord,'pos','oi');
+  colAdjacent(ord,'vcc','d1'); colAdjacent(ord,'rscc','rs');
   state.colOrder=ord; state.colHidden=hid;
   if(src.sortKey&&COL_BY_KEY[src.sortKey]){ state.sortKey=src.sortKey; state.sortDir=src.sortDir==='asc'?'asc':'desc'; }
   state.watchOnly=!!src.watchOnly; el('watchOnly').classList.toggle('on', state.watchOnly);

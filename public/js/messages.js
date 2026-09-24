@@ -867,6 +867,7 @@ function dmCallRead(text,sym,nowMs){
 const TG_NUM="\\$?(\\d+(?:\\.\\d+)?)\\s*(k)?(?![\\w%/]|\\.\\d)";
 const TG_PX=new RegExp("^[\\s,:;\u2014-]*((?:(?:goes|going|heading|headed|runs?|back)\\s+)?(?:to|\u2192|->|target(?:ing)?|tgt)\\s*)?"+TG_NUM,"i");
 const TG_STOP=new RegExp("(?:^|\\W)(?:unless|stop(?:\\s+at)?|(?:wrong|invalid(?:ated)?)\\s+(?:under|over|above|below|at|if))\\s+"+TG_NUM,"i");
+const TG_DATED=/^(?:by\b|eo[wmy]\b|end of|year[ -]?end)/i;   // callRead's DATE words (vs relative horizons)
 function dmCallTarget(text,sym,markPx,nowMs,sideOverride){
   const t=String(text||''), S=String(sym||'').toUpperCase();
   const i=S?t.toUpperCase().indexOf('$'+S):-1;
@@ -878,17 +879,17 @@ function dmCallTarget(text,sym,markPx,nowMs,sideOverride){
   if(/^\s*(puts|calls)\b/i.test(rest)) return null;
   const px=+p[2]*(p[3]?1000:1);
   const DAY=86400e3, now=Number.isFinite(+nowMs)?+nowMs:Date.now();
-  let horizonMs=null, byWord=null, m;
+  let horizonMs=null, byWord=null, dated=false, m;
   const days=(d)=>(d>=1&&d<=365?d*DAY:null);
   if((m=/(?:^|\W)in\s+(\d{1,3})\s*(d|days?|w|wks?|weeks?|mo|months?)\b/i.exec(rest))){
     const u=m[2].toLowerCase(), n=+m[1];
     horizonMs=days(u[0]==='d'?n:u[0]==='w'?n*7:n*30); byWord=horizonMs?m[0].replace(/^\W/,'').trim():null;
   } else if((m=/(?:^|\W)by\s+(\d{4})-(\d{2})-(\d{2})\b/i.exec(rest))){
     const end=Date.UTC(+m[1],+m[2]-1,+m[3]+1)-1;
-    if(new Date(Date.UTC(+m[1],+m[2]-1,+m[3])).getUTCDate()===+m[3]&&end>now){ horizonMs=days(Math.max(1,Math.ceil((end-now)/DAY))); byWord=horizonMs?m[0].replace(/^\W/,'').trim():null; }
+    if(new Date(Date.UTC(+m[1],+m[2]-1,+m[3])).getUTCDate()===+m[3]&&end>now){ horizonMs=days(Math.max(1,Math.ceil((end-now)/DAY))); byWord=horizonMs?m[0].replace(/^\W/,'').trim():null; dated=!!horizonMs; }
   } else {
     const r=dmCallRead('$'+S+' '+rest,S,now);
-    if(r.horizonMs){ horizonMs=r.horizonMs; byWord=r.horizonWord; }
+    if(r.horizonMs){ horizonMs=r.horizonMs; byWord=r.horizonWord; dated=TG_DATED.test(byWord); }
   }
   if(!horizonMs) return p[1]?{ok:false,px,error:'a target needs a deadline — by Oct 15 · in 3w'}:null;
   if(!(markPx>0)) return {ok:false,px,error:'no live mark to aim from'};
@@ -899,7 +900,15 @@ function dmCallTarget(text,sym,markPx,nowMs,sideOverride){
   if(side==='long'?px<=markPx:px>=markPx) return {ok:false,px,error:side+' to '+px+' is behind the mark ('+markPx+')'};
   if(stop!=null&&(side==='long'?stop>=markPx:stop<=markPx)) return {ok:false,px,error:'the stop ('+stop+') sits on the wrong side of the mark'};
   const word=(p[0]+rest.slice(0,Math.max(0,rest.indexOf(byWord))+byWord.length)).replace(/^[\s,:;—-]+/,'').replace(/[\s,.;:]+$/,'');
-  return {ok:true,px,stop,side,horizonMs,word};
+  const byDay=dated?new Date(now+horizonMs-DAY+1).toISOString().slice(0,10):null;   // (-104) the date a dated deadline names; null for "in 3w"
+  return {ok:true,px,stop,side,horizonMs,word,byDay};
+}
+// How a target resolves for this name (build 2026.09.24-104) — the server's rule (accounts.targetSweep,
+// compute.callTargetDeadline / callBarReaches), stated where the call is written and where it runs.
+function dmTgSessionRule(r){ return !!r&&r.uni!=='main'&&/^xyz:/.test(String(r.coin||''))&&!r.hm; }
+function dmTgRuleTxt(sr){
+  return sr?'US-session name: a touch counts during the 09:30\u201316:00 ET cash session; off-hours only a 5-minute close through the level counts (a thin overnight/weekend wick is not a hit, nor a stop); a date deadline ends at that date\u2019s 16:00 ET cash close (13:00 on an early-close day; the last close before it when the exchange is shut)'
+    :'any 5-minute touch counts, around the clock; a date deadline ends 24:00 UTC';
 }
 // The composer's preview: what the send will stamp, which words decided it, and — when the words
 // decided nothing — an offer to ask the model. An applied reading is the SENDER's choice: it rides
@@ -926,7 +935,7 @@ function dmStampPreview(text){
   const ask=vague&&dmAskAllowed()?' <button type="button" class="dm-tool" id="dm-callask"'+(dmState.callAsking?' disabled':'')+' title="Ask the model what this message means \u2014 you apply the reading or ignore it; nothing posts on its say-so. Spends one ask.">ask AI what I mean</button>':'';
   const drop=ov?' <button type="button" class="dm-tool" id="dm-calldrop" title="Back to the words">undo</button>':'';
   const need=tgOk&&r.px>0?tgOk.px/r.px-1:null;
-  const tgTxt=tgOk?' \u00b7 <span class="dm-tgpv" title="a target: it resolves on whichever comes first \u2014 the mark touches the level (hit), the deadline\u2019s close prints (miss)'+(tgOk.stop!=null?', or the stop prints (wrong)':'')+'">target <b>'+fmtPrice(tgOk.px)+'</b> <span class="'+(need>=0?'pos':'neg')+'">'+(need>=0?'+':'')+(need*100).toFixed(1)+'%</span> \u00b7 from \u201c'+esc(tgOk.word)+'\u201d'+(tgOk.stop!=null?' \u00b7 wrong at <b class="neg">'+fmtPrice(tgOk.stop)+'</b>':'')+'</span>'
+  const tgTxt=tgOk?' \u00b7 <span class="dm-tgpv" title="a target: it resolves on whichever comes first \u2014 the mark reaches the level (hit), the deadline\u2019s close prints (miss)'+(tgOk.stop!=null?', or the stop is reached (wrong)':'')+'. '+esc(dmTgRuleTxt(dmTgSessionRule(r)))+'">target <b>'+fmtPrice(tgOk.px)+'</b> <span class="'+(need>=0?'pos':'neg')+'">'+(need>=0?'+':'')+(need*100).toFixed(1)+'%</span> \u00b7 from \u201c'+esc(tgOk.word)+'\u201d'+(tgOk.stop!=null?' \u00b7 wrong at <b class="neg">'+fmtPrice(tgOk.stop)+'</b>':'')+'</span>'
     :tg&&!tg.ok?' \u00b7 <span class="dm-tgpv neg" title="the words tried to set a target and the reader refused it \u2014 the send stays a plain call">no target: '+esc(tg.error)+' \u2014 sends as a plain call</span>':'';
   pv.hidden=false; pv.innerHTML='will stamp <b>'+esc(r.ticker)+'</b> at <b>'+fmtPrice(r.px)+'</b> as <b class="'+(side==='short'?'neg':'pos')+'">'+side+'</b> \u00b7 <b>'+days+'d</b> '+(tgOk?'':why)+tgTxt+ask+drop+(dmState.callAsking?' <span class="sec">asking\u2026</span>':'')
     +(dmState.callProposal&&dmState.callProposal.text===key&&!ov
@@ -1328,7 +1337,7 @@ function dmTargetRow(m){
   const used=Math.max(0,Math.min(1,(tEnd-m.ts)/Math.max(1,tg.by-m.ts)));
   const stopPos=tg.stop!=null?Math.max(-1,Math.min(1,(tg.stop-m.refPx)/(tg.px-m.refPx))):null;
   const got=prog==null?null:Math.round(Math.max(0,prog)*100);
-  const pill=open?'<span class="dm-tg-pill open" title="still running: it resolves on the first touch of the target or the stop, or at the deadline\u2019s close">open</span>'
+  const pill=open?'<span class="dm-tg-pill open" title="still running: it resolves on the first touch of the target or the stop, or at the deadline\u2019s close \u2014 '+esc(dmTgRuleTxt(dmTgSessionRule(state.rows&&state.rows.get(m.ref))))+'">open</span>'
     :res==='hit'?'<span class="dm-tg-pill hit" title="the mark touched the target before the deadline'+(tg.stop!=null?' and before the stop':'')+'">hit \u2713'+(tg.at&&tg.by-tg.at>=DAY?' \u00b7 '+Math.floor((tg.by-tg.at)/DAY)+'d early':'')+'</span>'
     :res==='wrong'?'<span class="dm-tg-pill wrong" title="the stop printed before the target">wrong \u2717 \u00b7 stop '+fmtPx(tg.stop)+'</span>'
     :res==='miss'?'<span class="dm-tg-pill miss" title="the deadline\u2019s close printed with neither level touched \u2014 a miss on the binary record, whatever the % record says">missed'+(got!=null?' \u00b7 '+got+'% there':'')+'</span>'

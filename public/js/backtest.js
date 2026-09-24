@@ -23,7 +23,7 @@ import { openTrend, renderSignals, renderTrend } from "./trend.js";
 // Everything runs in-browser off state.rows[*].daily (shipped via /api/daily) + the SP500 benchmark, so
 // parameter tweaks are instant and add no server load. Non-fitted ranking rules: the honest overfitting
 // risk is the user picking params by eye, which the in-sample/out-of-sample split is there to expose.
-const BT_MIN_DAYS=25, BT_ANN=252;
+const BT_MIN_DAYS=25, BT_ANN_UTC=365;   // (build 2026.09.24-104) fallback periods/yr: the spine is UTC days, weekends included
 const BT_SIGNALS={ mom:'Momentum', smom:'Sector-relative momentum', rev:'Short-term reversion', res:'Residual momentum (β-neutral)',
   lowvol:'Low volatility', ivol:'Low idiosyncratic vol', beta:'Low beta (BAB)', max:'Anti-lottery (low MAX)',
   carry:'Funding carry', hprox:'High proximity', volt:'Volume trend', oid:'OI change',
@@ -34,7 +34,13 @@ const BT_SIGNALS={ mom:'Momentum', smom:'Sector-relative momentum', rev:'Short-t
 const BT_MVAR={ m0:1, mres:1, moi:1, mfund:1, mpart:1 };
 // signals that need payload columns beyond closes — btRun reports an honest "not shipped" instead of an empty rank
 const BT_NEEDS={ carry:'fundCov', hprox:'hiCov', volt:'voCov', oid:'oiCov', moi:'oiCov', mfund:'fundCov', mpart:'voCov' };
-function btAnn(){ return state.scope==='crypto'?365:BT_ANN; }   // crypto trades every day; equities ~252 sessions
+// Annualization = the periods per year the return series ACTUALLY has (build 2026.09.24-104). The
+// spine is UTC-day candles and the xyz perps trade weekends too, so an equity portR carries ~365
+// entries a year, not 252 sessions: √252 on a 365/yr series understated Sharpe ~1.2× and the √252
+// vol target read a daily σ as a smaller annual one and OVERSIZED the book. Observed = (bars-1)
+// over the day span of the spine; <3 bars or a zero span falls back to 365. Crypto stays 365.
+function btPeriodsPerYear(days){ const m=days?days.length:0; if(m<3) return null; const span=days[m-1]-days[0]; return span>0?(m-1)*365.25/span:null; }
+function btAnn(days){ if(state.scope==='crypto') return 365; const ppy=btPeriodsPerYear(days); return ppy>0?ppy:BT_ANN_UTC; }
 // ===== Target picks — the cross-section is a choice, not a given =====================
 // picks[] holds coins the user typed into the target box. Zero picks is the tab's original
 // behaviour (rank the whole universe). ONE pick collapses the cross-section entirely: a rank of
@@ -360,7 +366,7 @@ function btRunOne(p){
         if(p.structure==='short'&&nw>0) nw=0;
         if(nw!==0){
           if(p.weighting==='sig'){ nw*=(Number.isFinite(sc)&&sc>0)? clamp(Math.abs(sig)/sc,0.25,2) : 1; }        // size with conviction
-          else if(p.weighting==='vol'){ const v=btVol(a,di,Math.max(20,L)); nw*= v>0? clamp(BT_VOLTGT/(v*Math.sqrt(btAnn())),0.25,2) : 1; }   // size to a 20% annualized vol target
+          else if(p.weighting==='vol'){ const v=btVol(a,di,Math.max(20,L)); nw*= v>0? clamp(BT_VOLTGT/(v*Math.sqrt(btAnn(days))),0.25,2) : 1; }   // size to a 20% annualized vol target
         }
       }
       if(nw!==w){
@@ -413,7 +419,7 @@ function btStats(portR, eqSeg, ann){
   let hit=0; for(const x of portR) if(x>0) hit++;
   const total=eqSeg[eqSeg.length-1]/eqSeg[0]-1;
   let peak=eqSeg[0], mdd=0; for(const e of eqSeg){ if(e>peak) peak=e; const dd=e/peak-1; if(dd<mdd) mdd=dd; }
-  return { total, sharpe: sd>0? mean/sd*Math.sqrt(ann||BT_ANN):0, hit:hit/n, mdd, n };
+  return { total, sharpe: sd>0? mean/sd*Math.sqrt(ann||BT_ANN_UTC):0, hit:hit/n, mdd, n };
 }
 // equity curve: net (accent) / gross (blue) / benchmark (muted) / equal-weight (faint); IS|OOS split shaded; crosshair hover
 function btCurveSvg(res, splitIdx){
@@ -648,7 +654,7 @@ function renderBacktest(){
   const m=res.days.length, splitIdx=Math.max(1,Math.min(m-2,Math.floor(m*p.split)));
   const isR=res.portR.slice(0,splitIdx), oosR=res.portR.slice(splitIdx);
   const isE=res.eq.slice(0,splitIdx+1), oosE=res.eq.slice(splitIdx);
-  const ann=btAnn();
+  const ann=btAnn(res.days);   // (-104) the curve's own periods/yr, not 252
   const full=btStats(res.portR,res.eq,ann), is=btStats(isR,isE,ann), oos=btStats(oosR,oosE,ann);
   const fundRow=`<div class="s-row"><span>funding</span>${res.fundCov>0?`<b class="${res.fundCum>=0?'pos':'neg'}">${(res.fundCum>0?'+':'')+(res.fundCum*100).toFixed(1)}%</b>`:`<b class="sec" title="funding not loaded — update the server">—</b>`}</div>`;
   const feeRow=`<div class="s-row"><span>fees</span><b class="neg">−${(res.feeCum*100).toFixed(1)}%</b></div>`;
@@ -710,7 +716,7 @@ function renderBacktest(){
     `Shaded region is out-of-sample. Slippage not modeled.${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`;
   const cap = res.single ? capOne : res.on
     ? `<b>Overnight hold.</b> Each night buy the book at the 16:00 ET close and sell at the next 09:30 ET open (Fri→Mon over the weekend), flat during the cash session — ${structTxt}${mode==='set'?` of the ${picked.length} picked names`:''}, ${wtTxt}. The book round-trips every night, so it pays the ${p.cost}bp taker fee twice a night (that's the big drag here), plus the funding accrued over each hold. Gross is price-only; the gross↔net gap is fees + funding. Uses the close→open boundary holds from the hourly spine${res.ovCov>0?'':' — not loaded yet, so this is empty until the server ships them'}. Shaded = out-of-sample. Slippage not modeled.${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`
-    : `Each rebalance, rank ${mode==='set'?`the ${picked.length} picked names`:'the universe'} by ${BT_SIGNALS[p.signal].toLowerCase()} and go ${structTxt}, ${wtTxt}, held to the next rebalance. Net of a ${p.cost}bp market-order taker fee on turnover and the actual funding each position pays or earns while held${res.fundCov>0?'':' — funding not loaded yet, so this is price-only until the server ships it'}. Gross line is price-only; the gross↔net gap is your funding + fee drag. Shaded region is out-of-sample. In-sample-selected, slippage not yet modeled — the test runs on exactly the daily history this server ships${cr?' (crypto: ~90d, BTC benchmark, 365d annualization)':''}.${mvarNote}${mode==='set'?` <b>Custom universe:</b> ranks run only among the ${picked.length} names you picked, so the tails are ${Math.max(1,Math.floor(picked.length*p.quantile))} name per side — a sketch, not a cross-section.`:''} <b>Hover</b> the curve. Not a live trade signal.`;
+    : `Each rebalance, rank ${mode==='set'?`the ${picked.length} picked names`:'the universe'} by ${BT_SIGNALS[p.signal].toLowerCase()} and go ${structTxt}, ${wtTxt}, held to the next rebalance. Net of a ${p.cost}bp market-order taker fee on turnover and the actual funding each position pays or earns while held${res.fundCov>0?'':' — funding not loaded yet, so this is price-only until the server ships it'}. Gross line is price-only; the gross↔net gap is your funding + fee drag. Shaded region is out-of-sample. In-sample-selected, slippage not yet modeled — the test runs on exactly the daily history this server ships${cr?' (crypto: ~90d, BTC benchmark, 365d annualization)':` Sharpe and the vol target annualize at the series' own ${Math.round(ann)} periods/yr — UTC-day candles, weekends included, not 252 sessions`}.${mvarNote}${mode==='set'?` <b>Custom universe:</b> ranks run only among the ${picked.length} names you picked, so the tails are ${Math.max(1,Math.floor(picked.length*p.quantile))} name per side — a sketch, not a cross-section.`:''} <b>Hover</b> the curve. Not a live trade signal.`;
   const vbCap=res.eqvb?` The dashed <b>\u2b12 ${esc(res.vbName)}</b> line is that basket's price-only EW daily index over the same days \u2014 no costs, no funding, a comparison yardstick that never enters the stats; basket gap days (sub-floor coverage) compound flat.`:'';
   return head+controls+stats+(res.single?btPositionPanel(res):btBookPanel(res.book))+leg+sCard(btCurveSvg(res,splitIdx))+sCap(cap+vbCap)+renderDuelSection()+renderRetestSection();   // -96: the D1 retest study under the duel
 }

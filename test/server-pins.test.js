@@ -1038,7 +1038,8 @@ test("build -07 manifest: pair math welded across compute.js and app.js; duel pl
   // -04: the 5m/15m pair added two adjacency calls per merge site (m5 beside px, m15 beside m5);
   // 2026.08.10-01: the anchored-open trio (hopen/h4open/h12open beside dopen) added three more per site
   // 2026.09.16-79: the Position column (pos beside oi) added one more per site
-  assert.equal(app.split("colAdjacent(").length - 1, 15, "adjacency migration: one definition + (momp, m5, m15, hopen, h4open, h12open, pos) on the prefs path + the same seven on the layout path");
+  // 2026.09.24-104: the cash-close pair (vcc beside d1, rscc beside rs) added two more per site
+  assert.equal(app.split("colAdjacent(").length - 1, 19, "adjacency migration: one definition + (momp, m5, m15, hopen, h4open, h12open, pos, vcc, rscc) on the prefs path + the same nine on the layout path");
   assert.ok(app.includes("renderDuelSection()") && app.includes("loadDuelData()"), "duel panel wired into the backtest render");
   // -08: the hot dot rides BOTH momentum cells â€” it flags the name, not the incumbent score,
   // and must survive when only one of the two columns is visible.
@@ -1407,7 +1408,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract â€
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.24-103"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.24-104"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);

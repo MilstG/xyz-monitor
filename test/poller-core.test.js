@@ -2998,9 +2998,9 @@ test("callTarget: a price and a deadline after the ticker, an optional stop, the
   const T = (t, sym, mark, side) => callTarget(t, sym, mark, now, side);
   // The mock's four examples read exactly as the mock says.
   const intc = T("I think $INTC goes to 32 by Oct 15, wrong under 27", "INTC", 28.9);
-  assert.deepEqual(intc, { ok: true, px: 32, stop: 27, side: "long", horizonMs: 24 * DAY, word: "goes to 32 by Oct 15" });   // to the end of Oct 15 UTC, rounded up
+  assert.deepEqual(intc, { ok: true, px: 32, stop: 27, side: "long", horizonMs: 24 * DAY, word: "goes to 32 by Oct 15", byDay: "2026-10-15" });   // to the end of Oct 15 UTC, rounded up; byDay names the date (-104)
   const hood = T("$HOOD 125 in 2w", "HOOD", 113.9);
-  assert.ok(hood.ok && hood.px === 125 && hood.horizonMs === 14 * DAY && hood.stop === null && hood.side === "long", JSON.stringify(hood));
+  assert.ok(hood.ok && hood.px === 125 && hood.horizonMs === 14 * DAY && hood.stop === null && hood.side === "long" && hood.byDay === null, JSON.stringify(hood));
   const tsla = T("short $TSLA to 300 by 10/31 unless 360", "TSLA", 341.55);
   assert.ok(tsla.ok && tsla.side === "short" && tsla.px === 300 && tsla.stop === 360 && tsla.horizonMs === 40 * DAY, JSON.stringify(tsla));
   const btc = T("$BTC 120k by year end", "BTC", 112400);

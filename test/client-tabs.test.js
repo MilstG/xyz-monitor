@@ -867,7 +867,7 @@ test("D open column: manifest wiring — placed after 24h, visible by default, l
   // new column exists, right after d1 in COLS and in the default order, and NOT hidden
   assert.ok(/key:'dopen', label:'D open'/.test(app), "D open column defined");
   const ord = app.match(/const DEFAULT_ORDER=\[[^\]]*\];/)[0];
-  assert.ok(ord.includes("'d1','dopen','hopen','h4open','h12open','d7'"), "D open leads the anchored block (2026.08.10-01: + H/4h/12h open) between 24h and 7d in the default order");
+  assert.ok(ord.includes("'d1','vcc','dopen','hopen','h4open','h12open','d7'"), "D open leads the anchored block (2026.08.10-01: + H/4h/12h open) between 24h and 7d in the default order (2026.09.24-104: the hidden-by-default vs-cash-close column sits beside 24h)");
   const hid = app.match(/const DEFAULT_HIDDEN=\[[^\]]*\];/)[0];
   assert.ok(!hid.includes("'dopen'"), "D open is visible by default — it is the point of the column");
   assert.ok(/const LAYOUT_V=5;/.test(app), "LAYOUT_V bumped so saved layouts pick the column up (v5: sess column, 2026.08.14-01)");
