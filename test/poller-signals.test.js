@@ -477,7 +477,7 @@ test("-80 regression: string-typed closes can't kill the board — detectors coe
 test("warm-boot signals cadence: 2-min builds for the first 20 minutes, then the steady 10", () => {
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  for (const pin of ['setInterval(safeTick(buildSignals, "buildSignals"), 10 * 60 * 1000);',
+  for (const pin of ['staggered(safeTick(buildSignals, "buildSignals"), 10 * 60 * 1000, 5 * 1000);',
     'setTimeout(safeTick(buildSignals, "buildSignals"), 45 * 1000);',
     'if (Date.now() - bootT > 20 * 60 * 1000) clearInterval(earlyIv);',
     'signals warm-boot build:'])

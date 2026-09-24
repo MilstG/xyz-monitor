@@ -14,7 +14,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.24-100";
+const VERSION = "2026.09.24-101";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -285,6 +285,25 @@ function serveKeyed(req, reply, etagKey, build, fallback) {
     if (keyedCache.size > 800) { let i = 0; for (const k of keyedCache.keys()) { keyedCache.delete(k); if (++i >= 400) break; } }
   }
   return sendCachedBody(req, reply, body, tag);
+}
+
+// SSE write with backpressure (build 2026.09.24-101). Every frame used to be written blind: a
+// client that stopped reading (a phone asleep on a half-dead connection, a stalled proxy) kept its
+// socket "open" while Node buffered every snapshot poke, DM and heartbeat for it in memory, without
+// bound, for as long as the TCP connection lingered. Now a stream whose unflushed buffer is past
+// SSE_MAX_BUFFERED is dropped — detached and destroyed; EventSource reconnects on its own and the
+// hello frame resyncs it — and a destroyed or ended socket is detached instead of written to.
+// Returns true when the frame was queued.
+const SSE_MAX_BUFFERED = 64 * 1024;
+function sseWriteTo(entry, frame, detach) {
+  const res = entry && entry.res;
+  if (!res || res.destroyed || res.writableEnded) { if (detach) detach(entry); return false; }
+  if ((res.writableLength || 0) > SSE_MAX_BUFFERED) {
+    if (detach) detach(entry);
+    try { res.destroy(); } catch (_) {}
+    return false;
+  }
+  try { res.write(frame); return true; } catch (_) { return false; }
 }
 
 // Constant-time credential check: hash both sides to equal length, then timingSafeEqual.
@@ -2388,15 +2407,15 @@ async function buildServer() {
     // can coincide to the millisecond at boot, which would let the browser 304 a crypto request with a
     // cached stocks body (or vice-versa) — both tabs then read a payload for the wrong universe. Prefix
     // the scope so the two URLs can never share a validator. (-17 fix.)
-    reply.header("cache-control", "no-cache");
     // The empty fallback always carries dataTs 0, so without mixing the error text into the validator
     // a freshly-recorded failure reason would sit behind a 304 and never reach the tab.
     const errKey = built ? "" : "-e" + (buildErr ? buildErr.length : 0);
     const tag = 'W/"' + scope + "-" + (body.dataTs != null ? body.dataTs : (body.ts || 0)) + errKey + '"';
-    reply.header("etag", tag);
-    if (req.headers["if-none-match"] === tag) { return reply.code(304).send(); }
-    reply.header("content-type", "application/json; charset=utf-8");
-    return reply.send(JSON.stringify(body));
+    // Through the shared memoized serialize + threadpool gzip (build 2026.09.24-101), like
+    // /api/funding: this route used to JSON.stringify the full analytics body on every non-304
+    // request and leave compression to the per-response path. The built payload is one stable
+    // object per rebuild, so the WeakMap memo hits for every client until the next build.
+    return sendCachedBody(req, reply, body, tag);
   });
   // Funding heatmap board — every market's carry over calendar time, at 1h / 8h / 24h.
   // Scope-prefixed ETag, for the same reason /api/analytics carries one: the two universes' dataTs
@@ -3175,7 +3194,7 @@ async function buildServer() {
     return "data: " + JSON.stringify({ dataTs: s ? s.dataTs : 0, alertVer: s ? s.alertVer : 0,
       v: VERSION, dm: me ? { seq: ACCOUNTS.msgSeq() } : undefined }) + "\n\n";
   }
-  const sseWrite = (entry, frame) => { try { entry.res.write(frame); } catch (_) {} };
+  const sseWrite = (entry, frame) => sseWriteTo(entry, frame, sseDetach);
   let sseLastTs = -1, sseLastAlert = -1;
   setInterval(() => {
     if (!sseClients.size) return;
@@ -3323,6 +3342,14 @@ async function buildServer() {
     return reply.code(204).header("cache-control", "no-store").send();
   });
   fastify.get("/api/health", (req) => {
+    // Railway's healthcheck (and any anonymous prober) is answered BEFORE the full picture is
+    // built (build 2026.09.24-101): poller.stats() walks every lane, limiter and per-coin failure
+    // map, and the anonymous body below never carried any of it. Same fields, same values.
+    const admin = isAdmin(req);
+    if (!admin && !reqAuthed(req)) {
+      const lp = poller.lastPollAt();
+      return { ok: true, version: VERSION, stale: lp > 0 && Date.now() - lp > STALE_MS, ts: Date.now() };
+    }
     const full = { ok: true, version: VERSION,
       stale: poller.lastPollAt() > 0 && Date.now() - poller.lastPollAt() > STALE_MS, lastPollAgoMs: poller.lastPollAt() > 0 ? Date.now() - poller.lastPollAt() : null,
       volume: { boots: HEARTBEAT.boots, firstBoot: HEARTBEAT.firstBoot, dataDir: DATA_DIR },
@@ -3336,8 +3363,7 @@ async function buildServer() {
     // counts, earnings/news/filings stamps, loop, ticks) and the ask-budget chip (ai.askDayLeft).
     // Explicit allow-list, never a delete-list, so a field added to stats() later is admin-only
     // until somebody decides otherwise here.
-    if (isAdmin(req)) return full;
-    if (!reqAuthed(req)) return { ok: full.ok, version: full.version, stale: full.stale, ts: full.ts };
+    if (admin) return full;
     const e = full.earnings || {}, n = full.news || {}, ff = (n.filings && n.filings.fetch) || {}, ai = full.ai || {};
     return { ok: full.ok, version: full.version, stale: full.stale, lastPollAgoMs: full.lastPollAgoMs, loop: full.loop,
       lastPoll: full.lastPoll, active: full.active, failing: full.failing, ticks: full.ticks,
@@ -3356,10 +3382,11 @@ async function main() {
   log(`Listening on ${HOST}:${PORT} (dex=${DEX}, data=${DATA_DIR}, build=${VERSION})`);
   // accounts.db backup: shortly after boot (a deploy is the moment a bad migration would show),
   // then daily. Seven rotated copies beside the database, or in ACCOUNTS_BACKUP_DIR.
-  const accountsBackup = () => {
-    const r = ACCOUNTS.backup(process.env.ACCOUNTS_BACKUP_DIR || null, 7);
-    log(r.ok ? `accounts backup: ${r.file} (${(r.bytes / 1024).toFixed(0)} KB, ${r.kept} kept)` : `accounts backup FAILED: ${r.error}`);
-  };
+  // Off the event loop since build 2026.09.24-101: backupAsync runs the VACUUM INTO in a worker
+  // thread on its own connection (falls back to the in-process copy if a worker cannot start).
+  const accountsBackup = () => ACCOUNTS.backupAsync(process.env.ACCOUNTS_BACKUP_DIR || null, 7).then((r) =>
+    log(r.ok ? `accounts backup: ${r.file} (${(r.bytes / 1024).toFixed(0)} KB, ${r.kept} kept)` : `accounts backup FAILED: ${r.error}`))
+    .catch((e) => log("accounts backup FAILED (isolated): " + (e && e.message)));
   setTimeout(accountsBackup, 5 * 60 * 1000).unref();
   setInterval(accountsBackup, 24 * 3600 * 1000).unref();
   poller.start().catch((e) => log("poller start error: " + (e && e.message)));
@@ -3367,7 +3394,7 @@ async function main() {
 
 // _poller is a testing seam (build 2026.09.24-99): the Telegram sync suite binds chats and drains
 // the outbox against a stubbed Bot API through it. Nothing in the app reads it.
-module.exports = { buildServer, VERSION, _poller: () => poller };
+module.exports = { buildServer, VERSION, _poller: () => poller, _sseWriteTo: sseWriteTo, SSE_MAX_BUFFERED };
 if (require.main === module) main().catch((e) => { console.error(e); process.exit(1); });
 
 // Graceful stop: flush EVERYTHING that persists on a timer, not just features + ledger — the

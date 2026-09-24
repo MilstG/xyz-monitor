@@ -456,6 +456,73 @@ test("security -20: /api/health is three views — open, member, operator", asyn
   assert.ok(op.volume && op.volume.dataDir && op.csp && "provider" in op.ai && "backup" in op && "rate" in op, "the operator gets the deployment");
 });
 
+// build 2026.09.24-101: the anonymous health view (Railway's healthcheck) is answered before
+// poller.stats() is built; a signed-in caller still gets the full member/operator views.
+test("perf -101: anonymous /api/health never builds poller.stats(); members and operators still do", async () => {
+  const { _poller } = require("../server.js");
+  const p = _poller(), orig = p.stats;
+  let calls = 0;
+  p.stats = (...a) => { calls++; return orig.apply(p, a); };
+  try {
+    const anon = JSON.parse((await get("/api/health")).body);
+    assert.deepEqual(Object.keys(anon).sort(), ["ok", "stale", "ts", "version"], "same anonymous shape as before");
+    assert.equal(anon.ok, true); assert.equal(typeof anon.stale, "boolean");
+    assert.equal(calls, 0, "the healthcheck costs no stats() walk");
+    const cara = jar(); cara.absorb(await post("/login", { handle: "cara", password: "yet-another-long-pw" }));
+    const member = JSON.parse((await get("/api/health", cara)).body);
+    assert.equal(calls, 1, "a member's view is built from the full stats");
+    assert.ok(member.loop && "failing" in member && member.volume === undefined, "the member view is unchanged");
+    const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+    const op = JSON.parse((await get("/api/health", gus)).body);
+    assert.equal(calls, 2);
+    assert.ok(op.volume && op.csp && "backup" in op, "the operator view is unchanged");
+  } finally { p.stats = orig; }
+});
+
+// build 2026.09.24-101: /api/analytics rides the shared serialize + gzip memo.
+test("perf -101: /api/analytics serves through sendCachedBody — scoped ETag, 304, memoized serialize", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const a = await get("/api/analytics?u=stocks", gus);
+  assert.equal(a.statusCode, 200);
+  const tag = a.headers.etag;
+  assert.match(tag, /^W\/"stocks-/, "scope-prefixed validator kept");
+  assert.equal(a.headers["cache-control"], "no-cache");
+  assert.ok(JSON.parse(a.body), "a JSON body");
+  const b = await get("/api/analytics?u=stocks", gus, { "if-none-match": tag });
+  assert.equal(b.statusCode, 304);
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const route = srv.slice(srv.indexOf('fastify.get("/api/analytics"'), srv.indexOf('fastify.get("/api/funding"'));
+  assert.ok(route.includes("return sendCachedBody(req, reply, body, tag);") && !route.includes("JSON.stringify(body)"), "no per-request stringify");
+});
+
+// build 2026.09.24-101: SSE writes respect backpressure.
+test("perf -101: an SSE client past the buffer cap is dropped; destroyed sockets are detached, never written", () => {
+  const { _sseWriteTo, SSE_MAX_BUFFERED } = require("../server.js");
+  assert.equal(SSE_MAX_BUFFERED, 64 * 1024);
+  const mk = (over) => Object.assign({ destroyed: false, writableEnded: false, writableLength: 0, wrote: [], killed: false,
+    write(f) { this.wrote.push(f); return true; }, destroy() { this.killed = true; this.destroyed = true; } }, over || {});
+  const detached = [];
+  const detach = (e) => detached.push(e);
+  const ok = { res: mk() };
+  assert.equal(_sseWriteTo(ok, "data: 1\n\n", detach), true);
+  assert.deepEqual(ok.res.wrote, ["data: 1\n\n"]); assert.equal(detached.length, 0);
+  const at = { res: mk({ writableLength: SSE_MAX_BUFFERED }) };
+  assert.equal(_sseWriteTo(at, "x", detach), true, "exactly at the cap still writes");
+  const slow = { res: mk({ writableLength: SSE_MAX_BUFFERED + 1 }) };
+  assert.equal(_sseWriteTo(slow, "x", detach), false);
+  assert.ok(slow.res.killed && slow.res.wrote.length === 0 && detached.includes(slow), "a stalled reader is detached and destroyed, nothing more buffered");
+  const dead = { res: mk({ destroyed: true }) };
+  assert.equal(_sseWriteTo(dead, "x", detach), false);
+  assert.ok(dead.res.wrote.length === 0 && detached.includes(dead), "a destroyed socket is detached, not written");
+  const ended = { res: mk({ writableEnded: true }) };
+  assert.equal(_sseWriteTo(ended, "x", detach), false);
+  assert.ok(ended.res.wrote.length === 0 && detached.includes(ended));
+  const throws = { res: mk({ write() { throw new Error("EPIPE"); } }) };
+  assert.equal(_sseWriteTo(throws, "x", detach), false, "a throwing write is contained");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(srv.includes("const sseWrite = (entry, frame) => sseWriteTo(entry, frame, sseDetach);"), "every fan-out goes through the guarded writer");
+});
+
 test("security -20: the reset step-2 cookie is signed — a hand-set handle spends nobody's guesses", async () => {
   const { DatabaseSync } = require("node:sqlite");
   const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));

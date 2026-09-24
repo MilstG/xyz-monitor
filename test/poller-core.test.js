@@ -2685,7 +2685,7 @@ test("reliability: calendar lanes carry in-flight guards, the daily rebuild is d
   assert.ok(/function persistLedger\(force\) \{\s*\n\s*if \(!ledgerDirty\) return;\s*\n\s*if \(!force\) \{/.test(pol), "non-forced calls coalesce");
   assert.ok(pol.includes("const LEDGER_BATCH_MS = 2000;"), "2s trailing batch");
   assert.ok(pol.includes("if (fired) { persistTriggers(); persistLedger(); log(`ledger alerts:"), "the level-alert path is the batched caller");
-  assert.ok(pol.includes("persistLedger(true);   // the end of a signals pass is the batch boundary"), "the signals pass forces");
+  assert.ok(pol.includes("await persistLedgerAsync();   // the end of a signals pass is the batch boundary"), "the signals pass forces (async write, awaited, since -101)");
   assert.ok(pol.includes("persistLedger: () => { ledgerDirty = true; persistLedger(true); }"), "the shutdown/crash export is synchronous");
 });
 

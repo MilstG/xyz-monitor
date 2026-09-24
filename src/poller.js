@@ -186,6 +186,34 @@ function num(x) { const v = typeof x === "number" ? x : parseFloat(x); return Nu
 // values), `sig` = significant digits (for prices, which span 6 orders of magnitude).
 function rnd(x, dp) { return Number.isFinite(x) ? +x.toFixed(dp) : null; }
 function sig(x, n) { return Number.isFinite(x) ? (x === 0 ? 0 : +x.toPrecision(n)) : null; }
+// Web ReadableStream body -> file, honouring backpressure (build 2026.09.24-101). The zip ingests
+// (13F quarterly, House disclosures — hundreds of MB) used to `w.write()` every chunk without
+// looking at the return value, so a network faster than the disk buffered the whole download in the
+// write stream's memory: the exact double-hold the stream-to-disk change was meant to remove. Now a
+// full buffer awaits 'drain' before the next read, a write error aborts the read loop (and cancels
+// the body) instead of being an unhandled 'error' event, and the returned promise settles only when
+// the file is flushed and closed.
+async function webBodyToFile(body, file) {
+  const fsm = require("fs"), { once } = require("events"), { finished } = require("stream/promises");
+  const w = fsm.createWriteStream(file);
+  let werr = null; w.on("error", (e) => { werr = werr || e; });
+  const reader = body.getReader();
+  try {
+    for (;;) {
+      if (werr) throw werr;
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!w.write(Buffer.from(value))) await once(w, "drain");
+    }
+    if (werr) throw werr;
+    w.end();
+    await finished(w);
+  } catch (e) {
+    try { await reader.cancel(); } catch (_) {}
+    w.destroy();
+    throw e;
+  }
+}
 const sigq = sig;   // alias for scopes that shadow `sig` locally (buildDaily declares its content-signature as `sig`)
 
 function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, pushFetch: pushFetchOpt, extFetch: extFetchOpt, metaFetch: metaFetchOpt, posFetch: posFetchOpt, t13fCap: t13fCapOpt, congressGap: congressGapOpt, congressConc: congressConcOpt }) {
@@ -1956,22 +1984,40 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // the 2s socket tick — a busy open could fsync the same blob a dozen times in a minute. Non-forced
   // calls now coalesce on a ~2s trailing timer; `force` (the shutdown / crash export and the end of
   // a signals pass, which is the natural batch boundary) writes synchronously and cancels the timer.
+  // Async since build 2026.09.24-101 on the PERIODIC paths (the ~2s batch timer and the end of a
+  // signals pass): store.saveLedgerAsync does the same write/fsync/rename/dir-fsync through a
+  // FileHandle, serialized, so the two fsyncs no longer hold the loop. The blob is built and
+  // serialized synchronously at call time, so the file is exactly the state of that instant. The
+  // dirty flag clears when the blob is taken and is re-raised if the write fails, so a failed
+  // write is retried by the next persist. The exported persistLedger (shutdown / crash export)
+  // stays synchronous and supersedes any async write still in flight (see store.saveConfigAsync).
   let ledgerT = null;
   const LEDGER_BATCH_MS = 2000;
+  const ledgerBlob = () => ({ ts: Date.now(), open: [...ledgerOpen.values()], closed: ledgerClosed.slice(-4000), variants: variantState, rearm: [...rearm],
+    present: [...presentSince].map(([k, v]) => [k, v.t]),   // presence timelines survive restarts — a deploy is not a lapse
+    board: { since: boardEpSince, dropped: boardEpDropped, open: [...boardEp.values()], closed: boardEpClosed.slice(-BOARD_EP_KEEP),
+      evalT: [...actEval].map(([k, v]) => [k, v.t, v.b ? 1 : 0]) } });   // the board's own record rides the same blob — no new storage surface
   function persistLedger(force) {
     if (!ledgerDirty) return;
     if (!force) {
       if (ledgerT) return;
-      ledgerT = setTimeout(() => { ledgerT = null; try { persistLedger(true); } catch (e) { log("ledger persist (batched) failed: " + (e && e.message)); } }, LEDGER_BATCH_MS);
+      ledgerT = setTimeout(() => { ledgerT = null; persistLedgerAsync().catch((e) => log("ledger persist (batched) failed: " + (e && e.message))); }, LEDGER_BATCH_MS);
       if (ledgerT.unref) ledgerT.unref();
       return;
     }
     if (ledgerT) { clearTimeout(ledgerT); ledgerT = null; }
-    store.saveLedger({ ts: Date.now(), open: [...ledgerOpen.values()], closed: ledgerClosed.slice(-4000), variants: variantState, rearm: [...rearm],
-      present: [...presentSince].map(([k, v]) => [k, v.t]),   // presence timelines survive restarts — a deploy is not a lapse
-      board: { since: boardEpSince, dropped: boardEpDropped, open: [...boardEp.values()], closed: boardEpClosed.slice(-BOARD_EP_KEEP),
-        evalT: [...actEval].map(([k, v]) => [k, v.t, v.b ? 1 : 0]) } });   // the board's own record rides the same blob — no new storage surface
+    store.saveLedger(ledgerBlob());
     ledgerDirty = false;
+  }
+  async function persistLedgerAsync() {
+    if (!ledgerDirty) return true;
+    if (ledgerT) { clearTimeout(ledgerT); ledgerT = null; }
+    if (!store.saveLedgerAsync) { store.saveLedger(ledgerBlob()); ledgerDirty = false; return true; }
+    const p = store.saveLedgerAsync(ledgerBlob());   // serialized NOW, inside the store call
+    ledgerDirty = false;
+    const ok = await p;
+    if (ok === false) ledgerDirty = true;   // superseded by a sync write (already on disk) or failed: the next persist retries — a redundant write at worst
+    return ok !== false;
   }
   // Per-ticker signal history for the drawer: every VISIBLE claim the engine ever made on one
   // name — shadow-variant claims (vi) are internal bookkeeping and never surface here. Outcomes
@@ -3647,7 +3693,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       shown: top.length, signals: top,
       record: recordCache || {}, confluence: confCache || null, recordX: recordXCache,
       records: recordSets, variants, shadows, recent: rs0 ? rs0.recent : [], earnSplit };
-    persistLedger(true);   // the end of a signals pass is the batch boundary: claims opened this pass are on disk when it returns
+    await persistLedgerAsync();   // the end of a signals pass is the batch boundary: claims opened this pass are on disk when it returns (async write, build 2026.09.24-101)
     // Event-driven board rebuild (2026.08.03-07): claims opened THIS pass reach the board on the
     // chained build that follows, not the next ACT_MS/poll tick — the pure-cadence half of the
     // fire->shown cost, deleted. Debounced to one chained rebuild per signals pass, floor-limited
@@ -6269,10 +6315,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           // the floor, and now it is also the ceiling.
           if (res.body && typeof res.body.getReader === "function") {
             const fsm = require("fs");
-            const w = fsm.createWriteStream(tmpZip);
-            const reader = res.body.getReader();
-            for (;;) { const { done: d2, value } = await reader.read(); if (d2) break; w.write(Buffer.from(value)); }
-            await new Promise((res2, rej2) => { w.end(); w.on("finish", res2); w.on("error", rej2); });
+            await webBodyToFile(res.body, tmpZip);   // backpressure-aware (build 2026.09.24-101)
             zipBuf = fsm.readFileSync(tmpZip);
             try { fsm.unlinkSync(tmpZip); } catch (_) {}
           } else {
@@ -6553,10 +6596,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           if (!res || !res.ok) { tried.push(url + " → HTTP " + (res ? res.status : "no response")); continue; }
           if (res.body && typeof res.body.getReader === "function") {
             const fsm = require("fs");
-            const w = fsm.createWriteStream(tmpZip);
-            const reader = res.body.getReader();
-            for (;;) { const { done: d2, value } = await reader.read(); if (d2) break; w.write(Buffer.from(value)); }
-            await new Promise((res2, rej2) => { w.end(); w.on("finish", res2); w.on("error", rej2); });
+            await webBodyToFile(res.body, tmpZip);   // backpressure-aware (build 2026.09.24-101)
             zipBuf = fsm.readFileSync(tmpZip);
             try { fsm.unlinkSync(tmpZip); } catch (_) {}
           } else {
@@ -7978,7 +8018,27 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     return false;
   }
 
-  function persistFeatures() {
+  // Change signature of everything persistFeatures reads (build 2026.09.24-101). The blob is
+  // multi-MB and was re-serialized and rewritten every 120s whether or not a byte of it moved. The
+  // inputs are replaced by assignment (ref/feat on each hourly refresh, dailyRaw on each daily
+  // pull) or appended in place (premH), so an identity id per array/object plus the lengths and
+  // edge timestamps catch every change in O(markets) — no serialization. Any doubt compares
+  // unequal (a write), never equal: the signature can only cost a redundant write, not a lost one.
+  const featIds = new WeakMap(); let featIdSeq = 0;
+  const featId = (o) => { if (!o || typeof o !== "object") return 0; let id = featIds.get(o); if (!id) { id = ++featIdSeq; featIds.set(o, id); } return id; };
+  let featSigLast = null;
+  function featuresSig() {
+    const parts = [];
+    for (const r of rows.values()) {
+      if (r.delisted || (!r.feat && !r.dailyRaw)) continue;
+      const d = r.dailyRaw, ph = r.premH;
+      parts.push(r.coin + ":" + featId(r.ref) + "." + featId(r.feat) + "." + (r.hourlyTs || 0) + "." + (r.dailyTs || 0) + "." + (r.fundBackfilled ? 1 : 0)
+        + "." + featId(d) + "." + (d ? d.length : -1)
+        + "." + featId(ph) + "." + (ph ? ph.length + "." + (ph.length ? ph[0][0] + "." + ph[ph.length - 1][0] : "") : "-"));
+    }
+    return parts.join("|");
+  }
+  function featuresBlob() {
     const markets = {};
     for (const r of rows.values()) {
       if (r.delisted || (!r.feat && !r.dailyRaw)) continue;
@@ -7993,7 +8053,30 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         ph,   // downsampled 7d premium baseline, so redeploys keep the dislocation z-scores warm
       };
     }
-    store.saveFeatures({ ts: Date.now(), markets });
+    return { ts: Date.now(), markets };
+  }
+  // Synchronous write: shutdown and the crash export (and the test harness). Always writes.
+  function persistFeatures() {
+    const sig = featuresSig();
+    store.saveFeatures(featuresBlob());
+    featSigLast = sig;
+  }
+  // The 120s timer's path (build 2026.09.24-101): skip when nothing persistFeatures reads has
+  // changed since the last write, otherwise hand the blob to the store's async, serialized write
+  // (disk time on the threadpool). A store without saveFeaturesAsync gets the sync write. The
+  // signature only advances on a confirmed write, so a failed one is retried on the next tick.
+  // Resolves "skipped" | "written" | "failed".
+  let featInFlight = null;
+  function persistFeaturesAsync() {
+    if (featInFlight) return featInFlight;   // one write in flight at a time; the next tick catches up
+    const sig = featuresSig();
+    if (sig === featSigLast) return Promise.resolve("skipped");
+    const blob = featuresBlob();
+    if (!store.saveFeaturesAsync) { store.saveFeatures(blob); featSigLast = sig; return Promise.resolve("written"); }
+    featInFlight = Promise.resolve(store.saveFeaturesAsync(blob))
+      .then((ok) => { if (ok !== false) featSigLast = sig; return ok !== false ? "written" : "failed"; }, () => "failed")
+      .finally(() => { featInFlight = null; });
+    return featInFlight;
   }
 
   // Persist the raw 60d hourly spine so the session analytics survive redeploys instead of blanking
@@ -8555,7 +8638,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       // Deep 12h/1d lane (2026.08.21-01): seeds backward to each listing's birth, then trickles
       // forward. Rides the daily VACUUM-INTO snapshot below for free — one db, one off-copy.
       deepWorker();
-      const snap = () => { try { if (store.snapshotCandles()) log("5m archive: off-copy snapshot written (candles.db.bak)"); } catch (_) {} };
+      // Worker-thread VACUUM (build 2026.09.24-101): the copy of the whole archive used to run on
+      // the main connection and hold the loop for its full duration. snapshotCandlesAsync keeps the
+      // .tmp/rename/previous-.bak-survives contract; the sync path remains for stores without it.
+      const snap = () => {
+        const done = (ok) => { if (ok) log("5m archive: off-copy snapshot written (candles.db.bak)"); };
+        try {
+          if (store.snapshotCandlesAsync) store.snapshotCandlesAsync().then(done, () => {});
+          else done(store.snapshotCandles());
+        } catch (_) {}
+      };
       setInterval(snap, M5_SNAPSHOT_MS);
       setTimeout(snap, 10 * 60 * 1000);
       log(`5m archive: ENABLED (node:sqlite) — capturing closed 5m bars, ${M5_RETENTION_DAYS}d retention, ${store.candleCount ? store.candleCount() : 0} bar(s) on disk`);
@@ -8565,9 +8657,17 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // Timed + isolated since -08: these two were the only scheduled ticks outside safeTick, which
     // meant (a) a throw in either would take the process down and (b) they were invisible to the
     // tick stats. Same cadence, same functions — they just report in now like everything else.
+    // Phase stagger (build 2026.09.24-101): the synchronous-heavy periodic jobs used to be armed in
+    // the same tick, so every 60s the snapshot build, the daily build and the store flush landed
+    // together, and every 120s the features serialize and every 10 min the signals pass (with its
+    // ledger write) joined them — one long stall instead of several short ones. Cadences are
+    // unchanged; each job's first interval is merely armed after a small offset, which puts them
+    // on distinct residues mod 15s (snapshot 0, store flush 3, signals+ledger 5, daily 8,
+    // features 11), so no two of them can ever fire in the same second.
+    const staggered = (fn, ms, phaseMs) => setTimeout(() => setInterval(fn, ms), phaseMs);
     setInterval(safeTick(buildSnapshot, "buildSnapshot"), 15 * 1000);
-    setInterval(safeTick(buildDaily, "buildDaily"), 60 * 1000);
-    setInterval(safeTick(buildSignals, "buildSignals"), 10 * 60 * 1000);
+    staggered(safeTick(buildDaily, "buildDaily"), 60 * 1000, 8 * 1000);
+    staggered(safeTick(buildSignals, "buildSignals"), 10 * 60 * 1000, 5 * 1000);
     // Trigger detection follows the signals build on the same cadence, offset so it reads a
     // settled ledger. Isolated: a board error must never take the signal engine down with it.
     setInterval(safeTick(buildActionable, "buildActionable"), 10 * 60 * 1000);
@@ -8624,8 +8724,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // enough features are warm to snap, then idles until the next UTC midnight.
     setInterval(safeTick(duelTick, "duelTick"), 60 * 1000);
     setTimeout(safeTick(duelTick, "duelTick"), 45 * 1000);
-    setInterval(() => store.flush(), 30 * 1000);
-    setInterval(persistFeatures, 120 * 1000);
+    staggered(() => store.flush(), 30 * 1000, 3 * 1000);   // phase: see the stagger note at buildSnapshot
+    staggered(() => { persistFeaturesAsync().catch((e) => log("features persist failed (isolated): " + (e && e.message))); }, 120 * 1000, 11 * 1000);
     setInterval(() => { persistHourly().catch((e) => log("hourly persist failed (isolated): " + (e && e.message))); }, HOURLY_PERSIST_MS);
     setTimeout(() => { persistHourly().catch((e) => log("hourly persist failed (isolated): " + (e && e.message))); }, 90 * 1000);   // early snapshot so even a quick redeploy keeps the spine warm
     setInterval(maintenance, 24 * 3600 * 1000);
@@ -15368,6 +15468,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     buildSnapshotNow: buildSnapshot, // harness: run one snapshot build synchronously (content-sig identity test)
     buildAnalyticsNow: buildAnalytics, // harness: run one analytics build synchronously (regime aggregate path)
     persistFeatures,
+    persistFeaturesAsync,   // the 120s timer's path: skip-when-unchanged + async serialized write (build 2026.09.24-101)
     persistLedger: () => { ledgerDirty = true; persistLedger(true); },   // shutdown / crash path: synchronous, cancels any pending batch
     // Final-flush surface for the shutdown and crash paths: everything that otherwise persists
     // on a timer gets one more write on the way out. Each is idempotent, cheap, and safe to
@@ -15443,4 +15544,4 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
   };
 }
 
-module.exports = { createPoller };
+module.exports = { createPoller, webBodyToFile };

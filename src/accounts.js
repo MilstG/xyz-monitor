@@ -17,6 +17,7 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { vacuumIntoAsync } = require("./vacuum");
 
 // ---- code alphabet -----------------------------------------------------------------------------
 // Crockford base32: no I, L, O or U, so a code survives being read down a phone line and typed back.
@@ -2409,26 +2410,61 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   // volume, which is what turns "survives a bad migration" into "survives losing the volume".
   // Deliberately NOT the GitHub ledger backup: this file carries PII.
   let lastBackup = null;
-  function backup(dir, keep) {
+  // Split in three (build 2026.09.24-101) so the scheduled path can run the copy off the event
+  // loop: plan (names, dir), copy (VACUUM INTO — in-process here, in a worker in backupAsync),
+  // land (rename over, stat, rotate). Same names, same rotation, same result shape either way.
+  function backupPlan(dir, keep) {
     const out = dir || path.join(dataDir, "backups");
     const n = Number.isFinite(keep) && keep >= 1 ? Math.floor(keep) : 7;
+    fs.mkdirSync(out, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+    const file = path.join(out, `accounts-${stamp}-${Date.now() % 100000}.db`);
+    const tmp = file + ".tmp";
+    try { fs.unlinkSync(tmp); } catch (_) {}
+    return { out, n, file, tmp };
+  }
+  const backupCopySync = (tmp) => { try { fs.unlinkSync(tmp); } catch (_) {} db.exec("VACUUM INTO '" + tmp.replace(/'/g, "''") + "'"); };
+  function backupLand({ out, n, file, tmp }) {
+    fs.renameSync(tmp, file);
+    const bytes = fs.statSync(file).size;
+    // Rotate: newest n stay, the rest go. Names sort chronologically by construction.
+    const old = fs.readdirSync(out).filter((f) => /^accounts-\d{8}-\d{6}-\d+\.db$/.test(f)).sort();
+    for (const f of old.slice(0, Math.max(0, old.length - n))) { try { fs.unlinkSync(path.join(out, f)); } catch (_) {} }
+    lastBackup = { at: Date.now(), file, bytes };
+    return { ok: true, file, bytes, kept: Math.min(n, old.length) };
+  }
+  // Synchronous: tests, and the fallback shape. The daily schedule uses backupAsync.
+  function backup(dir, keep) {
+    let plan = null;
     try {
-      fs.mkdirSync(out, { recursive: true });
-      const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
-      const file = path.join(out, `accounts-${stamp}-${Date.now() % 100000}.db`);
-      const tmp = file + ".tmp";
-      try { fs.unlinkSync(tmp); } catch (_) {}
-      db.exec("VACUUM INTO '" + tmp.replace(/'/g, "''") + "'");
-      fs.renameSync(tmp, file);
-      const bytes = fs.statSync(file).size;
-      // Rotate: newest n stay, the rest go. Names sort chronologically by construction.
-      const old = fs.readdirSync(out).filter((f) => /^accounts-\d{8}-\d{6}-\d+\.db$/.test(f)).sort();
-      for (const f of old.slice(0, Math.max(0, old.length - n))) { try { fs.unlinkSync(path.join(out, f)); } catch (_) {} }
-      lastBackup = { at: Date.now(), file, bytes };
-      return { ok: true, file, bytes, kept: Math.min(n, old.length) };
+      plan = backupPlan(dir, keep);
+      backupCopySync(plan.tmp);
+      return backupLand(plan);
     } catch (e) {
+      if (plan) { try { fs.unlinkSync(plan.tmp); } catch (_) {} }
       return { ok: false, error: (e && e.message) || String(e) };
     }
+  }
+  // The scheduled path (build 2026.09.24-101): the VACUUM runs in a worker thread on its own
+  // connection to accounts.db (WAL: a concurrent reader is fine), so the copy of every message and
+  // attachment no longer stalls the server. A worker that cannot start runs backupCopySync instead.
+  // Serialized: an overlapping call (boot timer racing the daily one) waits for the running copy.
+  let backupChain = Promise.resolve();
+  function backupAsync(dir, keep, opts) {
+    const run = async () => {
+      let plan = null;
+      try {
+        plan = backupPlan(dir, keep);
+        await vacuumIntoAsync(file, plan.tmp, () => backupCopySync(plan.tmp), opts);
+        return backupLand(plan);
+      } catch (e) {
+        if (plan) { try { fs.unlinkSync(plan.tmp); } catch (_) {} }
+        return { ok: false, error: (e && e.message) || String(e) };
+      }
+    };
+    const p = backupChain.then(run, run);
+    backupChain = p.catch(() => {});
+    return p;
   }
   function close() {
     try { db.exec("PRAGMA wal_checkpoint(TRUNCATE);"); } catch (_) {}
@@ -2438,7 +2474,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   return {
     // identity
     signSession, sessionUser, tokenFor, countUsers, getUser, getUserByHandle, listUsers, pub, deriveKey,
-    backup, close, lastBackup: () => lastBackup, msgSeq,
+    backup, backupAsync, close, lastBackup: () => lastBackup, msgSeq,
     login, setPassword, signOutEverywhere, setDisabled, setAdmin, renameUser, touch, hydrate,
     // invites
     mintInvite, readInvite, revokeInvite, listInvites, redeem, bootstrap, claim, inviteState,

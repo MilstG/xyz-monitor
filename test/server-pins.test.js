@@ -1082,8 +1082,12 @@ test("-17 hotfix: analytics ETag is scope-namespaced so the two universes can't 
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   // the route builds a scope-prefixed validator and 304s only on an exact scope-tag match
   assert.ok(srv.includes('const tag = \'W/"\' + scope + "-" +'), "ETag prefixes the scope");
-  assert.ok(srv.includes('if (req.headers["if-none-match"] === tag) { return reply.code(304).send(); }'),
+  // Since -101 the route serves through sendCachedBody (memoized serialize + gzip), whose 304 is the
+  // same exact-tag match on the validator the route hands it.
+  assert.ok(srv.includes('if (req.headers["if-none-match"] === tag) { reply.code(304).send(); return; }'),
     "304 only when the scope-namespaced tag matches");
+  const route = srv.slice(srv.indexOf('fastify.get("/api/analytics"'), srv.indexOf('fastify.get("/api/funding"'));
+  assert.ok(route.includes("return sendCachedBody(req, reply, body, tag);"), "the analytics route hands its scope-namespaced tag to sendCachedBody");
   // prove the two tags differ even at an identical dataTs
   const tagOf = (scope, dataTs) => 'W/"' + scope + "-" + dataTs + '"';
   assert.notEqual(tagOf("stocks", 1721000000000), tagOf("crypto", 1721000000000), "same-ms builds still get distinct tags");
@@ -1395,7 +1399,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract â€
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.24-100"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.24-101"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -1595,7 +1599,7 @@ test("loop instrumentation 2026.07.29-05: histogram armed before the store/polle
   // Boot restore trims to the cap so a hand-edited or legacy-format file can't grow unbounded.
   assert.ok(srv.includes("loopRing = j.ring.slice(-LOOP_RING_MAX)"), "boot restore trims to the ring cap");
   // Health surface: live sample + ring + maxEver, on the existing route (no new endpoint).
-  assert.ok(/\/api\/health"[\s\S]{0,600}loop: \{ \.\.\.loopSample\(\), sinceMs: Date\.now\(\) - loopResetAt, windowMs: LOOP_WINDOW, maxEver: loopMaxEver, hist: loopRing \}/.test(srv),
+  assert.ok(/\/api\/health"[\s\S]{0,1200}loop: \{ \.\.\.loopSample\(\), sinceMs: Date\.now\(\) - loopResetAt, windowMs: LOOP_WINDOW, maxEver: loopMaxEver, hist: loopRing \}/.test(srv),
     "/api/health must ship the live sample, window age, maxEver and the ring");
 });
 
@@ -1725,7 +1729,7 @@ test("perf -08: tick instrumentation, cooperative yields and the serialized buil
   assert.ok(pol.includes("buildAnalyticsSafe(scope).catch(() => {});"), "getAnalytics fires the async self-heal and serves the fallback this once");
   // The previously bare intervals are timed + isolated now.
   assert.ok(pol.includes('setInterval(safeTick(buildSnapshot, "buildSnapshot"), 15 * 1000);'), "buildSnapshot runs through safeTick");
-  assert.ok(pol.includes('setInterval(safeTick(buildDaily, "buildDaily"), 60 * 1000);'), "buildDaily runs through safeTick");
+  assert.ok(pol.includes('staggered(safeTick(buildDaily, "buildDaily"), 60 * 1000, 8 * 1000);'), "buildDaily runs through safeTick (phase-staggered since -101)");
   // The names reach the wire, and the harness can settle the chain.
   assert.ok(pol.includes("ticks: [...tickStats]"), "stats() must ship the named tick durations");
   assert.ok(pol.includes("settleBuildsNow: () => buildChain"), "harness chain-settle export missing");

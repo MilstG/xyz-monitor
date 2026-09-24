@@ -705,7 +705,7 @@ You need a GitHub account and a Railway account.
 npm test          # node:test, one file per module/area under test/, run in parallel (~20s)
 npm run test:cov  # the same with Node's built-in coverage table (what CI runs)
 npm run lint      # ESLint 10, flat config: server (CommonJS), client (ES modules), service worker
-npm run bench     # event-loop cost of the poller's synchronous builds on a synthetic 150-market book
+npm run bench     # event-loop cost of the poller's synchronous builds, persistence and VACUUM paths on a synthetic 150-market book
 ```
 
 Test files are named for what they exercise (`compute-signals`, `poller-lanes`, `client-core`,
@@ -719,6 +719,22 @@ On the worker-thread question the codebase keeps asking: `npm run bench` is the 
 under a build every 200 ms is 16 ms — under the 50 ms gate the histogram on `/api/health` was
 armed for — and shipping one market's daily bars to a worker costs more than the level-map work on
 them. The build stays on the loop until those numbers, or the production histogram, say otherwise.
+
+**Performance (build 2026.09.24-101).** The first worker thread went where the numbers pointed:
+the daily `VACUUM INTO` off-copies of `candles.db` and `accounts.db` now run in a
+`worker_threads` Worker on their own connection (WAL permits the concurrent reader; `src/vacuum.js`),
+with the in-process copy as a fallback if a worker cannot start — on a 28 MB synthetic archive the
+loop's max delay during the copy drops from ~110 ms to ~7 ms (`npm run bench` prints both). The
+same .tmp → rename → previous-copy-survives contract holds. The 120 s `features.json` write skips
+when a cheap signature of its inputs is unchanged and otherwise writes through `fs.promises` on one
+serialized chain; the ledger's periodic persist uses an async FileHandle twin of the durable
+write/fsync/rename/dir-fsync sequence. Shutdown and the crash export stay synchronous and supersede
+any async write still in flight. Also: `/api/analytics` goes through the memoized serialize + gzip
+path, an anonymous `/api/health` (the Railway healthcheck) no longer builds the full stats, SSE
+streams more than 64 KB behind are dropped (EventSource reconnects and resyncs), the Hyperliquid
+limiter keeps a running sum instead of filter+reduce per grant, the zip ingests await `drain`, and
+the sync-heavy timers (snapshot, store flush, signals + ledger, daily, features) sit on distinct
+phases instead of firing in the same tick. Cadences are unchanged.
 
 ## Optional: earnings calendar (Finnhub)
 

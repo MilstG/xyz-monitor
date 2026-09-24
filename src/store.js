@@ -6,6 +6,7 @@
 const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
+const { vacuumIntoAsync } = require("./vacuum");
 
 const MAX_BUF = 50000; // hard cap on unflushed lines if the volume is unwritable
 
@@ -123,6 +124,8 @@ function openStore(dataDir) {
   const whaleFile = path.join(dataDir, "whale.json");        // 13F watchlist + cached quarterly books + unseen state + season builds
   let dbuf = [];
   let dPruning = false;   // hold deriv appends in dbuf during the streaming rewrite, same as the OI prune
+  let featGen = 0, featSeq = 0, featChain = Promise.resolve(true);   // saveFeaturesAsync serialization (build 2026.09.24-101)
+  let cfgChain = Promise.resolve(), cfgGen = new Map();              // saveConfigAsync serialization, per-file generation (same build)
   let oiPreloaded = null; // set by preloadOI(); consumed once by the next loadAll()
   // CONFIG-grade files (notes, rules, baskets, ledger): somebody typed these, or they are the
   // record itself, and nothing can rebuild them. tmp+rename alone is durable only by ext4
@@ -132,12 +135,43 @@ function openStore(dataDir) {
   // timestamp) and the .bak tried, instead of being treated as first boot and overwritten empty
   // on the next save — which is how a corrupt notes.json used to eat every note.
   function saveConfig(file, data) {
+    cfgGen.set(file, (cfgGen.get(file) || 0) + 1);   // supersedes any saveConfigAsync of this file still in flight
     const tmp = file + ".tmp";
     const fd = fs.openSync(tmp, "w");
     try { fs.writeSync(fd, JSON.stringify(data)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     try { if (fs.existsSync(file)) fs.copyFileSync(file, file + ".bak"); } catch (_) {}
     fs.renameSync(tmp, file);
     try { const dfd = fs.openSync(path.dirname(file), "r"); try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); } } catch (_) {}
+  }
+  // Async twin of saveConfig (build 2026.09.24-101) for the PERIODIC ledger persist: the same
+  // write -> fsync -> .bak -> rename -> dir fsync sequence, through a FileHandle, so the two fsyncs
+  // of a multi-MB blob wait on the threadpool instead of the event loop. The blob is serialized
+  // NOW (the caller's state is live and keeps moving). Writes queue on one chain — never two in
+  // flight, never out of order — through their own `.atmp` name so they cannot collide with the
+  // sync path's `.tmp`. The sync saveConfig (shutdown, crash export) bumps the file's generation;
+  // an async write that started before it re-checks at every await and drops itself rather than
+  // renaming an older blob over the one the shutdown just made durable. Resolves true when this
+  // blob is the file on disk, false when superseded or failed; throws only on a serialize error.
+  function saveConfigAsync(file, data) {
+    const body = JSON.stringify(data);
+    const gen = cfgGen.get(file) || 0, tmp = file + ".atmp";
+    const stale = () => (cfgGen.get(file) || 0) !== gen;
+    const run = async () => {
+      if (stale()) return false;
+      try {
+        const fh = await fs.promises.open(tmp, "w");
+        try { await fh.writeFile(body); await fh.sync(); } finally { await fh.close(); }
+        if (stale()) { await fs.promises.unlink(tmp).catch(() => {}); return false; }
+        try { await fs.promises.copyFile(file, file + ".bak"); } catch (_) {}   // first write: no previous version
+        if (stale()) { await fs.promises.unlink(tmp).catch(() => {}); return false; }
+        await fs.promises.rename(tmp, file);
+        try { const dh = await fs.promises.open(path.dirname(file), "r"); try { await dh.sync(); } finally { await dh.close(); } } catch (_) {}
+        return true;
+      } catch (_) { await fs.promises.unlink(tmp).catch(() => {}); return false; }
+    };
+    const p = cfgChain.then(run);
+    cfgChain = p;
+    return p;
   }
   function loadConfig(file, label) {
     if (!fs.existsSync(file)) return null;
@@ -392,11 +426,35 @@ function openStore(dataDir) {
     // so a crash mid-write must never be able to leave a truncated features.json behind —
     // that would silently cost a cold-start, the exact failure this file prevents.
     saveFeatures(data) {
+      featGen++;   // any async write still in flight is now older than this one: it must not rename over it
       try {
         const tmp = featFile + ".tmp";
         fs.writeFileSync(tmp, JSON.stringify(data));
         fs.renameSync(tmp, featFile);
       } catch (_) {}
+    },
+    // The periodic path (build 2026.09.24-101): the multi-MB write goes through fs.promises so
+    // the disk time is off the loop (the serialize is still here, synchronously — it has to be,
+    // the rows are live). Writes are SERIALIZED on one chain, each through its own tmp name, so
+    // two overlapping calls can never interleave bytes in one tmp or rename out of order. A sync
+    // saveFeatures (shutdown/crash) bumps featGen, and an async write that started before it skips
+    // its rename — an older blob can never land over the newer one the shutdown just wrote.
+    // Resolves true when this blob is on disk, false on any failure (never rejects).
+    saveFeaturesAsync(data) {
+      let body;
+      try { body = JSON.stringify(data); } catch (_) { return Promise.resolve(false); }
+      const gen = featGen, tmp = featFile + ".atmp" + (++featSeq);
+      const run = async () => {
+        try {
+          await fs.promises.writeFile(tmp, body);
+          if (gen !== featGen) { await fs.promises.unlink(tmp).catch(() => {}); return false; }
+          await fs.promises.rename(tmp, featFile);
+          return true;
+        } catch (_) { await fs.promises.unlink(tmp).catch(() => {}); return false; }
+      };
+      const p = featChain.then(run);
+      featChain = p;
+      return p;
     },
     loadFeatures() {
       try { if (fs.existsSync(featFile)) return JSON.parse(fs.readFileSync(featFile, "utf8")); }
@@ -434,6 +492,11 @@ function openStore(dataDir) {
     saveLedger(data) {
       try { saveConfig(ledgerFile, data); }
       catch (_) {}
+    },
+    // Periodic path (build 2026.09.24-101): see saveConfigAsync. Resolves true/false, never rejects.
+    saveLedgerAsync(data) {
+      try { return saveConfigAsync(ledgerFile, data); }
+      catch (_) { return Promise.resolve(false); }
     },
     // Score-duel state (MOM vs MOM+ daily snapshots + rank-IC series). Same atomic write
     // discipline as the ledger blob: tmp + rename, so a crash mid-write never truncates the
@@ -907,6 +970,27 @@ function openStore(dataDir) {
       try {
         cdb.exec("VACUUM INTO '" + String(tmp).replace(/'/g, "''") + "'");
         fs.renameSync(tmp, out);
+        return true;
+      } catch (_) {
+        try { fs.unlinkSync(tmp); } catch (_) {}
+        return false;   // the previous .bak is untouched
+      }
+    },
+    // The scheduled path (build 2026.09.24-101): the same .tmp -> rename -> previous-.bak-survives
+    // contract, but the VACUUM runs in a worker thread on its own connection (src/vacuum.js), so the
+    // multi-second copy of the archive no longer holds the event loop. Resolves true/false exactly
+    // like snapshotCandles; a worker that cannot start degrades to the in-process VACUUM.
+    async snapshotCandlesAsync(dest, opts) {
+      if (!cdb) return false;
+      const out = dest || (candleFile + ".bak"), tmp = out + ".tmp";
+      try { fs.unlinkSync(tmp); } catch (_) {}
+      try {
+        await vacuumIntoAsync(candleFile, tmp, () => {
+          if (!cdb) throw new Error("candles db closed");
+          try { fs.unlinkSync(tmp); } catch (_) {}
+          cdb.exec("VACUUM INTO '" + String(tmp).replace(/'/g, "''") + "'");
+        }, opts);
+        await fs.promises.rename(tmp, out);
         return true;
       } catch (_) {
         try { fs.unlinkSync(tmp); } catch (_) {}
