@@ -182,7 +182,8 @@ function nudgeLines(ctx) {
 const NUDGE_FOOT = "One reminder at most; pause usage under Messages → Your usage and you won’t get one.";
 function nudgeMessage(lead, lines, html) {
   const L = lines || [];
-  if (html === false) return { title: "Milst Screener", body: [lead].concat(L.length ? [L.join(" · ")] : []).join(" ") };
+  // (build 2026.09.24-114) kind: the service worker gives a reminder its own tag and click target
+  if (html === false) return { title: "Milst Screener", body: [lead].concat(L.length ? [L.join(" · ")] : []).join(" "), kind: "nudge" };
   return [tgEsc(lead)].concat(L.map(tgEsc)).concat(["<i>" + tgEsc(NUDGE_FOOT) + "</i>"]).join("\n");
 }
 

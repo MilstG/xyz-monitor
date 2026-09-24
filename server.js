@@ -15,7 +15,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.24-113";
+const VERSION = "2026.09.24-114";
 // (build 2026.09.24-107) Distinguishes this process from the last one in ETags built on
 // per-process counters (a restart must never 304 a client onto a different body).
 const BOOT_NONCE = Date.now().toString(36) + crypto.randomBytes(3).toString("hex");
@@ -1042,14 +1042,17 @@ async function buildServer() {
   fastify.post("/api/nav-groups", { bodyLimit: 4 * 1024 }, async (req, reply) => {
     reply.header("cache-control", "no-store");
     const b = req.body || {};
+    // (build 2026.09.24-114) the menus before the write: a marker only when they actually changed
+    const navNow = () => { try { return JSON.stringify(poller.getNavGroups()); } catch (_) { return null; } };
+    const was = navNow();
     // Two operations, one route, distinguished by which field the body carries: {key,label}
     // renames a menu, {view,group} moves a tab into one.
     const r = b.view != null
       ? poller.setNavViewGroup(String(b.view || ""), String(b.group || ""), isAdmin(req))
       : poller.setNavGroupLabel(String(b.key || ""), String(b.label == null ? "" : b.label), isAdmin(req));
     // (build 2026.09.24-111) Usage markers: a tab moved ('<view>><group>') or a menu renamed ('#<group>';
-    // the label itself is not kept)
-    if (r.ok) { try { ACCOUNTS.usageMark("nav", b.view != null ? String(b.view) + ">" + String(b.group || "") : "#" + String(b.key || "")); } catch (_) {} }
+    // the label itself is not kept). A repeat of the current state is not a change (-114).
+    if (r.ok && (was == null || navNow() !== was)) { try { ACCOUNTS.usageMark("nav", b.view != null ? String(b.view) + ">" + String(b.group || "") : "#" + String(b.key || "")); } catch (_) {} }
     return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : r.error === "write-failed" ? 503 : 400)).send(r);
   });
 
@@ -1768,9 +1771,13 @@ async function buildServer() {
     const me = dmMe(req, reply); if (!me) return;
     return ACCOUNTS.usageMine(me.uid, USAGE_TABS());
   });
+  // (build 2026.09.24-114) the usage routes' JSON bodies: a plain object or a 400 (a text/plain body
+  // arrives as a string; an array or null is not a settings object either)
+  const usageBodyOk = (b) => b != null && typeof b === "object" && !Array.isArray(b);
   fastify.post("/api/usage/pause", { bodyLimit: 1024 }, (req, reply) => {
     reply.header("cache-control", "no-store");
     const me = dmMe(req, reply); if (!me) return;
+    if (!usageBodyOk(req.body)) return reply.code(400).send({ ok: false, error: "bad body" });
     const r = ACCOUNTS.setUsagePaused(me.uid, !!(req.body || {}).paused);
     if (r.ok && r.paused) usageGate.forget(me.uid);
     return r;
@@ -2437,7 +2444,8 @@ async function buildServer() {
   fastify.post("/api/admin/usage/errors", { bodyLimit: 1024 }, (req, reply) => {
     reply.header("cache-control", "no-store");
     if (!adminOnly(req, reply)) return;
-    const b = req.body || {};
+    if (!usageBodyOk(req.body)) return reply.code(400).send({ ok: false, error: "bad body" });   // (-114)
+    const b = req.body;
     const r = ACCOUNTS.usageTriageSet(typeof b.sig === "string" ? b.sig : "", b.resolved === true);
     if (!r.ok) return reply.code(r.error === "no such error" ? 404 : 400).send(r);
     return r;
@@ -2456,10 +2464,19 @@ async function buildServer() {
     if (c.kind === "perf") return "p75 first paint " + (c.p75 / 1000).toFixed(1) + "s vs " + (c.p75Prev / 1000).toFixed(1) + "s (+" + Math.round((c.p75 / c.p75Prev - 1) * 100) + "%)";
     return c.kind;
   };
+  // (build 2026.09.24-114) Cost: the check stops for good once every condition has alerted for this
+  // build or the build is more than 3 days past its first-seen time (a regression is a post-DEPLOY
+  // question; the health card still computes the verdict on demand), and the triage sweep runs every
+  // 10 minutes rather than on every 60s tick.
+  const USAGE_REG_DAYS = 3, USAGE_TRIAGE_EVERY_MS = 10 * 60000, USAGE_REG_KINDS = ["new-errors", "err-rate", "perf"];
+  let usageTriageAt = 0;
   function usageRegressTick(now) {
     const t = now != null ? now : Date.now();
+    if (t - usageTriageAt >= USAGE_TRIAGE_EVERY_MS) { usageTriageAt = t; ACCOUNTS.usageTriageSweep(t); }   // a resolved error that recurred on a newer build reopens even while nobody looks
+    const info = ACCOUNTS.usageBuildInfo().find((x) => x.build === VERSION);
+    if (info && t - info.firstSeen > USAGE_REG_DAYS * 864e5) return { state: "done", sent: 0, why: "age" };
+    if (USAGE_REG_KINDS.every((k) => ACCOUNTS.usageAlerted(VERSION, k))) return { state: "done", sent: 0, why: "alerted" };
     const v = ACCOUNTS.usageRegress(VERSION, t);
-    ACCOUNTS.usageTriageSweep(t);   // a resolved error that recurred on a newer build reopens even while nobody looks
     let sent = 0;
     if (v.state === "regression") for (const c of v.conds) {
       if (!ACCOUNTS.usageAlertOnce(VERSION, c.kind, t)) continue;
@@ -2509,12 +2526,16 @@ async function buildServer() {
     const market = () => { if (lines) return lines; try { lines = UDG.nudgeLines(poller.briefCtxNow ? poller.briefCtxNow(t, 0) : null); } catch (_) { lines = []; } return lines; };
     const lead = cfg.nudgeText || UDG.NUDGE_DEFAULT_TEXT;
     const pushOn = !!(poller.pushOnNow && poller.pushOnNow());
-    const out = [];
+    const out = [], held = [];
     for (const m of ACCOUNTS.usageNudgeInputs(t)) {
       const tg = pushOn && poller.pushRecipientsFor ? poller.pushRecipientsFor(m.uid) : [];
       const hasPush = !!WEBPUSH && ACCOUNTS.webPushFor(m.uid).length > 0;
       const v = UDG.nudgeCheck(Object.assign({}, m, { hasTg: tg.length > 0, hasPush }), t);
       if (!v.ok) continue;
+      // (build 2026.09.24-114) the member's own quiet hours hold a reminder like they hold a DM
+      // mirror: one decision per member (any of their chats quiet → none of them now), nothing is
+      // marked sent, and the next hourly pass inside the 10:00–18:00 window tries again.
+      if (v.via === "telegram" && tg.some((c) => poller.pushQuietNow && poller.pushQuietNow(c))) { held.push(m.handle); continue; }
       let sent;
       if (v.via === "telegram") { const msg = UDG.nudgeMessage(lead, market(), true); for (const c of tg) poller.pushEnqueueNow(c, msg, false); sent = true; }
       else { try { sent = await webPushSend(m.uid, UDG.nudgeMessage(lead, market(), false)); } catch (_) { sent = false; } }
@@ -2523,7 +2544,7 @@ async function buildServer() {
       out.push({ handle: m.handle, via: v.via });
       log("usage nudge: " + m.handle + " via " + v.via);
     }
-    return { sent: out.length, to: out };
+    return { sent: out.length, to: out, held };
   }
   async function usageDigestTick(now) {
     const t = now != null ? now : Date.now();
@@ -2575,7 +2596,8 @@ async function buildServer() {
   fastify.post("/api/admin/usage/digest", { bodyLimit: 4 * 1024 }, (req, reply) => {
     reply.header("cache-control", "no-store");
     if (!adminOnly(req, reply)) return;
-    const b = req.body || {}, patch = {};
+    if (!usageBodyOk(req.body)) return reply.code(400).send({ ok: false, error: "bad body" });   // (-114) was a 500 on a string body
+    const b = req.body, patch = {};
     for (const k of ["digestOn", "digestDay", "nudgeOn", "nudgeText"]) if (k in b) patch[k] = b[k];
     const r = ACCOUNTS.usageCfgSet(patch, adminUid(req));
     if (!r.ok) return reply.code(400).send(r);

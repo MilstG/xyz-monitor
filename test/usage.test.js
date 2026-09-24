@@ -46,8 +46,9 @@ test("-109 usage store: beacons roll up per (ET day, member, kind, key) in one f
   A.usageRecord(BOB, { trend: 30000 }, "mobile-pwa", now);
   assert.equal(A._db.prepare("SELECT COUNT(*) AS n FROM usage_day").get().n, 0, "nothing touches SQLite on the request path");
   // (-112) + one sitewide device-per-tab row per (tab, class): markets|desktop, trend|desktop, trend|pwa (uid '0')
-  assert.equal(A.usagePending(), 10, "ann: markets, trend, device, hour; bob: trend, device, hour (the -110 heatmap row); 3 sitewide tdev rows");
-  assert.equal(A.usageFlush(), 10, "one row per (day, uid, kind, key)");
+  // (-114) + one sitewide 'sc' row for the day: how many members contributed (2), never who
+  assert.equal(A.usagePending(), 11, "ann: markets, trend, device, hour; bob: trend, device, hour (the -110 heatmap row); 3 sitewide tdev rows; 1 sc row");
+  assert.equal(A.usageFlush(), 11, "one row per (day, uid, kind, key)");
   assert.equal(A.usageGen(), g0 + 1);
   const row = A._db.prepare("SELECT * FROM usage_day WHERE uid = ? AND kind = 'tab' AND key = 'markets'").get(ANN);
   assert.equal(row.ms, 90000); assert.equal(row.n, 2); assert.equal(row.day, require("../src/compute").etDayStr(now), "day = the ET calendar day");
@@ -89,7 +90,7 @@ test("-109 usage store: pausing stops recording from the click on, and blanks th
   const now = Date.now();
   A.usageRecord(ANN, { markets: 90000 }, "desktop", now);
   assert.equal(A.setUsagePaused(ANN, true).paused, true);
-  assert.equal(A.usagePending(), 4, "what was recorded before the click stays (tab, device, hour; (-112) + the sitewide device-per-tab row)");
+  assert.equal(A.usagePending(), 5, "what was recorded before the click stays (tab, device, hour; (-112) + the sitewide device-per-tab row; (-114) + the day's contributor count)");
   assert.deepEqual(A.usageRecord(ANN, { markets: 90000 }, "desktop", now), { ok: true, stored: false });
   assert.equal(A.usagePaused(ANN), true);
   const s = A.usageSummary({ r: 7, tabs: TABS, now });

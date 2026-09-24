@@ -180,7 +180,7 @@ test("-112 store: paths, entry, controls and device-per-tab land under uid '0' o
   A.close();
 });
 
-test("-112 store: a paused member adds nothing sitewide; one member's daily share is capped; the rows keep 90 days", () => {
+test("-112 store: a paused member adds nothing sitewide; one member's daily share is capped; the rows keep 30 days (build 2026.09.24-114: was 90)", () => {
   const A = withMembers(2);
   const now = Date.now();
   A.setUsagePaused(U(0), true);
@@ -191,15 +191,15 @@ test("-112 store: a paused member adds nothing sitewide; one member's daily shar
   for (let i = 0; i < 80; i++) A.usageRecord(U(1), { markets: 1000 }, "desktop", now, { tr: { "markets>trend": 30 } });
   A.usageFlush();
   assert.equal(A._db.prepare("SELECT n FROM usage_day WHERE kind = 'tr'").get().n, A.USAGE_SITE_PER_DAY, "2,000 per member per ET day");
-  // retention: 90 days, and the 30-day per-member fold never touches them
-  A.usageRecord(U(1), { markets: 1000 }, "desktop", now - 100 * DAY, { tr: { "trend>markets": 1 } });
-  A.usageRecord(U(1), { markets: 1000 }, "desktop", now - 80 * DAY, { tr: { "corr>markets": 1 } });
+  // retention: 30 days (build 2026.09.24-114: was 90), and the 30-day per-member fold never touches them
+  A.usageRecord(U(1), { markets: 1000 }, "desktop", now - 40 * DAY, { tr: { "trend>markets": 1 } });
+  A.usageRecord(U(1), { markets: 1000 }, "desktop", now - 20 * DAY, { tr: { "corr>markets": 1 } });
   A.usageFlush();
   const r = A.usageRetain(now);
-  assert.ok(r.site >= 2, "the 100-day-old tr and tdev rows went");
+  assert.ok(r.site >= 3, "the 40-day-old tr, tdev and sc rows went");
   const keys = A._db.prepare("SELECT key FROM usage_day WHERE kind = 'tr' ORDER BY key").all().map((x) => x.key);
-  assert.deepEqual(keys, ["corr>markets", "markets>trend"], "80 days: kept");
-  assert.equal(A.USAGE_SITE_KEEP_DAYS, 90);
+  assert.deepEqual(keys, ["corr>markets", "markets>trend"], "20 days: kept");
+  assert.equal(A.USAGE_SITE_KEEP_DAYS, 30);
   A.close();
 });
 
@@ -225,13 +225,15 @@ test("-112 gate: paths and controls merge with caps while held, the entry tab pa
 
 // ---- aggregation --------------------------------------------------------------------------------------------------------
 test("-112 summary: top transitions, the outbound split, entry tabs, the nav suggestion, controls with quiet ones, device split — the math", () => {
-  const A = withMembers(2);
-  const now = Date.now();
-  A.usageRecord(U(0), { markets: 60000, trend: 30000 }, "desktop", now, { tr: { "markets>trend": 3, "trend>markets": 1 }, en: "markets",
+  const A = withMembers(3);
+  const now = Date.now(), y = now - DAY;   // (build 2026.09.24-114) complete days only, and ≥ 3 members: yesterday, a third member
+  A.usageRecord(U(0), { markets: 60000, trend: 30000 }, "desktop", y, { tr: { "markets>trend": 3, "trend>markets": 1 }, en: "markets",
     ctl: { "markets.window=1d": 2, "markets.col-on=rvol": 1 } });
-  A.usageRecord(U(1), { trend: 40000 }, "mobile-pwa", now, { tr: { "markets>trend": 1, "markets>corr": 2 }, en: "trend",
+  A.usageRecord(U(1), { trend: 40000 }, "mobile-pwa", y, { tr: { "markets>trend": 1, "markets>corr": 2 }, en: "trend",
     ctl: { "markets.window=1d": 1, "trend.side=short": 4 } });
+  A.usageRecord(U(2), { funding: 1000 }, "desktop", y);   // a third contributor on a tab outside TABS, under a minute: changes none of the numbers below
   const s = A.usageSummary({ r: 7, tabs: TABS, now, navOrder: ["corr", "trend", "sectors"] });
+  assert.equal(s.site.withheld, null); assert.equal(s.site.threshold.members, 3);
   const P = s.site.paths;
   assert.equal(P.total, 7);
   assert.deepEqual(P.top.map((e) => [e.from, e.to, e.n]), [["markets", "trend", 4], ["markets", "corr", 2], ["trend", "markets", 1]]);
@@ -316,7 +318,8 @@ test("-112 HTTP: the beacon's paths and controls are validated against the allow
   assert.ok(rows.length > 0 && rows.every((r) => r.uid === "0"), "stored under uid '0' only: " + JSON.stringify(rows));
   assert.deepEqual(rows.filter((r) => r.kind !== "tdev").map((r) => r.kind + " " + r.key + " " + r.n), ["ctl markets.window=1d 20", "en trend 1", "tr markets>trend 30"]);
   assert.ok(rows.some((r) => r.kind === "tdev" && r.key === "markets|desktop"));
-  assert.equal(d.site.paths.top[0].from, "markets"); assert.equal(d.site.controls.groups.find((g) => g.tab === "markets").items[0].n, 20);
+  // (build 2026.09.24-114) today's rows never reach the sections, and one member is below the k-threshold
+  assert.equal(d.site.withheld, "k"); assert.equal(d.site.paths, null); assert.equal(d.site.controls, null); assert.equal(d.site.devices, null);
   assert.ok(d.site.nav.current.length > 5, "the ribbon's movable tabs, from the live menus");
   assert.equal((await get("/api/admin/usage?r=7", bob)).statusCode, 403, "admin-only");
   assert.equal((await get("/api/admin/usage?r=7")).statusCode, 403);
@@ -399,7 +402,7 @@ test("-112 disclosure: the card, the member guide and README say sitewide (not l
   M.US.mine = { ok: true, keepDays: 30, activeDays: 1, ms: 60000, tabs: [], acts: [] };
   const card = M.usageCardHtml(), note = between(src("public/docs.html"), "<b>Your usage.</b>", "</div>");
   for (const w of ["not linked to you", "navigation paths", "control-usage counts", "never the text", "Never text, never tickers, never filter values beyond those preset names",
-    "screen time per tab by device class", "kept 90 days", "filters or columns"]) {
+    "screen time per tab by device class", "kept 30 days", "filters or columns"]) {
     assert.ok(card.includes(w), "card: " + w); assert.ok(note.includes(w), "guide: " + w);
   }
   const readme = src("README.md");
@@ -407,5 +410,5 @@ test("-112 disclosure: the card, the member guide and README say sitewide (not l
   assert.ok(readme.includes("never text, tickers or filter values beyond the\n    allowlisted preset ids"));
   const mock = src("docs/xyz-monitor-usage-stats-mock.html");
   assert.ok(/Built in build 2026\.09\.24-112<\/em> \(roadmap item 2\)/.test(mock));
-  assert.ok(src("server.js").includes('const VERSION = "2026.09.24-113"'));
+  assert.ok(src("server.js").includes('const VERSION = "2026.09.24-114"'));
 });

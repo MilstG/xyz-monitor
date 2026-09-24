@@ -253,7 +253,7 @@ test("-113 nudge text: market lines only (benchmarks, top movers), the lead esca
   const tg = UDG.nudgeMessage("Hi <you> & co", UDG.nudgeLines(ctx), true);
   assert.ok(tg.startsWith("Hi &lt;you&gt; &amp; co\nSPY +0.4%") && tg.includes("<i>One reminder at most; pause usage") && balanced(tg), tg);
   const push = UDG.nudgeMessage("Hi <you>", ["a", "b"], false);
-  assert.deepEqual(push, { title: "Milst Screener", body: "Hi <you> a · b" }, "the service worker shows push text as text");
+  assert.deepEqual(push, { title: "Milst Screener", body: "Hi <you> a · b", kind: "nudge" }, "the service worker shows push text as text; (-114) its own kind");
   assert.equal(UDG.NUDGE_DEFAULT_TEXT, "Haven’t seen you in a week — here’s what moved:");
   assert.equal(UDG.nudgeTextClean("   "), UDG.NUDGE_DEFAULT_TEXT);
   assert.equal(UDG.nudgeTextClean("a\u202eb\u0000c"), "a b c", "bidi and control characters go");
@@ -513,5 +513,5 @@ test("-113 disclosure: the card, the member guide and README say one reminder if
   assert.ok(readme.includes("(build 2026.09.24-113)") && readme.includes("roadmap item 3") && readme.includes("`usage-nudge`") && readme.includes("OFF by default")
     && readme.includes("never email or SMS; nothing if neither") && readme.includes("dedupe is per ISO week"));
   assert.ok(/Built in build 2026\.09\.24-113<\/em> \(roadmap item 3\)/.test(src("docs/xyz-monitor-usage-stats-mock.html")));
-  assert.ok(src("server.js").includes('const VERSION = "2026.09.24-113"'));
+  assert.ok(src("server.js").includes('const VERSION = "2026.09.24-114"'));
 });

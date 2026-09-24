@@ -123,8 +123,8 @@ test("-111 regression: ready at 20 page loads OR 2h live; compared with the prev
   assert.equal(v.state, "ok", "20 loads: decided"); assert.equal(v.prev, "P"); assert.equal(v.checks.loadsPrev, 30);
   s.A.close();
   s = scen(2 * HOUR);
-  s.loads("P", 3, s.now - DAY); s.loads("C", 2);
-  assert.equal(s.reg().state, "ok", "2h live: decided on whatever loads there are");
+  s.loads("P", 20, s.now - DAY); s.loads("C", 2);
+  assert.equal(s.reg().state, "ok", "2h live: decided on whatever loads there are (the BASELINE still needs 20 — build 2026.09.24-114)");
   s.A.close();
   // no earlier build with traffic: nothing to compare against — never an alarm
   s = scen(3 * HOUR);
@@ -136,10 +136,10 @@ test("-111 regression: ready at 20 page loads OR 2h live; compared with the prev
   // a build that never served traffic is skipped for the comparison; builds before -111 count paint samples as loads
   const now = Date.now(), A = withMembers(2);
   A.usageBuildSeen("P", now - 5 * DAY); A.usageBuildSeen("Q", now - 4 * DAY); A.usageBuildSeen("C", now - 3 * HOUR);
-  for (let i = 0; i < 12; i++) A.usageRecord(U(0), {}, null, now - 4.5 * DAY, { build: "P", perf: 900 });
+  for (let i = 0; i < 22; i++) A.usageRecord(U(0), {}, null, now - 4.5 * DAY, { build: "P", perf: 900 });
   v = A.usageRegress("C", now);
   assert.equal(v.prev, "P", "Q, deployed between them, had no traffic: P is the comparison");
-  assert.equal(v.checks.loadsPrev, 12, "P never counted loads: its 12 paint samples stand in");
+  assert.equal(v.checks.loadsPrev, 22, "P never counted loads: its 22 paint samples stand in");
   A.close();
 });
 
@@ -483,7 +483,8 @@ test("-111 HTTP: the beacon's hour buckets — the window's hours kept, a far on
 test("-111 HTTP: the regression tick alerts once per condition through the ops lane; the verdict rides the health card", async () => {
   const { gus, bob } = await who();
   // the previous build had traffic; this one: a new error two members hit
-  assert.equal((await post("/api/usage", { s: nextSid(), tabs: { markets: 1000 }, b: PREV, ld: 1 }, bob)).statusCode, 204);
+  // (build 2026.09.24-114) a baseline needs ≥ 20 page loads before anything is compared with it
+  for (let i = 0; i < 20; i++) assert.equal((await post("/api/usage", { s: nextSid(), tabs: {}, b: PREV, ld: 1 }, bob)).statusCode, 204);
   for (const j of [gus, bob]) assert.equal((await post("/api/usage", { s: nextSid(), tabs: { markets: 1000 }, b: VERSION, ld: 1, errs: [{ m: "Kaboom <b>", f: "/js/x.js", l: 5 }] }, j)).statusCode, 204);
   let v = app.usageRegressTick();
   assert.equal(v.state, "collecting", "3 loads, minutes old: not yet");

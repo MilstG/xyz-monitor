@@ -649,8 +649,8 @@ instant, and the per-IP rate limit stops being a per-user problem.
 - **Usage: sitewide tab paths, control usage and quiet controls, device split per tab**
   (build 2026.09.24-112) — roadmap item 2. Everything here is **sitewide only**: stored under
   `uid '0'` in `usage_day`, never a member's uid (the beacon's member is used only to refuse a
-  paused or disabled account and to cap what one account adds per ET day, in memory), kept **90
-  days**. A paused member's beacon contributes nothing (the route and `usageRecord` both refuse it,
+  paused or disabled account and to cap what one account adds per ET day, in memory), kept **30
+  days** (90 until build 2026.09.24-114). A paused member's beacon contributes nothing (the route and `usageRecord` both refuse it,
   and the browser stops counting at the click).
   - **Tab paths** (`kind='tr'`, key `<from>><to>`, both tab ids of the feature manifest): counted
     from `showView` — a move counts once the destination has held the screen **2s** (a quicker exit
@@ -720,6 +720,41 @@ instant, and the per-IP rate limit stops being a per-user problem.
   - Disclosed on the member's **Your usage** card (which says whether reminders are on), in the
     member guide and here: an inactive member may get one reminder if the operator turns it on;
     pausing usage opts out.
+- **Usage fixes** (build 2026.09.24-114) — from review of builds -111 → -113:
+  - **Chronic errors are not "new"**: the post-deploy `new-errors` condition counts a signature only
+    when **no older known build** hit it and `usage_err` first saw it **after this build went live**
+    (so a bug older than the 4 known builds stays chronic). The baseline is the most recent older
+    build with **≥ 20 page loads** — a short-lived hotfix is skipped — and with none, the verdict is
+    "no-baseline" and nothing is compared.
+  - **Triage in deploy order**: resolving stamps the **newest build in deploy order**
+    (`usage_build.at`) that hit the error, not the row hit last; only a build deployed after that one
+    reopens it, so a stale tab on an older build hitting it late never becomes the baseline.
+  - **Reminders respect quiet hours**: a Telegram reminder to a member whose chat is inside its quiet
+    window is **held** (not sent, not marked) and retried by the next hourly pass inside 10:00–18:00 ET.
+    A browser-push reminder has its own notification tag (`usage-nudge`) and opens the site root on
+    Markets; message notifications are unchanged.
+  - **k ≥ 3 for the sitewide sections**: tab paths, entry tabs, control usage and the device split need
+    a range of **≥ 7 days**, cover only its **complete** ET days (today is left out), and are shown
+    only when **≥ 3 members** contributed on one day of it; below that the fold says "not enough
+    members to show without identifying someone (n<3)". The count behind it is `kind='sc'` (uid
+    `'0'`, key = the ET day, `n` = how many distinct members added anything to the sitewide rows that
+    day) — kept from a transient in-memory set that is dropped when the day ends; **which** members
+    is never stored (after a restart the day's set starts from the members with any row that day, so
+    a restart can only under-count). The nav suggestion reads the tab table, so it stays.
+  - **Entry tabs are budgeted**: an entry tab draws on the same 2,000-per-member-per-day sitewide
+    budget and is capped at **200 per member per ET day** (like page loads), so fresh page-session
+    ids cannot inflate it.
+  - **Visible-only dwell**: the 2s bounce rule counts only time the page was visible (the clock stops
+    while hidden), and a page opened in the background gets no entry tab until it has been on screen.
+  - **Sitewide rows kept 30 days** (was 90 — the owner's minimal-retention call; the view never
+    reaches past 30 days): `tr`, `en`, `ctl`, `tdev` and `sc`. The `usage_mark` rows (deploys, gate
+    and menu changes, alert dedupe) stay **90 days**: they are operator config history, with **no
+    uid and no personal data**.
+  - Smaller: a repeated `POST /api/nav-groups` that changes nothing adds no marker; the usage routes'
+    POST bodies (`/api/usage/pause`, `/api/admin/usage/errors`, `/api/admin/usage/digest`) must be a
+    JSON object (400 otherwise — a text/plain body was a 500); a `usage_day(kind, day)` index; the
+    regression tick stops for a build once every condition has alerted or it is more than 3 days
+    past first-seen, and the triage sweep runs every 10 minutes instead of every tick.
 - **Admin panel folds** — the panel had grown to eight full-height boxes, so reaching the one you
   wanted meant scrolling past the seven you did not. Every segment is now a collapsed row naming
   what is inside it, with an expand-all/collapse-all control. Each fold wraps its box from

@@ -198,7 +198,7 @@ function uaRegressCard(V,kc){
   let v, s;
   if(V.state==='regression'){ v='<span class="neg">regression</span>'; s='<span class="neg">regression: '+(V.conds||[]).map(c=>esc(uaCondWord(c))).join(' · ')+'</span>'+vs+' · alerted once per condition'; }
   else if(V.state==='ok'){ v='<span class="pos">build '+sb+': OK</span>'; s=(+V.loads||0)+' page loads'+vs+': no new errors, error rate and p75 within bounds'; }
-  else if(V.state==='no-baseline'){ v='<span class="pos">build '+sb+': OK</span>'; s='no earlier build with traffic to compare against'; }
+  else if(V.state==='no-baseline'){ v='<span class="pos">build '+sb+': OK</span>'; s='no earlier build with ≥ 20 page loads to compare against'; }
   else if(V.state==='collecting'){ v='build '+sb+': collecting'; s=(+V.loads||0)+' / '+(+(V.need&&V.need.loads)||20)+' page loads — decides at that many, or '+Math.round(((V.need&&V.need.ageMs)||7200000)/3600000)+'h after the deploy'; }
   else { v='—'; s='this build is not in the known-builds list'; }
   return kc('Post-deploy check','this build against the previous known one: new errors (≥2 members), errors per page load (≥3×), p75 paint (≥30% and ≥0.3s)',v,s);
@@ -219,7 +219,7 @@ function uaTriageHtml(T){
       +'<td class="n">'+(+e.hits||0)+'</td><td class="n">'+(+e.members||0)+'</td>'
       +'<td><button type="button" class="btn" data-uatri="'+esc(e.sig)+'" data-on="'+(e.resolved?'0':'1')+'"'+(UA.triBusy?' disabled':'')+'>'+(UA.triBusy===e.sig?'…':e.resolved?'reopen':'resolve')+'</button></td></tr>').join('')
     +'</tbody></table></div>'
-    +'<div class="acc-note">One row per distinct error (file + message, across builds and line moves). Members is a count, never who. Resolving stamps the latest build it was seen on; a hit from a newer build reopens it as “regressed”, while stale tabs on the old build do not.</div>';
+    +'<div class="acc-note">One row per distinct error (file + message, across builds and line moves). Members is a count, never who. Resolving stamps the newest build (in deploy order) it was seen on; a hit from a build deployed after that one reopens it as “regressed”, while stale tabs on that or older builds do not.</div>';
 }
 function uaMarkWord(m){
   const d=String(m.detail||'');
@@ -316,9 +316,20 @@ function uaDevicesHtml(S){
   const leg='<div class="us-mixleg">'+cls.map((c,i)=>'<span><i class="c'+i+'"></i>'+esc(UA_DEV_LBL[c]||c)+'</span>').join('')+'</div>';
   return head+'<div class="us-card">'+leg+rows.map(r=>{ const tot=+r.ms||0;
     return '<div class="us-devr"><span>'+esc(r.label||r.key)+'</span><span class="us-mix">'+cls.map((c,i)=>{ const v=+((r.dev||{})[c])||0; return v>0&&tot>0?'<span class="c'+i+'" style="width:'+(v/tot*100).toFixed(1)+'%" title="'+esc(UA_DEV_LBL[c]||c)+' '+Math.round(v/tot*100)+'%"></span>':''; }).join('')+'</span><span class="v">'+uaHours(tot)+'</span></div>'; }).join('')
-    +'</div><div class="acc-note">Screen time on each tab by the device class it came from (desktop, mobile, tablet; PWA = installed, any size). Kept '+(+S.keepDays||90)+' days, without a member id.</div>';
+    +'</div><div class="acc-note">Screen time on each tab by the device class it came from (desktop, mobile, tablet; PWA = installed, any size). Complete days only (today left out), shown once ≥ '+(+((S.threshold||{}).k)||3)+' members contributed; kept '+(+S.keepDays||30)+' days, without a member id.</div>';
 }
-function uaSiteHtml(D){ const S=D&&D.site; if(!S) return ''; return uaPathsHtml(S)+uaControlsHtml(S)+uaDevicesHtml(S); }
+// (build 2026.09.24-114) the k-threshold: paths, controls and the device split cover the range's
+// complete days (never today), need a 7-day range, and show only when ≥ 3 members contributed.
+function uaSiteWithheldHtml(S){
+  const K=S.threshold||{}, k=+K.k||3, days=+K.minDays||7;
+  const why=S.withheld==='range'?'Pick a range of '+days+' days or more: the sitewide sections leave today out and never cover a single day.'
+    :'not enough members to show without identifying someone (n<'+k+')';
+  return '<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Tab paths · controls · device split · sitewide</div>'
+    +'<div class="acc-note us-withheld" style="margin:0">'+esc(why)+'</div>'
+    +'<div class="acc-note">Sitewide counts are shown only for ranges of '+days+'+ complete days (today left out) in which at least '+k+' members contributed on one day — below that a “sitewide” count could be one person’s. Kept '+(+S.keepDays||30)+' days, without a member id.</div>'
+    +uaNavHtml(S.nav);
+}
+function uaSiteHtml(D){ const S=D&&D.site; if(!S) return ''; if(S.withheld) return uaSiteWithheldHtml(S); return uaPathsHtml(S)+uaControlsHtml(S)+uaDevicesHtml(S); }
 
 // ---- the daily-active chart: bars per ET day + the trailing 7-day mean ---------------------------
 function uaDauSvg(series,marks){
@@ -509,4 +520,4 @@ function uaWire(){
     const s=e.target.closest&&e.target.closest('[data-uasel]'); if(!s) return;
     if(s.dataset.uasel==='path') UA.pathTab=s.value; else if(s.dataset.uasel==='ctl') UA.ctlTab=s.value; uaRender(); });
 }
-export { UA, openUsageAdm, uaDigestHtml, uaDgLoad, uaDgPost, uaCohortHtml, uaControlsHtml, uaDauSvg, uaDevicesHtml, uaFunnelHtml, uaHealthHtml, uaHeatSvg, uaMarksHtml, uaNavHtml, uaPathsHtml, uaRegressCard, uaRender, uaSiteHtml, uaTriage, uaTriageHtml };
+export { UA, openUsageAdm, uaSiteWithheldHtml, uaDigestHtml, uaDgLoad, uaDgPost, uaCohortHtml, uaControlsHtml, uaDauSvg, uaDevicesHtml, uaFunnelHtml, uaHealthHtml, uaHeatSvg, uaMarksHtml, uaNavHtml, uaPathsHtml, uaRegressCard, uaRender, uaSiteHtml, uaTriage, uaTriageHtml };

@@ -416,10 +416,17 @@ CREATE TABLE IF NOT EXISTS usage_day (
 --   'ctl'  key = '<group>.<control>[=<value>]' from the US_CONTROLS allowlist (public/js/usage.js);
 --          n = uses. Never text, never a ticker, never a typed value.
 --   'tdev' key = '<tab>|<desktop|mobile|tablet|pwa>'; ms = screen time on that tab from that class.
---   Kept USAGE_SITE_KEEP_DAYS (90) days, then deleted (the 30-day fold never touches uid '0').
+-- (build 2026.09.24-114)
+--   'sc'   day = key = an ET day; n = HOW MANY distinct members added anything to the four kinds
+--          above that day. A count only: it is kept from a transient in-memory set of that day's
+--          contributors which is thrown away when the day ends — which members is never stored.
+--          The summary shows the sitewide sections only when some day of the range reached 3.
+--   Kept USAGE_SITE_KEEP_DAYS (30; was 90) days, then deleted (the 30-day fold never touches uid '0').
+-- (build 2026.09.24-114) usage_day_kind: the regression check, triage and fold read by kind (and day).
 -- usage_err: one row per distinct error key, at most 200 per build; its message is truncated to
 -- 200 characters by the server and is browser-supplied, so every reader escapes it. Rows no hit
 -- has touched for the retention window go with the daily fold.
+CREATE INDEX IF NOT EXISTS usage_day_kind ON usage_day(kind, day);
 CREATE TABLE IF NOT EXISTS usage_err (
   key TEXT PRIMARY KEY,
   build TEXT NOT NULL,
@@ -2665,8 +2672,9 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
         FROM usage_day WHERE kind = 'tab' AND uid <> '${USAGE_SITE}' GROUP BY day, uid) GROUP BY substr(day, 1, 7), uid`),
     tabMin: db.prepare(`SELECT MIN(day) AS d FROM usage_day WHERE kind = 'tab' AND uid <> '${USAGE_SITE}'`),
     // (build 2026.09.24-112) the sitewide-only kinds age out at USAGE_SITE_KEEP_DAYS
-    siteDrop: db.prepare(`DELETE FROM usage_day WHERE uid = '${USAGE_SITE}' AND kind IN ('tr','en','ctl','tdev') AND day < ?`),
+    siteDrop: db.prepare(`DELETE FROM usage_day WHERE uid = '${USAGE_SITE}' AND kind IN ('tr','en','ctl','tdev','sc') AND day < ?`),   // (-114) + 'sc'
     // (build 2026.09.24-113) digest & nudges
+    scSeed: db.prepare(`SELECT DISTINCT uid FROM usage_day WHERE day = ? AND uid <> '${USAGE_SITE}'`),   // (-114) a restart's conservative start
     cfgAll: db.prepare("SELECT k, v FROM usage_cfg"),
     cfgUp: db.prepare("INSERT INTO usage_cfg (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v"),
     actDays: db.prepare(`SELECT uid, day, SUM(ms) AS s FROM usage_day WHERE kind = 'tab' AND uid <> '${USAGE_SITE}' AND day >= ? GROUP BY uid, day`),
@@ -2732,6 +2740,8 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     if (US.markHas.get("alert", d.slice(0, 80))) return false;
     return usageMark("alert", d, now);
   }
+  // (build 2026.09.24-114) has this (build, condition) alert gone out already (the tick's early stop)
+  const usageAlerted = (build, cond) => !!US.markHas.get("alert", (String(build) + "|" + String(cond)).slice(0, 80));
   // ---- (build 2026.09.24-111) the build each member's tab last ran, persisted -----------------------
   // Was an in-memory map in server.js, so every restart zeroed the stale-build count — exactly when a
   // deploy makes it interesting. Now: the same map here, loaded at open, written by the 60s flush
@@ -2836,20 +2846,43 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   // disabled member (usageRecord's first line) and to bound what one member can add per ET day (an
   // in-memory counter, never stored). Keys are re-checked here against the same allowlists the server
   // validated with, so a caller that skipped usageClamp still cannot mint a key.
-  const USAGE_SITE_KEEP_DAYS = 90;
-  const USAGE_SITE_PER_DAY = 2000;   // transitions + control uses one member can add per ET day
+  const USAGE_SITE_KEEP_DAYS = 30;   // (build 2026.09.24-114) was 90: the view never reaches past 30 days
+  const USAGE_SITE_PER_DAY = 2000;   // transitions + control uses + entry tabs one member can add per ET day
+  // (build 2026.09.24-114) the k-threshold: the sitewide sections cover the range's COMPLETE days
+  // only (never today), need a range of USAGE_SITE_MIN_DAYS, and show only when USAGE_SITE_K distinct
+  // members contributed — so one member's evening cannot be read off "sitewide" counts.
+  const USAGE_SITE_MIN_DAYS = 7, USAGE_SITE_K = 3;
+  const USAGE_EN_PER_DAY = 200;      // (build 2026.09.24-114) entry tabs per member per ET day, like page loads
   const USAGE_TR_N = 30, USAGE_CTL_N = 20, USAGE_SITE_KEYS = 40;
   const USAGE_TAB_SET = new Set(FEATURES.filter((f) => f.kind === "tab").map((f) => f.key));
   const USAGE_CTL = usageControls();
   const USAGE_DEVS = ["desktop", "mobile", "tablet", "pwa"];
   const usageDevClass = (d) => (/-pwa$/.test(d) ? "pwa" : d === "mobile" || d === "tablet" ? d : "desktop");
-  const usageSiteToday = new Map();   // uid -> {day, n}: in memory only
+  const usageSiteToday = new Map();   // uid -> {day, n, en}: in memory only
+  // (build 2026.09.24-114) the distinct-contributor COUNT per ET day ('sc' rows). The set of who is
+  // in memory only, per day, and dropped when the day leaves (at most two days are held: a beacon's
+  // day is its arrival day, so only around midnight do two overlap). After a restart the day's set
+  // starts from the members with any per-member row that day, so a restart can only UNDER-count.
+  const usageScDays = new Map();       // day -> Set(uid), transient
+  let usageScBooted = false;
+  function usageScNote(uid, day) {
+    let set = usageScDays.get(day);
+    if (!set) {
+      set = new Set();
+      if (!usageScBooted) { usageScBooted = true; try { for (const r of US.scSeed.all(day)) set.add(r.uid); } catch (_) {} }
+      usageScDays.set(day, set);
+      for (const d of [...usageScDays.keys()].sort().slice(0, -2)) usageScDays.delete(d);
+    }
+    if (set.has(uid)) return;
+    set.add(uid);
+    usageAdd(USAGE_SITE, day, "sc", day, 1, 0);
+  }
   function usageSiteRecord(uid, day, tabs, dev, x) {
     let tdev = 0, tr = 0, ctl = 0, en = 0;
     const cls = dev ? usageDevClass(String(dev)) : null;
     if (cls) for (const [k, ms] of Object.entries(tabs || {})) if (ms > 0 && USAGE_TAB_SET.has(k)) { usageAdd(USAGE_SITE, day, "tdev", k + "|" + cls, 1, ms); tdev += ms; }
     let q = usageSiteToday.get(uid);
-    if (!q || q.day !== day) { if (usageSiteToday.size > 5000) usageSiteToday.clear(); q = { day, n: 0 }; usageSiteToday.set(uid, q); }   // a bound, not a policy
+    if (!q || q.day !== day) { if (usageSiteToday.size > 5000) usageSiteToday.clear(); q = { day, n: 0, en: 0 }; usageSiteToday.set(uid, q); }   // a bound, not a policy
     const take = (v, cap) => { const c = Math.min(cap, Math.trunc(Number(v)) || 0, USAGE_SITE_PER_DAY - q.n); if (c <= 0) return 0; q.n += c; return c; };
     let keys = 0;
     for (const [k, v] of Object.entries((x && x.tr) || {})) {
@@ -2864,7 +2897,10 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       if (!USAGE_CTL.keys.has(k)) continue;
       const c = take(v, USAGE_CTL_N); if (c) { usageAdd(USAGE_SITE, day, "ctl", k, c, 0); ctl += c; keys++; }
     }
-    if (x && typeof x.en === "string" && USAGE_TAB_SET.has(x.en)) { usageAdd(USAGE_SITE, day, "en", x.en, 1, 0); en = 1; }
+    // (build 2026.09.24-114) an entry tab draws on the same daily budget and is capped per member per
+    // day like a page load: a fresh page-session id per request can no longer mint entries at will
+    if (x && typeof x.en === "string" && USAGE_TAB_SET.has(x.en) && q.en < USAGE_EN_PER_DAY && take(1, 1)) { q.en++; usageAdd(USAGE_SITE, day, "en", x.en, 1, 0); en = 1; }
+    if (tdev > 0 || tr > 0 || ctl > 0 || en > 0) usageScNote(uid, day);
     return { tdev, tr, ctl, en };
   }
   // One accepted beacon: {tab -> ms} already validated and clamped by the server, plus the device.
@@ -3028,8 +3064,10 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   const USAGE_SIG_RE = /^[\w\-./@~+]{1,120}\|[0-9a-f]{12}$/;
   const USAGE_TRIAGE_SHOW = 100;     // rows the triage list returns (open first); usage_err caps the total at 500
   // The regression check (usageRegress): a build is READY once it has minLoads page loads or has been
-  // live minAgeMs, and is then compared with the previous known build that had any traffic:
-  //   new-errors  a signature the previous build never hit, hit by ≥ errMembers members;
+  // live minAgeMs, and is then compared with the previous known build that had ≥ rateMinLoads page
+  // loads (build 2026.09.24-114; none such: "no-baseline", nothing compared):
+  //   new-errors  a signature no older known build ever hit and usage_err first saw after this build
+  //               went live (build 2026.09.24-114), hit by ≥ errMembers members;
   //   err-rate    error hits per page load ≥ rateX × the previous build's (zero hits before counts as
   //               one), with ≥ rateMinLoads loads on both sides and ≥ rateMinHits hits now;
   //   perf        p75 first paint ≥ perfX × the previous build's AND ≥ perfMs slower (≥ perfMin samples each).
@@ -3057,13 +3095,23 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     }
     // Builds before -111 never counted page loads: their first-paint samples stand in.
     const loadsOf = (s) => (s.loads > 0 ? s.loads : s.perfN);
-    const prevRow = info.slice(i + 1).find((r) => loadsOf(per.get(r.build)) > 0) || null;
+    // (build 2026.09.24-114) the baseline is the most recent OLDER build with at least rateMinLoads
+    // page loads: a hotfix that lived twenty minutes on one load is not a baseline for anything, and
+    // no comparison is trusted without one.
+    const prevRow = info.slice(i + 1).find((r) => loadsOf(per.get(r.build)) >= USAGE_REG.rateMinLoads) || null;
     const C = per.get(cur.build), P = prevRow ? per.get(prevRow.build) : null, R = USAGE_REG;
     const loads = loadsOf(C), loadsPrev = P ? loadsOf(P) : 0;
     const ready = loads >= R.minLoads || t - cur.at >= R.minAgeMs;
     const conds = [];
-    // 1. new distinct errors
-    const fresh = P ? [...C.sigs].filter(([sig, e]) => !P.sigs.has(sig) && e.who.size >= R.errMembers)
+    // 1. new distinct errors. (build 2026.09.24-114) NEW means new to this build: no OLDER known
+    // build hit the signature (not just the baseline — a chronic error skipped by a quiet hotfix
+    // is still chronic), and usage_err has never seen it before this build's first-seen time (which
+    // reaches builds that aged out of the known list).
+    const older = info.slice(i + 1).map((r) => per.get(r.build));
+    const sigFirst = new Map();
+    for (const e of US.errAll.all()) { const sg = usageSig(e.key); if (sg && !(sigFirst.get(sg) <= e.firstAt)) sigFirst.set(sg, e.firstAt); }
+    const isNew = (sig) => !older.some((o) => o.sigs.has(sig)) && !(sigFirst.get(sig) < cur.at);
+    const fresh = P ? [...C.sigs].filter(([sig, e]) => isNew(sig) && e.who.size >= R.errMembers)
       .sort((a, b) => b[1].who.size - a[1].who.size || b[1].hits - a[1].hits) : [];
     if (ready && fresh.length) {
       const [sig, e] = fresh[0], txt = US.errOne.get(e.key) || {};
@@ -3132,7 +3180,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     out.sort((a, b) => rank(a) - rank(b) || b.lastAt - a.lastAt);
     return { total: out.length, open: out.filter((x) => !x.resolved).length, rows: out.slice(0, USAGE_TRIAGE_SHOW) };
   }
-  // The operator's toggle: resolved = on stamps the error's latest build (the reopen baseline); off
+  // The operator's toggle: resolved = on stamps the newest build (deploy order) that hit it (the reopen baseline); off
   // deletes the row (open, and any "regressed" flag with it). Only a signature usage_err holds.
   function usageTriageSet(sig, resolved, now) {
     if (typeof sig !== "string" || !USAGE_SIG_RE.test(sig)) return { ok: false, error: "bad error id" };
@@ -3140,7 +3188,14 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     const rows = US.errAll.all().filter((e) => usageSig(e.key) === sig);
     if (!rows.length) return { ok: false, error: "no such error" };
     if (resolved) {
-      let last = rows[0]; for (const e of rows) if (e.lastAt > last.lastAt) last = e;
+      // (build 2026.09.24-114) the NEWEST build in deploy order (usage_build.at) that hit it — not the
+      // row hit last: a stale tab on an older build hitting it after the buggy one would otherwise
+      // become the baseline, and the buggy build's next stale hit would "reopen" it. Rows on builds
+      // that left the known list rank below every known one (then by last hit).
+      const at = new Map(US.buildAll.all().map((r) => [r.build, r.at]));
+      const rank = (e) => (at.has(e.build) ? at.get(e.build) : -Infinity);
+      let last = rows[0];
+      for (const e of rows) if (rank(e) > rank(last) || (rank(e) === rank(last) && e.lastAt > last.lastAt)) last = e;
       US.triSet.run(sig, now != null ? now : Date.now(), last.build, null, null);
     } else US.triDel.run(sig);
     usageGeneration++;
@@ -3237,7 +3292,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     // first-paint histograms per build (+ the last day each build was seen); errors per key.
     const actWho = new Map(), actHits = new Map(), heat = Array.from({ length: 7 }, () => new Array(24).fill(0));
     const perfHist = new Map(), errHits = new Map(), errWho = new Map(), errRows = [];
-    const site = { tr: new Map(), en: new Map(), ctl: new Map(), tdev: new Map() };   // (-112)
+    const site = { tr: new Map(), en: new Map(), ctl: new Map(), tdev: new Map(), sc: new Map() };   // (-112); (-114) + sc
     const bump = (m, k, v) => m.set(k, (m.get(k) || 0) + v);
     const addTo = (m, k, v) => { if (!m.has(k)) m.set(k, new Set()); m.get(k).add(v); };
     for (const row of US.range.all(pFrom, today)) {
@@ -3260,7 +3315,9 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
         bump(perfHist.get(b), bin, row.n);
       } else if (row.kind === "err" && !o.lite) errRows.push(row);   // (-110 follow-up) kept to the two builds below
       // (build 2026.09.24-112) the sitewide-only kinds (uid '0' by construction; read whatever the uid)
-      else if (o.lite) continue;
+      // (build 2026.09.24-114) complete days only: today (still filling up) never reaches them
+      else if (o.lite || row.day === today) continue;
+      else if (row.kind === "sc") bump(site.sc, row.day, row.n);
       else if (row.kind === "tr") bump(site.tr, row.key, row.n);
       else if (row.kind === "en") bump(site.en, row.key, row.n);
       else if (row.kind === "ctl") bump(site.ctl, row.key, row.n);
@@ -3364,7 +3421,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       series, tabs: tabRows, members: memberRows,
       // (build 2026.09.24-112) sitewide: tab paths + entry tabs + the nav-order suggestion, control
       // usage + quiet controls, time per tab by device class
-      site: o.lite ? null : usageSitewide(site, tabs, tabRows, o.navOrder, (actHits.get("drawer-open") || 0) > 0),
+      site: o.lite ? null : usageSitewide(site, tabs, tabRows, o.navOrder, (actHits.get("drawer-open") || 0) > 0, { r, from: days[0], to: usageDayShift(today, -1) }),
       funnel, heat: { ms: heat, total: heatTot, peak, coreShare: heatTot ? core / heatTot : null },
       cohorts: o.lite ? null : usageCohorts(today, members, USAGE_WK_COHORTS),
       health: { build, perf: { cur: perfOf(build), prev: perfOf(prev) },
@@ -3386,10 +3443,25 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   //             the columns never toggled either way, not listed one quiet row each.
   //   devices   time per tab split desktop / mobile / tablet / PWA.
   const USAGE_PATHS_TOP = 15;
-  function usageSitewide(site, tabs, tabRows, navOrder, drawerUsed) {
+  function usageSitewide(site, tabs, tabRows, navOrder, drawerUsed, span) {
     const label = new Map((tabs || []).map((t) => [t.key, t.label]));
     const row = new Map((tabRows || []).map((t) => [t.key, t]));
     const nameOf = (k) => label.get(k) || (k === "header" ? "Header (every tab)" : k === "drawer" ? "Ticker drawer" : k);
+    // the nav suggestion reads the tab table (per-member reach the fold already shows), not these rows
+    const cur = (navOrder || NAV_VIEW_ORDER).filter((k) => row.has(k) && row.get(k).gate !== "off");
+    const score = (k) => { const t = row.get(k); return (t.reach || 0) * (t.ms || 0) / 3600e3; };
+    const suggested = cur.map((k, i) => ({ key: k, label: nameOf(k), score: score(k), reach: row.get(k).reach, ms: row.get(k).ms, i }))
+      .sort((a, b) => b.score - a.score || a.i - b.i).map(({ i, ...x }) => x);
+    const nav = { current: cur.map((k) => ({ key: k, label: nameOf(k) })), suggested, same: suggested.every((x, i) => x.key === cur[i]) };
+    // (build 2026.09.24-114) the k-threshold. `members` is a LOWER bound on the distinct members
+    // behind the range's rows: the most on any one complete day (the per-day counts cannot be added
+    // up — one member on five days is not five members).
+    const sp = span || {};
+    let members = 0;
+    for (const n of site.sc.values()) if (n > members) members = n;
+    const k = { minDays: USAGE_SITE_MIN_DAYS, k: USAGE_SITE_K, r: sp.r || null, from: sp.from || null, to: sp.to || null, members };
+    if (!(sp.r >= USAGE_SITE_MIN_DAYS) || members < USAGE_SITE_K)
+      return { keepDays: USAGE_SITE_KEEP_DAYS, threshold: k, withheld: !(sp.r >= USAGE_SITE_MIN_DAYS) ? "range" : "k", paths: null, nav, controls: null, devices: null };
     // paths
     const edges = [];
     for (const [k, n] of site.tr) {
@@ -3407,12 +3479,6 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     const enTot = ens.reduce((s, x) => s + x[1], 0);
     const paths = { total, top: edges.slice(0, USAGE_PATHS_TOP).map((e) => ({ from: e.from, fromLabel: nameOf(e.from), to: e.to, toLabel: nameOf(e.to), n: e.n, share: total ? e.n / total : 0 })),
       from, entry: { total: enTot, rows: ens.map(([k, n]) => ({ key: k, label: nameOf(k), n, share: n / enTot })) } };
-    // the nav suggestion: movable tabs that are not switched off, by reach × hours
-    const cur = (navOrder || NAV_VIEW_ORDER).filter((k) => row.has(k) && row.get(k).gate !== "off");
-    const score = (k) => { const t = row.get(k); return (t.reach || 0) * (t.ms || 0) / 3600e3; };
-    const suggested = cur.map((k, i) => ({ key: k, label: nameOf(k), score: score(k), reach: row.get(k).reach, ms: row.get(k).ms, i }))
-      .sort((a, b) => b.score - a.score || a.i - b.i).map(({ i, ...x }) => x);
-    const nav = { current: cur.map((k) => ({ key: k, label: nameOf(k) })), suggested, same: suggested.every((x, i) => x.key === cur[i]) };
     // controls
     const groups = [], quiet = [];
     let ctlTotal = 0;
@@ -3443,7 +3509,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       x.ms += ms; x.dev[c] += ms; dev.set(tab, x);
     }
     const devices = { classes: USAGE_DEVS.slice(), rows: [...dev.values()].sort((a, b) => b.ms - a.ms || (a.key < b.key ? -1 : 1)) };
-    return { keepDays: USAGE_SITE_KEEP_DAYS, paths, nav, controls, devices };
+    return { keepDays: USAGE_SITE_KEEP_DAYS, threshold: k, withheld: null, paths, nav, controls, devices };
   }
   // One member's last USAGE_KEEP_DAYS days: minutes per day, tab mix, device mix. Shared by the
   // member's own card (usageMine) and the operator's drill-in (usageMember, which AUDITS).
@@ -3736,11 +3802,11 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     usageBuildSeen, usageBuildKnown, usageBuilds: () => usageBuildList.slice(),
     USAGE_ERR_TOTAL, USAGE_ERR_NEW_PER_DAY, USAGE_WK_KEEP_DAYS, USAGE_PREV_MIN_N,
     // (build 2026.09.24-111) markers, the regression check, error triage, stale builds, monthly rows
-    usageMark, usageAlertOnce, usageBuildInfo, usageRegress, usageTriage, usageTriageSet, usageTriageSweep,
+    usageMark, usageAlertOnce, usageAlerted, usageBuildInfo, usageRegress, usageTriage, usageTriageSet, usageTriageSweep,
     usageCfg, usageCfgSet, usageDigestSent, usageDigestData, usageNudgeInputs, usageNudgeMark, usageNudgeLog,   // (build 2026.09.24-113)
     usageLastBuild, usageStale, usageSig, USAGE_REG, USAGE_MARK_KEEP_DAYS, USAGE_MO_KEEP, USAGE_LOADS_PER_DAY,
     // (build 2026.09.24-112) the sitewide-only kinds' bounds
-    USAGE_SITE_KEEP_DAYS, USAGE_SITE_PER_DAY, usageDevClass,
+    USAGE_SITE_KEEP_DAYS, USAGE_SITE_PER_DAY, usageDevClass, USAGE_SITE_MIN_DAYS, USAGE_SITE_K, USAGE_EN_PER_DAY,
     pendingEscalations, markEscalated,
     setPxHistory,
     // browser push subscriptions — stored here, delivered by the server (which holds the keys)

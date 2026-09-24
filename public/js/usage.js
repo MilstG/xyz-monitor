@@ -116,15 +116,24 @@ const US_CTL_N_MAX=20, US_CTL_KEYS_MAX=40, US_TR_BOUNCE_MS=2000, US_TR_N_MAX=30,
 // destination has held the screen for 2s: a tab left inside 2s is a bounce and is skipped, so
 // A → B (1s) → C counts A→C, and A → B (1s) → A counts nothing. Re-selecting the tab you are on is not
 // a transition. The first tab that holds for 2s is the page load's ENTRY tab (once per load).
-function usTr(now,tab){ return {cur:tab||null,at:now,last:null,done:false,tr:{},en:null,enDone:false}; }
+// (build 2026.09.24-114) Only VISIBLE time holds a tab: the dwell clock stops while the page is hidden
+// (`hid` = when it went hidden; on return `at` moves forward by the hidden span), so an hour in a
+// background tab never turns a 1s bounce into a move, and a page opened in the background has no entry
+// tab until it has been on screen for 2s.
+function usTr(now,tab,vis){ return {cur:tab||null,at:now,last:null,done:false,tr:{},en:null,enDone:false,hid:vis===false?now:null}; }
 function usTrSettle(t,now){
-  if(!t.cur||t.done||now-t.at<US_TR_BOUNCE_MS) return;
+  if(!t.cur||t.done||(t.hid!=null?t.hid:now)-t.at<US_TR_BOUNCE_MS) return;
   if(t.last==null){ if(!t.enDone){ t.en=t.cur; t.enDone=true; } }
   else if(t.last!==t.cur){ const k=t.last+'>'+t.cur;
     if(k in t.tr||Object.keys(t.tr).length<US_TR_KEYS_MAX) t.tr[k]=Math.min(US_TR_N_MAX,(t.tr[k]||0)+1); }
   t.last=t.cur; t.done=true;
 }
-function usTrView(t,v,now){ if(!v||v===t.cur) return; usTrSettle(t,now); t.cur=v; t.at=now; t.done=false; }
+function usTrView(t,v,now){ if(!v||v===t.cur) return; usTrSettle(t,now); t.cur=v; t.at=now; t.done=false; if(t.hid!=null) t.hid=now; }
+// (-114) the page went hidden / came back: settle what already held, then pause / resume the dwell clock
+function usTrVis(t,vis,now){
+  if(!vis){ if(t.hid==null){ usTrSettle(t,now); t.hid=now; } }
+  else if(t.hid!=null){ t.at+=Math.max(0,now-t.hid); t.hid=null; }
+}
 // Hand over what has settled (the tab on screen now counts if it has held 2s) and start fresh.
 function usTrTake(t,now){ usTrSettle(t,now); const out={tr:t.tr,en:t.en}; t.tr={}; t.en=null; return out; }
 function usTrGive(t,x){ for(const k in (x.tr||{})) t.tr[k]=Math.min(US_TR_N_MAX,(t.tr[k]||0)+x.tr[k]); if(x.en&&!t.en) t.en=x.en; }
@@ -216,7 +225,7 @@ export function __boot_usage_1(){
   US.paused=!!window.__ME.usagePaused;
   const vis=typeof document==='undefined'||document.visibilityState!=='hidden';
   US.acc=usAcc(usNow(),state.view||'markets',vis);
-  US.tr=usTr(usNow(),state.view||'markets');   // (-112) this page load's tab path starts on the tab it opened on
+  US.tr=usTr(usNow(),state.view||'markets',vis);   // (-112) this page load's tab path starts on the tab it opened on; (-114) its clock runs only while visible
   const onIn=()=>{ if(US.acc) usInput(US.acc,usNow()); };
   for(const ev of ['pointerdown','pointermove','keydown','wheel','scroll','touchstart'])
     try{ document.addEventListener(ev,onIn,{passive:true,capture:true}); }catch(_){ }
@@ -226,8 +235,9 @@ export function __boot_usage_1(){
     const hidden=document.visibilityState==='hidden';
     if(hidden) US.hiddenSeen=true;
     usSetVis(US.acc,!hidden,usNow());
+    if(US.tr) usTrVis(US.tr,!hidden,usNow());   // (-114) hidden time never holds a tab
     if(hidden) usageFlush(false); }); }catch(_){ }
-  try{ window.addEventListener('pagehide',()=>{ usSetVis(US.acc,false,usNow()); usageFlush(true); }); }catch(_){ }
+  try{ window.addEventListener('pagehide',()=>{ usSetVis(US.acc,false,usNow()); if(US.tr) usTrVis(US.tr,false,usNow()); usageFlush(true); }); }catch(_){ }
   setInterval(()=>usageFlush(false),US_FLUSH_MS);
   try{ document.addEventListener('click',(e)=>{ const b=e.target&&e.target.closest&&e.target.closest('[data-uspause]'); if(b) usagePause(b.dataset.uspause==='1'); }); }catch(_){ }
 }
@@ -254,7 +264,7 @@ function usageCardHtml(){
     // (build 2026.09.24-110 follow-up) everything the member guide (docs.html) lists, in the same order
     +'<div class="us-disc">The operator can see this summary for every member: which tabs you open and for how long (only while the page is visible and you have used it in the last five minutes); roughly which hour of the week that was (Eastern time); the kind of device (desktop, mobile or tablet, installed or not); how many times you use a few features (calls, targets, alerts, shares, CSV exports, asks, AI reports, ticker drawer opens, linking Telegram, turning on push — the count only, never which ticker); and, to catch bugs, how long the page took to first show the markets table, which build your tab is running, how many times you load the page, and any JavaScript errors it hit (the error message with quoted text removed, cut to 200 characters, and file:line). It never records what you search, which tickers you look at or your filter values, and which filters or columns you set is never linked to you. Opening your detail is logged in the admin audit. Kept '+((d&&d.keepDays)||30)+' days, then only sitewide totals remain — except a yes/no per week you were active (for join-week retention), kept 8 weeks, and one total per month (minutes on screen and active days, for month-over-month trends), kept for this month and last.</div>'
     // (build 2026.09.24-112) the sitewide-only counts, said separately because nobody's name is on them
-    +'<div class="us-disc">Also collected, sitewide and not linked to you (totals with no member attached, kept 90 days): navigation paths — which tab people move to from which, and the first tab a page load settles on; control-usage counts from a fixed list — the Markets column picker (which column), window and scope buttons, filter presets (the preset name only), CSV and share buttons, drawer sections, and whether a search box was used (never the text); and screen time per tab by device class. Never text, never tickers, never filter values beyond those preset names. Paused, you add nothing to these either.</div>'
+    +'<div class="us-disc">Also collected, sitewide and not linked to you (totals with no member attached, kept 30 days): navigation paths — which tab people move to from which, and the first tab a page load settles on; control-usage counts from a fixed list — the Markets column picker (which column), window and scope buttons, filter presets (the preset name only), CSV and share buttons, drawer sections, and whether a search box was used (never the text); and screen time per tab by device class. Never text, never tickers, never filter values beyond those preset names. Paused, you add nothing to these either. The operator sees these only for ranges of 7 or more complete days (never today) in which at least 3 members contributed on one day; below that the fold says “not enough members to show without identifying someone (n&lt;3)”, since a “sitewide” count from one or two people could identify them.</div>'
     +(d&&d.ok&&!paused?'<div class="us-kpis">'+k('active days · '+(d.keepDays||30)+'d',String(d.activeDays||0))+k('on screen',usFmtH(d.ms||0))+k('top tab',top)+'</div>'
       +usMonthsHtml(d)
       +((d.acts||[]).some(a=>a.n>0)?'<div class="us-acts">'+(d.acts||[]).filter(a=>a.n>0).map(a=>'<span class="acc-chip on">'+esc(US_ACT_CHIP[a.key]||a.key)+' '+(+a.n||0)+'</span>').join('')+'</div>':''):'')
@@ -282,9 +292,9 @@ async function usagePause(on){
       if(US.paused){ US.acts={}; US.perf=null; US.errs.clear(); US.ctl={}; US.tr=null; }   // (-110) counters, the paint sample and errors too; (-112) paths and controls
       else { if(US.acc) US.lastSent=0;
         // (-112) a fresh path from the tab on screen; this load's entry tab is not counted again
-        US.tr=usTr(usNow(),state.view||'markets'); US.tr.enDone=true; }
+        US.tr=usTr(usNow(),state.view||'markets',typeof document==='undefined'||document.visibilityState!=='hidden'); US.tr.enDone=true; }
     }
   }catch(_){ }
   US.busy=false; usageMeLoad();
 }
-export { US, US_CONTROLS, US_CTL_SET, usCtlKeys, usTr, usTrGive, usTrSettle, usTrTake, usTrView, usageCtl, usageSearch, usUnquote, usAcc, usCounting, usGive, usHrAdd, usInput, usSetTab, usSetVis, usSettle, usTake, usTakeHr, usageAct, usageCardHtml, usageErr, usageFirstPaint, usageFlush, usageMeLoad, usagePaint, usagePause, usageView };
+export { US, US_CONTROLS, US_CTL_SET, usCtlKeys, usTr, usTrGive, usTrSettle, usTrTake, usTrView, usTrVis, usageCtl, usageSearch, usUnquote, usAcc, usCounting, usGive, usHrAdd, usInput, usSetTab, usSetVis, usSettle, usTake, usTakeHr, usageAct, usageCardHtml, usageErr, usageFirstPaint, usageFlush, usageMeLoad, usagePaint, usagePause, usageView };

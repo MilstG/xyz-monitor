@@ -2536,7 +2536,7 @@ test("small fixes: escaped terminal sink, capped scrollback, total-order compara
   assert.ok(sw.includes('t.postMessage({ go: "dm" })') && !sw.includes('t.navigate("/#dm")'), "an open client is asked to switch tabs, not navigated");
   assert.ok(sw.includes('self.clients.openWindow("/#dm")'), "no client open: a real navigation remains the fallback");
   assert.ok(sw.includes("(build 2026.09.16-80)"), "sw header build stamp updated");
-  assert.ok(app.includes("navigator.serviceWorker.addEventListener('message',e=>{ const d=e&&e.data; if(d&&d.go==='dm') showView('dm'); });"), "the page answers the message");
+  assert.ok(app.includes("navigator.serviceWorker.addEventListener('message',e=>{ const d=e&&e.data; if(d&&d.go==='dm') showView('dm'); else if(d&&d.go==='markets') showView('markets'); });"), "the page answers the message (build 2026.09.24-114: + a usage reminder's go:'markets')");
 });
 
 test("share to chat (build 2026.09.21-84): the sheet can close — its author display: has a [hidden] companion", () => {

@@ -593,7 +593,7 @@ export function __boot_nav_10590() {
 export function __boot_nav_10612() {if('serviceWorker' in navigator){ try{ navigator.serviceWorker.register('/sw.js').catch(()=>{});
   // A notification click on an OPEN tab asks the page to switch tabs (sw.js postMessage) instead
   // of navigating it: a full navigation reloaded the app and dropped whatever was being typed.
-  navigator.serviceWorker.addEventListener('message',e=>{ const d=e&&e.data; if(d&&d.go==='dm') showView('dm'); }); }catch(_){}}
+  navigator.serviceWorker.addEventListener('message',e=>{ const d=e&&e.data; if(d&&d.go==='dm') showView('dm'); else if(d&&d.go==='markets') showView('markets'); }); }catch(_){}}
 
 document.querySelectorAll('#corrtf button').forEach(b=>{ if(b.dataset.d===state.corr.tf)b.classList.add('active');
   b.addEventListener('click',()=>{ state.corr.tf=b.dataset.d; usageCtl('corr.lookback='+b.dataset.d); document.querySelectorAll('#corrtf button').forEach(x=>x.classList.toggle('active',x===b));
