@@ -207,7 +207,7 @@ test("-108 call parser: a side word before the target or around the horizon deci
   assert.equal(R("$NVDA sell 2mo").side, "short"); assert.equal(R("$NVDA buy 30d").sideWord, "buy");
   assert.equal(R("$NVDA 30d long").sideWord, "long");
   assert.ok(T("$NVDA buy to 250 by Oct 15").ok && T("$NVDA buy to 250 by Oct 15").side === "long");
-  assert.ok(T("$NVDA selling 150 in 3w").ok, "a bare number behind a side word, with a deadline");
+  assert.equal(T("$NVDA selling 150 in 3w"), null, "(-108 follow-up) a bare number behind a side word is a size or entry, not a target");
   // options are still options: selling puts is long, buying puts is short, a strike is not a target
   assert.equal(R("$NVDA sell 100 puts").side, "long"); assert.equal(R("$NVDA sell 100 puts").sideWord, "sell … puts");
   assert.equal(R("$NVDA buy 100 puts").side, "short");
@@ -249,4 +249,98 @@ test("-108 call days: the preview, the stamp's close and the target row count th
   const app = src("public/js/messages.js");
   assert.ok(app.includes("days=tgOk?Math.max(1,(tgOk.by||0)>0?dmDaysLeft(tgOk.by):Math.ceil(tgOk.horizonMs/86400e3))"), "the composer preview counts with the same helper");
   assert.ok(app.includes("'open \\u00b7 '+dmDaysLeft(c.closeTs)+'d')"), "the calls list too");
+});
+
+// ---- (build 2026.09.24-108 follow-up) a size is not a target; behind a side word only a target word makes one
+test("-108 follow-up call parser: sizes and bare numbers behind a side word are not targets — server and client agree on every phrase", () => {
+  const now = Date.UTC(2026, 8, 24, 15, 0, 0);
+  const app = src("public/js/messages.js");
+  const cut = app.slice(app.indexOf("const CALL_SHORT_BEFORE="), app.indexOf("// The composer's preview:"));
+  const [cRead, cTarget] = new Function(cut + "\nreturn [dmCallRead, dmCallTarget];")();
+  // [phrase, callRead side, callRead horizon days, callTarget at mark 120: null | "err" | [side, px]]
+  const rows = [
+    ["$NVDA buy 200 shares by eom","long",7,null],
+    ["$NVDA sell 10 contracts this week","short",7,null],
+    ["$NVDA long 150 by eom","long",7,null],
+    ["$NVDA buy 150 in 2w","long",null,null],
+    ["$NVDA short 100 in 2w","short",null,null],
+    ["$NVDA 200 shares by eom","long",7,null],
+    ["$NVDA 2k shares in 2w","long",null,null],
+    ["$NVDA to 150 shares by eom","long",7,null],
+    ["$NVDA buy 5 lots in 3w","long",null,null],
+    ["$NVDA sell 3 units by friday","short",2,null],
+    ["$NVDA to 150 in 2w","long",null,["long",150]],
+    ["$NVDA 150 by eom","long",7,["long",150]],
+    ["$NVDA short to 100 in 2w","short",null,["short",100]],
+    ["$NVDA buy to 150 by Oct 15","long",22,["long",150]],
+    ["$NVDA long target 150 by eom","long",7,["long",150]],
+    ["$NVDA sell tgt 100 in 3w","short",null,["short",100]],
+    ["$NVDA short goes to 100 by eom","short",7,["short",100]],
+    ["$NVDA short → 100 in 2w","short",null,["short",100]],
+    ["$NVDA → 150 unless 110 in 3w","long",null,["long",150]],
+    ["$NVDA to 1.5k eoy","long",99,["long",1500]],
+    ["$NVDA 130 by Oct 15, wrong under 115","long",22,["long",130]],
+    ["bearish $NVDA to 100 in 3w","short",null,["short",100]],
+    ["$NVDA down to 100 in 2w","short",null,null],
+    ["$NVDA 100 puts by eom","short",7,null],
+    ["$NVDA sell 100 puts by eom","long",7,null],
+    ["$NVDA buying 140 calls by friday","long",2,null],
+    ["$NVDA in 2w","long",14,null],
+    ["$NVDA 2w short","short",14,null],
+    ["$NVDA short 2w","short",14,null],
+    ["$NVDA long 2w","long",14,null],
+    ["$NVDA sell the rip","short",null,null],
+    ["$NVDA buy the dip","long",null,null],
+    ["$NVDA sell 100 puts","long",null,null],
+    ["$NVDA buy 100 puts","short",null,null],
+    ["$NVDA short","short",null,null],
+    ["$NVDA 30d","long",30,null],
+    ["$NVDA in 10 days","long",10,null],
+    ["$NVDA 2w long to 150","long",14,null],
+    ["$NVDA short to 150 in 2w","short",null,"err"],
+    ["$NVDA going to 200 by friday","long",2,["long",200]],
+    ["$NVDA heading to 200 next week","long",7,["long",200]],
+    ["$NVDA to 100","long",null,"err"],
+  ];
+  assert.ok(rows.length >= 40);
+  for (const [t, side, hd, exp] of rows) {
+    const r = C.callRead(t, "NVDA", now), g = C.callTarget(t, "NVDA", 120, now, null);
+    assert.equal(r.side, side, "side: " + t);
+    assert.equal(r.horizonMs ? r.horizonMs / DAY : null, hd, "horizon: " + t);
+    assert.deepEqual(g === null ? null : g.ok ? [g.side, g.px] : "err", exp, "target: " + t);
+    assert.deepEqual(cRead(t, "NVDA", now), r, "read parity: " + t);
+    for (const sr of [undefined, true, false]) for (const so of [null, "long", "short"])
+      assert.deepEqual(cTarget(t, "NVDA", 120, now, so, sr), C.callTarget(t, "NVDA", 120, now, so, sr), "target parity: " + t + " / " + so + " / " + sr);
+  }
+});
+
+// ---- (build 2026.09.24-108 follow-up) loadTriggers is single-flight, extra calls coalesce into one more pull
+test("-108 follow-up triggers: overlapping loadTriggers calls pull once, then once more — each event fires once", async () => {
+  const trig = src("public/js/triggers.js");
+  const body = between(trig, "const TSEQ=", "// INTERRUPT only.");
+  let seq = 0, pulls = 0, release = null;
+  const fired = [], sinces = [];
+  const store = { m: { "xyzmon.trig.seq": "0" }, get(k) { return this.m[k]; }, set(k, v) { this.m[k] = v; } };
+  const state = { alerts: { trig: { on: true }, seenSeq: 0 } };
+  // The server's ring: one new rule event per pull while the test keeps adding them.
+  const fetchJSON = async (url) => {
+    pulls++; const since = +(/since=(\d+)/.exec(url) || [0, 0])[1], top = seq; sinces.push(since);
+    await new Promise((r) => { release = r; });
+    const events = []; for (let s = since + 1; s <= top; s++) events.push({ kind: "rule", seq: s });
+    return { events, recent: [], seq: top };
+  };
+  const ALERT_CHANNELS = { rule: { toast: true } };
+  const load = new Function("store", "state", "fetchJSON", "el", "saveAlerts", "updateBell", "buildAlertsPanel", "fireOps", "fireLedger", "fireGeneric", "fireTrigger", "ALERT_CHANNELS",
+    body + "\nreturn loadTriggers;")(store, state, fetchJSON, () => ({ hidden: true }), () => {}, () => {}, () => {}, () => {}, () => {}, (ev) => fired.push(ev.seq), () => {}, ALERT_CHANNELS);
+  seq = 1;
+  const a = load(), b = load(), c = load();   // the SSE alertVer path and the snapshot path, same bump, plus one more
+  await tick();
+  assert.equal(pulls, 1, "one pull in flight, however many callers");
+  seq = 2;                                   // a second bump lands mid-pull
+  release(); await tick(); await tick();
+  assert.equal(pulls, 2, "the calls made mid-pull coalesce into exactly one more");
+  release(); await Promise.all([a, b, c]);
+  assert.deepEqual(sinces, [0, 1], "the follow-up reads from the advanced cursor");
+  assert.deepEqual(fired, [1, 2], "each event toasts once — no duplicates, none lost");
+  const d = load(); await tick(); assert.equal(pulls, 3, "idle again: the next call pulls"); release(); await d;
 });

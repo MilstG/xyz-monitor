@@ -448,6 +448,17 @@ test("tg sync -99 server: edits, deletes, reactions and files cross in both dire
     assert.equal((await post("/api/dm", { drop: true, id: f1.id }, gus)).statusCode, 200);
     await drainAll(P);
     assert.deepEqual(since(), [], "a deleted attachment is neither uploaded nor replaced by its (deleted) words");
+
+    // ---- (build 2026.09.24-108 follow-up) an edit that grows a queued line past Telegram's 4096 ----
+    // The rebuilt text used to go out uncapped: a 400 from Telegram and the whole pack was dropped.
+    const g1 = JSON.parse((await post("/api/dm", { thread: T, body: "short line" }, gus)).body).message;
+    const huge = "<b>&amp;</b> ".repeat(400).slice(0, 4000);   // 4000 raw characters, far more once escaped
+    assert.equal((await post("/api/dm", { id: g1.id, body: huge }, gus)).statusCode, 200);   // still queued
+    await drainAll(P);
+    c = since();
+    assert.deepEqual(c.map((x) => x.method), ["sendMessage", "sendMessage"], "the grown line still goes out, once per chat");
+    assert.ok(c.every((x) => x.body.text.length <= 3500 && x.body.text.length > 3000 && /\u2026/.test(x.body.text) && /&lt;b&gt;&amp;amp;/.test(x.body.text) && /edited/.test(x.body.text)),
+      "capped at DM_MIRROR_CHARS with an ellipsis, the escaping whole: " + c.map((x) => x.body.text.slice(0, 200)));
   } finally {
     await app.close();
     globalThis.fetch = realFetch;

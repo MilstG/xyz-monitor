@@ -6418,6 +6418,7 @@ module.exports.callRead = callRead;
 const TG_NUM = "\\$?(\\d+(?:\\.\\d+)?)\\s*(k)?(?![\\w%/]|\\.\\d)";
 const TG_PX = new RegExp("^[\\s,:;\\u2014-]*((?:(?:goes|going|heading|headed|runs?|back)\\s+)?(?:to|\\u2192|->|target(?:ing)?|tgt)\\s*)?" + TG_NUM, "i");
 const TG_STOP = new RegExp("(?:^|\\W)(?:unless|stop(?:\\s+at)?|(?:wrong|invalid(?:ated)?)\\s+(?:under|over|above|below|at|if))\\s+" + TG_NUM, "i");
+const CALL_SIZE_AFTER = /^\s*(?:shares?|shs?|contracts?|cts?|lots?|units?|x)\b/i;   // (build 2026.09.24-108 follow-up) "200 shares" is a size
 const TG_DATED = /^(?:by\b|eo[wmy]\b|end of|year[ -]?end)/i;   // callRead's DATE words (vs relative horizons like "30d", "next week")
 // (build 2026.09.24-107) `sessionRule` (optional; boolean when the caller knows the name): the
 // deadline is then decided here and returned as `by` — a dated one at that date's close
@@ -6437,6 +6438,11 @@ function callTarget(text, sym, markPx, nowMs, sideOverride, sessionRule) {
   if (!p) return null;
   const rest = after.slice(p[0].length);
   if (/^\s*(puts|calls)\b/i.test(rest)) return null;            // "$HOOD 100 puts" is a strike
+  // (build 2026.09.24-108 follow-up) a size is not a target: "$NVDA buy 200 shares by eom", "$NVDA sell
+  // 10 contracts this week". And behind a side word only an explicit target word makes the number a
+  // target ("$NVDA short to 150 in 2w"); "$NVDA long 150 by eom" / "$NVDA buy 150 in 2w" name a size or entry.
+  if (CALL_SIZE_AFTER.test(rest)) return null;
+  if (lead && !p[1]) return null;
   const px = +p[2] * (p[3] ? 1000 : 1);
   const DAY = 86400e3, now = Number.isFinite(+nowMs) ? +nowMs : Date.now();
   let horizonMs = null, byWord = null, dated = false, m;

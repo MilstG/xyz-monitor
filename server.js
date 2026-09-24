@@ -1989,8 +1989,33 @@ async function buildServer() {
     const live = rows.filter((r) => !r.deleted && !(r.mine && r.via === "telegram"));
     if (!live.length) return null;
     if (part.file) return { caption: dmMirrorLine(live[0], true), fallback: dmMirrorLine(live[0]) };
-    const text = live.map((r) => dmMirrorLine(r)).join("\n\n");
-    return { text: part.head ? part.head + "\n\n" + text : text };
+    return { text: dmMirrorFit(live, part.head) };
+  }
+  // (build 2026.09.24-108 follow-up) The pack was sized at enqueue (<= DM_MIRROR_CHARS) but an edit
+  // made while it sat in the outbox can grow a line to a 4000-character body (more once escaped), and
+  // Telegram refuses anything over 4096 with a 400 — which dropped the WHOLE pack. The rebuilt text is
+  // held to DM_MIRROR_CHARS: the longest bodies are shortened (cut in the raw words, before escaping,
+  // so the HTML stays whole) and marked with an ellipsis; if the names/quotes alone still overflow,
+  // the oldest lines give way to a count. Never dropped for length.
+  function dmMirrorFit(rows, head) {
+    const cap = DM_MIRROR_CHARS, keep = rows.map((r) => String(r.body || "").length);
+    const lineOf = (r, i) => (keep[i] < String(r.body || "").length ? dmMirrorLine(Object.assign({}, r, { body: String(r.body).slice(0, keep[i]) + "\u2026" })) : dmMirrorLine(r));
+    const join = (lines) => (head ? head + "\n\n" : "") + lines.join("\n\n");
+    for (let k = 0; k < 64; k++) {
+      const lines = rows.map(lineOf), text = join(lines);
+      if (text.length <= cap) return text;
+      let j = -1;
+      for (let i = 0; i < rows.length; i++) if (keep[i] > 0 && (j < 0 || lines[i].length > lines[j].length)) j = i;
+      if (j < 0) break;
+      // Shrink in proportion: the escaped line is longer than the raw words ("&" -> "&amp;").
+      keep[j] = Math.max(0, Math.min(keep[j] - 1, Math.floor(keep[j] * (lines[j].length - (text.length - cap) - 1) / lines[j].length)));
+    }
+    const lines = rows.map(lineOf);
+    let n = 0;
+    while (n < lines.length - 1 && join([
+      "<i>+" + (n + 1) + " earlier line" + (n ? "s" : "") + " trimmed \u2014 open Messages</i>"].concat(lines.slice(n + 1))).length > cap) n++;
+    const text = join(["<i>+" + (n + 1) + " earlier line" + (n ? "s" : "") + " trimmed \u2014 open Messages</i>"].concat(lines.slice(n + 1)));
+    return text.length <= cap ? text : "<i>" + lines.length + " line" + (lines.length === 1 ? "" : "s") + " too long to mirror \u2014 open Messages</i>";
   }
   function dmMirrorSend(chat, uid, part) {
     const onSent = part.ids.length ? (res, it) => ACCOUNTS.tgMapAdd(chat, res && res.message_id, part.ids, uid, "out", it && it.file ? 1 : 0) : null;

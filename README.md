@@ -289,7 +289,8 @@ instant, and the per-IP rate limit stops being a per-user problem.
   the file's name if Telegram refuses the upload; a photo, document, voice note or audio file sent
   at the bot is fetched with `getFile` and stored through the composer's own upload door — the
   same magic-byte sniff, type allowlist and 8 MB / 3 MB caps, with the size checked from
-  Telegram's metadata before anything is downloaded. Every call rides the alert outbox (its 3 s
+  Telegram's metadata before anything is downloaded (inbound file delivery is at-most-once: a
+  restart mid-download loses that file, since the update offset has already moved past it). Every call rides the alert outbox (its 3 s
   pacing and 429 backoff), and a refusal (`message is not modified`, too old to delete) is logged
   and skipped without touching the chat's delivery status. What Telegram does not allow, stays
   out: the **Bot API sends no update when a message is deleted in Telegram**, so a delete made

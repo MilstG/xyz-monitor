@@ -875,6 +875,7 @@ function dmCallRead(text,sym,nowMs){
 const TG_NUM="\\$?(\\d+(?:\\.\\d+)?)\\s*(k)?(?![\\w%/]|\\.\\d)";
 const TG_PX=new RegExp("^[\\s,:;\u2014-]*((?:(?:goes|going|heading|headed|runs?|back)\\s+)?(?:to|\u2192|->|target(?:ing)?|tgt)\\s*)?"+TG_NUM,"i");
 const TG_STOP=new RegExp("(?:^|\\W)(?:unless|stop(?:\\s+at)?|(?:wrong|invalid(?:ated)?)\\s+(?:under|over|above|below|at|if))\\s+"+TG_NUM,"i");
+const CALL_SIZE_AFTER=/^\s*(?:shares?|shs?|contracts?|cts?|lots?|units?|x)\b/i;   // (build 2026.09.24-108 follow-up) "200 shares" is a size
 const TG_DATED=/^(?:by\b|eo[wmy]\b|end of|year[ -]?end)/i;   // callRead's DATE words (vs relative horizons)
 // (build 2026.09.24-107) The server's deadline calendar, ported for the preview (compute.js
 // callTargetDeadline / callSessionClose / usDayStatus): a date ends at its US cash close for a
@@ -932,6 +933,8 @@ function dmCallTarget(text,sym,markPx,nowMs,sideOverride,sessionRule){
   if(!p) return null;
   const rest=after.slice(p[0].length);
   if(/^\s*(puts|calls)\b/i.test(rest)) return null;
+  if(CALL_SIZE_AFTER.test(rest)) return null;   // (build 2026.09.24-108 follow-up) "200 shares" is a size, not a target
+  if(lead&&!p[1]) return null;   // (-108 follow-up) behind a side word only an explicit target word ("to 150") makes a target
   const px=+p[2]*(p[3]?1000:1);
   const DAY=86400e3, now=Number.isFinite(+nowMs)?+nowMs:Date.now();
   let horizonMs=null, byWord=null, dated=false, m;
