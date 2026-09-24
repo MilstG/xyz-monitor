@@ -19,6 +19,7 @@ import { aiMatches, openAiReport } from "./report.js";
 import { exportSectors, renderSectors } from "./sectors.js";
 import { EV_LABELS } from "./trend.js";
 import { loadPush, loadRules, loadTriggers } from "./triggers.js";
+import { usageCtl, usageSearch } from "./usage.js";
 
 
 // ===== polling cycle + countdown =====
@@ -200,7 +201,9 @@ function buildColMenu(){ const pop=el('colpop'); let h='<div class="cphead">Show
   h+='<button class="btn" id="colReset" style="margin-top:8px;width:100%;justify-content:center">Reset layout</button>';
   pop.innerHTML=h;
   pop.querySelectorAll('input[type=checkbox]').forEach(cb=>cb.addEventListener('change',()=>{
-    const k=cb.dataset.col; if(cb.checked) state.colHidden.delete(k); else state.colHidden.add(k); if(k==='pos') store.set('xyzmon.posCol', cb.checked?'shown':'hidden'); buildHead(); render(); savePrefs(); }));
+    const k=cb.dataset.col; if(cb.checked) state.colHidden.delete(k); else state.colHidden.add(k);
+    usageCtl('markets.col-'+(cb.checked?'on':'off')+'='+k);   // (build 2026.09.24-112) which column, from the fixed id list — never the layout
+    if(k==='pos') store.set('xyzmon.posCol', cb.checked?'shown':'hidden'); buildHead(); render(); savePrefs(); }));
   el('colReset').addEventListener('click',()=>{ state.colOrder=[...DEFAULT_ORDER]; state.colHidden=new Set(DEFAULT_HIDDEN); buildColMenu(); buildHead(); render(); savePrefs(); });
 }
 function setWindow(tf){ state.tf=tf;
@@ -227,7 +230,7 @@ document.addEventListener('visibilitychange',()=>{ if(document.hidden) return;
   if(typeof dmSync==='function'&&dmState&&dmState.me){ try{ dmSync(); }catch(_){} }
   visibleCatchUp(); });   // (build 2026.09.24-103) the one pull a hidden tab skipped, plus any deferred markets paint
 // Search-as-you-type re-rendered the whole table synchronously per keystroke; one frame is plenty.
-el('filter').addEventListener('input', e=>{ state.filter=e.target.value; scheduleRender(); savePrefs(); });
+el('filter').addEventListener('input', e=>{ usageSearch('markets.search'); state.filter=e.target.value; scheduleRender(); savePrefs(); });
 el('body').addEventListener('click', e=>{ const star=e.target.closest('.star');
   if(star){ e.stopPropagation(); toggleWatch(star.dataset.star); return; }
   const pit=e.target.closest('.pit[data-pit]');
@@ -250,11 +253,11 @@ shareWireBoard(el('sect-board'), {view:'sectors', title:()=>state.sect&&state.se
 shareWireBoard(el('rvd-wrap'), {view:'drawdown', title:'Drawdown', rowSel:'tr[data-coin]'});
 shareWireBoard(el('funding-body'), {view:'funding', title:'Funding heat', rowSel:'text.fh-tk[data-coin]', capture:n=>fhShareCard(n.getAttribute('data-coin'))});
 shareWireDrawer(el('drawer'));
-el('watchOnly').addEventListener('click',()=>{ state.watchOnly=!state.watchOnly; el('watchOnly').classList.toggle('on', state.watchOnly); updateFilterChip(); render(); savePrefs(); });
+el('watchOnly').addEventListener('click',()=>{ state.watchOnly=!state.watchOnly; usageCtl('markets.preset=watch'); el('watchOnly').classList.toggle('on', state.watchOnly); updateFilterChip(); render(); savePrefs(); });
 // Deliberately NOT part of a saved layout, unlike ★-only: adding a field to the layout signature
 // would mark every layout the operator has already saved as dirty. Per browser, in prefs.
-{ const nb=el('noteOnly'); if(nb) nb.addEventListener('click',()=>{ state.noteOnly=!state.noteOnly; nb.classList.toggle('on', state.noteOnly); updateFilterChip(); render(); savePrefs(); }); }
-{ const pb=el('posOnly'); if(pb) pb.addEventListener('click',()=>{ state.posOnly=!state.posOnly; pb.classList.toggle('on', state.posOnly); updateFilterChip(); render(); });
+{ const nb=el('noteOnly'); if(nb) nb.addEventListener('click',()=>{ state.noteOnly=!state.noteOnly; usageCtl('markets.preset=notes'); nb.classList.toggle('on', state.noteOnly); updateFilterChip(); render(); savePrefs(); }); }
+{ const pb=el('posOnly'); if(pb) pb.addEventListener('click',()=>{ state.posOnly=!state.posOnly; usageCtl('markets.preset=pos'); pb.classList.toggle('on', state.posOnly); updateFilterChip(); render(); });
   const lk=el('posLink'), inp=el('posAddr'), ub=el('posUnlink');
   if(lk&&inp){ lk.addEventListener('click',()=>{ const v=(inp.value||'').trim(); if(!v){ inp.classList.add('bad'); inp.focus(); return; } posLink(v); });
     inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); lk.click(); } }); }
@@ -274,7 +277,7 @@ document.addEventListener('click',e=>{ const pop=el('alertpop');
   if(clickedOutside(pop, el('bellBtn'), e)) closeAlertPop(); });
 ['volMin','volMax','oiMin','oiMax'].forEach(id=>el(id).addEventListener('input', applyNumFilters));
 applyNumFilters();
-el('clearFilters').addEventListener('click', ()=>{ ['volMin','volMax','oiMin','oiMax'].forEach(id=>{ el(id).value=''; el(id).classList.remove('bad'); });
+el('clearFilters').addEventListener('click', ()=>{ usageCtl('markets.preset=clear'); ['volMin','volMax','oiMin','oiMax'].forEach(id=>{ el(id).value=''; el(id).classList.remove('bad'); });
   state.filters={volMin:null,volMax:null,oiMin:null,oiMax:null}; updateFilterChip(); render(); savePrefs(); });
 el('filtersBtn').addEventListener('click',e=>{ e.stopPropagation(); const pop=el('filterpop');
   if(pop.hidden){ pop.hidden=false; el('filtersBtn').setAttribute('aria-expanded','true'); const m=el('volMin'); if(m) m.focus(); }
@@ -292,28 +295,28 @@ el('layBtn').addEventListener('click',e=>{ e.stopPropagation(); const pop=el('la
 document.addEventListener('click',e=>{ const pop=el('laypop');
   if(clickedOutside(pop, el('layBtn'), e)){ pop.hidden=true; el('layBtn').setAttribute('aria-expanded','false'); } });
 document.querySelectorAll('#tfseg button').forEach(b=>{ if(b.dataset.tf===state.tf)b.classList.add('active');
-  b.addEventListener('click',()=>setWindow(b.dataset.tf)); });
-document.querySelectorAll('#grpseg button').forEach(b=>b.addEventListener('click',()=>setGrp(b.dataset.grp)));
+  b.addEventListener('click',()=>{ usageCtl('markets.window='+b.dataset.tf); setWindow(b.dataset.tf); }); });   // (build 2026.09.24-112) usage: sitewide control count
+document.querySelectorAll('#grpseg button').forEach(b=>b.addEventListener('click',()=>{ usageCtl('markets.group='+b.dataset.grp); setGrp(b.dataset.grp); }));   // (build 2026.09.24-112) usage: sitewide control count
 { const ah=el('acthead'); if(ah) ah.addEventListener('click',()=>{ state.actOpen=!state.actOpen; renderActionLists(); savePrefs(); }); }
 document.querySelectorAll('#grpwtseg button').forEach(b=>b.addEventListener('click',()=>{
-  state.grpWt=b.dataset.gwt==='eq'?'eq':'vol'; syncGrpSeg(); render(); savePrefs(); }));
+  state.grpWt=b.dataset.gwt==='eq'?'eq':'vol'; usageCtl('markets.weight='+state.grpWt); syncGrpSeg(); render(); savePrefs(); }));
 syncGrpSeg();   // after loadPrefs: reflect the restored lens (buttons, weighting seg, parked column/layout menus)
 document.querySelectorAll('#sectf button').forEach(b=>{ if(b.dataset.tf===state.tf)b.classList.add('active');
-  b.addEventListener('click',()=>setWindow(b.dataset.tf)); });
+  b.addEventListener('click',()=>{ usageCtl('sectors.window='+b.dataset.tf); setWindow(b.dataset.tf); }); });   // (build 2026.09.24-112) usage: sitewide control count
 document.querySelectorAll('#sectwt button').forEach(b=>{ if(b.dataset.wt===state.sect.wt)b.classList.add('active');
-  b.addEventListener('click',()=>{ state.sect.wt=b.dataset.wt;
+  b.addEventListener('click',()=>{ state.sect.wt=b.dataset.wt; usageCtl('sectors.weight='+b.dataset.wt);
     document.querySelectorAll('#sectwt button').forEach(x=>x.classList.toggle('active',x===b));
     if(!el('view-sectors').hidden) renderSectors(); }); });
 el('sectExport').addEventListener('click', exportSectors);
 document.querySelectorAll('#sectgrp button').forEach(b=>{ if(b.dataset.grp===state.sect.grp)b.classList.add('active');
-  b.addEventListener('click',()=>{ state.sect.grp=b.dataset.grp;
+  b.addEventListener('click',()=>{ state.sect.grp=b.dataset.grp; usageCtl('sectors.grouping='+b.dataset.grp);
     document.querySelectorAll('#sectgrp button').forEach(x=>x.classList.toggle('active',x===b));
     // A drill-in selection is a group NAME; the other grouping may not contain it. Clear rather
     // than let a stale name pin a phantom row.
     state.sect.sel=null; const dp=el('sect-detail'); if(dp) dp.hidden=true;
     if(!el('view-sectors').hidden) renderSectors(); savePrefs(); }); });
 document.querySelectorAll('#sectmode button').forEach(b=>{ if(b.dataset.mode===state.sect.mode)b.classList.add('active');
-  b.addEventListener('click',()=>{ state.sect.mode=b.dataset.mode;
+  b.addEventListener('click',()=>{ state.sect.mode=b.dataset.mode; usageCtl('sectors.view='+b.dataset.mode);
     document.querySelectorAll('#sectmode button').forEach(x=>x.classList.toggle('active',x===b));
     if(!el('view-sectors').hidden) renderSectors(); }); });
 document.querySelectorAll('#rfseg button').forEach(b=>{ if(+b.dataset.ms===state.refreshMs)b.classList.add('active');
@@ -325,7 +328,7 @@ document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>show
   const h=el('homeBtn'); if(h) h.addEventListener('click',()=>showView('markets')); }
 document.querySelectorAll('#hsgwin button').forEach(b=>b.addEventListener('click',()=>{ state.housingWin=b.dataset.w; renderHousing(); }));
 document.querySelectorAll('#liqwin button').forEach(b=>b.addEventListener('click',()=>{ state.liqWin=b.dataset.w; renderLiquidity(); }));
-document.querySelectorAll('[data-scope]').forEach(b=>b.addEventListener('click',()=>setScope(b.dataset.scope)));
+document.querySelectorAll('[data-scope]').forEach(b=>b.addEventListener('click',()=>{ usageCtl('header.scope='+b.dataset.scope); setScope(b.dataset.scope); }));   // (build 2026.09.24-112) usage: sitewide control count
 }
 
 // ===== nav tabs: drag to reorder, order persisted per browser =====
@@ -590,16 +593,16 @@ export function __boot_nav_10590() {
 export function __boot_nav_10612() {if('serviceWorker' in navigator){ try{ navigator.serviceWorker.register('/sw.js').catch(()=>{});
   // A notification click on an OPEN tab asks the page to switch tabs (sw.js postMessage) instead
   // of navigating it: a full navigation reloaded the app and dropped whatever was being typed.
-  navigator.serviceWorker.addEventListener('message',e=>{ const d=e&&e.data; if(d&&d.go==='dm') showView('dm'); }); }catch(_){}}
+  navigator.serviceWorker.addEventListener('message',e=>{ const d=e&&e.data; if(d&&d.go==='dm') showView('dm'); else if(d&&d.go==='markets') showView('markets'); }); }catch(_){}}
 
 document.querySelectorAll('#corrtf button').forEach(b=>{ if(b.dataset.d===state.corr.tf)b.classList.add('active');
-  b.addEventListener('click',()=>{ state.corr.tf=b.dataset.d; document.querySelectorAll('#corrtf button').forEach(x=>x.classList.toggle('active',x===b));
+  b.addEventListener('click',()=>{ state.corr.tf=b.dataset.d; usageCtl('corr.lookback='+b.dataset.d); document.querySelectorAll('#corrtf button').forEach(x=>x.classList.toggle('active',x===b));
     if(!el('view-corr').hidden) renderCorr(); }); });
 document.querySelectorAll('#corrn button').forEach(b=>{ if(+b.dataset.n===state.corr.topN)b.classList.add('active');
-  b.addEventListener('click',()=>{ state.corr.topN=+b.dataset.n; state.corr.selected=null; state.corr.pair=null; document.querySelectorAll('#corrn button').forEach(x=>x.classList.toggle('active',x===b));
+  b.addEventListener('click',()=>{ state.corr.topN=+b.dataset.n; usageCtl('corr.top='+b.dataset.n); state.corr.selected=null; state.corr.pair=null; document.querySelectorAll('#corrn button').forEach(x=>x.classList.toggle('active',x===b));
     if(!el('view-corr').hidden) openCorr(); }); });
 document.querySelectorAll('#corrtop button').forEach(b=>{ if(+b.dataset.k===state.corr.topPairs)b.classList.add('active');
-  b.addEventListener('click',()=>{ state.corr.topPairs=+b.dataset.k; document.querySelectorAll('#corrtop button').forEach(x=>x.classList.toggle('active',x===b)); renderCorrPairs(); }); });
+  b.addEventListener('click',()=>{ state.corr.topPairs=+b.dataset.k; usageCtl('corr.pairs='+b.dataset.k); document.querySelectorAll('#corrtop button').forEach(x=>x.classList.toggle('active',x===b)); renderCorrPairs(); }); });
 }
 
 let corrSearchT=null;
@@ -897,7 +900,7 @@ function cmdkActivate(i, report){ const row=_cmdkRows[i]; if(!row) return; close
 export function __boot_nav_10845() {
 { const q=el('cmdk-q'), bg=el('cmdkbg');
   if(bg) bg.addEventListener('click',closeCmdk);
-  if(q){ q.addEventListener('input',()=>cmdkRender(q.value));
+  if(q){ q.addEventListener('input',()=>{ usageSearch('header.search'); cmdkRender(q.value); });   // (build 2026.09.24-112) a typing burst counted, never the text
     q.addEventListener('keydown',e=>{   // Escape bubbles to the overlay stack, which closes the palette as its top layer
       if(e.key==='ArrowDown'){ e.preventDefault(); if(_cmdkRows.length){ _cmdkSel=(_cmdkSel+1)%_cmdkRows.length; cmdkPaint(); } return; }
       if(e.key==='ArrowUp'){ e.preventDefault(); if(_cmdkRows.length){ _cmdkSel=(_cmdkSel-1+_cmdkRows.length)%_cmdkRows.length; cmdkPaint(); } return; }
@@ -905,11 +908,11 @@ export function __boot_nav_10845() {
   document.addEventListener('keydown',e=>{
     if((e.metaKey||e.ctrlKey)&&(e.key==='k'||e.key==='K')){ e.preventDefault(); cmdkOpen()?closeCmdk():openCmdk(); } }); }
 { const shq=el('sighist-q');   // claim-history browser on the Signals tab (static markup — survives signals-body re-renders)
-  if(shq) shq.addEventListener('input',()=>{ clearTimeout(G._shTimer); G._shTimer=setTimeout(runSigHist,250); });
+  if(shq) shq.addEventListener('input',()=>{ usageSearch('signals.search'); clearTimeout(G._shTimer); G._shTimer=setTimeout(runSigHist,250); });
   const she=el('sighist-ev');
   if(she){ for(const ev of Object.keys(EV_LABELS)){ const o=document.createElement('option'); o.value=ev; o.textContent=EV_LABELS[ev]; she.appendChild(o); }
     she.addEventListener('change',runSigHist); } }
-el('corrsearch').addEventListener('input',e=>{ state.corr.search=e.target.value; state.corr.selected=null; state.corr.pair=null;
+el('corrsearch').addEventListener('input',e=>{ usageSearch('corr.search'); state.corr.search=e.target.value; state.corr.selected=null; state.corr.pair=null;
   clearTimeout(corrSearchT); corrSearchT=setTimeout(()=>{ if(!el('view-corr').hidden) openCorr(); },300); });
 el('mktExport').addEventListener('click', exportMarkets);
 el('corrExport').addEventListener('click', exportCorr);

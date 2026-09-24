@@ -7,9 +7,25 @@
 // retention, the drill-in's features row, and client health. Error messages come from BROWSERS —
 // any member (or anything injected into their page) can make one say anything — so the message,
 // the file:line and the build all go through esc() like every other string here, never raw.
+// (build 2026.09.24-111) Deploy & gate markers on the daily-active chart plus their list with the
+// affected tab's reach before/after; the post-deploy verdict card; the error triage list with a
+// resolve toggle (POST /api/admin/usage/errors — the only write this fold makes, by signature).
+// Marker details are operator config (feature keys, build stamps) and still go through esc().
+// (build 2026.09.24-112) Sitewide sections (no member in any of them): tab paths (top transitions,
+// "where people go from X", entry tabs) with a READ-ONLY suggested nav order; control usage per tab
+// with "never used in range" highlighted and the quiet-controls list; time per tab by device class.
+// Tab labels, control keys and values all come from the payload and still go through esc().
+// (build 2026.09.24-113) "Digest & nudges": the weekly operator digest's settings (on/off, ET weekday),
+// last sent, this week's schedule and a PREVIEW of its text (plain text from the server — member display
+// names and browser-supplied error messages in it, so it goes through esc() like everything else), the
+// "send test now" button, the opt-in lapsed-member nudge (toggle + the lead text) and the nudge log (the
+// dm_audit 'usage-nudge' rows). Reads GET /api/admin/usage/digest; writes POST …/digest and …/digest/test.
 import { el, esc } from "./core.js";
 
-const UA={r:7,data:null,err:null,loading:false,loadedAt:0,msort:{k:'days',d:-1},tsort:{k:'ms',d:-1},sel:null,detail:null,wired:false};
+const UA={r:7,data:null,err:null,loading:false,loadedAt:0,msort:{k:'days',d:-1},tsort:{k:'ms',d:-1},sel:null,detail:null,wired:false,
+  triBusy:null,triErr:null,   // (-111) the triage toggle in flight, and its last error
+  pathTab:null,ctlTab:null,   // (-112) the tab picked for "where people go from X", and for its controls
+  dg:{data:null,err:null,busy:null,msg:null,draft:null}};   // (-113) digest & nudges: payload, error, action in flight, last result, unsaved reminder text
 const UA_STALE_MS=60000;
 
 async function uaLoad(){
@@ -20,6 +36,30 @@ async function uaLoad(){
     UA.data=await r.json(); UA.err=null; UA.loadedAt=Date.now();
   }catch(e){ UA.err=String(e&&e.message||e); }
   UA.loading=false; uaRender();
+  uaDgLoad();   // (-113) the digest & nudges sub-section rides every refresh
+}
+// ---- (build 2026.09.24-113) digest & nudges ------------------------------------------------------------
+async function uaDgLoad(){
+  try{
+    const r=await fetch('/api/admin/usage/digest',{headers:{accept:'application/json'}});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(d.error||('HTTP '+r.status));
+    UA.dg.data=d; UA.dg.err=null;
+  }catch(e){ UA.dg.err=String(e&&e.message||e); }
+  uaRender();
+}
+async function uaDgPost(url,body,what){
+  if(UA.dg.busy) return;
+  UA.dg.busy=what; UA.dg.msg=null; uaRender();
+  try{
+    const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify(body||{})});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok||d.ok===false) UA.dg.msg={bad:true,text:d.error||('HTTP '+r.status)};
+    else if(what==='test') UA.dg.msg={bad:false,text:'sent to '+(+d.sent||0)+' operator chat'+(d.sent===1?'':'s')+' · '+(+d.chars||0)+' chars'};
+    else { UA.dg.data=d; UA.dg.msg={bad:false,text:'saved'}; if(what==='text') UA.dg.draft=null; }
+  }catch(e){ UA.dg.msg={bad:true,text:String(e&&e.message||e)}; }
+  UA.dg.busy=null;
+  if(what==='test') await uaDgLoad(); else uaRender();
 }
 async function uaOpenMember(h){
   if(UA.sel===h){ UA.sel=null; UA.detail=null; uaRender(); return; }
@@ -30,6 +70,19 @@ async function uaOpenMember(h){
     UA.detail=r.ok?Object.assign(d,{viewedAt:Date.now()}):{error:d.error||('HTTP '+r.status)};
   }catch(e){ UA.detail={error:String(e&&e.message||e)}; }
   if(UA.sel===h) uaRender();
+}
+// (build 2026.09.24-111) Resolve / reopen one distinct error. The server answers with the new state;
+// the fold then reloads (the triage list rides the usage payload, whose cache key the toggle bumped).
+async function uaTriage(sig,on){
+  if(UA.triBusy) return;
+  UA.triBusy=sig; UA.triErr=null; uaRender();
+  try{
+    const r=await fetch('/api/admin/usage/errors',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({sig,resolved:!!on})});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok||!d.ok) UA.triErr=d.error||('HTTP '+r.status);
+  }catch(e){ UA.triErr=String(e&&e.message||e); }
+  UA.triBusy=null;
+  await uaLoad();
 }
 // Opened by access.js whenever the Usage fold is open (lazyCall). Refetches at most once a minute —
 // the server's own aggregates only move on its 60s flush.
@@ -120,17 +173,166 @@ function uaHealthHtml(H){
   const errs=kc('JS errors','window.onerror + unhandledrejection, deduped by message and file:line',
     (E.distinct||0)+' <span class="acc-mu">distinct · '+(E.hits||0)+' hits</span>',
     top?'top: <span class="neg">'+esc(top.loc)+' · '+esc(top.msg)+'</span> · '+(+top.members||0)+' member'+(top.members===1?'':'s'):'none in range');
-  const stale=kc('Stale builds','members whose open tab runs an older build (last beacon inside the hour)',
+  const stale=kc('Stale builds','members whose open tab runs an older build (last beacon inside the hour; kept across restarts)',
     H.stale==null?'—':String(H.stale), H.stale?'the new-version toast offers them the reload':'everyone online is on '+esc(H.build||'this build'));
-  const list=(E.top||[]).length?'<div class="us-tw" style="margin-top:var(--sp-2)"><table class="us-tbl us-errs"><thead><tr><th>build</th><th>file:line</th><th>message</th><th class="n">hits</th><th class="n">members</th></tr></thead><tbody>'
+  // (-111) with a triage list in the payload, it replaces the top-five table (it carries the same rows and more)
+  const list=!H.triage&&(E.top||[]).length?'<div class="us-tw" style="margin-top:var(--sp-2)"><table class="us-tbl us-errs"><thead><tr><th>build</th><th>file:line</th><th>message</th><th class="n">hits</th><th class="n">members</th></tr></thead><tbody>'
     +(E.top||[]).map(e=>'<tr><td class="mono">'+esc(e.build)+'</td><td class="mono">'+esc(e.loc)+'</td><td class="us-emsg">'+esc(e.msg)+'</td><td class="n">'+(+e.hits||0)+'</td><td class="n">'+(+e.members||0)+'</td></tr>').join('')
     +'</tbody></table></div>':'';
-  return '<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Client health</div><div class="us-health">'+perf+errs+stale+'</div>'+list
+  return '<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Client health</div><div class="us-health">'+uaRegressCard(H.regress,kc)+perf+errs+stale+'</div>'+list+uaTriageHtml(H.triage)
     +'<div class="acc-note">Error text is whatever the browser reported, with quoted text removed and cut to 200 characters; only builds this deployment served count, at most '+(+H.errCap||200)+' distinct errors are kept per build (500 overall, 20 new per member per day), and this card shows this build and the previous one. Public (signed-out) visitors are not tracked: the flag is off and the anonymous-visitor path is deliberately not built.</div>';
 }
 
+// ---- (build 2026.09.24-111) the post-deploy verdict, error triage, deploy & gate markers ---------------
+const uaShort=(b)=>{ const m=/-(\d+)$/.exec(String(b||'')); return m?'-'+m[1]:String(b||'?'); };
+function uaCondWord(c){
+  if(!c) return '';
+  if(c.kind==='new-errors') return (+c.n||0)+' new error'+(c.n===1?'':'s')+' hit by ≥2 members';
+  if(c.kind==='err-rate') return 'errors per page load '+(+c.x||0).toFixed(1)+'×';
+  if(c.kind==='perf') return 'p75 first paint +'+Math.round(((+c.p75||0)/(+c.p75Prev||1)-1)*100)+'% ('+uaSec(c.p75)+' vs '+uaSec(c.p75Prev)+')';
+  return String(c.kind||'');
+}
+function uaRegressCard(V,kc){
+  if(!V) return '';
+  const sb=esc(uaShort(V.build)), vs=V.prev?' vs build '+esc(uaShort(V.prev)):'';
+  let v, s;
+  if(V.state==='regression'){ v='<span class="neg">regression</span>'; s='<span class="neg">regression: '+(V.conds||[]).map(c=>esc(uaCondWord(c))).join(' · ')+'</span>'+vs+' · alerted once per condition'; }
+  else if(V.state==='ok'){ v='<span class="pos">build '+sb+': OK</span>'; s=(+V.loads||0)+' page loads'+vs+': no new errors, error rate and p75 within bounds'; }
+  else if(V.state==='no-baseline'){ v='<span class="pos">build '+sb+': OK</span>'; s='no earlier build with ≥ 20 page loads to compare against'; }
+  else if(V.state==='collecting'){ v='build '+sb+': collecting'; s=(+V.loads||0)+' / '+(+(V.need&&V.need.loads)||20)+' page loads — decides at that many, or '+Math.round(((V.need&&V.need.ageMs)||7200000)/3600000)+'h after the deploy'; }
+  else { v='—'; s='this build is not in the known-builds list'; }
+  return kc('Post-deploy check','this build against the previous known one: new errors (≥2 members), errors per page load (≥3×), p75 paint (≥30% and ≥0.3s)',v,s);
+}
+const uaWhen=(ms)=>{ if(!ms) return '—'; try{ return new Date(ms).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false}); }catch(_){ return '—'; } };
+function uaTriageHtml(T){
+  if(!T) return '';
+  const rows=T.rows||[];
+  if(!rows.length) return '<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Error triage</div><div class="acc-note" style="margin:0">No errors on record.</div>';
+  const st=(e)=>e.resolved?'<span class="acc-chip">resolved</span>':e.regressed?'<span class="acc-chip warn" title="resolved, then hit again on a newer build">regressed · '+esc(uaShort(e.regressedBuild))+'</span>':'<span class="acc-chip on">open</span>';
+  return '<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Error triage · '+(+T.open||0)+' open of '+(+T.total||0)+'</div>'
+    +(UA.triErr?'<div class="acc-note neg" style="margin:0 0 var(--sp-1)">could not update — '+esc(UA.triErr)+'</div>':'')
+    +'<div class="us-tw"><table class="us-tbl us-errs us-tri"><thead><tr><th>state</th><th>file:line · message</th><th>builds</th><th>first seen</th><th>last seen</th><th class="n">hits</th><th class="n">members</th><th></th></tr></thead><tbody>'
+    +rows.map(e=>'<tr'+(e.resolved?' class="us-res"':'')+'><td>'+st(e)+'</td>'
+      +'<td class="us-emsg"><span class="mono">'+esc(e.loc)+'</span> · '+esc(e.msg)+'</td>'
+      +'<td class="mono">'+esc(uaShort(e.firstBuild))+(e.lastBuild!==e.firstBuild?' → '+esc(uaShort(e.lastBuild)):'')+'</td>'
+      +'<td class="mono">'+esc(uaWhen(e.firstAt))+'</td><td class="mono">'+esc(uaWhen(e.lastAt))+'</td>'
+      +'<td class="n">'+(+e.hits||0)+'</td><td class="n">'+(+e.members||0)+'</td>'
+      +'<td><button type="button" class="btn" data-uatri="'+esc(e.sig)+'" data-on="'+(e.resolved?'0':'1')+'"'+(UA.triBusy?' disabled':'')+'>'+(UA.triBusy===e.sig?'…':e.resolved?'reopen':'resolve')+'</button></td></tr>').join('')
+    +'</tbody></table></div>'
+    +'<div class="acc-note">One row per distinct error (file + message, across builds and line moves). Members is a count, never who. Resolving stamps the newest build (in deploy order) it was seen on; a hit from a build deployed after that one reopens it as “regressed”, while stale tabs on that or older builds do not.</div>';
+}
+function uaMarkWord(m){
+  const d=String(m.detail||'');
+  if(m.kind==='deploy') return 'deploy · build '+d;
+  if(m.kind==='gate'){ const i=d.indexOf('='); return 'gate · '+(m.tabLabel||(i>=0?d.slice(0,i):d))+' → '+(i>=0?d.slice(i+1):'?'); }
+  if(m.kind==='nav'){ if(d[0]==='#') return 'menu renamed · '+d.slice(1); const i=d.indexOf('>'); return 'menu · '+(m.tabLabel||(i>=0?d.slice(0,i):d))+' moved to '+(i>=0?d.slice(i+1):'?'); }
+  if(m.kind==='alert'){ const i=d.lastIndexOf('|'); return 'regression alert · build '+(i>=0?uaShort(d.slice(0,i))+' · '+d.slice(i+1):d); }
+  return m.kind+' · '+d;
+}
+function uaReachCell(w,pending){
+  if(!w) return '<span class="na">'+(pending?'from tomorrow':'folded')+'</span>';
+  const notes=[]; if(w.days<7) notes.push((w.days)+'d'); if(w.active<5) notes.push('small n');
+  return uaPct(w.reach)+' <span class="acc-mu">'+(+w.users||0)+'/'+(+w.active||0)+'</span>'+(notes.length?' <span class="acc-chip warn">'+notes.join(' · ')+'</span>':'');
+}
+function uaMarksHtml(D){
+  const M=D.marks; if(!M) return '';
+  const head='<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Deploys &amp; gate changes</div>';
+  if(!M.length) return head+'<div class="acc-note" style="margin:0">No deploys or gate changes in the last 90 days.</div>';
+  return head+'<div class="us-tw"><table class="us-tbl us-marks"><thead><tr><th>when</th><th>change</th><th class="n">reach · 7d before</th><th class="n">after</th><th class="n">Δ</th></tr></thead><tbody>'
+    +M.map(m=>{ const tab=!!m.tab, b=m.before, a=m.after;
+      const dd=tab&&b&&a&&b.reach!=null&&a.reach!=null?Math.round((a.reach-b.reach)*100):null;
+      return '<tr><td class="mono">'+esc(uaWhen(m.at))+'</td><td><i class="us-mkdot '+(m.kind==='deploy'?'us-mk-dep':m.kind==='alert'?'us-mk-alert':'us-mk-gate')+'"></i>'+esc(uaMarkWord(m))+'</td>'
+        +(tab?'<td class="n">'+uaReachCell(b,false)+'</td><td class="n">'+uaReachCell(a,!a)+'</td><td class="n">'+(dd==null?'<span class="na">—</span>':'<span class="'+(dd>=0?'pos':'neg')+'">'+(dd>=0?'+':'')+dd+' pts</span>')+'</td>'
+          :'<td class="n na" colspan="3">'+(m.kind==='deploy'?'see Client health':'')+'</td>')+'</tr>'; }).join('')
+    +'</tbody></table></div>'
+    +'<div class="acc-note">Reach = members who opened the tab ÷ members active (≥1 min on screen) in the window: the 7 ET days before the change day against the 7 after it, or the days since (“Nd”); the change day itself is in neither. “small n” = under 5 active members. Windows are clipped to the '+(D.keepDays||30)+'-day per-member retention. Markers are operator config history (no member data), kept 90 days.</div>';
+}
+
+// ---- (build 2026.09.24-112) sitewide: tab paths, the suggested nav order, controls, device split -------
+const UA_DEV_LBL={desktop:'desktop',mobile:'mobile',tablet:'tablet',pwa:'PWA'};
+function uaSelHtml(kind,opts,cur){
+  return '<select class="us-sel" data-uasel="'+kind+'" aria-label="pick a tab">'+opts.map(o=>'<option value="'+esc(o.key)+'"'+(o.key===cur?' selected':'')+'>'+esc(o.label)+'</option>').join('')+'</select>';
+}
+function uaSplitRows(rows,lblOf){
+  return rows.map(r=>{ const w=Math.max(0,Math.min(100,(+r.share||0)*100));
+    return '<div class="us-fr"><span>'+esc(lblOf(r))+'</span><span class="us-track"><span style="width:'+w.toFixed(1)+'%"></span></span><span class="v">'+(+r.n||0)+' · '+Math.round(w)+'%</span></div>'; }).join('');
+}
+function uaPathsHtml(S){
+  const P=S&&S.paths; if(!P) return '';
+  const head='<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Tab paths · sitewide</div>';
+  const top=(P.top||[]).length?'<div class="us-tw" style="border:0"><table class="us-tbl us-paths"><thead><tr><th>from</th><th>to</th><th class="n">times</th><th class="n">share</th></tr></thead><tbody>'
+    +P.top.map(e=>'<tr><td>'+esc(e.fromLabel||e.from)+'</td><td>→ '+esc(e.toLabel||e.to)+'</td><td class="n">'+(+e.n||0)+'</td><td class="n">'+uaPct(e.share)+' <span class="us-bar b" style="width:'+Math.round((+e.share||0)*60)+'px"></span></td></tr>').join('')
+    +'</tbody></table></div>':'<div class="acc-note" style="margin:0">No tab-to-tab moves in this range yet.</div>';
+  const from=P.from||[];
+  if(!UA.pathTab||!from.some(x=>x.key===UA.pathTab)) UA.pathTab=from.length?from[0].key:null;
+  const sel=from.find(x=>x.key===UA.pathTab);
+  const out=from.length?'<div class="us-row" style="margin:0 0 var(--sp-2)"><span class="acc-mu">where people go from</span> '+uaSelHtml('path',from,UA.pathTab)
+    +(sel?' <span class="acc-mu">'+(+sel.n||0)+' moves</span>':'')+'</div>'+(sel?uaSplitRows(sel.to||[],r=>r.label||r.key):''):'<div class="acc-note" style="margin:0">—</div>';
+  const E=P.entry||{};
+  const entry=(E.rows||[]).length?uaSplitRows(E.rows,r=>r.label||r.key):'<div class="acc-note" style="margin:0">No page loads settled on a tab in this range yet.</div>';
+  return head+'<div class="us-grid2"><div class="us-card"><h4>Top transitions</h4><div class="sub">tab → tab moves in range, top 15 of '+(+P.total||0)+' (a tab left inside 2s is a bounce and skipped; re-selecting the same tab is not a move)</div>'+top+'</div>'
+    +'<div class="us-card"><h4>Where people go next</h4><div class="sub">the outbound split of one tab’s moves</div>'+out
+    +'<h4 style="margin-top:var(--sp-3)">Entry tabs</h4><div class="sub">the first tab each page load settled on ('+(+E.total||0)+' loads)</div>'+entry+'</div></div>'
+    +uaNavHtml(S.nav);
+}
+// Read-only: the ribbon is changed in Features, never from here.
+function uaNavHtml(N){
+  if(!N||!(N.current||[]).length) return '';
+  const line=(xs)=>xs.map((x,i)=>'<span class="us-navk">'+(i+1)+'</span>'+esc(x.label||x.key)).join(' <span class="acc-mu">·</span> ');
+  return '<div class="us-card us-nav" style="margin-top:var(--sp-3)"><h4>Suggested order'+(N.same?' <span class="acc-chip on">matches the current order</span>':'')+'</h4>'
+    +'<div class="sub">movable tabs ranked by reach × hours in range (ties keep the current place) — a suggestion only; menus and moves live in Features</div>'
+    +'<div class="us-navl"><b>suggested</b> '+line(N.suggested||[])+'</div><div class="us-navl"><b>current</b> '+line(N.current||[])+'</div></div>';
+}
+function uaCtlWord(x){ return esc(x.control)+(x.value!=null?' = <span class="mono">'+esc(x.value)+'</span>':''); }
+function uaControlsHtml(S){
+  const C=S&&S.controls; if(!C) return '';
+  const G=(C.groups||[]);
+  const head='<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Controls · sitewide · '+(+C.total||0)+' uses</div>';
+  if(C.error) return head+'<div class="acc-note neg" style="margin:0">control allowlist unavailable — '+esc(C.error)+'</div>';
+  if(!UA.ctlTab||!G.some(g=>g.tab===UA.ctlTab)) UA.ctlTab=(G.find(g=>g.tab==='markets')||G[0]||{}).tab||null;
+  const g=G.find(x=>x.tab===UA.ctlTab);
+  let tbl='';
+  if(g){
+    const cols=(g.items||[]).filter(x=>x.control==='col-on'||x.control==='col-off');
+    const rows=(g.items||[]).filter(x=>!(x.control==='col-on'||x.control==='col-off')||x.n>0);
+    tbl='<div class="us-tw" style="border:0"><table class="us-tbl us-ctl"><thead><tr><th>control</th><th class="n">uses</th></tr></thead><tbody>'
+      +rows.map(x=>'<tr'+(x.n===0?' class="us-never"':'')+'><td>'+uaCtlWord(x)+(x.n===0?' <span class="acc-chip warn">never used in range</span>':'')+'</td><td class="n">'+(+x.n||0)+'</td></tr>').join('')
+      +'</tbody></table></div>'
+      +(cols.length&&g.colsNever?'<div class="acc-note" style="margin:var(--sp-1) 0 0">'+(+g.colsNever.length||0)+' of '+new Set(cols.map(x=>x.value)).size+' columns never toggled either way in range'+(g.colsNever.length?': <span class="mono">'+g.colsNever.map(esc).join(' ')+'</span>':'')+'</div>':'')
+      +(g.active?'':'<div class="acc-note" style="margin:var(--sp-1) 0 0">No screen time on this tab in range, so its controls are not called quiet.</div>');
+  }
+  const Q=C.quiet||[];
+  const quiet=Q.length?'<div class="us-quiet">'+Q.map(q=>'<span class="acc-chip warn" title="'+esc(q.key)+'">'+esc(q.label)+' · '+uaCtlWord(q)+'</span>').join('')+'</div>'
+    :'<div class="acc-note" style="margin:0">Every control on a tab people used was used at least once.</div>';
+  return head+'<div class="us-grid2"><div class="us-card"><h4>Controls by use</h4><div class="sub">'+uaSelHtml('ctl',G.map(x=>({key:x.tab,label:x.label+' · '+(+x.n||0)})),UA.ctlTab)+' allowlisted controls, most used first</div>'+tbl+'</div>'
+    +'<div class="us-card"><h4>Quiet controls · '+Q.length+'</h4><div class="sub">never used in range, on tabs that had screen time — candidates to simplify, like the quiet tabs</div>'+quiet+'</div></div>'
+    +'<div class="acc-note">Counts only, from a fixed allowlist of '+(+C.allowlist||0)+' control keys (column ids, window and scope options, preset ids, CSV, share, drawer sections, “search used”). Never text, never a ticker, never a filter value. Stored without a member id.</div>';
+}
+function uaDevicesHtml(S){
+  const D=S&&S.devices; if(!D) return '';
+  const cls=D.classes||['desktop','mobile','tablet','pwa'], rows=D.rows||[];
+  const head='<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Device split per tab · sitewide</div>';
+  if(!rows.length) return head+'<div class="acc-note" style="margin:0">No screen time in this range yet.</div>';
+  const leg='<div class="us-mixleg">'+cls.map((c,i)=>'<span><i class="c'+i+'"></i>'+esc(UA_DEV_LBL[c]||c)+'</span>').join('')+'</div>';
+  return head+'<div class="us-card">'+leg+rows.map(r=>{ const tot=+r.ms||0;
+    return '<div class="us-devr"><span>'+esc(r.label||r.key)+'</span><span class="us-mix">'+cls.map((c,i)=>{ const v=+((r.dev||{})[c])||0; return v>0&&tot>0?'<span class="c'+i+'" style="width:'+(v/tot*100).toFixed(1)+'%" title="'+esc(UA_DEV_LBL[c]||c)+' '+Math.round(v/tot*100)+'%"></span>':''; }).join('')+'</span><span class="v">'+uaHours(tot)+'</span></div>'; }).join('')
+    +'</div><div class="acc-note">Screen time on each tab by the device class it came from (desktop, mobile, tablet; PWA = installed, any size). Complete days only (today left out), shown once ≥ '+(+((S.threshold||{}).k)||3)+' members contributed; kept '+(+S.keepDays||30)+' days, without a member id.</div>';
+}
+// (build 2026.09.24-114) the k-threshold: paths, controls and the device split cover the range's
+// complete days (never today), need a 7-day range, and show only when ≥ 3 members contributed.
+function uaSiteWithheldHtml(S){
+  const K=S.threshold||{}, k=+K.k||3, days=+K.minDays||7;
+  const why=S.withheld==='range'?'Pick a range of '+days+' days or more: the sitewide sections leave today out and never cover a single day.'
+    :'not enough members to show without identifying someone (n<'+k+')';
+  return '<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Tab paths · controls · device split · sitewide</div>'
+    +'<div class="acc-note us-withheld" style="margin:0">'+esc(why)+'</div>'
+    +'<div class="acc-note">Sitewide counts are shown only for ranges of '+days+'+ complete days (today left out) in which at least '+k+' members contributed on one day — below that a “sitewide” count could be one person’s. Kept '+(+S.keepDays||30)+' days, without a member id.</div>'
+    +uaNavHtml(S.nav);
+}
+function uaSiteHtml(D){ const S=D&&D.site; if(!S) return ''; if(S.withheld) return uaSiteWithheldHtml(S); return uaPathsHtml(S)+uaControlsHtml(S)+uaDevicesHtml(S); }
+
 // ---- the daily-active chart: bars per ET day + the trailing 7-day mean ---------------------------
-function uaDauSvg(series){
+function uaDauSvg(series,marks){
   const W=640,H=150,P={l:26,r:6,t:8,b:20}, n=series.length||1;
   const max=Math.max(1,...series.map(x=>x.n))*1.15, bw=(W-P.l-P.r)/n, y=v=>H-P.b-(v/max)*(H-P.t-P.b);
   let g='';
@@ -139,6 +341,11 @@ function uaDauSvg(series){
     g+='<rect class="us-barf" x="'+X.toFixed(1)+'" y="'+y(x.n).toFixed(1)+'" width="'+w.toFixed(1)+'" height="'+(H-P.b-y(x.n)).toFixed(1)+'" rx="1.5"><title>'+esc(x.day)+': '+x.n+' active</title></rect>'; });
   const pts=series.map((x,i)=>{ const a=series.slice(Math.max(0,i-6),i+1); const m=a.reduce((p,q)=>p+q.n,0)/a.length; return (P.l+i*bw+bw/2).toFixed(1)+','+y(m).toFixed(1); });
   if(pts.length>1) g+='<polyline class="us-mean" points="'+pts.join(' ')+'"/>';
+  // (-111) deploy & gate markers: a vertical line at the start of the ET day each one happened on
+  const col=new Map(series.map((x,i)=>[x.day,i]));
+  for(const m of (marks||[])){ const i=col.get(m.day); if(i==null) continue;
+    const X=(P.l+i*bw+0.5).toFixed(1), cls=m.kind==='deploy'?'us-mk-dep':m.kind==='alert'?'us-mk-alert':'us-mk-gate';
+    g+='<line class="us-mk '+cls+'" x1="'+X+'" x2="'+X+'" y1="'+P.t+'" y2="'+(H-P.b)+'"><title>'+esc(uaMarkWord(m))+'</title></line>'; }
   const step=n<=7?1:7;
   for(let i=n-1;i>=0;i-=step) g+='<text class="us-axis" x="'+(P.l+i*bw+bw/2).toFixed(1)+'" y="'+(H-5)+'" text-anchor="middle">'+esc(uaDay(series[i].day))+'</text>';
   return '<svg class="us-svg" viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none" role="img" aria-label="active members per day">'+g+'</svg>';
@@ -179,6 +386,41 @@ function uaDetailHtml(){
     +'</div>';
 }
 
+const UA_DAYS=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+const uaAgo=(ms)=>{ if(!ms) return 'never'; const h=(Date.now()-ms)/3600000; return h<1?Math.max(1,Math.round(h*60))+'m ago':h<48?Math.round(h)+'h ago':Math.round(h/24)+'d ago'; };
+function uaDigestHtml(){
+  const G=UA.dg, d=G.data;
+  const head='<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Digest &amp; nudges</div>';
+  if(!d) return head+'<div class="acc-note" style="margin:0">'+(G.err?'could not load — '+esc(G.err):'loading…')+'</div>';
+  const S=d.schedule||{}, P=d.preview||{}, busy=!!G.busy;
+  const chan=!d.pushOn?'<span class="neg">Telegram is not configured — nothing can be sent</span>'
+    :(+d.operators||0)?(+d.operators)+' operator chat'+(d.operators===1?'':'s')+' (the Telegram roster’s operator designation)':'<span class="neg">no operator chat designated — mark one on the Telegram roster</span>';
+  const dig='<div class="us-card"><h4>Weekly usage digest</h4><div class="sub">to the operator, once per ISO week, after the morning brief’s default hour ('+String(+S.briefHourUtc||0).padStart(2,'0')+':00 UTC) on the chosen ET weekday</div>'
+    +'<div class="us-row" style="flex-wrap:wrap;gap:var(--sp-2)"><label><input type="checkbox" data-uadg="digestOn"'+(d.digestOn?' checked':'')+(busy?' disabled':'')+'> send the weekly digest</label>'
+    +'<label>on <select data-uadg="digestDay"'+(busy?' disabled':'')+'>'+UA_DAYS.map((n,i)=>'<option value="'+i+'"'+(i===d.digestDay?' selected':'')+'>'+n+'</option>').join('')+'</select></label>'
+    +'<button type="button" class="btn" data-uadgtest="1"'+(busy||!d.pushOn||!d.operators?' disabled':'')+'>'+(G.busy==='test'?'…':'send test now')+'</button></div>'
+    +'<div class="acc-note" style="margin:var(--sp-1) 0 0">last sent: <b>'+esc(d.lastAt?uaWhen(d.lastAt)+' ('+uaAgo(d.lastAt)+') · '+(d.lastWeek||''):'never')+'</b>'
+    +' · this week ('+esc(S.week||'')+'): '+(!d.digestOn?'off':S.sentThisWeek?'sent':S.due?'due now':'due '+esc(uaDay(S.day||'')))+' · to '+chan+'</div>'
+    +'<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-2)">Preview · '+esc(P.week||'')+' · '+(+P.chars||0)+' of '+(+P.limit||4096)+' chars</div>'
+    +'<pre class="us-dgpre" style="white-space:pre-wrap;margin:0;max-height:22em;overflow:auto">'+esc(P.text||'')+'</pre>'
+    +'<div class="acc-note">Names are members’ display names; paused members are only counted, never named. The test goes to the same operator chats now and does not count as this week’s send.</div></div>';
+  const R=d.rules||{}, text=G.draft!=null?G.draft:(d.nudgeText||'');
+  const log=(d.nudgeLog||[]);
+  const nud='<div class="us-card"><h4>Lapsed-member reminder</h4><div class="sub">optional, off by default: one friendly reminder to a member active in the prior '+(+R.recentDays||14)+' days who then goes '+(+R.quietDays||7)+' days without activity — at most once per '+(+R.everyDays||30)+' days, never to paused, disabled or operator accounts, only over the channel they already have (their linked Telegram, else browser push; none → skipped). Sent 10:00–18:00 ET.</div>'
+    +'<div class="us-row" style="flex-wrap:wrap;gap:var(--sp-2)"><label><input type="checkbox" data-uadg="nudgeOn"'+(d.nudgeOn?' checked':'')+(busy?' disabled':'')+'> send reminders</label>'
+    +(d.nudgeOn&&d.nudgeSince?'<span class="acc-chip on">on since '+esc(uaWhen(d.nudgeSince))+'</span>':'<span class="acc-chip">off</span>')+'</div>'
+    +'<label class="acc-note" style="display:block;margin:var(--sp-1) 0 0">reminder text (then 2–3 market lines — benchmarks and the day’s top movers; nothing personal)</label>'
+    +'<textarea data-uadgtext="1" rows="2" maxlength="'+(+d.nudgeMax||300)+'" style="width:100%;box-sizing:border-box"'+(busy?' disabled':'')+'>'+esc(text)+'</textarea>'
+    +'<div class="us-row" style="gap:var(--sp-2)"><button type="button" class="btn" data-uadgsave="1"'+(busy?' disabled':'')+'>'+(G.busy==='text'?'…':'save text')+'</button>'
+    +'<button type="button" class="btn" data-uadgreset="1"'+(busy?' disabled':'')+'>default</button></div>'
+    +'<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-2)">Reminders sent · '+log.length+'</div>'
+    +(log.length?'<div class="us-tw"><table class="us-tbl us-nudges"><thead><tr><th>when</th><th>member · channel</th><th>switched on by</th></tr></thead><tbody>'
+      +log.map(x=>'<tr><td class="mono">'+esc(uaWhen(x.at))+'</td><td>'+esc(x.detail)+'</td><td class="acc-mu">'+esc(x.by)+'</td></tr>').join('')+'</tbody></table></div>'
+      :'<div class="acc-note" style="margin:0">none yet</div>')
+    +'<div class="acc-note">Every reminder is written to the audit log as “usage-nudge” (All messages → Read log). Members are told in their Your usage card that the operator may turn this on, and that pausing usage opts them out.</div></div>';
+  return head+(G.msg?'<div class="acc-note '+(G.msg.bad?'neg':'pos')+'" style="margin:0 0 var(--sp-1)">'+esc(G.msg.text)+'</div>':'')+'<div class="us-grid2">'+dig+nud+'</div>';
+}
+
 function uaRender(){
   const box=el('admUsageBox'); if(!box) return;
   const sub=el('admUsageSub');
@@ -200,8 +442,9 @@ function uaRender(){
     +kp('median / day',K.medMinPerDay==null?'—':uaMin(K.medMinPerDay)+' min','per active member-day')
     +kp('new members',String(K.newMembers||0),'in range · '+(K.newActive||0)+' active')+'</div>';
   const dau='<div class="us-grid2"><div class="us-card"><h4>Active people per day</h4><div class="sub">distinct members with ≥1 minute on screen that ET day</div>'
-    +uaDauSvg(D.series||[])
-    +'<div class="us-legend"><span><i class="c0"></i>members</span><span><i class="us-legmean"></i>7-day mean</span></div></div>'
+    +uaDauSvg(D.series||[],D.marks||[])
+    +'<div class="us-legend"><span><i class="c0"></i>members</span><span><i class="us-legmean"></i>7-day mean</span>'
+    +((D.marks||[]).length?'<span><i class="us-mkdot us-mk-dep"></i>deploy</span><span><i class="us-mkdot us-mk-gate"></i>gate / menu</span><span><i class="us-mkdot us-mk-alert"></i>regression alert</span>':'')+'</div></div>'
     // (build 2026.09.24-110) when people are here
     +'<div class="us-card"><h4>When people are here</h4><div class="sub">minutes on screen by weekday × hour (ET), whole range</div>'
     +uaHeatSvg(D.heat)+uaHeatNote(D.heat)+'</div></div>';
@@ -227,7 +470,7 @@ function uaRender(){
         +'<td><span class="acc-chip'+(t.gate==='admin'?' on':t.gate==='off'?' warn':'')+'">'+esc(t.gate)+'</span></td></tr>'; }).join('')
     +'</tbody></table></div>'
     +'<div class="acc-note">Reach is the share of members active in the range who opened the tab at all. Under 10% gets a “quiet” flag — evidence for the gate and menu decisions in Features (Feature visibility shows the same flag at 30 days).'
-    +(D.priorKept?'':' “vs prior” compares sitewide hours with the '+D.r+' days before; per-member history older than '+(D.keepDays||30)+' days is folded away, so member trends are blank at this range.')+'</div>';
+    +(D.priorKept?'':' “vs prior” compares sitewide hours with the '+D.r+' days before. Per-member history older than '+(D.keepDays||30)+' days is folded away, so at this range a member’s trend compares this month’s screen time per day with last month’s (a small monthly total per member, kept 2 months; blank until both months cover a week'+(D.moDays?' — now '+(+D.moDays.cur||0)+'d and '+(+D.moDays.prev||0)+'d':'')+').')+'</div>';
   const me=(window.__ME&&window.__ME.handle)||'';
   const mval=(m,k)=>m.paused&&k!=='handle'&&k!=='lastSeen'?null:k==='handle'?m.handle:k==='top'?null:m[k];
   const mRows=uaSorted(D.members||[],UA.msort,mval);
@@ -247,7 +490,7 @@ function uaRender(){
       +'<td class="n">'+(m.paused?'':uaDelta(m.trend))+'</td></tr>').join('')
     +'</tbody></table></div>'+uaDetailHtml()
     +'<div class="acc-note">“Lapsed” = no activity for more than 10 days. Opening a member’s detail is logged (All messages → Read log); these sitewide numbers are not. Members see their own summary, and can pause it, in Messages.</div>';
-  box.innerHTML='<div class="us-row">'+seg+chips+'</div>'+kpis+dau+tabs+adopt+members+uaHealthHtml(D.health);
+  box.innerHTML='<div class="us-row">'+seg+chips+'</div>'+kpis+dau+uaMarksHtml(D)+tabs+uaSiteHtml(D)+adopt+members+uaHealthHtml(D.health)+uaDigestHtml();   // (-113) digest & nudges last   // (-112) the sitewide sections after the tab table
 }
 
 function uaWire(){
@@ -258,11 +501,23 @@ function uaWire(){
     const r=e.target.closest('[data-uar]');
     if(r){ const v=+r.dataset.uar; if(v!==UA.r){ UA.r=v; uaLoad(); } return; }
     if(e.target.closest('[data-uarefresh]')){ uaLoad(); return; }
+    const tri=e.target.closest('[data-uatri]'); if(tri){ uaTriage(tri.dataset.uatri,tri.dataset.on==='1'); return; }   // (-111)
     if(e.target.closest('[data-uaclose]')){ UA.sel=null; UA.detail=null; uaRender(); return; }
     const th=e.target.closest('[data-uat]'); if(th){ sortBy(UA.tsort,th.dataset.uat); uaRender(); return; }
     const mh=e.target.closest('[data-uam]'); if(mh){ sortBy(UA.msort,mh.dataset.uam); uaRender(); return; }
     const row=e.target.closest('[data-uah]'); if(row){ uaOpenMember(row.dataset.uah); return; }
+    // (-113) digest & nudges
+    if(e.target.closest('[data-uadgtest]')){ uaDgPost('/api/admin/usage/digest/test',{},'test'); return; }
+    if(e.target.closest('[data-uadgsave]')){ const t=box.querySelector('[data-uadgtext]'); uaDgPost('/api/admin/usage/digest',{nudgeText:t?t.value:''},'text'); return; }
+    if(e.target.closest('[data-uadgreset]')){ UA.dg.draft=null; uaDgPost('/api/admin/usage/digest',{nudgeText:''},'text'); return; }
   });
+  box.addEventListener('input',(e)=>{ if(e.target.closest&&e.target.closest('[data-uadgtext]')) UA.dg.draft=e.target.value; });
   box.addEventListener('keydown',(e)=>{ const row=e.target.closest&&e.target.closest('[data-uah]'); if(row&&e.key==='Enter') uaOpenMember(row.dataset.uah); });
+  // (-112) the two tab pickers (a view choice only — nothing is fetched or written)
+  box.addEventListener('change',(e)=>{
+    const g=e.target.closest&&e.target.closest('[data-uadg]');   // (-113) the digest & nudge settings
+    if(g){ const k=g.dataset.uadg; uaDgPost('/api/admin/usage/digest',{[k]:k==='digestDay'?+g.value:!!g.checked},'cfg'); return; }
+    const s=e.target.closest&&e.target.closest('[data-uasel]'); if(!s) return;
+    if(s.dataset.uasel==='path') UA.pathTab=s.value; else if(s.dataset.uasel==='ctl') UA.ctlTab=s.value; uaRender(); });
 }
-export { UA, openUsageAdm, uaCohortHtml, uaDauSvg, uaFunnelHtml, uaHealthHtml, uaHeatSvg, uaRender };
+export { UA, openUsageAdm, uaSiteWithheldHtml, uaDigestHtml, uaDgLoad, uaDgPost, uaCohortHtml, uaControlsHtml, uaDauSvg, uaDevicesHtml, uaFunnelHtml, uaHealthHtml, uaHeatSvg, uaMarksHtml, uaNavHtml, uaPathsHtml, uaRegressCard, uaRender, uaSiteHtml, uaTriage, uaTriageHtml };

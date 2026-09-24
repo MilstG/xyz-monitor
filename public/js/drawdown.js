@@ -24,6 +24,7 @@ import { loadDaily } from "./data.js";
 import { openDetail } from "./drawer.js";
 import { downloadCSV } from "./corr.js";
 import { layoutMapLabels, mapLabelSvg } from "./sectors.js";
+import { usageCtl } from "./usage.js";
 
 const RVD_KEY='xyzmon.rvd.v1';
 // Presets are days back from today's UTC midnight; 'ytd' is Jan 1 of the current UTC year.
@@ -259,7 +260,7 @@ function renderDrawdown(){
     downloadCSV(`return-drawdown-${state.scope}-${since}.csv`, m); };
   function wireControls(){
     const c=el('rvd-ctrls'); if(!c) return;
-    c.querySelectorAll('[data-rvdp]').forEach(b=>b.onclick=()=>{ RVD.preset=b.dataset.rvdp; RVD.date=null; RVD.page=1; rvdSave(); renderDrawdown(); });
+    c.querySelectorAll('[data-rvdp]').forEach(b=>b.onclick=()=>{ usageCtl('drawdown.since='+b.dataset.rvdp); RVD.preset=b.dataset.rvdp; RVD.date=null; RVD.page=1; rvdSave(); renderDrawdown(); });
     c.querySelectorAll('[data-rvdy]').forEach(b=>b.onclick=()=>{ RVD.y=b.dataset.rvdy; rvdSave(); renderDrawdown(); });
     c.querySelectorAll('[data-rvdd]').forEach(b=>b.onclick=()=>{ RVD.dd=b.dataset.rvdd; rvdSave(); renderDrawdown(); });
     c.querySelectorAll('[data-rvdt]').forEach(b=>b.onclick=()=>{ RVD.top=b.dataset.rvdt; rvdSave(); renderDrawdown(); });

@@ -143,7 +143,8 @@ function firstTickerRef(body) {
   return m ? m[1].toUpperCase() : "";
 }
 
-const { callRead, callTarget, callBarReaches, inCashSession, marketSessions, callSessionClose, etDayStr, etParts } = require("./compute");
+const { callRead, callTarget, callBarReaches, inCashSession, marketSessions, callSessionClose, etDayStr, etParts, FEATURES, NAV_VIEW_ORDER } = require("./compute");
+const { usageControls } = require("./usage-controls");   // (build 2026.09.24-112) the control allowlist
 const { homeMkt } = require("./sectors");
 
 function openAccounts(dataDir, opts) {
@@ -401,9 +402,31 @@ CREATE TABLE IF NOT EXISTS usage_day (
 --   'wk'   day = key = the Monday (YYYY-MM-DD) of an ET week the member was active in (any day
 --          with a minute on screen); n = 1, ms = 0. A yes/no bit, and the ONE per-member kind
 --          EXEMPT from the 30-day fold, so join-week retention can reach past the window.
+-- (build 2026.09.24-111)
+--   'load' key = a known build; n = page loads under it (the regression check's denominator).
+--   'mo'   day = 'YYYY-MM-01', key = 'YYYY-MM': one member's month — ms = screen time, n = active
+--          days (≥ a minute). Also exempt from the 30-day fold; kept for the current and the
+--          previous month only, so the member "trend" at 30d has something to compare with.
+--   'hr'   now bucketed by the hour the minutes were SPENT in (the beacon carries them per hour),
+--          stored under that hour's ET day; the beacon's arrival hour is only the fallback.
+-- (build 2026.09.24-112) SITEWIDE-ONLY kinds: always uid '0', never a member's uid (the beacon's
+-- member is used only to refuse a paused one and to bound what one member can add per day):
+--   'tr'   key = '<from>><to>': tab→tab transitions (both tab ids of the manifest); n = times.
+--   'en'   key = a tab id: the page load's entry tab; n = page loads that settled there first.
+--   'ctl'  key = '<group>.<control>[=<value>]' from the US_CONTROLS allowlist (public/js/usage.js);
+--          n = uses. Never text, never a ticker, never a typed value.
+--   'tdev' key = '<tab>|<desktop|mobile|tablet|pwa>'; ms = screen time on that tab from that class.
+-- (build 2026.09.24-114)
+--   'sc'   day = key = an ET day; n = HOW MANY distinct members added anything to the four kinds
+--          above that day. A count only: it is kept from a transient in-memory set of that day's
+--          contributors which is thrown away when the day ends — which members is never stored.
+--          The summary shows the sitewide sections only when some day of the range reached 3.
+--   Kept USAGE_SITE_KEEP_DAYS (30; was 90) days, then deleted (the 30-day fold never touches uid '0').
+-- (build 2026.09.24-114) usage_day_kind: the regression check, triage and fold read by kind (and day).
 -- usage_err: one row per distinct error key, at most 200 per build; its message is truncated to
 -- 200 characters by the server and is browser-supplied, so every reader escapes it. Rows no hit
 -- has touched for the retention window go with the daily fold.
+CREATE INDEX IF NOT EXISTS usage_day_kind ON usage_day(kind, day);
 CREATE TABLE IF NOT EXISTS usage_err (
   key TEXT PRIMARY KEY,
   build TEXT NOT NULL,
@@ -420,6 +443,54 @@ CREATE TABLE IF NOT EXISTS usage_err (
 CREATE TABLE IF NOT EXISTS usage_build (
   build TEXT PRIMARY KEY,
   at INTEGER NOT NULL
+) STRICT;
+-- (build 2026.09.24-111) usage_build.at IS the build's first-seen time (ON CONFLICT DO NOTHING keeps
+-- the first boot's stamp through every re-deploy of the same build), so it needs no second column.
+-- usage_mark: operator CONFIG history, not personal data — no uid, ever. kind 'deploy' (detail =
+-- the build, written the first time a build boots), 'gate' ('<feature>=<state>', a feature-flag
+-- write that changed the resolved state), 'nav' ('<view>><group>' a tab moved between menus, or
+-- '#<group>' a menu renamed — the label itself is not kept), 'alert' ('<build>|<condition>', a
+-- post-deploy regression alert that went out: the persisted dedupe), 'mo-start' (the first ET day
+-- the monthly rows below cover). Pruned at 90 days; gate/nav rows are also capped at 400.
+CREATE TABLE IF NOT EXISTS usage_mark (
+  at INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  detail TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS usage_mark_at ON usage_mark(at);
+-- (build 2026.09.24-111) Error triage, keyed by the error's SIGNATURE ('<file>|<message hash>':
+-- usage_err's key without the build and the line, so one bug keeps one row across deploys). A row
+-- exists only once the operator resolved something: resolvedAt/resolvedBuild (the last build the
+-- error was seen on at that moment); a hit from a NEWER build afterwards reopens it and sets
+-- regressedAt/regressedBuild. Rows whose signature left usage_err go with the daily fold.
+CREATE TABLE IF NOT EXISTS usage_triage (
+  sig TEXT PRIMARY KEY,
+  resolvedAt INTEGER,
+  resolvedBuild TEXT,
+  regressedAt INTEGER,
+  regressedBuild TEXT
+) STRICT;
+-- (build 2026.09.24-111) The build each member's tab last beaconed from (the stale-build count):
+-- one row per member at most, written by the 60s flush, so a restart no longer resets the count.
+CREATE TABLE IF NOT EXISTS usage_last (
+  uid TEXT PRIMARY KEY,
+  build TEXT NOT NULL,
+  at INTEGER NOT NULL
+) STRICT;
+-- (build 2026.09.24-113) The operator's Usage settings: the weekly digest (on/off, ET weekday) and
+-- its persisted per-ISO-week dedupe, and the opt-in lapsed-member nudge (on/off, the lead text, who
+-- turned it on — the audit rows name them). One JSON value per key; operator config, no member data.
+CREATE TABLE IF NOT EXISTS usage_cfg (
+  k TEXT PRIMARY KEY,
+  v TEXT NOT NULL
+) STRICT;
+-- (build 2026.09.24-113) The last lapsed-member nudge per member (the once-per-30-days rule). Kept 30
+-- days — the per-member retention — then deleted by the daily fold. Every nudge is ALSO a dm_audit row
+-- ('usage-nudge'), which is the log the operator reads.
+CREATE TABLE IF NOT EXISTS usage_nudge (
+  uid TEXT PRIMARY KEY,
+  at INTEGER NOT NULL,
+  via TEXT NOT NULL
 ) STRICT;
 `);
 
@@ -2519,6 +2590,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   // admin payload's cache key is built on. Retention: USAGE_KEEP_DAYS ET days per member, then the
   // rows fold into uid '0' (sitewide) and the per-member rows go.
   const USAGE_KEEP_DAYS = 30;
+  const USAGE_ACTIVE_MS = 60000;   // "active" = at least a minute on screen that ET day (moved up in -111: the flush reads it)
   const USAGE_SITE = "0";   // no real uid is one character (adoptableUid wants 12+), so it can never collide
   // (build 2026.09.24-110) The action counters: a FIXED allowlist, counted where each feature
   // already lives. Most are server-side (the authenticated call the action already is); csv and
@@ -2540,14 +2612,15 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   const US = {
     up: db.prepare(`INSERT INTO usage_day (day, uid, kind, key, n, ms) VALUES (?,?,?,?,?,?)
       ON CONFLICT(day, uid, kind, key) DO UPDATE SET n = n + excluded.n, ms = ms + excluded.ms`),
-    range: db.prepare("SELECT * FROM usage_day WHERE day >= ? AND day <= ? AND kind <> 'wk'"),
-    rangeOf: db.prepare("SELECT * FROM usage_day WHERE uid = ? AND day >= ? AND day <= ? AND kind <> 'wk'"),
+    // (-111) 'mo' rows are exempt from the fold like 'wk' and are read on their own (moAll / moOf)
+    range: db.prepare("SELECT * FROM usage_day WHERE day >= ? AND day <= ? AND kind NOT IN ('wk','mo')"),
+    rangeOf: db.prepare("SELECT * FROM usage_day WHERE uid = ? AND day >= ? AND day <= ? AND kind NOT IN ('wk','mo')"),
     // WHERE ... GROUP BY: the SELECT needs its WHERE for SQLite to parse the upsert's ON CONFLICT.
     // (-110) 'wk' rows are the one per-member kind the fold never touches (see the schema note).
     fold: db.prepare(`INSERT INTO usage_day (day, uid, kind, key, n, ms)
-      SELECT day, '${USAGE_SITE}', kind, key, SUM(n), SUM(ms) FROM usage_day WHERE day < ? AND uid <> '${USAGE_SITE}' AND kind <> 'wk' GROUP BY day, kind, key
+      SELECT day, '${USAGE_SITE}', kind, key, SUM(n), SUM(ms) FROM usage_day WHERE day < ? AND uid <> '${USAGE_SITE}' AND kind NOT IN ('wk','mo') GROUP BY day, kind, key
       ON CONFLICT(day, uid, kind, key) DO UPDATE SET n = n + excluded.n, ms = ms + excluded.ms`),
-    drop: db.prepare(`DELETE FROM usage_day WHERE day < ? AND uid <> '${USAGE_SITE}' AND kind <> 'wk'`),
+    drop: db.prepare(`DELETE FROM usage_day WHERE day < ? AND uid <> '${USAGE_SITE}' AND kind NOT IN ('wk','mo')`),
     pause: db.prepare("UPDATE user SET usagePaused = ? WHERE uid = ?"),
     // (-110) The weekly-active bit, derived from the daily tab rows: a member is active in an ET
     // week (Monday..Sunday) when any ONE day of it had a minute on screen — the daily rule, weekly.
@@ -2567,6 +2640,48 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     buildUp: db.prepare("INSERT INTO usage_build (build, at) VALUES (?, ?) ON CONFLICT(build) DO NOTHING"),
     buildAll: db.prepare("SELECT build, at FROM usage_build ORDER BY at DESC, build DESC"),
     buildDel: db.prepare("DELETE FROM usage_build WHERE build = ?"),
+    // (build 2026.09.24-111) markers, the regression check, error triage, stale builds, monthly rows
+    markAdd: db.prepare("INSERT INTO usage_mark (at, kind, detail) VALUES (?,?,?)"),
+    markSince: db.prepare("SELECT at, kind, detail FROM usage_mark WHERE at >= ? AND kind <> 'mo-start' ORDER BY at DESC, rowid DESC LIMIT ?"),
+    markHas: db.prepare("SELECT 1 AS x FROM usage_mark WHERE kind = ? AND detail = ? LIMIT 1"),
+    markFirst: db.prepare("SELECT detail FROM usage_mark WHERE kind = ? ORDER BY at ASC LIMIT 1"),
+    markPrune: db.prepare("DELETE FROM usage_mark WHERE at < ?"),
+    markOps: db.prepare("SELECT COUNT(*) AS n FROM usage_mark WHERE kind IN ('gate','nav')"),
+    markTrim: db.prepare("DELETE FROM usage_mark WHERE rowid IN (SELECT rowid FROM usage_mark WHERE kind IN ('gate','nav') ORDER BY at ASC, rowid ASC LIMIT ?)"),
+    tabKept: db.prepare(`SELECT day, uid, key, ms FROM usage_day WHERE kind = 'tab' AND uid <> '${USAGE_SITE}' AND day >= ? AND day <= ?`),
+    regRows: db.prepare("SELECT uid, kind, key, n FROM usage_day WHERE kind IN ('load','perf','err') AND day >= ?"),
+    errAll: db.prepare("SELECT key, build, loc, msg, firstAt, lastAt FROM usage_err"),
+    errHits: db.prepare("SELECT uid, key, SUM(n) AS n FROM usage_day WHERE kind = 'err' GROUP BY uid, key"),
+    triAll: db.prepare("SELECT sig, resolvedAt, resolvedBuild, regressedAt, regressedBuild FROM usage_triage"),
+    triSet: db.prepare(`INSERT INTO usage_triage (sig, resolvedAt, resolvedBuild, regressedAt, regressedBuild) VALUES (?,?,?,?,?)
+      ON CONFLICT(sig) DO UPDATE SET resolvedAt = excluded.resolvedAt, resolvedBuild = excluded.resolvedBuild, regressedAt = excluded.regressedAt, regressedBuild = excluded.regressedBuild`),
+    triDel: db.prepare("DELETE FROM usage_triage WHERE sig = ?"),
+    lastAll: db.prepare("SELECT uid, build, at FROM usage_last"),
+    lastUp: db.prepare("INSERT INTO usage_last (uid, build, at) VALUES (?,?,?) ON CONFLICT(uid) DO UPDATE SET build = excluded.build, at = MAX(at, excluded.at)"),
+    lastPrune: db.prepare("DELETE FROM usage_last WHERE at < ?"),
+    dayTabMs: db.prepare("SELECT COALESCE(SUM(ms), 0) AS s FROM usage_day WHERE day = ? AND uid = ? AND kind = 'tab'"),
+    moUp: db.prepare(`INSERT INTO usage_day (day, uid, kind, key, n, ms) VALUES (?, ?, 'mo', ?, ?, ?)
+      ON CONFLICT(day, uid, kind, key) DO UPDATE SET n = n + excluded.n, ms = ms + excluded.ms`),
+    moOf: db.prepare("SELECT key, n, ms FROM usage_day WHERE uid = ? AND kind = 'mo' ORDER BY key DESC"),
+    moAll: db.prepare(`SELECT uid, key, n, ms FROM usage_day WHERE kind = 'mo' AND uid <> '${USAGE_SITE}'`),
+    moAny: db.prepare("SELECT 1 AS x FROM usage_day WHERE kind = 'mo' LIMIT 1"),
+    moDrop: db.prepare("DELETE FROM usage_day WHERE kind = 'mo' AND key < ?"),
+    // the one-time backfill: every per-member daily row still kept, summed per member and month
+    moFill: db.prepare(`INSERT OR IGNORE INTO usage_day (day, uid, kind, key, n, ms)
+      SELECT substr(day, 1, 7) || '-01', uid, 'mo', substr(day, 1, 7), SUM(s >= 60000), SUM(s) FROM (SELECT day, uid, SUM(ms) AS s
+        FROM usage_day WHERE kind = 'tab' AND uid <> '${USAGE_SITE}' GROUP BY day, uid) GROUP BY substr(day, 1, 7), uid`),
+    tabMin: db.prepare(`SELECT MIN(day) AS d FROM usage_day WHERE kind = 'tab' AND uid <> '${USAGE_SITE}'`),
+    // (build 2026.09.24-112) the sitewide-only kinds age out at USAGE_SITE_KEEP_DAYS
+    siteDrop: db.prepare(`DELETE FROM usage_day WHERE uid = '${USAGE_SITE}' AND kind IN ('tr','en','ctl','tdev','sc') AND day < ?`),   // (-114) + 'sc'
+    // (build 2026.09.24-113) digest & nudges
+    scSeed: db.prepare(`SELECT DISTINCT uid FROM usage_day WHERE day = ? AND uid <> '${USAGE_SITE}'`),   // (-114) a restart's conservative start
+    cfgAll: db.prepare("SELECT k, v FROM usage_cfg"),
+    cfgUp: db.prepare("INSERT INTO usage_cfg (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v"),
+    actDays: db.prepare(`SELECT uid, day, SUM(ms) AS s FROM usage_day WHERE kind = 'tab' AND uid <> '${USAGE_SITE}' AND day >= ? GROUP BY uid, day`),
+    nudgeAll: db.prepare("SELECT uid, at, via FROM usage_nudge"),
+    nudgeUp: db.prepare("INSERT INTO usage_nudge (uid, at, via) VALUES (?,?,?) ON CONFLICT(uid) DO UPDATE SET at = excluded.at, via = excluded.via"),
+    nudgePrune: db.prepare("DELETE FROM usage_nudge WHERE at < ?"),
+    nudgeLog: db.prepare("SELECT uid, detail, at FROM dm_audit WHERE action = 'usage-nudge' ORDER BY id DESC LIMIT ?"),
   };
   let usagePend = new Map(), usageErrPend = new Map(), usageGeneration = 0;
   // (build 2026.09.24-110 follow-up) Every error row there is (stored or pending): key -> {build,
@@ -2587,13 +2702,74 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     if (typeof build !== "string" || !build) return usageBuildList.slice();
     const t = now != null ? now : Date.now();
     // Re-deploying the same build keeps its first-seen time; a new one goes to the front.
-    US.buildUp.run(build, Math.max(t, ...US.buildAll.all().map((r) => r.at + 1)));
+    const had = US.buildAll.all();
+    const at = Math.max(t, ...had.map((r) => r.at + 1));
+    US.buildUp.run(build, at);
+    // (build 2026.09.24-111) a build booting for the FIRST time is a deploy marker on the chart
+    if (!had.some((r) => r.build === build)) usageMark("deploy", build, at);
     const all = US.buildAll.all().map((r) => r.build);
     for (const b of all.slice(USAGE_BUILDS_KEEP)) US.buildDel.run(b);
     usageBuildList = all.slice(0, USAGE_BUILDS_KEEP);
     return usageBuildList.slice();
   }
   const usageBuildKnown = (b) => typeof b === "string" && usageBuildList.includes(b);
+  // (build 2026.09.24-111) The known builds with their first-seen times, newest first.
+  const usageBuildInfo = () => US.buildAll.all().map((r) => ({ build: r.build, firstSeen: r.at }));
+
+  // ---- (build 2026.09.24-111) deploy & gate markers ----------------------------------------------
+  // Operator config history (no uid): a build's first boot, a feature-flag write that moved a tab's
+  // resolved gate, a tab moved between menus or a menu renamed, and a regression alert that went out.
+  // Written where the change happens (usageBuildSeen; the server's /api/features and /api/nav-groups
+  // after a successful write), read by the summary for the chart's vertical lines and the marker
+  // list's before/after reach. Pruned at USAGE_MARK_KEEP_DAYS with the daily fold.
+  const USAGE_MARK_KEEP_DAYS = 90;
+  const USAGE_MARK_OPS_CAP = 400;    // gate/nav rows: an admin toggling a flag in a loop cannot grow the table
+  const USAGE_MARK_KINDS = new Set(["deploy", "gate", "nav", "alert", "mo-start"]);
+  function usageMark(kind, detail, now) {
+    if (!USAGE_MARK_KINDS.has(kind)) return false;
+    const d = String(detail == null ? "" : detail).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, 80);
+    US.markAdd.run(now != null ? now : Date.now(), kind, d);
+    if (kind === "gate" || kind === "nav") { const n = US.markOps.get().n; if (n > USAGE_MARK_OPS_CAP) US.markTrim.run(n - USAGE_MARK_OPS_CAP); }
+    usageGeneration++;
+    return true;
+  }
+  // The persisted dedupe for the regression alert: true exactly once per (build, condition), across
+  // restarts — the claim is the marker row itself (which the chart then shows).
+  function usageAlertOnce(build, cond, now) {
+    const d = String(build) + "|" + String(cond);
+    if (US.markHas.get("alert", d.slice(0, 80))) return false;
+    return usageMark("alert", d, now);
+  }
+  // (build 2026.09.24-114) has this (build, condition) alert gone out already (the tick's early stop)
+  const usageAlerted = (build, cond) => !!US.markHas.get("alert", (String(build) + "|" + String(cond)).slice(0, 80));
+  // ---- (build 2026.09.24-111) the build each member's tab last ran, persisted -----------------------
+  // Was an in-memory map in server.js, so every restart zeroed the stale-build count — exactly when a
+  // deploy makes it interesting. Now: the same map here, loaded at open, written by the 60s flush
+  // (dirty members only), one row per member (bounded by the member count — unknown uids are refused).
+  const usageLast = new Map(US.lastAll.all().map((r) => [r.uid, { build: r.build, at: r.at }]));
+  let usageLastDirty = new Set();
+  function usageLastBuild(uid, build, now) {
+    if (!users.has(uid) || typeof build !== "string" || !/^[0-9A-Za-z.\-]{1,32}$/.test(build)) return false;
+    usageLast.set(uid, { build, at: now != null ? now : Date.now() });
+    usageLastDirty.add(uid);
+    return true;
+  }
+  // Members whose last beacon inside `windowMs` came from a build other than `version` (paused and
+  // disabled members are not counted).
+  function usageStale(version, now, windowMs) {
+    const t = now != null ? now : Date.now(), w = windowMs > 0 ? windowMs : 3600e3;
+    let n = 0;
+    for (const [uid, x] of usageLast) {
+      if (t - x.at > w) continue;
+      const u = users.get(uid);
+      if (u && !u.disabledAt && !u.usagePaused && x.build !== version) n++;
+    }
+    return n;
+  }
+  // Page loads per member per ET day under a known build: a bound, not a policy (a real member
+  // reloads far less), so a scripted flood cannot dilute the regression check's error rate.
+  const USAGE_LOADS_PER_DAY = 200;
+  const usageLoadToday = new Map();   // uid -> {day, n}
   // Calendar arithmetic on the ET day STRING (UTC-anchored, so DST can never skip or repeat a day).
   const usageDayShift = (d, n) => new Date(Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)) + n * 864e5).toISOString().slice(0, 10);
   // The Monday of the ET week holding day d (weeks run Monday..Sunday).
@@ -2602,9 +2778,22 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   const usagePaused = (uid) => !!((users.get(uid) || {}).usagePaused);
   // Stage-A data (and anything flushed before a crash) gets its weekly bits once, at open.
   try { US.wkFill.run("0000-00-00"); } catch (_) {}
-  // (-110) The heatmap's bucket: the ET weekday (0 = Sunday) and hour the beacon ARRIVED in. A beacon
-  // carries at most two minutes, so a minute can land one hour late at an hour's edge — fine for
-  // "when are people here", and it needs no clock from the browser.
+  // (build 2026.09.24-111) The monthly rows start from what the daily rows still hold: once, at the
+  // first open with none, and the first day they cover is written down ('mo-start') so a month that
+  // began before it is compared per COVERED day, never read as a quiet month.
+  const USAGE_MO_KEEP = 2;   // the current month and the one before it
+  const usageMonthOf = (d) => d.slice(0, 7);
+  const usagePrevMonth = (d) => usageMonthOf(usageDayShift(d.slice(0, 8) + "01", -1));
+  try {
+    if (!US.moAny.get()) {
+      US.moFill.run();
+      if (!US.markFirst.get("mo-start")) usageMark("mo-start", (US.tabMin.get() || {}).d || usageToday(), Date.now());
+    }
+  } catch (_) {}
+  const usageMoStart = () => { try { const r = US.markFirst.get("mo-start"); return r ? r.detail : null; } catch (_) { return null; } };
+  // (-110) The heatmap's bucket: the ET weekday (0 = Sunday) and hour of an instant. (-111) Applied
+  // to the hours the beacon says its minutes were spent in (usageHours); the ARRIVAL hour is now only
+  // the fallback, so a minute no longer lands an hour late at an hour's edge.
   function usageHourKey(now) { const p = etParts(now); return p.wd + "-" + String(p.h).padStart(2, "0"); }
   // First-paint samples are bucketed (100ms under 2s, 250ms under 5s, 1s under 30s, then one bin):
   // percentiles come back out of the histogram at the bucket's midpoint.
@@ -2652,6 +2841,68 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     else usageErrPend.set(key, { key, build, loc: e.loc, msg: e.msg, firstAt: now, lastAt: now });
     return key;
   }
+  // ---- (build 2026.09.24-112) sitewide-only: tab paths, entry tabs, control usage, device per tab ----
+  // Written under uid '0' and nowhere else: the member id reaches this code only to refuse a paused or
+  // disabled member (usageRecord's first line) and to bound what one member can add per ET day (an
+  // in-memory counter, never stored). Keys are re-checked here against the same allowlists the server
+  // validated with, so a caller that skipped usageClamp still cannot mint a key.
+  const USAGE_SITE_KEEP_DAYS = 30;   // (build 2026.09.24-114) was 90: the view never reaches past 30 days
+  const USAGE_SITE_PER_DAY = 2000;   // transitions + control uses + entry tabs one member can add per ET day
+  // (build 2026.09.24-114) the k-threshold: the sitewide sections cover the range's COMPLETE days
+  // only (never today), need a range of USAGE_SITE_MIN_DAYS, and show only when USAGE_SITE_K distinct
+  // members contributed — so one member's evening cannot be read off "sitewide" counts.
+  const USAGE_SITE_MIN_DAYS = 7, USAGE_SITE_K = 3;
+  const USAGE_EN_PER_DAY = 200;      // (build 2026.09.24-114) entry tabs per member per ET day, like page loads
+  const USAGE_TR_N = 30, USAGE_CTL_N = 20, USAGE_SITE_KEYS = 40;
+  const USAGE_TAB_SET = new Set(FEATURES.filter((f) => f.kind === "tab").map((f) => f.key));
+  const USAGE_CTL = usageControls();
+  const USAGE_DEVS = ["desktop", "mobile", "tablet", "pwa"];
+  const usageDevClass = (d) => (/-pwa$/.test(d) ? "pwa" : d === "mobile" || d === "tablet" ? d : "desktop");
+  const usageSiteToday = new Map();   // uid -> {day, n, en}: in memory only
+  // (build 2026.09.24-114) the distinct-contributor COUNT per ET day ('sc' rows). The set of who is
+  // in memory only, per day, and dropped when the day leaves (at most two days are held: a beacon's
+  // day is its arrival day, so only around midnight do two overlap). After a restart the day's set
+  // starts from the members with any per-member row that day, so a restart can only UNDER-count.
+  const usageScDays = new Map();       // day -> Set(uid), transient
+  let usageScBooted = false;
+  function usageScNote(uid, day) {
+    let set = usageScDays.get(day);
+    if (!set) {
+      set = new Set();
+      if (!usageScBooted) { usageScBooted = true; try { for (const r of US.scSeed.all(day)) set.add(r.uid); } catch (_) {} }
+      usageScDays.set(day, set);
+      for (const d of [...usageScDays.keys()].sort().slice(0, -2)) usageScDays.delete(d);
+    }
+    if (set.has(uid)) return;
+    set.add(uid);
+    usageAdd(USAGE_SITE, day, "sc", day, 1, 0);
+  }
+  function usageSiteRecord(uid, day, tabs, dev, x) {
+    let tdev = 0, tr = 0, ctl = 0, en = 0;
+    const cls = dev ? usageDevClass(String(dev)) : null;
+    if (cls) for (const [k, ms] of Object.entries(tabs || {})) if (ms > 0 && USAGE_TAB_SET.has(k)) { usageAdd(USAGE_SITE, day, "tdev", k + "|" + cls, 1, ms); tdev += ms; }
+    let q = usageSiteToday.get(uid);
+    if (!q || q.day !== day) { if (usageSiteToday.size > 5000) usageSiteToday.clear(); q = { day, n: 0, en: 0 }; usageSiteToday.set(uid, q); }   // a bound, not a policy
+    const take = (v, cap) => { const c = Math.min(cap, Math.trunc(Number(v)) || 0, USAGE_SITE_PER_DAY - q.n); if (c <= 0) return 0; q.n += c; return c; };
+    let keys = 0;
+    for (const [k, v] of Object.entries((x && x.tr) || {})) {
+      if (keys >= USAGE_SITE_KEYS) break;
+      const i = k.indexOf(">"), a = k.slice(0, i), b = k.slice(i + 1);
+      if (i < 0 || a === b || !USAGE_TAB_SET.has(a) || !USAGE_TAB_SET.has(b)) continue;
+      const c = take(v, USAGE_TR_N); if (c) { usageAdd(USAGE_SITE, day, "tr", k, c, 0); tr += c; keys++; }
+    }
+    keys = 0;
+    for (const [k, v] of Object.entries((x && x.ctl) || {})) {
+      if (keys >= USAGE_SITE_KEYS) break;
+      if (!USAGE_CTL.keys.has(k)) continue;
+      const c = take(v, USAGE_CTL_N); if (c) { usageAdd(USAGE_SITE, day, "ctl", k, c, 0); ctl += c; keys++; }
+    }
+    // (build 2026.09.24-114) an entry tab draws on the same daily budget and is capped per member per
+    // day like a page load: a fresh page-session id per request can no longer mint entries at will
+    if (x && typeof x.en === "string" && USAGE_TAB_SET.has(x.en) && q.en < USAGE_EN_PER_DAY && take(1, 1)) { q.en++; usageAdd(USAGE_SITE, day, "en", x.en, 1, 0); en = 1; }
+    if (tdev > 0 || tr > 0 || ctl > 0 || en > 0) usageScNote(uid, day);
+    return { tdev, tr, ctl, en };
+  }
   // One accepted beacon: {tab -> ms} already validated and clamped by the server, plus the device.
   // (-110) `extra` = {acts: {csv|drawer-open -> n}, build, perf: ms|null, errs: [{msg, loc, c}]} —
   // validated and clamped by the server too.
@@ -2663,19 +2914,54 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     let tot = 0;
     for (const [k, ms] of Object.entries(tabs || {})) { if (ms > 0) { usageAdd(uid, day, "tab", k, 1, ms); tot += ms; } }
     if (tot > 0 && dev) usageAdd(uid, day, "dev", dev, 1, tot);
-    if (tot > 0) usageAdd(uid, day, "hr", usageHourKey(t), 1, tot);
     const x = extra || {};
+    if (tot > 0) usageHours(uid, tot, x.hrs, t);
     let acts = 0, perf = 0, errs = 0, errDropped = 0;
     for (const [k, n] of Object.entries(x.acts || {})) if (USAGE_ACT_SET.has(k) && n > 0) { usageAdd(uid, day, "act", k, n, 0); acts += n; }
     // (-110 follow-up) perf and errors only under a build this deployment served (the server checks
     // too); anything else keeps its screen time and counters and loses the rest.
     const build = usageBuildKnown(x.build) ? x.build : null;
+    // (build 2026.09.24-111) one page load under a known build (the client says so on its first
+    // beacon; the server lets it through once per page session), capped per member per ET day
+    let load = 0;
+    if (build && x.load) {
+      const q = usageLoadToday.get(uid);
+      if (!q || q.day !== day) usageLoadToday.set(uid, { day, n: 1 }); else q.n++;
+      if (usageLoadToday.size > 5000) usageLoadToday.clear();   // a bound, not a policy
+      if ((usageLoadToday.get(uid) || { n: 1 }).n <= USAGE_LOADS_PER_DAY) { usageAdd(uid, day, "load", build, 1, 0); load = 1; }
+    }
     if (build && x.perf > 0) { usageAdd(uid, day, "perf", build + "|" + usagePerfBucket(x.perf), 1, Math.round(x.perf)); perf = 1; }
     for (const e of build ? x.errs || [] : []) {
       const key = usageErrNote(uid, build, e, t);
       if (key) { usageAdd(uid, day, "err", key, e.c, 0); errs += e.c; } else errDropped++;
     }
-    return { ok: true, stored: tot > 0 || acts > 0 || perf > 0 || errs > 0, ms: tot, acts, perf, errs, errDropped };
+    const site = usageSiteRecord(uid, day, tabs, dev, x);   // (build 2026.09.24-112) uid '0' only
+    return { ok: true, stored: tot > 0 || acts > 0 || perf > 0 || errs > 0 || load > 0, ms: tot, acts, perf, errs, errDropped, load, site };
+  }
+  // (build 2026.09.24-111) The heatmap's buckets: the beacon carries its minutes per clock hour
+  // (`hrs` = {UTC hour index -> ms}; ET offsets are whole hours, so a UTC hour IS one ET hour), already
+  // limited by the server's gate to the hours of this beacon's wall-time window. Here they are scaled
+  // to the ACCEPTED screen time (never more heat than tab time) and stored under each hour's own ET
+  // day and '<dow>-<hh>' key; whatever the buckets do not cover (none sent, a skewed clock, an hour
+  // outside the window) lands in the arrival hour, the old rule. A sanity bound on top: nothing
+  // older than a day or more than an hour ahead of `t` is believed.
+  function usageHours(uid, tot, hrs, t) {
+    const ok = [];
+    let S = 0;
+    if (hrs && typeof hrs === "object") for (const [k, v] of Object.entries(hrs).slice(0, 8)) {
+      const h = Number(k), ms = Math.round(Number(v));
+      if (!Number.isInteger(h) || !(ms > 0) || h * 3600e3 > t + 3600e3 || (h + 1) * 3600e3 < t - 864e5) continue;
+      ok.push([h, ms]); S += ms;
+    }
+    const f = S > tot ? tot / S : 1, out = new Map();
+    let left = tot;
+    for (const [h, ms] of ok) {
+      const v = Math.min(left, Math.floor(ms * f)); if (v <= 0) continue;
+      const hs = h * 3600e3, k = etDayStr(hs) + "\u0001" + usageHourKey(hs);
+      out.set(k, (out.get(k) || 0) + v); left -= v;
+    }
+    if (left > 0) { const k = usageToday(t) + "\u0001" + usageHourKey(t); out.set(k, (out.get(k) || 0) + left); }
+    for (const [k, v] of out) { const i = k.indexOf("\u0001"); usageAdd(uid, k.slice(0, i), "hr", k.slice(i + 1), 1, v); }
   }
   // (-110) A server-side action counter: the call that IS the action already reached the server
   // authenticated, so it counts here — more reliable than a beacon, and it cannot be forged by one.
@@ -2687,12 +2973,25 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     return true;
   }
   function usageFlush() {
-    if (!usagePend.size && !usageErrPend.size && !usageErrDel.size) return 0;
-    const rows = [...usagePend.values()], errs = [...usageErrPend.values()], dels = [...usageErrDel];
-    usagePend = new Map(); usageErrPend = new Map(); usageErrDel = new Set();
+    if (!usagePend.size && !usageErrPend.size && !usageErrDel.size && !usageLastDirty.size) return 0;
+    const rows = [...usagePend.values()], errs = [...usageErrPend.values()], dels = [...usageErrDel], lasts = [...usageLastDirty];
+    usagePend = new Map(); usageErrPend = new Map(); usageErrDel = new Set(); usageLastDirty = new Set();
     db.exec("BEGIN IMMEDIATE");
     try {
+      // (-111) the monthly rows, incrementally: each (member, day) this flush adds screen time to adds
+      // it to that month's row, and one active day when the day's total crosses the minute NOW (read
+      // before the upsert) — exact however the day's minutes are split across flushes, and it never
+      // needs the daily rows again, so the 30-day fold cannot shrink a month.
+      const dayAdd = new Map();
+      for (const r of rows) if (r.kind === "tab" && r.uid !== USAGE_SITE) { const k = r.uid + "\u0001" + r.day; dayAdd.set(k, (dayAdd.get(k) || 0) + Math.round(r.ms)); }
+      const before = new Map();
+      for (const k of dayAdd.keys()) { const i = k.indexOf("\u0001"); before.set(k, US.dayTabMs.get(k.slice(i + 1), k.slice(0, i)).s); }
       for (const r of rows) US.up.run(r.day, r.uid, r.kind, r.key, r.n, Math.round(r.ms));
+      for (const [k, add] of dayAdd) {
+        const i = k.indexOf("\u0001"), uid = k.slice(0, i), day = k.slice(i + 1), b0 = before.get(k);
+        US.moUp.run(day.slice(0, 8) + "01", uid, usageMonthOf(day), b0 < USAGE_ACTIVE_MS && b0 + add >= USAGE_ACTIVE_MS ? 1 : 0, add);
+      }
+      for (const uid of lasts) { const x = usageLast.get(uid); if (x) US.lastUp.run(uid, x.build, x.at); }
       for (const k of dels) US.errDel.run(k);   // (-110 follow-up) evicted past USAGE_ERR_TOTAL
       for (const e of errs) US.errUp.run(e.key, e.build, e.loc, e.msg, e.firstAt, e.lastAt);
       // (-110) the weekly bits for every week this flush touched (from the Monday of its oldest day)
@@ -2706,6 +3005,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       for (const r of rows) usageAdd(r.uid, r.day, r.kind, r.key, r.n, r.ms);
       for (const x of errs) if (!usageErrPend.has(x.key)) usageErrPend.set(x.key, x);
       for (const k of dels) if (usageErrIdx.has(k) === false) usageErrDel.add(k);
+      for (const uid of lasts) usageLastDirty.add(uid);
       throw e;
     }
     usageGeneration++;
@@ -2720,18 +3020,33 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     const cut = usageDayShift(usageToday(t), -(USAGE_KEEP_DAYS - 1));   // oldest day still kept per member
     db.exec("BEGIN IMMEDIATE");
     let dropped, errs;
+    const extra = { mo: 0, marks: 0, triage: 0, site: 0, nudges: 0 };
     try {
       US.wkFill.run("0000-00-00");
       // (-110 follow-up) whole weeks: the Monday USAGE_WK_KEEP_DAYS before this week's is the oldest kept
       US.wkDrop.run(usageDayShift(usageWeekOf(usageToday(t)), -USAGE_WK_KEEP_DAYS));
       US.fold.run(cut); dropped = Number(US.drop.run(cut).changes || 0);
       errs = Number(US.errPrune.run(t - USAGE_KEEP_DAYS * 864e5).changes || 0);
+      // (-111) the monthly rows keep this month and the one before; markers keep 90 days; a stale-
+      // build row a day old says nothing any more; a triage row whose error left usage_err goes too
+      const moCut = usagePrevMonth(usageToday(t));
+      extra.mo = Number(US.moDrop.run(moCut).changes || 0);
+      extra.marks = Number(US.markPrune.run(t - USAGE_MARK_KEEP_DAYS * 864e5).changes || 0);
+      US.lastPrune.run(t - 864e5);
+      // (-112) the sitewide paths / controls / device-per-tab rows keep 90 days
+      extra.site = Number(US.siteDrop.run(usageDayShift(usageToday(t), -(USAGE_SITE_KEEP_DAYS - 1))).changes || 0);
+      // (build 2026.09.24-113) the last-nudge rows keep the per-member window (30 days), which is all
+      // the once-per-30-days rule needs; the audit rows are the log and stay like every other one
+      extra.nudges = Number(US.nudgePrune.run(t - USAGE_KEEP_DAYS * 864e5).changes || 0);
+      const sigs = new Set(US.errAll.all().map((e) => usageSig(e.key)));
+      for (const r of US.triAll.all()) if (!sigs.has(r.sig)) { US.triDel.run(r.sig); extra.triage++; }
       db.exec("COMMIT");
     }
     catch (e) { try { db.exec("ROLLBACK"); } catch (_) {} throw e; }
+    for (const [uid, x] of [...usageLast]) if (t - x.at > 864e5) usageLast.delete(uid);
     if (errs) usageErrReload();
-    if (dropped || errs) usageGeneration++;
-    return { ok: true, cut, dropped, errs };
+    if (dropped || errs || extra.mo || extra.marks || extra.triage || extra.site) usageGeneration++;
+    return Object.assign({ ok: true, cut, dropped, errs }, extra);
   }
   function setUsagePaused(uid, on) {
     const u = users.get(uid);
@@ -2742,9 +3057,198 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     usageGeneration++;
     return { ok: true, paused: !!on };
   }
+  // ---- (build 2026.09.24-111) error signatures, the post-deploy regression check, error triage ----
+  // An error KEY is '<build>|<file:line>|<message hash>'; its SIGNATURE drops the build and the line
+  // ('<file>|<hash>'), so one bug keeps one identity across deploys that move its line number.
+  const usageSig = (key) => { const p = String(key).split("|"); return p.length === 3 ? p[1].replace(/:\d+$/, "") + "|" + p[2] : null; };
+  const USAGE_SIG_RE = /^[\w\-./@~+]{1,120}\|[0-9a-f]{12}$/;
+  const USAGE_TRIAGE_SHOW = 100;     // rows the triage list returns (open first); usage_err caps the total at 500
+  // The regression check (usageRegress): a build is READY once it has minLoads page loads or has been
+  // live minAgeMs, and is then compared with the previous known build that had ≥ rateMinLoads page
+  // loads (build 2026.09.24-114; none such: "no-baseline", nothing compared):
+  //   new-errors  a signature no older known build ever hit and usage_err first saw after this build
+  //               went live (build 2026.09.24-114), hit by ≥ errMembers members;
+  //   err-rate    error hits per page load ≥ rateX × the previous build's (zero hits before counts as
+  //               one), with ≥ rateMinLoads loads on both sides and ≥ rateMinHits hits now;
+  //   perf        p75 first paint ≥ perfX × the previous build's AND ≥ perfMs slower (≥ perfMin samples each).
+  const USAGE_REG = Object.freeze({ minLoads: 20, minAgeMs: 2 * 3600e3, errMembers: 2, rateX: 3, rateMinHits: 10, rateMinLoads: 20, perfX: 1.3, perfMs: 300, perfMin: 10 });
+  function usageRegress(build, now) {
+    usageFlush();
+    const t = now != null ? now : Date.now();
+    const info = US.buildAll.all();   // newest first
+    const i = info.findIndex((r) => r.build === build);
+    if (i < 0) return { build: build || null, state: "unknown", ready: false, conds: [], checks: {} };
+    const cur = info[i];
+    const per = new Map(info.map((r) => [r.build, { loads: 0, perfN: 0, hist: new Map(), hits: 0, sigs: new Map() }]));
+    for (const r of US.regRows.all(etDayStr(Math.min(...info.map((x) => x.at))))) {
+      const s = per.get(r.kind === "load" ? r.key : r.key.slice(0, r.key.indexOf("|")));
+      if (!s) continue;
+      if (r.kind === "load") s.loads += r.n;
+      else if (r.kind === "perf") { const bin = +r.key.slice(r.key.lastIndexOf("|") + 1); s.hist.set(bin, (s.hist.get(bin) || 0) + r.n); s.perfN += r.n; }
+      else {
+        const sig = usageSig(r.key); if (!sig) continue;
+        s.hits += r.n;
+        const e = s.sigs.get(sig) || { key: r.key, hits: 0, who: new Set() };
+        e.hits += r.n; if (r.uid !== USAGE_SITE) e.who.add(r.uid);
+        s.sigs.set(sig, e);
+      }
+    }
+    // Builds before -111 never counted page loads: their first-paint samples stand in.
+    const loadsOf = (s) => (s.loads > 0 ? s.loads : s.perfN);
+    // (build 2026.09.24-114) the baseline is the most recent OLDER build with at least rateMinLoads
+    // page loads: a hotfix that lived twenty minutes on one load is not a baseline for anything, and
+    // no comparison is trusted without one.
+    const prevRow = info.slice(i + 1).find((r) => loadsOf(per.get(r.build)) >= USAGE_REG.rateMinLoads) || null;
+    const C = per.get(cur.build), P = prevRow ? per.get(prevRow.build) : null, R = USAGE_REG;
+    const loads = loadsOf(C), loadsPrev = P ? loadsOf(P) : 0;
+    const ready = loads >= R.minLoads || t - cur.at >= R.minAgeMs;
+    const conds = [];
+    // 1. new distinct errors. (build 2026.09.24-114) NEW means new to this build: no OLDER known
+    // build hit the signature (not just the baseline — a chronic error skipped by a quiet hotfix
+    // is still chronic), and usage_err has never seen it before this build's first-seen time (which
+    // reaches builds that aged out of the known list).
+    const older = info.slice(i + 1).map((r) => per.get(r.build));
+    const sigFirst = new Map();
+    for (const e of US.errAll.all()) { const sg = usageSig(e.key); if (sg && !(sigFirst.get(sg) <= e.firstAt)) sigFirst.set(sg, e.firstAt); }
+    const isNew = (sig) => !older.some((o) => o.sigs.has(sig)) && !(sigFirst.get(sig) < cur.at);
+    const fresh = P ? [...C.sigs].filter(([sig, e]) => isNew(sig) && e.who.size >= R.errMembers)
+      .sort((a, b) => b[1].who.size - a[1].who.size || b[1].hits - a[1].hits) : [];
+    if (ready && fresh.length) {
+      const [sig, e] = fresh[0], txt = US.errOne.get(e.key) || {};
+      conds.push({ kind: "new-errors", n: fresh.length, top: { sig, loc: txt.loc || e.key.split("|")[1], msg: txt.msg || "", members: e.who.size, hits: e.hits } });
+    }
+    // 2. error hits per page load
+    const rate = loads ? C.hits / loads : null, ratePrev = loadsPrev ? P.hits / loadsPrev : null;
+    const x = loads && loadsPrev ? rate / (Math.max(P.hits, 1) / loadsPrev) : null;
+    if (ready && P && loads >= R.rateMinLoads && loadsPrev >= R.rateMinLoads && C.hits >= R.rateMinHits && x >= R.rateX)
+      conds.push({ kind: "err-rate", rate, ratePrev, x, hits: C.hits, loads });
+    // 3. p75 first paint
+    const p75 = C.perfN >= R.perfMin ? usagePct(C.hist, 0.75) : null, p75Prev = P && P.perfN >= R.perfMin ? usagePct(P.hist, 0.75) : null;
+    if (ready && p75 != null && p75Prev != null && p75 >= p75Prev * R.perfX && p75 - p75Prev >= R.perfMs) conds.push({ kind: "perf", p75, p75Prev });
+    const state = !ready ? "collecting" : !P ? "no-baseline" : conds.length ? "regression" : "ok";
+    return { build: cur.build, since: cur.at, prev: prevRow ? prevRow.build : null, ready, state, loads, need: { loads: R.minLoads, ageMs: R.minAgeMs },
+      checks: { newErrors: fresh.length, hits: C.hits, rate, ratePrev, x, loadsPrev, p75, p75Prev, perfN: C.perfN, perfNPrev: P ? P.perfN : 0 }, conds };
+  }
+  // A resolved error reopens when a build NEWER than the one it was resolved on (deploy order, from
+  // usage_build) hits it after the click; a stale tab still on the old build never reopens it. A
+  // resolved build that aged out of the known list is older than every known one.
+  function usageTriageSweep(now) {
+    usageFlush();
+    const tri = US.triAll.all().filter((r) => r.resolvedAt != null);
+    if (!tri.length) return 0;
+    const t = now != null ? now : Date.now();
+    const at = new Map(US.buildAll.all().map((r) => [r.build, r.at]));
+    const rows = US.errAll.all().map((e) => Object.assign(e, { sig: usageSig(e.key) }));
+    let n = 0;
+    for (const r of tri) {
+      const base = at.has(r.resolvedBuild) ? at.get(r.resolvedBuild) : -Infinity;
+      let hit = null;
+      for (const e of rows) {
+        if (e.sig !== r.sig || e.lastAt <= r.resolvedAt || e.build === r.resolvedBuild || !at.has(e.build) || at.get(e.build) <= base) continue;
+        if (!hit || at.get(e.build) > at.get(hit.build)) hit = e;
+      }
+      if (hit) { US.triSet.run(r.sig, null, null, t, hit.build); n++; }
+    }
+    if (n) usageGeneration++;
+    return n;
+  }
+  // Per distinct error (signature): first/last build and time, hits, members affected (a COUNT —
+  // never who), and the operator's resolved / regressed state. Open regressions first, then open,
+  // then resolved; newest first within each.
+  function usageTriage(now) {
+    usageTriageSweep(now);
+    const by = new Map();
+    for (const e of US.errAll.all()) { const sig = usageSig(e.key); if (!sig) continue; if (!by.has(sig)) by.set(sig, []); by.get(sig).push(e); }
+    const hits = new Map(), who = new Map();
+    for (const r of US.errHits.all()) {
+      const sig = usageSig(r.key); if (!by.has(sig)) continue;
+      hits.set(sig, (hits.get(sig) || 0) + r.n);
+      if (r.uid !== USAGE_SITE) { if (!who.has(sig)) who.set(sig, new Set()); who.get(sig).add(r.uid); }
+    }
+    const tri = new Map(US.triAll.all().map((r) => [r.sig, r]));
+    const out = [];
+    for (const [sig, rows] of by) {
+      let first = rows[0], last = rows[0];
+      for (const e of rows) { if (e.firstAt < first.firstAt) first = e; if (e.lastAt > last.lastAt) last = e; }
+      const r = tri.get(sig) || {};
+      out.push({ sig, loc: last.loc, msg: last.msg, firstBuild: first.build, lastBuild: last.build, firstAt: first.firstAt, lastAt: last.lastAt,
+        builds: rows.length, hits: hits.get(sig) || 0, members: (who.get(sig) || new Set()).size,
+        resolved: r.resolvedAt != null, resolvedAt: r.resolvedAt != null ? r.resolvedAt : null,
+        regressed: r.regressedAt != null, regressedAt: r.regressedAt != null ? r.regressedAt : null, regressedBuild: r.regressedBuild || null });
+    }
+    const rank = (x) => (x.resolved ? 2 : x.regressed ? 0 : 1);
+    out.sort((a, b) => rank(a) - rank(b) || b.lastAt - a.lastAt);
+    return { total: out.length, open: out.filter((x) => !x.resolved).length, rows: out.slice(0, USAGE_TRIAGE_SHOW) };
+  }
+  // The operator's toggle: resolved = on stamps the newest build (deploy order) that hit it (the reopen baseline); off
+  // deletes the row (open, and any "regressed" flag with it). Only a signature usage_err holds.
+  function usageTriageSet(sig, resolved, now) {
+    if (typeof sig !== "string" || !USAGE_SIG_RE.test(sig)) return { ok: false, error: "bad error id" };
+    usageFlush();
+    const rows = US.errAll.all().filter((e) => usageSig(e.key) === sig);
+    if (!rows.length) return { ok: false, error: "no such error" };
+    if (resolved) {
+      // (build 2026.09.24-114) the NEWEST build in deploy order (usage_build.at) that hit it — not the
+      // row hit last: a stale tab on an older build hitting it after the buggy one would otherwise
+      // become the baseline, and the buggy build's next stale hit would "reopen" it. Rows on builds
+      // that left the known list rank below every known one (then by last hit).
+      const at = new Map(US.buildAll.all().map((r) => [r.build, r.at]));
+      const rank = (e) => (at.has(e.build) ? at.get(e.build) : -Infinity);
+      let last = rows[0];
+      for (const e of rows) if (rank(e) > rank(last) || (rank(e) === rank(last) && e.lastAt > last.lastAt)) last = e;
+      US.triSet.run(sig, now != null ? now : Date.now(), last.build, null, null);
+    } else US.triDel.run(sig);
+    usageGeneration++;
+    return { ok: true, sig, resolved: !!resolved };
+  }
+  // ---- (build 2026.09.24-111) the markers with before/after reach -------------------------------
+  // For a gate or menu change on a TAB: that tab's reach (members who opened it ÷ members active,
+  // the tab table's own definition) over the 7 ET days before the change day vs the 7 after it —
+  // or the days since, when fewer have passed (days says how many). The change day itself is in
+  // neither (it is half one, half the other). Windows are clipped to the per-member retention: a
+  // change older than ~3 weeks has a shorter "before", and one past the window has none.
+  const USAGE_MARK_SHOW = 40;
+  function usageMarkList(now, today, tabs) {
+    const rows = US.markSince.all(now - USAGE_MARK_KEEP_DAYS * 864e5, USAGE_MARK_SHOW);
+    if (!rows.length) return [];
+    const label = new Map((tabs || []).map((x) => [x.key, x.label]));
+    const keepFrom = usageDayShift(today, -(USAGE_KEEP_DAYS - 1));
+    const idx = new Map();   // day -> Map(uid -> {tot, tabs: Map(key -> ms)})
+    for (const r of US.tabKept.all(keepFrom, today)) {
+      if (!idx.has(r.day)) idx.set(r.day, new Map());
+      const m = idx.get(r.day), x = m.get(r.uid) || { tot: 0, tabs: new Map() };
+      x.tot += r.ms; x.tabs.set(r.key, (x.tabs.get(r.key) || 0) + r.ms); m.set(r.uid, x);
+    }
+    const win = (from, to, key) => {
+      const a = from < keepFrom ? keepFrom : from, b = to > today ? today : to;
+      if (a > b) return null;
+      const who = new Map();
+      let days = 0;
+      for (let d = a; d <= b; d = usageDayShift(d, 1)) {
+        days++;
+        for (const [uid, x] of idx.get(d) || []) {
+          const w = who.get(uid) || { on: false, ms: 0 };
+          if (x.tot >= USAGE_ACTIVE_MS) w.on = true;
+          w.ms += x.tabs.get(key) || 0; who.set(uid, w);
+        }
+      }
+      let active = 0, users = 0;
+      for (const w of who.values()) if (w.on) { active++; if (w.ms > 0) users++; }
+      return { from: a, to: b, days, active, users, reach: active ? users / active : null };
+    };
+    return rows.map((m) => {
+      const day = etDayStr(m.at);
+      let tab = m.kind === "gate" ? m.detail.split("=")[0] : m.kind === "nav" && m.detail[0] !== "#" ? m.detail.split(">")[0] : null;
+      if (tab && !label.has(tab)) tab = null;
+      const out = { at: m.at, day, kind: m.kind, detail: m.detail, tab, tabLabel: tab ? label.get(tab) : null };
+      if (tab) { out.before = win(usageDayShift(day, -7), usageDayShift(day, -1), tab); out.after = win(usageDayShift(day, 1), usageDayShift(day, 7), tab); }
+      return out;
+    });
+  }
+  // (build 2026.09.24-111) Days from ET day string a to b (b - a), UTC-anchored like usageDayShift.
+  const usageDayNum = (d) => Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)) / 864e5;
   // tabs: [{key, label, gate}] (the feature manifest's tabs, resolved by the server). online: Set of uids.
   const usageMed = (a) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
-  const USAGE_ACTIVE_MS = 60000;   // "active" = at least a minute on screen that ET day
   function usageDays(today, r) { const out = []; for (let i = r - 1; i >= 0; i--) out.push(usageDayShift(today, -i)); return out; }
   // (-110) Retention by join week. Cohorts are the ET weeks members joined in (user.createdAt), the
   // last `weeks` of them; cell N is the share of that week's joiners active in week N after joining
@@ -2788,6 +3292,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     // first-paint histograms per build (+ the last day each build was seen); errors per key.
     const actWho = new Map(), actHits = new Map(), heat = Array.from({ length: 7 }, () => new Array(24).fill(0));
     const perfHist = new Map(), errHits = new Map(), errWho = new Map(), errRows = [];
+    const site = { tr: new Map(), en: new Map(), ctl: new Map(), tdev: new Map(), sc: new Map() };   // (-112); (-114) + sc
     const bump = (m, k, v) => m.set(k, (m.get(k) || 0) + v);
     const addTo = (m, k, v) => { if (!m.has(k)) m.set(k, new Set()); m.get(k).add(v); };
     for (const row of US.range.all(pFrom, today)) {
@@ -2809,6 +3314,14 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
         if (!perfHist.has(b)) perfHist.set(b, new Map());
         bump(perfHist.get(b), bin, row.n);
       } else if (row.kind === "err" && !o.lite) errRows.push(row);   // (-110 follow-up) kept to the two builds below
+      // (build 2026.09.24-112) the sitewide-only kinds (uid '0' by construction; read whatever the uid)
+      // (build 2026.09.24-114) complete days only: today (still filling up) never reaches them
+      else if (o.lite || row.day === today) continue;
+      else if (row.kind === "sc") bump(site.sc, row.day, row.n);
+      else if (row.kind === "tr") bump(site.tr, row.key, row.n);
+      else if (row.kind === "en") bump(site.en, row.key, row.n);
+      else if (row.kind === "ctl") bump(site.ctl, row.key, row.n);
+      else if (row.kind === "tdev") bump(site.tdev, row.key, row.ms);
     }
     const activeOn = new Map();   // day -> Set(uid)
     const uActive = new Map();    // uid -> {days, ms}
@@ -2836,6 +3349,22 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
         prevMs: prev, delta: prev > 0 ? (ms - prev) / prev : null };
     }).filter((t) => t.ms > 0 || t.prevMs > 0 || t.gate !== "off");
     const TEN_DAYS = 10 * 864e5;
+    // (-111) When the prior range is already folded (30d), the member trend is month over month from
+    // the monthly rows: this month's screen time per COVERED day against last month's (a month the
+    // rows only partly cover — they began mid-month — counts only the days they cover). Blank until
+    // both sides cover a week.
+    let moTrend = null;
+    if (!priorKept) {
+      const curM = usageMonthOf(today), prevM = usagePrevMonth(today), start = usageMoStart();
+      const cov = (a, b) => { const x = start && start > a ? start : a; return x > b ? 0 : usageDayNum(b) - usageDayNum(x) + 1; };
+      const curDays = cov(curM + "-01", today), prevDays = cov(prevM + "-01", usageDayShift(curM + "-01", -1));
+      const mo = new Map();
+      for (const r of US.moAll.all()) {
+        if (r.key !== curM && r.key !== prevM) continue;
+        const x = mo.get(r.uid) || { cur: 0, prev: 0 }; x[r.key === curM ? "cur" : "prev"] += r.ms; mo.set(r.uid, x);
+      }
+      moTrend = { curDays, prevDays, of: (uid) => { const x = mo.get(uid); return x && x.prev > 0 && curDays >= 7 && prevDays >= 7 ? (x.cur / curDays) / (x.prev / prevDays) - 1 : null; } };
+    }
     const memberRows = members.map((u) => {
       const base = { handle: u.handle, display: u.display, admin: !!u.isAdmin, createdAt: u.createdAt,
         lastSeen: u.lastSeen || 0, online: online.has(u.uid), paused: !!u.usagePaused };
@@ -2849,7 +3378,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       let curMs = 0; for (const t of tabs) curMs += uTab.get(u.uid + "|" + t.key) || 0;
       const prev = uPrev.get(u.uid) || 0;
       return Object.assign(base, { days: a.days, minPerDay: a.days ? a.ms / a.days / 60000 : 0, top, dev,
-        trend: priorKept && prev > 0 ? (curMs - prev) / prev : null });
+        trend: priorKept ? (prev > 0 ? (curMs - prev) / prev : null) : moTrend.of(u.uid) });
     });
     // (-110) Adoption: of the members ACTIVE in the range, how many did each thing at least once.
     // Hits count everyone's (a member who acted without a minute on screen still did it).
@@ -2881,6 +3410,8 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       return { build: t.build || parts[0], loc: t.loc || parts[1] || "?", msg: t.msg != null ? t.msg : "(message not kept)", hits, members };
     });
     return { ok: true, r, today, days, keepDays: USAGE_KEEP_DAYS, priorKept, gen: usageGeneration,
+      trendBasis: priorKept ? "range" : "month", moDays: moTrend ? { cur: moTrend.curDays, prev: moTrend.prevDays } : null,
+      marks: o.lite ? null : usageMarkList(now, today, tabs),   // (-111) deploy & gate markers, newest first
       kpi: { online: members.filter((u) => online.has(u.uid)).length,
         activeToday: activeOn.has(today) ? activeOn.get(today).size : 0,
         activeRange, members: members.length,
@@ -2888,11 +3419,97 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
         medMinPerDay: usageMed(memberDayMin),
         newMembers: newMembers.length, newActive: newMembers.filter((u) => uActive.has(u.uid)).length },
       series, tabs: tabRows, members: memberRows,
+      // (build 2026.09.24-112) sitewide: tab paths + entry tabs + the nav-order suggestion, control
+      // usage + quiet controls, time per tab by device class
+      site: o.lite ? null : usageSitewide(site, tabs, tabRows, o.navOrder, (actHits.get("drawer-open") || 0) > 0, { r, from: days[0], to: usageDayShift(today, -1) }),
       funnel, heat: { ms: heat, total: heatTot, peak, coreShare: heatTot ? core / heatTot : null },
       cohorts: o.lite ? null : usageCohorts(today, members, USAGE_WK_COHORTS),
       health: { build, perf: { cur: perfOf(build), prev: perfOf(prev) },
         errors: { distinct: errAll.length, hits: errAll.reduce((s, e) => s + e.hits, 0), top: errs, builds: [...errBuilds] },
-        stale: o.stale != null ? o.stale : null, errCap: USAGE_ERR_CAP } };
+        stale: o.stale != null ? o.stale : null, errCap: USAGE_ERR_CAP,
+        // (-111) the post-deploy verdict for this build, and the error triage list
+        regress: build && !o.lite ? usageRegress(build, now) : null,
+        triage: o.lite ? null : usageTriage(now) } };
+  }
+  // (build 2026.09.24-112) The sitewide sections of the summary. `site` = the range's rows summed per
+  // key (Maps); `tabs` = the manifest's tabs [{key, label, gate}]; `tabRows` = the summary's tab table
+  // (reach, ms); `navOrder` = the ribbon's movable tabs in their current order.
+  //   paths     top 15 transitions; per tab, where people go from it (outbound split); entry tabs.
+  //   nav       a READ-ONLY suggested order of the movable tabs by reach × hours (ties keep the
+  //             current order), beside the current order. Nothing is ever reordered from here.
+  //   controls  per group every allowlisted control with its count (zero included), sorted by use;
+  //             "quiet" = never used in range on a tab that had screen time in range (a control on
+  //             a tab nobody opened says nothing about the control). Column toggles are summarised as
+  //             the columns never toggled either way, not listed one quiet row each.
+  //   devices   time per tab split desktop / mobile / tablet / PWA.
+  const USAGE_PATHS_TOP = 15;
+  function usageSitewide(site, tabs, tabRows, navOrder, drawerUsed, span) {
+    const label = new Map((tabs || []).map((t) => [t.key, t.label]));
+    const row = new Map((tabRows || []).map((t) => [t.key, t]));
+    const nameOf = (k) => label.get(k) || (k === "header" ? "Header (every tab)" : k === "drawer" ? "Ticker drawer" : k);
+    // the nav suggestion reads the tab table (per-member reach the fold already shows), not these rows
+    const cur = (navOrder || NAV_VIEW_ORDER).filter((k) => row.has(k) && row.get(k).gate !== "off");
+    const score = (k) => { const t = row.get(k); return (t.reach || 0) * (t.ms || 0) / 3600e3; };
+    const suggested = cur.map((k, i) => ({ key: k, label: nameOf(k), score: score(k), reach: row.get(k).reach, ms: row.get(k).ms, i }))
+      .sort((a, b) => b.score - a.score || a.i - b.i).map(({ i, ...x }) => x);
+    const nav = { current: cur.map((k) => ({ key: k, label: nameOf(k) })), suggested, same: suggested.every((x, i) => x.key === cur[i]) };
+    // (build 2026.09.24-114) the k-threshold. `members` is a LOWER bound on the distinct members
+    // behind the range's rows: the most on any one complete day (the per-day counts cannot be added
+    // up — one member on five days is not five members).
+    const sp = span || {};
+    let members = 0;
+    for (const n of site.sc.values()) if (n > members) members = n;
+    const k = { minDays: USAGE_SITE_MIN_DAYS, k: USAGE_SITE_K, r: sp.r || null, from: sp.from || null, to: sp.to || null, members };
+    if (!(sp.r >= USAGE_SITE_MIN_DAYS) || members < USAGE_SITE_K)
+      return { keepDays: USAGE_SITE_KEEP_DAYS, threshold: k, withheld: !(sp.r >= USAGE_SITE_MIN_DAYS) ? "range" : "k", paths: null, nav, controls: null, devices: null };
+    // paths
+    const edges = [];
+    for (const [k, n] of site.tr) {
+      const i = k.indexOf(">"), a = k.slice(0, i), b = k.slice(i + 1);
+      if (i < 0 || a === b || !label.has(a) || !label.has(b) || !(n > 0)) continue;
+      edges.push({ from: a, to: b, n });
+    }
+    edges.sort((x, y) => y.n - x.n || (x.from + ">" + x.to < y.from + ">" + y.to ? -1 : 1));
+    const total = edges.reduce((s, e) => s + e.n, 0);
+    const outOf = new Map();
+    for (const e of edges) { const x = outOf.get(e.from) || { key: e.from, label: nameOf(e.from), n: 0, to: [] }; x.n += e.n; x.to.push({ key: e.to, label: nameOf(e.to), n: e.n }); outOf.set(e.from, x); }
+    const from = [...outOf.values()].sort((a, b) => b.n - a.n || (a.key < b.key ? -1 : 1));
+    for (const x of from) for (const t of x.to) t.share = t.n / x.n;
+    const ens = [...site.en].filter(([k, n]) => label.has(k) && n > 0).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
+    const enTot = ens.reduce((s, x) => s + x[1], 0);
+    const paths = { total, top: edges.slice(0, USAGE_PATHS_TOP).map((e) => ({ from: e.from, fromLabel: nameOf(e.from), to: e.to, toLabel: nameOf(e.to), n: e.n, share: total ? e.n / total : 0 })),
+      from, entry: { total: enTot, rows: ens.map(([k, n]) => ({ key: k, label: nameOf(k), n, share: n / enTot })) } };
+    // controls
+    const groups = [], quiet = [];
+    let ctlTotal = 0;
+    for (const [g, ctrls] of Object.entries(USAGE_CTL.table)) {
+      const items = [];
+      for (const [c, vals] of Object.entries(ctrls)) for (const v of vals.length ? vals : [null]) {
+        const key = g + "." + c + (v == null ? "" : "=" + v);
+        items.push({ key, control: c, value: v, n: site.ctl.get(key) || 0 });
+      }
+      items.sort((a, b) => b.n - a.n || (a.key < b.key ? -1 : 1));
+      const n = items.reduce((s, x) => s + x.n, 0); ctlTotal += n;
+      const t = row.get(g);
+      const active = g === "header" ? total + enTot > 0 || [...row.values()].some((x) => x.ms > 0) : g === "drawer" ? drawerUsed || n > 0 : !!(t && t.ms > 0);
+      const cols = items.filter((x) => x.control === "col-on" || x.control === "col-off");
+      const colIds = [...new Set(cols.map((x) => x.value))];
+      const colsNever = colIds.filter((id) => !cols.some((x) => x.value === id && x.n > 0)).sort();
+      if (active) for (const x of items) if (x.n === 0 && x.control !== "col-on" && x.control !== "col-off") quiet.push({ tab: g, label: nameOf(g), key: x.key, control: x.control, value: x.value });
+      groups.push({ tab: g, label: nameOf(g), active, n, items, colsNever: colIds.length ? colsNever : null, gate: t ? t.gate : null });
+    }
+    const colGroup = groups.find((x) => x.colsNever && x.active);
+    const controls = { total: ctlTotal, groups, quiet, colsNever: colGroup ? { tab: colGroup.tab, label: colGroup.label, ids: colGroup.colsNever } : null, allowlist: USAGE_CTL.keys.size, error: USAGE_CTL.error || null };
+    // device split per tab
+    const dev = new Map();
+    for (const [k, ms] of site.tdev) {
+      const i = k.lastIndexOf("|"), tab = k.slice(0, i), c = k.slice(i + 1);
+      if (i < 0 || !label.has(tab) || !USAGE_DEVS.includes(c) || !(ms > 0)) continue;
+      const x = dev.get(tab) || { key: tab, label: nameOf(tab), ms: 0, dev: { desktop: 0, mobile: 0, tablet: 0, pwa: 0 } };
+      x.ms += ms; x.dev[c] += ms; dev.set(tab, x);
+    }
+    const devices = { classes: USAGE_DEVS.slice(), rows: [...dev.values()].sort((a, b) => b.ms - a.ms || (a.key < b.key ? -1 : 1)) };
+    return { keepDays: USAGE_SITE_KEEP_DAYS, threshold: k, withheld: null, paths, nav, controls, devices };
   }
   // One member's last USAGE_KEEP_DAYS days: minutes per day, tab mix, device mix. Shared by the
   // member's own card (usageMine) and the operator's drill-in (usageMember, which AUDITS).
@@ -2915,12 +3532,21 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       ms: total,
       tabs: [...tab].sort((a, b) => b[1] - a[1]).map(([k, ms]) => ({ key: k, label: label.get(k) || k, ms, share: total ? ms / total : 0 })),
       devices: [...dev].sort((a, b) => b[1] - a[1]).map(([k, ms]) => ({ key: k, ms })),
-      acts: USAGE_ACTS.map((k) => ({ key: k, n: act.get(k) || 0 })) };
+      acts: USAGE_ACTS.map((k) => ({ key: k, n: act.get(k) || 0 })),
+      // (-111) the monthly rows kept about this member (this month and last), pending minutes included
+      months: usageMonths(u.uid, pend, today) };
+  }
+  function usageMonths(uid, pend, today) {
+    const m = new Map(US.moOf.all(uid).map((r) => [r.key, { key: r.key, ms: r.ms, days: r.n }]));
+    const cur = usageMonthOf(today);
+    for (const r of pend) if (r.kind === "tab" && usageMonthOf(r.day) === cur) { const x = m.get(cur) || { key: cur, ms: 0, days: 0 }; x.ms += r.ms; m.set(cur, x); }
+    return [...m.values()].sort((a, b) => (a.key < b.key ? 1 : -1)).slice(0, USAGE_MO_KEEP);
   }
   function usageMine(uid, tabs, now) {
     const u = users.get(uid);
     if (!u) return { ok: false, error: "no such account" };
-    return Object.assign({ ok: true }, usageDetail(u, tabs, now));
+    // (build 2026.09.24-113) whether the operator has lapsed-member reminders switched on, for the card
+    return Object.assign({ ok: true }, usageDetail(u, tabs, now), { nudgeOn: !!usageCfg().nudgeOn });
   }
   function usageMember(adminUid, handle, tabs, now) {
     const u = getUserByHandle(handle);
@@ -2931,6 +3557,134 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     if (u.usagePaused) return { ok: true, handle: d.handle, display: d.display, createdAt: d.createdAt, invitedBy: d.invitedBy, paused: true, keepDays: USAGE_KEEP_DAYS };
     return Object.assign({ ok: true }, d);
   }
+
+  // ---- (build 2026.09.24-113) the weekly operator digest and the opt-in lapsed-member nudge ----------
+  // Settings live in usage_cfg (one JSON value per key). Defaults: digest ON, Monday (ET weekday 1);
+  // nudges OFF. digestWeek/digestAt are the digest's persisted dedupe — a restart never re-sends a week.
+  const USAGE_CFG_DEFAULT = Object.freeze({ digestOn: true, digestDay: 1, digestWeek: null, digestAt: null,
+    nudgeOn: false, nudgeText: null, nudgeBy: null, nudgeSetAt: null });
+  let _usageDigestMod = null;
+  const usageDigestMod = () => (_usageDigestMod = _usageDigestMod || require("./usage-digest"));
+  function usageCfg() {
+    const out = Object.assign({}, USAGE_CFG_DEFAULT);
+    for (const r of US.cfgAll.all()) {
+      if (!Object.prototype.hasOwnProperty.call(USAGE_CFG_DEFAULT, r.k)) continue;
+      try { out[r.k] = JSON.parse(r.v); } catch (_) {}
+    }
+    return out;
+  }
+  // The operator's write: validated field by field, all-or-nothing. `byUid` is the admin making it —
+  // switching nudges on records who did, and that uid is the actor on every 'usage-nudge' audit row.
+  function usageCfgSet(patch, byUid, now) {
+    const p = patch && typeof patch === "object" ? patch : {}, w = {}, M = usageDigestMod();
+    if ("digestOn" in p) { if (typeof p.digestOn !== "boolean") return { ok: false, error: "digestOn must be true or false" }; w.digestOn = p.digestOn; }
+    if ("digestDay" in p) { if (!Number.isInteger(p.digestDay) || p.digestDay < 0 || p.digestDay > 6) return { ok: false, error: "digestDay must be 0 (Sunday) to 6 (Saturday)" }; w.digestDay = p.digestDay; }
+    if ("nudgeOn" in p) { if (typeof p.nudgeOn !== "boolean") return { ok: false, error: "nudgeOn must be true or false" }; w.nudgeOn = p.nudgeOn; }
+    if ("nudgeText" in p) {
+      if (p.nudgeText != null && typeof p.nudgeText !== "string") return { ok: false, error: "nudgeText must be text" };
+      const blank = p.nudgeText == null || !p.nudgeText.trim();
+      const t = blank ? null : M.nudgeTextClean(p.nudgeText);
+      if (!blank && t == null) return { ok: false, error: "reminder text is at most " + M.NUDGE_TEXT_MAX + " characters" };
+      w.nudgeText = t === M.NUDGE_DEFAULT_TEXT ? null : t;
+    }
+    if (w.nudgeOn === true && !usageCfg().nudgeOn) { w.nudgeBy = byUid || null; w.nudgeSetAt = now != null ? now : Date.now(); }
+    db.exec("BEGIN IMMEDIATE");
+    try { for (const [k, v] of Object.entries(w)) US.cfgUp.run(k, JSON.stringify(v)); db.exec("COMMIT"); }
+    catch (e) { try { db.exec("ROLLBACK"); } catch (_) {} throw e; }
+    return Object.assign({ ok: true }, usageCfg());
+  }
+  // The dedupe write, kept apart from the operator's settings path (it is not a setting).
+  function usageDigestSent(week, at) { US.cfgUp.run("digestWeek", JSON.stringify(String(week))); US.cfgUp.run("digestAt", JSON.stringify(+at)); return usageCfg(); }
+  // The digest's numbers for scheduled ET day D (o.day): this week = D-7..D-1 against last week =
+  // D-14..D-8, both inside the 30-day per-member window. Paused members are left out of every set and
+  // only counted ("N paused") — never named, as lapsed or anything else. Disabled accounts are not
+  // members here at all. o.tabs = the manifest's tabs [{key, label, gate}]; o.build = this build.
+  function usageDigestData(o) {
+    usageFlush();
+    const opt = o || {}, now = opt.now != null ? opt.now : Date.now();
+    const D = opt.day || usageToday(now);
+    const { a, b } = usageDigestMod().digestWindows(D);
+    const members = [...users.values()].filter((u) => !u.disabledAt);
+    const paused = members.filter((u) => u.usagePaused).length;
+    const live = new Map(members.filter((u) => !u.usagePaused).map((u) => [u.uid, u]));
+    const perDay = new Map(), tabA = new Map(), tabB = new Map(), uTabA = new Map();
+    const bump = (m, k, v) => m.set(k, (m.get(k) || 0) + v);
+    for (const r of US.range.all(b.from, D)) {
+      if (r.kind !== "tab") continue;
+      if (r.day <= b.to) bump(tabB, r.key, r.ms); else if (r.day <= a.to) bump(tabA, r.key, r.ms);
+      if (r.uid === USAGE_SITE) continue;
+      bump(perDay, r.uid + "|" + r.day, r.ms);
+      if (r.day >= a.from && r.day <= a.to) bump(uTabA, r.uid + "|" + r.key, r.ms);
+    }
+    const activeA = new Set(), activeB = new Set(), activeD = new Set(), daily = new Map();
+    for (const [k, ms] of perDay) {
+      if (ms < USAGE_ACTIVE_MS) continue;
+      const i = k.indexOf("|"), uid = k.slice(0, i), day = k.slice(i + 1);
+      if (!live.has(uid)) continue;
+      if (day > a.to) activeD.add(uid);
+      else if (day >= a.from) { activeA.add(uid); bump(daily, day, 1); }
+      else activeB.add(uid);
+    }
+    let sumDaily = 0;
+    for (const n of daily.values()) sumDaily += n;
+    const person = (uid) => { const u = live.get(uid); return { handle: u.handle, display: u.display || u.handle }; };
+    const low = (x) => String(x.display).toLowerCase();
+    const byName = (x, y) => (low(x) < low(y) ? -1 : low(x) > low(y) ? 1 : 0);
+    // newly lapsed: active last week, not one active day this week (≥ 7 days) — and not back today either
+    const lapsed = [...activeB].filter((uid) => !activeA.has(uid) && !activeD.has(uid)).map(person).sort(byName);
+    // returning: active this week, not last week, and a member since before last week began
+    const returning = [...activeA].filter((uid) => !activeB.has(uid) && etDayStr(live.get(uid).createdAt || 0) < b.from).map(person).sort(byName);
+    const joined = members.filter((u) => { const c = etDayStr(u.createdAt || 0); return c >= a.from && c <= a.to; });
+    const tabs = (opt.tabs || []).map((t) => {
+      let n = 0;
+      for (const uid of activeA) if ((uTabA.get(uid + "|" + t.key) || 0) > 0) n++;
+      return { key: t.key, label: t.label, gate: t.gate, ms: tabA.get(t.key) || 0, prevMs: tabB.get(t.key) || 0, reach: activeA.size ? n / activeA.size : null };
+    });
+    const top = tabs.filter((t) => t.ms > 0).sort((x, y) => y.ms - x.ms).slice(0, 3);
+    // biggest mover: the largest change in screen time among tabs with ≥ 10 minutes in either week
+    const movers = tabs.filter((t) => Math.max(t.ms, t.prevMs) >= 10 * 60000).sort((x, y) => Math.abs(y.ms - y.prevMs) - Math.abs(x.ms - x.prevMs));
+    const mover = movers.length && movers[0].ms !== movers[0].prevMs ? movers[0] : null;
+    // quiet: member-visible tabs (not switched off, not admin-only) opened by < 10% of this week's actives
+    const quiet = activeA.size ? tabs.filter((t) => t.gate !== "off" && t.gate !== "admin" && t.reach < 0.1).sort((x, y) => x.reach - y.reach || y.ms - x.ms) : [];
+    // errors, from the triage list: new = first seen this week (or since) and still open; regressed = reopened and open
+    const tri = usageTriage(now);
+    const pick = (e) => ({ loc: e.loc, msg: e.msg, members: e.members, hits: e.hits, build: e.lastBuild });
+    const fresh = tri.rows.filter((e) => !e.resolved && !e.regressed && etDayStr(e.firstAt) >= a.from).map(pick);
+    const regressed = tri.rows.filter((e) => e.regressed && !e.resolved).map(pick);
+    return { day: D, week: usageDigestMod().digestWeekKey(D), a, b,
+      members: { total: members.length, paused, active: activeA.size, activePrev: activeB.size,
+        stickiness: activeA.size ? sumDaily / 7 / activeA.size : null, newJoined: joined.length,
+        newActive: joined.filter((u) => activeA.has(u.uid)).length },
+      lapsed, returning, tabs: { top, mover, quiet: quiet.map((t) => ({ key: t.key, label: t.label, reach: t.reach })) },
+      errors: { fresh, regressed, open: tri.open }, verdict: opt.build ? usageRegress(opt.build, now) : null };
+  }
+  // Per member, the inputs of the nudge rules (usage-digest.js nudgeCheck) minus the channels (the
+  // server knows those): the last active ET day inside the window, last seen, the last nudge.
+  function usageNudgeInputs(now) {
+    usageFlush();
+    const t = now != null ? now : Date.now();
+    const act = new Map();
+    for (const r of US.actDays.all(usageDayShift(usageToday(t), -(USAGE_KEEP_DAYS - 1)))) {
+      if (r.s < USAGE_ACTIVE_MS) continue;
+      if (!act.has(r.uid) || r.day > act.get(r.uid)) act.set(r.uid, r.day);
+    }
+    const last = new Map(US.nudgeAll.all().map((r) => [r.uid, r.at]));
+    return [...users.values()].map((u) => ({ uid: u.uid, handle: u.handle, display: u.display || u.handle,
+      disabled: !!u.disabledAt, paused: !!u.usagePaused, admin: !!u.isAdmin, lastActive: act.get(u.uid) || null,
+      lastSeen: u.lastSeen || 0, lastNudgeAt: last.has(u.uid) ? last.get(u.uid) : null }));
+  }
+  // A nudge that went out: the 30-day row, and the audit row (actor = the admin who switched nudges
+  // on, or 'system'; detail = '<handle> · <telegram|push>') — the log the fold shows.
+  function usageNudgeMark(uid, via, byUid, now) {
+    const u = users.get(uid);
+    if (!u) return { ok: false, error: "no such account" };
+    const t = now != null ? now : Date.now();
+    US.nudgeUp.run(uid, t, String(via));
+    try { S.auditAdd.run(byUid || "system", "usage-nudge", null, u.handle + " · " + via, t); } catch (_) {}
+    return { ok: true };
+  }
+  const usageNudgeLog = (limit) => US.nudgeLog.all(Math.trunc(Math.min(Math.max(+limit || 50, 1), 200)))
+    .map((r) => ({ at: r.at, by: (users.get(r.uid) || {}).display || r.uid, detail: r.detail }));
 
   // ---- backup + close --------------------------------------------------------------------------
   // accounts.db is the one file on the volume with no other copy anywhere: users, password hashes,
@@ -3047,6 +3801,12 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     // (build 2026.09.24-110 follow-up) the known-build gate and the error-row bounds
     usageBuildSeen, usageBuildKnown, usageBuilds: () => usageBuildList.slice(),
     USAGE_ERR_TOTAL, USAGE_ERR_NEW_PER_DAY, USAGE_WK_KEEP_DAYS, USAGE_PREV_MIN_N,
+    // (build 2026.09.24-111) markers, the regression check, error triage, stale builds, monthly rows
+    usageMark, usageAlertOnce, usageAlerted, usageBuildInfo, usageRegress, usageTriage, usageTriageSet, usageTriageSweep,
+    usageCfg, usageCfgSet, usageDigestSent, usageDigestData, usageNudgeInputs, usageNudgeMark, usageNudgeLog,   // (build 2026.09.24-113)
+    usageLastBuild, usageStale, usageSig, USAGE_REG, USAGE_MARK_KEEP_DAYS, USAGE_MO_KEEP, USAGE_LOADS_PER_DAY,
+    // (build 2026.09.24-112) the sitewide-only kinds' bounds
+    USAGE_SITE_KEEP_DAYS, USAGE_SITE_PER_DAY, usageDevClass, USAGE_SITE_MIN_DAYS, USAGE_SITE_K, USAGE_EN_PER_DAY,
     pendingEscalations, markEscalated,
     setPxHistory,
     // browser push subscriptions — stored here, delivered by the server (which holds the keys)

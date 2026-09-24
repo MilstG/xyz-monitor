@@ -601,6 +601,160 @@ instant, and the per-IP rate limit stops being a per-user problem.
     own card shows the same counters and says plainly that perf and errors are collected.
   - **Public (signed-out) visitors stay off**, and the anonymous-visitor id path is
     **deliberately not built** — the flag still acknowledges and drops.
+- **Usage: deploy/gate markers, post-deploy regression alerts, error triage**
+  (build 2026.09.24-111) — the Usage fold starts answering "did that change help or hurt?":
+  - **Deploy & gate markers**: a small `usage_mark(at, kind, detail)` table — operator config
+    history, **no uid**, pruned at **90 days** (gate/menu rows also capped at 400). `deploy` is written
+    the first time a build boots (`usage_build.at` already is the build's first-seen time: a
+    re-deploy keeps it), `gate` (`<feature>=<state>`) when a `POST /api/features` write moves the
+    resolved state, `nav` (`<view>><group>`, or `#<group>` for a rename — the label is not kept) on a
+    successful `POST /api/nav-groups`. They are vertical lines on the daily-active chart and a
+    **Deploys & gate changes** list; a tab change carries that tab's **reach before vs after** (members
+    who opened it ÷ members active, the tab table's own definition) over the 7 ET days before the
+    change day and the 7 after it — or the days since, labelled `Nd`; the change day is in neither;
+    "small n" under 5 active members; windows clipped to the 30-day per-member retention.
+  - **Post-deploy regression alert**: the beacon now says `ld: 1` on a page load's first beacon
+    (`kind='load'`, key = build; once per page session at the gate, ≤ 200 per member per day; builds
+    before this one fall back to their first-paint sample count). Once the current build has **≥ 20
+    page loads or 2h live**, main()'s 60s flush compares it with the previous known build that had
+    traffic: **new distinct errors** (a file + message signature the previous build never hit) hit by
+    **≥ 2 members**; **error hits per page load ≥ 3×** (≥ 20 loads on both, ≥ 10 hits now; zero hits
+    before counts as one); **p75 first paint ≥ 30% AND ≥ 300ms slower** (≥ 10 samples each). Each
+    condition sends **one** alert per build through the ops lane (`poller.pushOps`: the operator's
+    Telegram and push, like every server-health alert); the dedupe is a `usage_mark` `alert` row, so
+    a restart never re-sends (and the chart shows it). The browser-supplied message loses `<>&`
+    before it rides a Telegram message. The health cards gain **Post-deploy check**: "build -111:
+    OK", "collecting 7 / 20 page loads", or "regression: …".
+  - **Error triage**: one row per distinct error **signature** (`<file>|<message hash>` — the
+    build and line dropped, so a bug keeps its row across deploys and line moves): first/last build,
+    first/last seen, hits, **members affected (a count, never who)**, and a **resolve** toggle —
+    `POST /api/admin/usage/errors {sig, resolved}` (admin-only, refused cross-site like every POST,
+    by signature only). Resolving stamps the error's latest build (`usage_triage`); a hit from a
+    **newer** build (deploy order) reopens it flagged **regressed**, while stale tabs on the old build
+    do not. The list rides `GET /api/admin/usage` (`health.triage`); every string is escaped.
+  - **Heatmap by the hour the minutes were spent**: the client splits its visible spans at
+    clock-hour boundaries and sends `h: {UTC hour index -> ms}` (an ET hour is a whole UTC hour);
+    the gate keeps only hours overlapping the beacon's own wall-time window (since the session's
+    last accepted beacon, ≤ 2 min, ± 1 min for clock skew) and scales them to the accepted time;
+    anything uncovered lands in the arrival hour, the old rule.
+  - **Stale builds survive restarts**: the last build per member is kept in `usage_last` (one row
+    per member, written by the 60s flush, pruned after a day) instead of a server map.
+  - **Monthly trend rows**: `kind='mo'` (day = `YYYY-MM-01`, key = `YYYY-MM`) keeps **one total per
+    member per month — screen time and active days, nothing else** — incrementally at each flush,
+    exempt from the 30-day fold, kept for **this month and the previous one** (2 months), then
+    deleted. At 30d, where the prior range is already folded, a member's "trend" compares this
+    month's screen time per covered day with last month's (blank until both cover a week). The first
+    open backfills them from the kept daily rows and notes the first day covered. Disclosed on the
+    member's card (which now lists their months), in the member guide and here.
+- **Usage: sitewide tab paths, control usage and quiet controls, device split per tab**
+  (build 2026.09.24-112) — roadmap item 2. Everything here is **sitewide only**: stored under
+  `uid '0'` in `usage_day`, never a member's uid (the beacon's member is used only to refuse a
+  paused or disabled account and to cap what one account adds per ET day, in memory), kept **30
+  days** (90 until build 2026.09.24-114). A paused member's beacon contributes nothing (the route and `usageRecord` both refuse it,
+  and the browser stops counting at the click).
+  - **Tab paths** (`kind='tr'`, key `<from>><to>`, both tab ids of the feature manifest): counted
+    from `showView` — a move counts once the destination has held the screen **2s** (a quicker exit
+    is a bounce: A → B (1s) → C counts A→C), re-selecting the tab you are on is not a move. The first
+    tab a page load settles on is its **entry tab** (`kind='en'`, once per page session at the gate).
+    The fold shows the **top 15 transitions**, **"where people go from X"** (pick a tab → its
+    outbound split) and entry tabs, plus a read-only **suggested order** line: the movable tabs
+    ranked by reach × hours in range, beside the ribbon's current order (nothing is reordered).
+  - **Control usage** (`kind='ctl'`, key `<tab>.<control>[=<value>]`): a fixed allowlist, the
+    `US_CONTROLS` table in `public/js/usage.js`, counted at each control's existing handler — the
+    Markets column picker (`markets.col-on=<id>` / `col-off`, ids from the fixed column list), the
+    window / group / weight / scope / side / lookback segmented controls (values from each control's
+    fixed option set), filter presets (`markets.preset=watch|notes|pos|clear`), CSV and share buttons
+    per tab, the drawer's section controls (it has no collapsible sections: candle window, full
+    signal history, all news, derivs refresh, share), and **search used** (one count per typing
+    burst, never the text). The server parses **that same table text** at boot
+    (`src/usage-controls.js`, strict JSON between marker comments) and drops every other key, so
+    browser and server cannot drift; a parity test pins it and the column ids against `base.js`.
+    Clamped per beacon (≤ 20 per key, ≤ 40 keys; transitions ≤ 30 per key and no more than the
+    accepted wall time can hold at one per 2s) and per account per ET day (2,000). The fold lists
+    each tab's controls by use with **"never used in range"** highlighted, and a **Quiet controls**
+    list (never used, on tabs that had screen time) — the control-level twin of the quiet-tab flag;
+    columns never toggled either way are summarised in one line.
+  - **Device split per tab** (`kind='tdev'`, key `<tab>|desktop|mobile|tablet|pwa`, ms): screen time
+    per tab by device class, as a stacked bar per tab.
+  - Disclosed on the member's card, in the member guide and here: sitewide (not linked to you)
+    navigation paths and control-usage counts; never text, tickers or filter values beyond the
+    allowlisted preset ids.
+- **Usage: weekly operator digest and opt-in lapsed-member nudges** (build 2026.09.24-113) —
+  roadmap item 3. Pure composition and rules in `src/usage-digest.js`; data in `accounts.js`
+  (`usageDigestData`, `usageNudgeInputs`); delivery in `server.js` (`usageDigestTick`, on main()'s
+  60s usage flush).
+  - **Weekly digest to the operator**: on the configured **ET weekday** (default **Monday**), once
+    the morning brief's default send moment (`BRIEF_DEFAULT_HOUR`:00 UTC on that date) has passed,
+    one compact Telegram message goes to the **designated operator chats** (the Telegram roster's
+    operator flag — the brief's operator-test targets), force-sent like the brief, plus a quiet
+    ops-ring entry. It covers the **7 complete ET days before the scheduled day vs the 7 before
+    those**: active members this week vs last, stickiness (mean daily active ÷ weekly active),
+    **newly lapsed** (active last week, no active day this week — ≥ 7 days), **returning** (active
+    this week, not last week, a member since before last week), new joiners, **"N paused"** (paused
+    members are left out of every set and never named), the top 3 tabs by screen time with the
+    week-over-week change, the **biggest mover** (largest change among tabs with ≥ 10 min in either
+    week), **quiet** member-visible tabs (< 10% reach), **new / regressed errors** from the triage
+    list (open only; file:line and message clipped and escaped) and the **current build's
+    post-deploy verdict**. Every dynamic string is HTML-escaped for Telegram's `parse_mode=HTML`; a
+    ladder (names 10 → 5 → 2 → counts only, error lines 2 → 1 → 0, quiet tabs 6 → 3 → a count, then
+    whole lines from the end) keeps it under **3,900 visible characters** (Telegram's hard limit is
+    4,096). The **dedupe is per ISO week** (`usage_cfg.digestWeek`, persisted — a restart never
+    re-sends); a missed day catches up later in the same week, never the next; with no operator
+    chat designated nothing is marked. Settings (on/off, weekday) are persisted in `usage_cfg`.
+  - **Lapsed-member nudge — OFF by default**: when the operator turns it on, once an hour between
+    10:00 and 18:00 ET, a member whose last active ET day (≥ a minute on screen) is **8–14 days
+    ago** — active in the prior 14 days, then 7 full days with none — and whom the server has not
+    seen for 7 days gets **one** friendly reminder: the operator's lead line (default "Haven't seen
+    you in a week — here's what moved:", ≤ 300 characters, plain text) plus 2–3 market lines from
+    the brief's own context (the benchmarks' day and the top stock mover each way — no personal
+    data). **At most once per 30 days** per member (`usage_nudge`, one row per member, pruned at 30
+    days); **never** to paused, disabled or operator accounts; only over the channel the member
+    already has — their own linked Telegram (queued normally, so their quiet hours and hourly cap
+    apply), else browser push; **never email or SMS; nothing if neither**. Each reminder is a
+    `dm_audit` row `usage-nudge` (actor = the admin who switched reminders on; detail =
+    `<handle> · telegram|push`), shown in All messages → Read log and in the fold's log.
+  - **Admin · Usage · Digest & nudges**: the settings, last sent, this week's schedule, a preview of
+    this week's digest (plain text, escaped), **send test now** (`POST /api/admin/usage/digest/test`
+    — admin-only; operator chats only; does not count as the week's send), the reminder toggle and
+    text, and the reminder log. `GET/POST /api/admin/usage/digest` are admin-only.
+  - Disclosed on the member's **Your usage** card (which says whether reminders are on), in the
+    member guide and here: an inactive member may get one reminder if the operator turns it on;
+    pausing usage opts out.
+- **Usage fixes** (build 2026.09.24-114) — from review of builds -111 → -113:
+  - **Chronic errors are not "new"**: the post-deploy `new-errors` condition counts a signature only
+    when **no older known build** hit it and `usage_err` first saw it **after this build went live**
+    (so a bug older than the 4 known builds stays chronic). The baseline is the most recent older
+    build with **≥ 20 page loads** — a short-lived hotfix is skipped — and with none, the verdict is
+    "no-baseline" and nothing is compared.
+  - **Triage in deploy order**: resolving stamps the **newest build in deploy order**
+    (`usage_build.at`) that hit the error, not the row hit last; only a build deployed after that one
+    reopens it, so a stale tab on an older build hitting it late never becomes the baseline.
+  - **Reminders respect quiet hours**: a Telegram reminder to a member whose chat is inside its quiet
+    window is **held** (not sent, not marked) and retried by the next hourly pass inside 10:00–18:00 ET.
+    A browser-push reminder has its own notification tag (`usage-nudge`) and opens the site root on
+    Markets; message notifications are unchanged.
+  - **k ≥ 3 for the sitewide sections**: tab paths, entry tabs, control usage and the device split need
+    a range of **≥ 7 days**, cover only its **complete** ET days (today is left out), and are shown
+    only when **≥ 3 members** contributed on one day of it; below that the fold says "not enough
+    members to show without identifying someone (n<3)". The count behind it is `kind='sc'` (uid
+    `'0'`, key = the ET day, `n` = how many distinct members added anything to the sitewide rows that
+    day) — kept from a transient in-memory set that is dropped when the day ends; **which** members
+    is never stored (after a restart the day's set starts from the members with any row that day, so
+    a restart can only under-count). The nav suggestion reads the tab table, so it stays.
+  - **Entry tabs are budgeted**: an entry tab draws on the same 2,000-per-member-per-day sitewide
+    budget and is capped at **200 per member per ET day** (like page loads), so fresh page-session
+    ids cannot inflate it.
+  - **Visible-only dwell**: the 2s bounce rule counts only time the page was visible (the clock stops
+    while hidden), and a page opened in the background gets no entry tab until it has been on screen.
+  - **Sitewide rows kept 30 days** (was 90 — the owner's minimal-retention call; the view never
+    reaches past 30 days): `tr`, `en`, `ctl`, `tdev` and `sc`. The `usage_mark` rows (deploys, gate
+    and menu changes, alert dedupe) stay **90 days**: they are operator config history, with **no
+    uid and no personal data**.
+  - Smaller: a repeated `POST /api/nav-groups` that changes nothing adds no marker; the usage routes'
+    POST bodies (`/api/usage/pause`, `/api/admin/usage/errors`, `/api/admin/usage/digest`) must be a
+    JSON object (400 otherwise — a text/plain body was a 500); a `usage_day(kind, day)` index; the
+    regression tick stops for a build once every condition has alerted or it is more than 3 days
+    past first-seen, and the triage sweep runs every 10 minutes instead of every tick.
 - **Admin panel folds** — the panel had grown to eight full-height boxes, so reaching the one you
   wanted meant scrolling past the seven you did not. Every segment is now a collapsed row naming
   what is inside it, with an expand-all/collapse-all control. Each fold wraps its box from

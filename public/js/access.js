@@ -196,7 +196,8 @@ function admWhen(ts){ try{ return new Date(ts).toLocaleString('en-US',{month:'sh
 
 // How each dm_audit action reads in the log. Unlisted actions show their raw name, as they always did.
 // (build 2026.09.24-109) view-usage: an operator opened one member's usage detail in the Usage fold.
-const ADM_AUDIT_LABEL={'view-usage':'viewed the usage detail of'};
+// (build 2026.09.24-113) usage-nudge: a lapsed-member reminder went out (the actor is the admin who switched reminders on).
+const ADM_AUDIT_LABEL={'view-usage':'viewed the usage detail of','usage-nudge':'(reminders on) sent a lapsed-member reminder to'};
 function renderAdmDm(){
   const box=el('admDmBox'); if(!box) return;
   if(!IS_ADMIN){ box.innerHTML=''; return; }

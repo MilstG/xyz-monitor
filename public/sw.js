@@ -50,6 +50,17 @@ self.addEventListener("push", (e) => {
   let d = {};
   try { d = e.data ? e.data.json() : {}; } catch (_) {}
   const title = String(d.title || "Milst Screener");
+  // (build 2026.09.24-114) a usage reminder is not a message: its own tag (it never replaces or is
+  // replaced by a conversation's notification) and its own click target (the site root, Markets)
+  if (d.kind === "nudge") {
+    e.waitUntil(self.registration.showNotification(title, {
+      body: String(d.body || ""),
+      tag: "usage-nudge",
+      icon: "/icon.svg",
+      data: { kind: "nudge" },
+    }));
+    return;
+  }
   e.waitUntil(self.registration.showNotification(title, {
     body: String(d.body || "new message"),
     tag: "dm-" + (d.thread || "x"),          // one notification per conversation, newest wins
@@ -60,6 +71,14 @@ self.addEventListener("push", (e) => {
 
 self.addEventListener("notificationclick", (e) => {
   e.notification.close();
+  const nd = e.notification && e.notification.data;
+  if (nd && nd.kind === "nudge") {   // (build 2026.09.24-114) a usage reminder opens the terminal on Markets, not Messages
+    e.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((tabs) => {
+      for (const t of tabs) { if ("focus" in t) { t.focus(); try { t.postMessage({ go: "markets" }); } catch (_) {} return; } }
+      return self.clients.openWindow ? self.clients.openWindow("/") : null;
+    }));
+    return;
+  }
   // Focus an open terminal if one exists and ASK it to switch to Messages (the page listens for
   // {go:'dm'} — a navigate() reloaded the whole app and dropped a half-typed message); only a
   // window that isn't open gets a real navigation.

@@ -15,7 +15,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.24-110";
+const VERSION = "2026.09.24-114";
 // (build 2026.09.24-107) Distinguishes this process from the last one in ETags built on
 // per-process counters (a restart must never 304 a client onto a different body).
 const BOOT_NONCE = Date.now().toString(36) + crypto.randomBytes(3).toString("hex");
@@ -214,6 +214,8 @@ let poller = null;
 // were never closed on SIGTERM and the deploy notice they carry never went out.
 let SSE_REGISTRY = null;
 let USAGE_SWEEP = null;   // (build 2026.09.24-110 follow-up) buildServer's usage sweep, for main() and shutdown
+let USAGE_REGRESS = null;   // (build 2026.09.24-111) buildServer's post-deploy regression check, for main()'s 60s flush
+let USAGE_DIGEST = null;    // (build 2026.09.24-113) buildServer's weekly digest + nudge tick, for main()'s 60s flush
 
 // Weak ETag from the payload's data version so an unchanged snapshot revalidates to 304
 // (browsers polling every 30s get a tiny empty response instead of the full table).
@@ -1024,7 +1026,13 @@ async function buildServer() {
   fastify.post("/api/features", { bodyLimit: 8 * 1024 }, async (req, reply) => {
     reply.header("cache-control", "no-store");
     const b = req.body || {};
-    const r = poller.setFlag(String(b.key || ""), String(b.state || ""), isAdmin(req));
+    const key = String(b.key || "");
+    let was = null;
+    try { was = require("./src/compute").featureState(poller.getFlags(), key); } catch (_) {}
+    const r = poller.setFlag(key, String(b.state || ""), isAdmin(req));
+    // (build 2026.09.24-111) a write that MOVED the resolved gate is a marker on the Usage chart
+    // (operator config history: no uid); a same-state write is not a change.
+    if (r.ok && r.state !== was) { try { ACCOUNTS.usageMark("gate", key + "=" + r.state); } catch (_) {} }
     return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : r.error === "write-failed" ? 503 : 400)).send(r);
   });
 
@@ -1034,11 +1042,17 @@ async function buildServer() {
   fastify.post("/api/nav-groups", { bodyLimit: 4 * 1024 }, async (req, reply) => {
     reply.header("cache-control", "no-store");
     const b = req.body || {};
+    // (build 2026.09.24-114) the menus before the write: a marker only when they actually changed
+    const navNow = () => { try { return JSON.stringify(poller.getNavGroups()); } catch (_) { return null; } };
+    const was = navNow();
     // Two operations, one route, distinguished by which field the body carries: {key,label}
     // renames a menu, {view,group} moves a tab into one.
     const r = b.view != null
       ? poller.setNavViewGroup(String(b.view || ""), String(b.group || ""), isAdmin(req))
       : poller.setNavGroupLabel(String(b.key || ""), String(b.label == null ? "" : b.label), isAdmin(req));
+    // (build 2026.09.24-111) Usage markers: a tab moved ('<view>><group>') or a menu renamed ('#<group>';
+    // the label itself is not kept). A repeat of the current state is not a change (-114).
+    if (r.ok && (was == null || navNow() !== was)) { try { ACCOUNTS.usageMark("nav", b.view != null ? String(b.view) + ">" + String(b.group || "") : "#" + String(b.key || "")); } catch (_) {} }
     return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : r.error === "write-failed" ? 503 : 400)).send(r);
   });
 
@@ -1558,9 +1572,16 @@ async function buildServer() {
   //   errs  [{m, f, l, c}]: deduped client-side by message + file:line; the message is cut to 200
   //         characters, the file to a same-site path (never a query string), c = hits (clamped).
   //         Browser-supplied text: stored as data, escaped by every reader, never interpreted.
+  //   h     (build 2026.09.24-111) the beacon's minutes per clock hour, {UTC hour index -> ms} (an ET
+  //         hour is a whole UTC hour): the heatmap's buckets. Shape-checked here (integer keys, at
+  //         most 8, positive ms, each ≤ 2 min); the gate keeps only the hours of the beacon's own
+  //         wall-time window and scales them to the accepted time (usage-gate.js).
+  //   ld    (-111) 1 on a page load's first beacon: the regression check's page-load count, under a
+  //         known build only, once per page session (the gate) and ≤ 200 per member per day.
   const USAGE_BEACON_ACTS = new Set(["csv", "drawer-open"]);
-  const USAGE_MAX_ACTS = 50, USAGE_MAX_ERRS = 5, USAGE_ERR_MSG = 200, USAGE_ERR_LOC = 120;
-  const usageBuild = new Map();            // uid -> {build, at}: the last beacon's build (in memory: an hour is the window)
+  const USAGE_MAX_ACTS = 50, USAGE_MAX_ERRS = 5, USAGE_ERR_MSG = 200, USAGE_ERR_LOC = 120, USAGE_MAX_HRS = 8;
+  // (build 2026.09.24-111) The last beacon's build per member now lives in accounts.js (usageLastBuild),
+  // written with the 60s flush, so a restart no longer zeroes the stale-build count.
   const USAGE_STALE_MS = 3600 * 1000;
   // Strip control characters (and the bidi/zero-width ones a hostile message would use to lie about
   // what it says) — the text still goes through esc() everywhere it is shown.
@@ -1638,10 +1659,64 @@ async function buildServer() {
         errs.push({ msg, loc, c: Number.isFinite(c) && c > 0 ? Math.min(USAGE_MAX_ACTS, c) : 1 });
       }
     }
-    return { tabs, pwa: b.pwa === true, acts, build, rawBuild, sid, perf, errs: build ? errs : [] };
+    const hrs = {};
+    if (b.h && typeof b.h === "object" && !Array.isArray(b.h)) {
+      for (const [k, v] of Object.entries(b.h).slice(0, USAGE_MAX_HRS)) {
+        if (!/^\d{1,9}$/.test(k)) continue;
+        const ms = Math.round(Number(v));
+        if (Number.isFinite(ms) && ms > 0) hrs[k] = Math.min(USAGE_MAX_FLUSH_MS, ms);
+      }
+    }
+    // (build 2026.09.24-112) sitewide tab paths, the entry tab and control counts (usageSiteClamp)
+    const site = usageSiteClamp(b);
+    return { tabs, pwa: b.pwa === true, acts, build, rawBuild, sid, perf, errs: build ? errs : [], hrs, load: !!build && b.ld === 1,
+      tr: site.tr, en: site.en, ctl: site.ctl };
+  }
+  // (build 2026.09.24-112) The beacon's sitewide fields, all optional, all validated against allowlists:
+  //   tr   {'<from>><to>' -> n}: tab→tab transitions; both ends must be tab ids of the feature manifest
+  //        and differ; ≤ USAGE_MAX_TR_KEYS keys, each n clamped to USAGE_MAX_TR_N. The gate clamps the
+  //        total again to what the accepted wall time allows (one per 2s dwell).
+  //   en   the page load's entry tab (a tab id), once per page session (the gate).
+  //   ctl  {'<group>.<control>[=<value>]' -> n}: control uses; the key must be in the US_CONTROLS
+  //        allowlist (public/js/usage.js, parsed by src/usage-controls.js — the same text the browser
+  //        runs); ≤ USAGE_MAX_CTL_KEYS keys, each n clamped to USAGE_MAX_CTL_N.
+  // Every key is checked against a Set, so '__proto__', 'constructor' and friends are simply unknown;
+  // the output objects are null-prototype all the same. accounts.js stores all three under uid '0'.
+  const USAGE_MAX_TR_KEYS = 40, USAGE_MAX_TR_N = 30, USAGE_MAX_CTL_KEYS = 40, USAGE_MAX_CTL_N = 20;
+  const USAGE_CTL = require("./src/usage-controls").usageControls();
+  if (USAGE_CTL.error) log("usage: control allowlist unavailable (" + USAGE_CTL.error + ") — control counts are dropped");
+  const usageObj = (x) => x && typeof x === "object" && !Array.isArray(x);
+  function usageSiteClamp(b) {
+    const tr = Object.create(null), ctl = Object.create(null);
+    if (usageObj(b.tr)) {
+      let n = 0;
+      for (const [k, v] of Object.entries(b.tr)) {
+        if (n >= USAGE_MAX_TR_KEYS) break;
+        const i = typeof k === "string" ? k.indexOf(">") : -1;
+        if (i < 0) continue;
+        const from = k.slice(0, i), to = k.slice(i + 1);
+        if (from === to || !USAGE_TAB_KEYS.has(from) || !USAGE_TAB_KEYS.has(to)) continue;
+        const c = Math.trunc(Number(v));
+        if (!Number.isFinite(c) || c <= 0) continue;
+        tr[k] = Math.min(USAGE_MAX_TR_N, c); n++;
+      }
+    }
+    if (usageObj(b.ctl)) {
+      let n = 0;
+      for (const [k, v] of Object.entries(b.ctl)) {
+        if (n >= USAGE_MAX_CTL_KEYS) break;
+        if (!USAGE_CTL.keys.has(k)) continue;
+        const c = Math.trunc(Number(v));
+        if (!Number.isFinite(c) || c <= 0) continue;
+        ctl[k] = Math.min(USAGE_MAX_CTL_N, c); n++;
+      }
+    }
+    const en = typeof b.en === "string" && USAGE_TAB_KEYS.has(b.en) ? b.en : null;
+    return { tr, en, ctl };
   }
   function usageStore(uid, p, now) {
-    const r = ACCOUNTS.usageRecord(uid, p.tabs, p.dev, now, { acts: p.acts, build: p.build, perf: p.perf, errs: p.errs });
+    const r = ACCOUNTS.usageRecord(uid, p.tabs, p.dev, now, { acts: p.acts, build: p.build, perf: p.perf, errs: p.errs, hrs: p.hrs, load: p.load,
+      tr: p.tr, en: p.en, ctl: p.ctl });   // (build 2026.09.24-112) stored sitewide, without the uid
     if (r.stored) ACCOUNTS.touch(uid);
     return r;
   }
@@ -1653,7 +1728,7 @@ async function buildServer() {
     const now = Date.now();
     const c = usageClamp(req.body);
     if (c.error) return reply.code(400).send({ ok: false, error: c.error });
-    if (c.rawBuild) usageBuild.set(me.uid, { build: c.rawBuild, at: now });
+    if (c.rawBuild) ACCOUNTS.usageLastBuild(me.uid, c.rawBuild, now);   // (-111) persisted with the flush
     c.dev = usageDevice(req.headers["user-agent"], c.pwa);
     // (-110 follow-up) held early beacons get the same 204: sendBeacon never sees the answer anyway
     const g = usageGate.offer(me.uid, c.sid, c, now, (uid, p) => usageStore(uid, p, now));
@@ -1662,16 +1737,9 @@ async function buildServer() {
     return reply.code(204).send();
   });
   // Members whose last beacon inside the hour came from a build other than this one: tabs still
-  // running an old bundle after a deploy (the reload toast is what fixes them).
-  function usageStale(now) {
-    const t = now != null ? now : Date.now();
-    let n = 0;
-    for (const [uid, x] of usageBuild) {
-      if (t - x.at > USAGE_STALE_MS) { usageBuild.delete(uid); continue; }
-      if (x.build !== VERSION && !ACCOUNTS.usagePaused(uid)) n++;
-    }
-    return n;
-  }
+  // running an old bundle after a deploy (the reload toast is what fixes them). (-111) Counted from
+  // the persisted per-member row, so it survives the restart that the deploy itself is.
+  const usageStale = (now) => ACCOUNTS.usageStale(VERSION, now != null ? now : Date.now(), USAGE_STALE_MS);
   // Reach per tab over the full 30-day window, for Admin → Feature visibility (build 2026.09.24-110).
   // quiet = under 10% of the members active in the window opened it at all.
   // (-110 follow-up) GET /api/features calls this on every read: memoized on the flush generation,
@@ -1703,9 +1771,13 @@ async function buildServer() {
     const me = dmMe(req, reply); if (!me) return;
     return ACCOUNTS.usageMine(me.uid, USAGE_TABS());
   });
+  // (build 2026.09.24-114) the usage routes' JSON bodies: a plain object or a 400 (a text/plain body
+  // arrives as a string; an array or null is not a settings object either)
+  const usageBodyOk = (b) => b != null && typeof b === "object" && !Array.isArray(b);
   fastify.post("/api/usage/pause", { bodyLimit: 1024 }, (req, reply) => {
     reply.header("cache-control", "no-store");
     const me = dmMe(req, reply); if (!me) return;
+    if (!usageBodyOk(req.body)) return reply.code(400).send({ ok: false, error: "bad body" });
     const r = ACCOUNTS.setUsagePaused(me.uid, !!(req.body || {}).paused);
     if (r.ok && r.paused) usageGate.forget(me.uid);
     return r;
@@ -2347,7 +2419,11 @@ async function buildServer() {
     const key = [BOOT_NONCE, ACCOUNTS.usageGen(), r, ACCOUNTS.countUsers(), [...online].sort().join(","), stale, Math.floor(Date.now() / 60000)].join(".");
     let hit = usageBodies.get(r);
     if (!hit || hit.key !== key) {
-      const body = ACCOUNTS.usageSummary({ r, online, tabs: USAGE_TABS(), build: VERSION, stale });
+      // (build 2026.09.24-112) navOrder: the ribbon's movable tabs as the menus hold them now, for the
+      // read-only "suggested order" line (a menu move is a usage_mark, which bumps the cache key)
+      let navOrder = null;
+      try { navOrder = poller.getNavGroups().reduce((a, g) => a.concat(g.views || []), []); } catch (_) {}
+      const body = ACCOUNTS.usageSummary({ r, online, tabs: USAGE_TABS(), build: VERSION, stale, navOrder });
       body.publicOn = USAGE_PUBLIC; body.beacon = true;
       hit = { key, body, tag: 'W/"u' + crypto.createHash("sha1").update(key).digest("base64url").slice(0, 16) + '"' };
       usageBodies.set(r, hit);
@@ -2360,6 +2436,185 @@ async function buildServer() {
     const r = ACCOUNTS.usageMember(adminUid(req), str((req.query || {}).h) || "", USAGE_TABS());
     if (!r.ok) return reply.code(404).send(r);
     return r;
+  });
+  // (build 2026.09.24-111) Error triage: the operator marks one distinct error (its signature —
+  // '<file>|<message hash>', never text) resolved or open again. Admin-only; like every POST here it
+  // is refused cross-site before any handler runs (the Sec-Fetch-Site hook) and rides SameSite=Lax
+  // cookies. The list itself is in GET /api/admin/usage (health.triage); a toggle bumps its cache key.
+  fastify.post("/api/admin/usage/errors", { bodyLimit: 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    if (!adminOnly(req, reply)) return;
+    if (!usageBodyOk(req.body)) return reply.code(400).send({ ok: false, error: "bad body" });   // (-114)
+    const b = req.body;
+    const r = ACCOUNTS.usageTriageSet(typeof b.sig === "string" ? b.sig : "", b.resolved === true);
+    if (!r.ok) return reply.code(r.error === "no such error" ? 404 : 400).send(r);
+    return r;
+  });
+  // (build 2026.09.24-111) The post-deploy regression check, on main()'s 60s usage flush: once this
+  // build is ready (≥ 20 page loads or 2h live), each condition that holds against the previous
+  // known build is sent ONCE — through the ops lane (poller.pushOps: the ring, the operator's
+  // Telegram and push, like every other server-health alert). The dedupe is a usage_mark row, so a
+  // restart never re-sends. The alert names a file:line and counts; the browser-supplied message
+  // goes out with markup characters removed (it rides a Telegram HTML message).
+  const usageRegWord = (c) => {
+    const tg = (x) => String(x == null ? "" : x).replace(/[<>&]/g, " ").slice(0, 120);
+    if (c.kind === "new-errors") return c.n + " new error" + (c.n === 1 ? "" : "s") + " hit by \u2265" + ACCOUNTS.USAGE_REG.errMembers + " members \u2014 top: "
+      + tg(c.top.loc) + (c.top.msg ? " \u00b7 " + tg(c.top.msg) : "") + " (" + c.top.members + " members, " + c.top.hits + " hits)";
+    if (c.kind === "err-rate") return "error hits per page load up " + c.x.toFixed(1) + "\u00d7 (" + c.rate.toFixed(2) + " vs " + (c.ratePrev || 0).toFixed(2) + ", " + c.hits + " hits in " + c.loads + " loads)";
+    if (c.kind === "perf") return "p75 first paint " + (c.p75 / 1000).toFixed(1) + "s vs " + (c.p75Prev / 1000).toFixed(1) + "s (+" + Math.round((c.p75 / c.p75Prev - 1) * 100) + "%)";
+    return c.kind;
+  };
+  // (build 2026.09.24-114) Cost: the check stops for good once every condition has alerted for this
+  // build or the build is more than 3 days past its first-seen time (a regression is a post-DEPLOY
+  // question; the health card still computes the verdict on demand), and the triage sweep runs every
+  // 10 minutes rather than on every 60s tick.
+  const USAGE_REG_DAYS = 3, USAGE_TRIAGE_EVERY_MS = 10 * 60000, USAGE_REG_KINDS = ["new-errors", "err-rate", "perf"];
+  let usageTriageAt = 0;
+  function usageRegressTick(now) {
+    const t = now != null ? now : Date.now();
+    if (t - usageTriageAt >= USAGE_TRIAGE_EVERY_MS) { usageTriageAt = t; ACCOUNTS.usageTriageSweep(t); }   // a resolved error that recurred on a newer build reopens even while nobody looks
+    const info = ACCOUNTS.usageBuildInfo().find((x) => x.build === VERSION);
+    if (info && t - info.firstSeen > USAGE_REG_DAYS * 864e5) return { state: "done", sent: 0, why: "age" };
+    if (USAGE_REG_KINDS.every((k) => ACCOUNTS.usageAlerted(VERSION, k))) return { state: "done", sent: 0, why: "alerted" };
+    const v = ACCOUNTS.usageRegress(VERSION, t);
+    let sent = 0;
+    if (v.state === "regression") for (const c of v.conds) {
+      if (!ACCOUNTS.usageAlertOnce(VERSION, c.kind, t)) continue;
+      sent++;
+      if (poller && poller.pushOpsNow) poller.pushOpsNow("usage: regression on build " + VERSION, usageRegWord(c) + " \u2014 vs build " + v.prev + ". Admin \u00b7 Usage \u00b7 Client health.", "warn");
+      log("usage regression alert (" + c.kind + "): build " + VERSION + " vs " + v.prev);
+    }
+    return { state: v.state, sent };
+  }
+  USAGE_REGRESS = usageRegressTick;
+  fastify.decorate("usageRegressTick", usageRegressTick);
+  // ===== (build 2026.09.24-113) weekly usage digest for the operator + opt-in lapsed-member nudges =====
+  // The digest: once per ISO week, on the configured ET weekday (default Monday) once the morning
+  // brief's default send moment has passed, one compact Telegram message to the DESIGNATED operator
+  // chats — the brief's operator-test targets, force-sent like the brief — plus a quiet ops-ring entry
+  // (poller.pushOps with quiet: the bell log shows it, Telegram does not get it twice). The dedupe is
+  // usage_cfg.digestWeek, so a restart never re-sends a week; with no operator chat linked nothing is
+  // marked and it goes out once one is (the same week only). Composition: src/usage-digest.js.
+  // The nudge: OFF unless the operator turns it on. Once an hour in ET daytime (10:00–18:00), every
+  // member the rules in usage-digest.js nudgeCheck allow gets ONE reminder over the channel they
+  // already have — their own linked Telegram (queued normally, so their quiet hours and hourly cap
+  // hold) or else browser push; never email or SMS, nothing when neither exists. Each one is a
+  // dm_audit 'usage-nudge' row naming the admin who switched nudges on.
+  const UDG = require("./src/usage-digest");
+  const usageBriefHour = () => { try { const s = poller.briefStateNow && poller.briefStateNow(); return s && Number.isFinite(s.defaultHour) ? s.defaultHour : 10; } catch (_) { return 10; } };
+  const usageOperatorChats = () => { try { return poller.pushOperatorChatsNow ? poller.pushOperatorChatsNow() : []; } catch (_) { return []; } };
+  // The digest for scheduled ET day `day` (the preview uses today when this week's day is still ahead).
+  function usageDigestCompose(day, now, html) {
+    const data = ACCOUNTS.usageDigestData({ now, day, tabs: USAGE_TABS(), build: VERSION });
+    return { data, text: UDG.digestText(data, { html }) };
+  }
+  function usageDigestSend(text) {
+    const targets = usageOperatorChats();
+    for (const c of targets) poller.pushEnqueueNow(c, text, true);
+    return targets.length;
+  }
+  let usageNudgeHour = "";
+  async function usageNudgeTick(now, force) {
+    const t = now != null ? now : Date.now();
+    const cfg = ACCOUNTS.usageCfg();
+    if (!cfg.nudgeOn) return { off: true, sent: 0 };
+    const C = require("./src/compute"), et = C.etParts(t), hk = C.etDayStr(t) + "|" + et.h;
+    if (!force) { if (et.h < 10 || et.h >= 18 || usageNudgeHour === hk) return { sent: 0, waiting: true }; }
+    usageNudgeHour = hk;
+    // the market lines, assembled once and only when someone is actually due one
+    let lines = null;
+    const market = () => { if (lines) return lines; try { lines = UDG.nudgeLines(poller.briefCtxNow ? poller.briefCtxNow(t, 0) : null); } catch (_) { lines = []; } return lines; };
+    const lead = cfg.nudgeText || UDG.NUDGE_DEFAULT_TEXT;
+    const pushOn = !!(poller.pushOnNow && poller.pushOnNow());
+    const out = [], held = [];
+    for (const m of ACCOUNTS.usageNudgeInputs(t)) {
+      const tg = pushOn && poller.pushRecipientsFor ? poller.pushRecipientsFor(m.uid) : [];
+      const hasPush = !!WEBPUSH && ACCOUNTS.webPushFor(m.uid).length > 0;
+      const v = UDG.nudgeCheck(Object.assign({}, m, { hasTg: tg.length > 0, hasPush }), t);
+      if (!v.ok) continue;
+      // (build 2026.09.24-114) the member's own quiet hours hold a reminder like they hold a DM
+      // mirror: one decision per member (any of their chats quiet → none of them now), nothing is
+      // marked sent, and the next hourly pass inside the 10:00–18:00 window tries again.
+      if (v.via === "telegram" && tg.some((c) => poller.pushQuietNow && poller.pushQuietNow(c))) { held.push(m.handle); continue; }
+      let sent;
+      if (v.via === "telegram") { const msg = UDG.nudgeMessage(lead, market(), true); for (const c of tg) poller.pushEnqueueNow(c, msg, false); sent = true; }
+      else { try { sent = await webPushSend(m.uid, UDG.nudgeMessage(lead, market(), false)); } catch (_) { sent = false; } }
+      if (!sent) continue;
+      ACCOUNTS.usageNudgeMark(m.uid, v.via, cfg.nudgeBy, t);
+      out.push({ handle: m.handle, via: v.via });
+      log("usage nudge: " + m.handle + " via " + v.via);
+    }
+    return { sent: out.length, to: out, held };
+  }
+  async function usageDigestTick(now) {
+    const t = now != null ? now : Date.now();
+    const cfg = ACCOUNTS.usageCfg();
+    const res = { digest: null, nudge: null };
+    if (cfg.digestOn) {
+      const s = UDG.digestSchedule(t, cfg.digestDay, usageBriefHour());
+      if (!s.due) res.digest = { due: false, week: s.week };
+      else if (cfg.digestWeek === s.week) res.digest = { due: true, already: true, week: s.week };
+      else if (!usageOperatorChats().length) res.digest = { due: true, sent: 0, week: s.week, error: "no-operator-designated" };
+      else {
+        const { text } = usageDigestCompose(s.day, t, true);
+        const n = usageDigestSend(text);
+        ACCOUNTS.usageDigestSent(s.week, t);
+        if (poller.pushOpsNow) poller.pushOpsNow("usage digest", "week " + s.week + " sent to " + n + " operator chat" + (n === 1 ? "" : "s"), "info", true);
+        log("usage digest " + s.week + " sent to " + n + " operator chat(s)");
+        res.digest = { due: true, sent: n, week: s.week, chars: briefVisibleLenOf(text) };
+      }
+    }
+    try { res.nudge = await usageNudgeTick(t); } catch (e) { log("usage nudge FAILED (isolated): " + (e && e.message)); }
+    return res;
+  }
+  const briefVisibleLenOf = (x) => require("./src/compute").briefVisibleLen(x);
+  USAGE_DIGEST = usageDigestTick;
+  fastify.decorate("usageDigestTick", usageDigestTick);
+  fastify.decorate("usageNudgeTick", usageNudgeTick);
+  // The fold's sub-section: settings, last sent, this week's schedule, the digest preview (PLAIN text —
+  // the fold escapes it), the nudge log. Admin-only; nothing here names anyone the member table
+  // does not already show, and the nudge log is the dm_audit rows.
+  function usageDigestView(now) {
+    const t = now != null ? now : Date.now();
+    const cfg = ACCOUNTS.usageCfg();
+    const s = UDG.digestSchedule(t, cfg.digestDay, usageBriefHour());
+    const day = s.day <= s.today ? s.day : s.today;
+    const { data, text } = usageDigestCompose(day, t, false);
+    return { ok: true, digestOn: !!cfg.digestOn, digestDay: cfg.digestDay, lastWeek: cfg.digestWeek, lastAt: cfg.digestAt,
+      schedule: { day: s.day, week: s.week, at: s.at, due: s.due, sentThisWeek: cfg.digestWeek === s.week, briefHourUtc: usageBriefHour() },
+      preview: { day, week: data.week, text, chars: briefVisibleLenOf(UDG.digestText(data, { html: true })), limit: 4096 },
+      operators: usageOperatorChats().length, pushOn: !!(poller.pushOnNow && poller.pushOnNow()), webPush: !!WEBPUSH,
+      nudgeOn: !!cfg.nudgeOn, nudgeText: cfg.nudgeText || UDG.NUDGE_DEFAULT_TEXT, nudgeDefault: UDG.NUDGE_DEFAULT_TEXT, nudgeMax: UDG.NUDGE_TEXT_MAX,
+      nudgeSince: cfg.nudgeSetAt, nudgeLog: ACCOUNTS.usageNudgeLog(50),
+      rules: { quietDays: UDG.NUDGE_QUIET_DAYS, recentDays: UDG.NUDGE_RECENT_DAYS, everyDays: UDG.NUDGE_EVERY_DAYS } };
+  }
+  fastify.get("/api/admin/usage/digest", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    if (!adminOnly(req, reply)) return;
+    return usageDigestView();
+  });
+  fastify.post("/api/admin/usage/digest", { bodyLimit: 4 * 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    if (!adminOnly(req, reply)) return;
+    if (!usageBodyOk(req.body)) return reply.code(400).send({ ok: false, error: "bad body" });   // (-114) was a 500 on a string body
+    const b = req.body, patch = {};
+    for (const k of ["digestOn", "digestDay", "nudgeOn", "nudgeText"]) if (k in b) patch[k] = b[k];
+    const r = ACCOUNTS.usageCfgSet(patch, adminUid(req));
+    if (!r.ok) return reply.code(400).send(r);
+    if ("nudgeOn" in patch) log("usage nudges switched " + (r.nudgeOn ? "ON" : "off") + " by an admin");
+    return usageDigestView();
+  });
+  // "Send test now": this week's digest (as the preview shows it) to the operator chats, now. It does
+  // NOT mark the week — the scheduled send still goes out on its day.
+  fastify.post("/api/admin/usage/digest/test", { bodyLimit: 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    if (!adminOnly(req, reply)) return;
+    if (!(poller.pushOnNow && poller.pushOnNow())) return { ok: false, error: "telegram is not configured (TG_BOT_TOKEN)" };
+    if (!usageOperatorChats().length) return { ok: false, error: "no operator chat designated — mark one on the Telegram roster" };
+    const t = Date.now(), cfg = ACCOUNTS.usageCfg(), s = UDG.digestSchedule(t, cfg.digestDay, usageBriefHour());
+    const { text } = usageDigestCompose(s.day <= s.today ? s.day : s.today, t, true);
+    const n = usageDigestSend(text);
+    return { ok: true, sent: n, chars: briefVisibleLenOf(text) };
   });
   // ===== /alert: threshold rules written in a conversation (build 2026.09.21-83) ==================
   // The same line works in a chat's composer and at the Telegram bot. A rule written IN a
@@ -3745,7 +4000,10 @@ async function main() {
   // (build 2026.09.24-109) Usage: the pending beacon minutes land every 60s in one transaction
   // (and once more from ACCOUNTS.close() at shutdown); once a day, rows past the 30-day window
   // fold into the sitewide bucket and the per-member rows go.
-  setInterval(() => { try { if (USAGE_SWEEP) USAGE_SWEEP(); } catch (e) { log("usage sweep FAILED: " + (e && e.message)); } try { ACCOUNTS.usageFlush(); } catch (e) { log("usage flush FAILED: " + (e && e.message)); } }, 60 * 1000).unref();
+  setInterval(() => { try { if (USAGE_SWEEP) USAGE_SWEEP(); } catch (e) { log("usage sweep FAILED: " + (e && e.message)); } try { ACCOUNTS.usageFlush(); } catch (e) { log("usage flush FAILED: " + (e && e.message)); }
+    try { if (USAGE_REGRESS) USAGE_REGRESS(); } catch (e) { log("usage regression check FAILED: " + (e && e.message)); }
+    // (build 2026.09.24-113) the weekly operator digest and the opt-in nudges; async, isolated
+    if (USAGE_DIGEST) USAGE_DIGEST().catch((e) => log("usage digest tick FAILED (isolated): " + (e && e.message))); }, 60 * 1000).unref();   // (build 2026.09.24-111)
   const usageRetain = () => { try { const r = ACCOUNTS.usageRetain(); if (r.dropped) log(`usage retention: ${r.dropped} per-member row(s) before ${r.cut} folded into sitewide totals`); } catch (e) { log("usage retention FAILED: " + (e && e.message)); } };
   setTimeout(usageRetain, 2 * 60 * 1000).unref();
   setInterval(usageRetain, 24 * 3600 * 1000).unref();

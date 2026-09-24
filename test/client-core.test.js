@@ -2303,7 +2303,8 @@ test("audit -67 client: the SSE stream is recreated after a terminal close, fore
   assert.ok(/_sseRetryT=setTimeout\(startEvents,_sseBackoff\); _sseBackoff=Math\.min\(_sseBackoff\*2,60000\)/.test(sse), "and re-opened with backoff");
   assert.ok(/_sseSrc\.onopen=\(\)=>\{ _sseOk=true; _sseBackoff=2000;/.test(sse), "backoff resets on a good open");
   assert.ok(/document\.addEventListener\('visibilitychange',\(\)=>\{ if\(document\.hidden\) return;\s*\n\s*if\(!_sseSrc\) startEvents\(\);\s*\n\s*if\(typeof dmSync==='function'&&dmState&&dmState\.me\)/.test(app), "foregrounding reopens the stream and pulls messages once");
-  assert.ok(/el\('filter'\)\.addEventListener\('input', e=>\{ state\.filter=e\.target\.value; scheduleRender\(\); savePrefs\(\); \}\);/.test(app), "the markets filter renders once per frame");
+  // (-112) the usage search-burst count (never the text) runs first
+  assert.ok(/el\('filter'\)\.addEventListener\('input', e=>\{ usageSearch\('markets\.search'\); state\.filter=e\.target\.value; scheduleRender\(\); savePrefs\(\); \}\);/.test(app), "the markets filter renders once per frame");
   assert.ok(/updateFilterChip\(\); scheduleRender\(\); savePrefs\(\);\n\}/.test(app) && /\['volMin','volMax','oiMin','oiMax'\]\.forEach\(id=>el\(id\)\.addEventListener\('input', applyNumFilters\)\);/.test(app), "so do the numeric filters");
   assert.ok(/nfT=setTimeout\(\(\)=>\{ renderNews\(\);[\s\S]{0,200}\},120\); \}; \}/.test(app), "the news filter debounces");
 });
@@ -2535,7 +2536,7 @@ test("small fixes: escaped terminal sink, capped scrollback, total-order compara
   assert.ok(sw.includes('t.postMessage({ go: "dm" })') && !sw.includes('t.navigate("/#dm")'), "an open client is asked to switch tabs, not navigated");
   assert.ok(sw.includes('self.clients.openWindow("/#dm")'), "no client open: a real navigation remains the fallback");
   assert.ok(sw.includes("(build 2026.09.16-80)"), "sw header build stamp updated");
-  assert.ok(app.includes("navigator.serviceWorker.addEventListener('message',e=>{ const d=e&&e.data; if(d&&d.go==='dm') showView('dm'); });"), "the page answers the message");
+  assert.ok(app.includes("navigator.serviceWorker.addEventListener('message',e=>{ const d=e&&e.data; if(d&&d.go==='dm') showView('dm'); else if(d&&d.go==='markets') showView('markets'); });"), "the page answers the message (build 2026.09.24-114: + a usage reminder's go:'markets')");
 });
 
 test("share to chat (build 2026.09.21-84): the sheet can close — its author display: has a [hidden] companion", () => {
