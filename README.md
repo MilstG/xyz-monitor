@@ -260,11 +260,40 @@ instant, and the per-IP rate limit stops being a per-user problem.
   fallback again); while any of your chats is inside its quiet hours the mirror holds, then catches up with the last ten lines
   and a count of the rest. The mirror rides the alert outbox (`force`: a conversation you asked
   for live is not an alert, and the hourly alert cap must not park it), and the cursor is the
-  same `notifiedMsgId` the digest uses, so the two can never deliver a line twice. Edits,
-  deletions and reactions are not mirrored; attachments arrive as their name. Bare text is only
-  accepted from a **private** chat with the bot — a group chat linked with `/start` would post
-  everyone's lines under the one account that linked it. `/r` and `/r @handle` keep working as
-  before.
+  same `notifiedMsgId` the digest uses, so the two can never deliver a line twice. Bare text is
+  only accepted from a **private** chat with the bot — a group chat linked with `/start` would
+  post everyone's lines under the one account that linked it. `/r` and `/r @handle` keep working
+  as before.
+- **Telegram sync: edits, deletions, reactions and attachments** (build 2026.09.24-99) — the
+  sync now carries more than new lines. A map (`dm_tg`: chat, Telegram `message_id`, row, and
+  which way it went) is written from Telegram's own answer to each send, so either side can find
+  the other. **Edits**: an edit here (the author's, or an operator's moderation edit, which reads
+  "edited by …") repaints every mirrored copy with `editMessageText` (`editMessageCaption` for a
+  file); editing a line you typed at the bot, in Telegram, rewrites the row through the same edit
+  rules as the composer (not a command result, not a card) and repaints the other members' chats.
+  **Deletions**: a delete here removes the bot's copy with `deleteMessage`, and your own typed
+  line from your private chat too; a delete inside a packed catch-up message shrinks it with an
+  edit instead. **Reactions**: a reaction here sets the bot's reaction on the mirrored message
+  with `setMessageReaction`; a reaction in Telegram becomes yours here. The vocabularies differ,
+  so each site reaction has one Telegram stand-in (👍 👎 👀 🔥 🤔 as themselves, ✅ → 👌, 📈 → 🏆,
+  📉 → 💔) and a few near-synonyms map back (💯/🤝 → ✅, 🤨 → 🤔, ⚡ → 🔥, ❤/👏 → 👍); anything else
+  is ignored. **Attachments**: a file here goes to the chat as a photo (png/jpeg/webp) or a
+  document (gif, .txt, voice notes) with its line as the caption, falling back to the line and
+  the file's name if Telegram refuses the upload; a photo, document, voice note or audio file sent
+  at the bot is fetched with `getFile` and stored through the composer's own upload door — the
+  same magic-byte sniff, type allowlist and 8 MB / 3 MB caps, with the size checked from
+  Telegram's metadata before anything is downloaded. Every call rides the alert outbox (its 3 s
+  pacing and 429 backoff), and a refusal (`message is not modified`, too old to delete) is logged
+  and skipped without touching the chat's delivery status. What Telegram does not allow, stays
+  out: the **Bot API sends no update when a message is deleted in Telegram**, so a delete made
+  there is never mirrored here; a bot cannot edit a line *you* typed, so an edit here to a
+  phone-typed line reaches the other members' chats but not your own; deleting a message older
+  than 48 hours is refused; a bot holds **one** reaction per message, so the chat shows the
+  conversation's most-used reaction (latest on a tie), and none at all on a packed catch-up
+  message, which would claim every line in it; reaction updates need `message_reaction` in
+  `allowed_updates` (the poll asks for it) and are read from private chats only — in a group
+  Telegram would also require the bot to be an admin, and the reacting person could not be
+  attributed; files over the Bot API's 20 MB download limit cannot be fetched at all.
 - **Chat alerts: `/alert`** (build 2026.09.21-83) — a threshold rule written where it will fire.
   `/alert NVDA > 200`, `/alert NVDA crosses down 180`, `/alert NVDA above 200ma`, `/alert HOOD d1
   > 5 big day`, `/alert any rvol > 3`; `/alert list` and `/alert off <id>` manage them; `/alert

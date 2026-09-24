@@ -12014,12 +12014,44 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   async function pushUpdatesTick() {
     if (!pushOn()) return;
     const offsetBefore = pushOffset;
-    const r = await tgApi("getUpdates", { offset: pushOffset || undefined, timeout: 0, allowed_updates: ["message"] });
+    // edited_message and message_reaction (build 2026.09.24-99) feed the sync's way back. Telegram
+    // only sends message_reaction when it is named here explicitly (and, in a group, only to a bot
+    // that is an admin there — the sync reads private chats only, so that never arises).
+    const r = await tgApi("getUpdates", { offset: pushOffset || undefined, timeout: 0, allowed_updates: ["message", "edited_message", "message_reaction"] });
     if (!r.ok) { pushLastErr = r.error; return; }
     pushLastErr = null;
     for (const u of r.result || []) {
       if (Number.isFinite(u.update_id)) pushOffset = Math.max(pushOffset, u.update_id + 1);
+      // The sync's way back (build 2026.09.24-99): edits, reactions and files, from a LINKED chat
+      // that is PRIVATE — the same two gates bare text has, for the same reason (a group linked
+      // with /start would act under the one account that linked it). Each forwards to the bridge
+      // and never replies on success; a failure the member should hear about is said once.
+      if (u.edited_message || u.message_reaction) {
+        const e = u.edited_message || u.message_reaction;
+        const ch = e.chat;
+        if (!dmBridge || !ch || !pushRecipients.has(String(ch.id)) || !(ch.type == null || ch.type === "private")) continue;
+        let res;
+        try {
+          if (u.edited_message) {
+            const t2 = typeof e.text === "string" ? e.text : typeof e.caption === "string" ? e.caption : null;
+            if (t2 == null || t2.trim().startsWith("/")) continue;
+            res = dmBridge(String(ch.id), t2.trim(), { edit: true, tgId: e.message_id });
+          } else {
+            // Only the chat's own person: in a private chat that is the one user who can react.
+            if (e.user && String(e.user.id) !== String(ch.id)) continue;
+            const emo = (list) => (Array.isArray(list) ? list : []).filter((x) => x && x.type === "emoji" && x.emoji).map((x) => x.emoji);
+            res = dmBridge(String(ch.id), "", { reaction: { tgId: e.message_id, added: emo(e.new_reaction).filter((x) => !emo(e.old_reaction).includes(x)),
+              removed: emo(e.old_reaction).filter((x) => !emo(e.new_reaction).includes(x)) } });
+          }
+        } catch (err) { res = { ok: false, error: "That didn't sync \u2014 try again.", silent: false }; }
+        if (res && !res.ok && !res.silent) pushReply(ch.id, "\u26a0 " + (res.error || "Could not sync that."));
+        continue;
+      }
       const m = u.message;
+      if (m && m.chat && typeof m.text !== "string" && dmBridge && pushRecipients.has(String(m.chat.id)) && (m.chat.type == null || m.chat.type === "private")) {
+        const f = tgInboundFile(m);
+        if (f) { await pushInboundFile(m, f); continue; }
+      }
       if (!m || !m.chat || typeof m.text !== "string") continue;
       const chat = m.chat.id, name = (m.from && (m.from.first_name || m.from.username)) || String(chat);
       const txt = m.text.trim();
@@ -12096,13 +12128,54 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       // harness does, so an absent type is treated as private.)
       if (dmBridge && !txt.startsWith("/") && pushRecipients.has(String(chat)) && (m.chat.type == null || m.chat.type === "private")) {
         let res;
-        try { res = dmBridge(String(chat), txt, { bare: true }); }
+        try { res = dmBridge(String(chat), txt, m.message_id ? { bare: true, tgId: m.message_id } : { bare: true }); }
         catch (e) { res = { ok: false, error: "That didn't send \u2014 try again.", silent: false }; }
         if (res && !res.ok && !res.silent) pushReply(chat, "\u26a0 " + (res.error || "Could not send."));
       }
     }
     pushCmdPrune();
     if (pushOffset && pushOffset !== offsetBefore) persistPush();   // every 20s poll used to rewrite push.json whether or not the cursor moved
+  }
+  // ---- files sent at the bot (build 2026.09.24-99) --------------------------------------------
+  // A photo, document, voice note or audio file sent into a synced private chat. The bridge's own
+  // size cap is checked against Telegram's declared size BEFORE anything is downloaded (a 20 MB
+  // video is refused from its metadata, not after pulling it), then getFile resolves a path and
+  // the bytes come down through the same injected transport. Type and final size are decided by
+  // the attachment store's sniff behind the bridge — this layer never learns what an image is.
+  const TG_GETFILE_MAX = 20 * 1024 * 1024;   // the Bot API will not serve a bigger file to a bot at all
+  let dmFileMax = TG_GETFILE_MAX;
+  function tgInboundFile(m) {
+    if (Array.isArray(m.photo) && m.photo.length) {
+      // Largest size that fits the cap; Telegram lists sizes smallest first.
+      const fits = m.photo.filter((p) => p && p.file_id && !(+p.file_size > dmFileMax));
+      const p = fits.length ? fits[fits.length - 1] : m.photo[m.photo.length - 1];
+      return { id: p.file_id, size: +p.file_size || 0, name: "photo-" + (m.message_id || Date.now()) + ".jpg" };
+    }
+    for (const k of ["document", "voice", "audio", "animation", "video"]) {
+      const d = m[k];
+      if (d && d.file_id) return { id: d.file_id, size: +d.file_size || 0,
+        name: d.file_name || (k === "voice" ? "voice-" + (m.message_id || Date.now()) + ".ogg" : k + "-" + (m.message_id || Date.now())) };
+    }
+    return null;
+  }
+  async function pushInboundFile(m, f) {
+    const chat = String(m.chat.id);
+    const say = (t) => pushReply(chat, "\u26a0 " + t);
+    if (f.size > dmFileMax) { say("That file is too large to sync (" + Math.round(dmFileMax / 1048576) + " MB maximum)."); return; }
+    const token = PUSH_TOKEN();
+    const g = await tgApi("getFile", { file_id: f.id });
+    if (!g.ok || !g.result || !g.result.file_path) { log(`push: getFile for ${pushMask(chat)} failed — ${g.error || "no path"}`); say("That file could not be fetched from Telegram \u2014 try again."); return; }
+    let buf = null;
+    try {
+      const res = await pushFetch(`https://api.telegram.org/file/bot${token}/${g.result.file_path}`, { method: "GET", signal: AbortSignal.timeout(60000) });
+      if (res.ok) buf = Buffer.from(await res.arrayBuffer());
+    } catch (e) { buf = null; }
+    if (!buf) { log(`push: file download for ${pushMask(chat)} failed`); say("That file could not be fetched from Telegram \u2014 try again."); return; }
+    if (buf.length > dmFileMax) { say("That file is too large to sync (" + Math.round(dmFileMax / 1048576) + " MB maximum)."); return; }
+    let res;
+    try { res = dmBridge(chat, typeof m.caption === "string" ? m.caption.trim() : "", { file: { name: f.name, bytes: buf }, tgId: m.message_id }); }
+    catch (e) { res = { ok: false, error: "That didn't send \u2014 try again." }; }
+    if (res && !res.ok && !res.silent) say(res.error || "Could not send.");
   }
   // One reply per command, and only when the chat has budget left. `linkedOverride` lets /stop's
   // confirmation ride the linked allowance even though the chat was just unlinked.
@@ -12132,15 +12205,47 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // Bounded, paced, and never silently lossy: an overflow increments a counter the panel shows and
   // the next delivered message discloses. `force` bypasses the per-recipient hourly cap for replies
   // to a human who just typed a command at the bot — a /stop confirmation is not an alert.
-  function pushEnqueue(chat, text, force, after, reply) {
-    if (!text) return;
+  // `sync` (build 2026.09.24-99) carries a Telegram-sync housekeeping call instead of a plain
+  // send: { method, payload, file, onSent, fallback }. Same queue, same pacing gap, same 429
+  // backoff — an edit or a reaction is a request against the same per-chat ceiling a send is.
+  function pushEnqueue(chat, text, force, after, reply, sync) {
+    if (!text && !(sync && sync.method)) return;
     if (pushQueue.length >= PUSH_QUEUE_MAX) {
       // Overflow evicts a bot reply before it evicts an alert: a dropped "/help" answer costs a
       // retype, a dropped setup costs the setup.
       const ri = pushQueue.findIndex((q) => q.reply);
       if (ri >= 0) pushQueue.splice(ri, 1); else { pushQueue.shift(); pushDropped++; }
     }
-    pushQueue.push({ chat: String(chat), text, tries: 0, at: Date.now(), force: !!force, after: after || 0, reply: !!reply });
+    const item = { chat: String(chat), text, tries: 0, at: Date.now(), force: !!force, after: after || 0, reply: !!reply };
+    if (sync) {
+      if (sync.method) { item.method = String(sync.method); item.payload = sync.payload || {}; }
+      if (sync.file && typeof sync.file.load === "function") item.file = sync.file;
+      if (typeof sync.onSent === "function") item.onSent = sync.onSent;
+      if (sync.fallback) item.fallback = String(sync.fallback);
+    }
+    pushQueue.push(item);
+  }
+  // multipart/form-data for the upload methods (sendPhoto, sendDocument), with the runtime's own
+  // FormData and Blob — no dependency. Same abort, same error shape as tgApi, so the drain's
+  // retry/backoff/mute branches read an upload's failure exactly like a send's.
+  async function tgUpload(method, fields, file) {
+    const token = PUSH_TOKEN();
+    if (!token) return { ok: false, error: "disabled" };
+    let bytes;
+    try { bytes = file.load(); } catch (e) { bytes = null; }
+    // The bytes went between enqueue and drain (the message was deleted, retention swept it): a
+    // 4xx-shaped failure, so the drain drops the item or falls back to its text.
+    if (!bytes || !bytes.length) return { ok: false, status: 400, error: "attachment no longer stored" };
+    const fd = new FormData();
+    for (const [k, v] of Object.entries(fields || {})) if (v != null) fd.append(k, typeof v === "string" ? v : String(v));
+    fd.append(file.field || "document", new Blob([bytes], { type: file.mime || "application/octet-stream" }), file.name || "file");
+    let res, j = null;
+    try { res = await pushFetch(`https://api.telegram.org/bot${token}/${method}`, { method: "POST", body: fd, signal: AbortSignal.timeout(60000) }); }
+    catch (e) { return { ok: false, error: "network: " + (e && e.message) }; }
+    try { j = await res.json(); } catch (_) {}
+    if (!res.ok || !j || j.ok !== true) return { ok: false, status: res.status, error: (j && j.description) || ("http " + (res && res.status)),
+      retryAfter: j && j.parameters && +j.parameters.retry_after };
+    return { ok: true, result: j.result };
   }
   function pushRecent(chat, now) {
     const r = pushRecipients.get(String(chat));
@@ -12173,15 +12278,20 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const item = pushQueue[idx];
     pushSending = true;
     try {
-      const held = pushDropped;
+      // The overflow disclosure rides a plain send only: an edit or a reaction has no text to carry it.
+      const held = item.method ? 0 : pushDropped;
       const body = held > 0 ? item.text + "\n\n<i>+" + held + " alert(s) dropped \u2014 outbox overflow</i>" : item.text;
-      const r = await tgApi("sendMessage",
-        { chat_id: item.chat, text: body, parse_mode: "HTML", disable_web_page_preview: true });
+      const r = item.file ? await tgUpload(item.method, Object.assign({ chat_id: item.chat }, item.payload), item.file)
+        : item.method ? await tgApi(item.method, Object.assign({ chat_id: item.chat }, item.payload))
+        : await tgApi("sendMessage", { chat_id: item.chat, text: body, parse_mode: "HTML", disable_web_page_preview: true });
       const rec = pushRecipients.get(item.chat);
       if (r.ok) {
         if (held > 0) pushDropped -= held;
         pushQueue.splice(idx, 1);
-        if (rec) { rec.lastOk = now; rec.lastErr = null; rec.sent = (rec.sent || []).concat(now); }
+        // Only a new message counts toward the hourly cap; repainting one already sent is not a send.
+        if (rec) { rec.lastOk = now; rec.lastErr = null; if (!item.method || /^send/.test(item.method)) rec.sent = (rec.sent || []).concat(now); }
+        // The sync map is written here, from Telegram's own answer: the message_id exists only now.
+        if (item.onSent) { try { item.onSent(r.result, item); } catch (e) { log("push: sync map write failed (isolated): " + (e && e.message)); } }
         pushHoldUntil = now + PUSH_SEND_GAP;
         pushLogAdd({ t: now, chat: pushMask(item.chat), ok: true });
         pushDirty = true;
@@ -12197,13 +12307,27 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         persistPush();
         pushLogAdd({ t: now, chat: pushMask(item.chat), ok: false, err: "blocked \u2014 muted" });
         log(`push: ${pushMask(item.chat)} blocked the bot — muted`);
+      } else if (r.status >= 400 && r.status < 500 && item.fallback) {
+        // An upload Telegram refused (too big for a photo, a type it will not take) degrades to
+        // the words and the file's name — the line still reaches the phone.
+        log(`push: upload to ${pushMask(item.chat)} refused (${r.error}) — sending the line instead`);
+        pushQueue[idx] = { chat: item.chat, text: item.fallback, tries: 0, at: item.at, force: item.force, after: 0, reply: false,
+          onSent: item.onSent ? (res, it) => item.onSent(res, it) : undefined };
       } else if (r.status >= 400 && r.status < 500) {
         // A malformed message must never wedge the queue behind itself.
         pushQueue.splice(idx, 1);
-        if (rec) rec.lastErr = r.error;
-        pushLastErr = r.error;
-        pushLogAdd({ t: now, chat: pushMask(item.chat), ok: false, err: r.error });
-        log(`push: dropped an undeliverable message to ${pushMask(item.chat)} — ${r.error}`);
+        if (item.method && !item.file) {
+          // Sync housekeeping Telegram declines ("message is not modified", "message to delete not
+          // found", "message can't be deleted", a reaction the chat does not allow): logged and
+          // skipped. It is not a delivery failure, so it never lands in the recipient's error slot.
+          pushLogAdd({ t: now, chat: pushMask(item.chat), ok: false, err: item.method + ": " + r.error });
+          log(`push: ${item.method} on ${pushMask(item.chat)} skipped — ${r.error}`);
+        } else {
+          if (rec) rec.lastErr = r.error;
+          pushLastErr = r.error;
+          pushLogAdd({ t: now, chat: pushMask(item.chat), ok: false, err: r.error });
+          log(`push: dropped an undeliverable message to ${pushMask(item.chat)} — ${r.error}`);
+        }
       } else {
         item.tries++;
         pushHoldUntil = now + Math.min(60000, 2000 * Math.pow(2, item.tries));
@@ -14909,7 +15033,11 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     // that are not alerts: a password-reset code that waits until 8am is not a password reset.
     pushEnqueueNow: (chat, text, force) => pushEnqueue(chat, text, !!force, 0),
     // The inbound half of the same wire: server.js installs the handler that turns /r into a message.
-    setDmBridge: (fn) => { dmBridge = typeof fn === "function" ? fn : null; },
+    setDmBridge: (fn, o) => { dmBridge = typeof fn === "function" ? fn : null; if (o && +o.fileMax > 0) dmFileMax = Math.min(+o.fileMax, TG_GETFILE_MAX); },
+    // Telegram sync housekeeping (build 2026.09.24-99): an upload, an edit, a delete or a reaction,
+    // through the same outbox, force-flagged like the mirror's sends. `onSent` hears Telegram's
+    // answer (the new message_id), which is how the server's sync map gets written.
+    pushSyncNow: (chat, text, sync) => pushEnqueue(chat, text, true, 0, false, sync || null),
     // harness: seed the caches the desk digest reads, without a poll
     setSignalsCacheNow: (c) => { signalsCache = c; },
     dailyCacheSetNow: (d) => { dailyCache = d; return dailyCache; },
@@ -14951,6 +15079,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     pushStateNow: () => ({ queue: pushQueue.length, hold: pushHoldUntil, dropped: pushDropped,
       recipients: pushRecipients.size, codes: pushCodes.size, offset: pushOffset, bootAt: pushBootAt }),
     pushSetBootNow: (t) => { pushBootAt = t; },   // harness: exercise the boot lookback deterministically
+    pushUnholdNow: () => { pushHoldUntil = 0; },  // harness: skip the pacing gap so a test can drain a whole outbox
     pushSetPollNow: (t) => { lastPoll = t; },     // harness: age the poll clock so the stall watchdog is testable without waiting 10 minutes
     levelScanNow: levelScan,                     // harness: run the live level scan on demand
     getRules,

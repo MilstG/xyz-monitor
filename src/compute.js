@@ -5118,6 +5118,20 @@ function tgEsc(s) {
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+// Reactions across the Telegram sync (build 2026.09.24-99). The site speaks a fixed vocabulary of
+// eight; Telegram accepts only its own list of standard reaction emoji, and three of the eight
+// (check, chart up, chart down) are not on it. So each site reaction has exactly ONE Telegram
+// stand-in, and the way back also accepts a few near-synonyms a phone user is likely to tap. A
+// Telegram reaction with no meaning here (a clown, a banana) is ignored, never guessed into one.
+// Every value below is on the Bot API's ReactionTypeEmoji list; anything else is refused there.
+const TG_REACT_OUT = { "\u{1F44D}": "\u{1F44D}", "\u{1F44E}": "\u{1F44E}", "\u{1F440}": "\u{1F440}", "\u{1F525}": "\u{1F525}",
+  "\u2705": "\u{1F44C}", "\u{1F914}": "\u{1F914}", "\u{1F4C8}": "\u{1F3C6}", "\u{1F4C9}": "\u{1F494}" };
+const TG_REACT_IN = Object.assign(Object.fromEntries(Object.entries(TG_REACT_OUT).map(([site, tg]) => [tg, site])),
+  { "\u{1F4AF}": "\u2705", "\u{1F91D}": "\u2705", "\u{1F928}": "\u{1F914}", "\u26A1": "\u{1F525}", "\u2764": "\u{1F44D}", "\u{1F44F}": "\u{1F44D}" });
+function tgReactOut(emoji) { return TG_REACT_OUT[String(emoji || "")] || null; }
+// Telegram sometimes carries a variation selector (U+FE0F) on the same glyph; it is not meaning.
+function tgReactIn(emoji) { return TG_REACT_IN[String(emoji || "").replace(/\uFE0F/g, "")] || null; }
+
 // Link codes: 6 chars from an unambiguous alphabet (no O/0, I/1 — these get read off a screen and
 // typed into a phone). Validation is pure and case-insensitive; minting lives in the poller because
 // it needs randomness and TTL state.
@@ -6015,6 +6029,9 @@ module.exports.PUSH_DEFAULT_CLASSES = PUSH_DEFAULT_CLASSES;
 module.exports.PUSH_ADMIN_CLASSES = PUSH_ADMIN_CLASSES;
 module.exports.PUSH_CODE_ALPHABET = PUSH_CODE_ALPHABET;
 module.exports.tgEsc = tgEsc;
+module.exports.tgReactOut = tgReactOut;
+module.exports.tgReactIn = tgReactIn;
+module.exports.TG_REACT_OUT = TG_REACT_OUT;
 module.exports.pushCodeOk = pushCodeOk;
 module.exports.pushCodeNorm = pushCodeNorm;
 module.exports.pushEligible = pushEligible;

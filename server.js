@@ -9,12 +9,12 @@ const { openStore } = require("./src/store");
 const { createPoller } = require("./src/poller");
 const { openAccounts, PW_MIN: ACCOUNT_PW_MIN, DM_MAX_LEN: ACCOUNT_DM_MAX,
   FILE_MAX: ACCOUNT_DM_FILE_MAX } = require("./src/accounts");
-const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HELP, RULE_OP_LABEL, validateCard, cardText } = require("./src/compute");
+const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HELP, RULE_OP_LABEL, validateCard, cardText, tgReactOut, tgReactIn } = require("./src/compute");
 
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.24-98";
+const VERSION = "2026.09.24-99";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1638,7 +1638,7 @@ async function buildServer() {
     else if (b.close != null) r = ACCOUNTS.closeThread(me.uid, b.close);
     else if (b.reopen != null) r = ACCOUNTS.reopenThread(me.uid, b.reopen);
     else if (b.clearHistory != null) r = ACCOUNTS.clearHistory(me.uid, b.clearHistory);
-    else if (b.react) r = ACCOUNTS.react(me.uid, b.id, String(b.emoji || ""));
+    else if (b.react) { r = ACCOUNTS.react(me.uid, b.id, String(b.emoji || "")); if (r.ok) dmTgReact(r.message.id); }
     else if (b.read != null || b.markRead) r = ACCOUNTS.markRead(me.uid, b.thread, b.read);
     else if (b.mute != null) r = ACCOUNTS.setMuted(me.uid, b.thread, !!b.mute);
     else if (b.boardNotify != null) r = ACCOUNTS.setBoardNotify(me.uid, b.thread, !!b.boardNotify);
@@ -1699,10 +1699,12 @@ async function buildServer() {
     }
     else if (b.drop && b.id != null) {
       r = ACCOUNTS.drop(me.uid, b.id, isAdmin(req));
+      if (r.ok) dmTgRepaint(r.message.id);   // Telegram sync (build 2026.09.24-99): the mirrored copy goes too
       if (r.ok && r.moderated) { log("operator " + me.handle + " deleted message " + r.message.id + " by " + r.message.sender); dmPoke(r.thread, { refresh: Number(r.thread) }); }
     }
     else if (b.id != null) {
       r = ACCOUNTS.edit(me.uid, b.id, b.body, isAdmin(req));
+      if (r.ok) dmTgRepaint(r.message.id);   // Telegram sync (build 2026.09.24-99): the mirrored copy is rewritten, moderation included
       if (r.ok && r.moderated) { log("operator " + me.handle + " edited message " + r.message.id + " by " + r.message.sender); dmPoke(r.thread, { refresh: Number(r.thread) }); }
     }
     else {
@@ -1807,17 +1809,44 @@ async function buildServer() {
     if (o.alert) { const a = dmAlertCmd(me, text, ACCOUNTS.tgSyncThread(me.uid), { tg: true }); return a.ok ? { ok: true, text: tgEsc(a.text) } : { ok: false, error: tgEsc(a.error) }; }
     // Bare text (build 2026.09.21-83): into the synced conversation, or nowhere. `silent` rides
     // back so the wire spends no reply on a chat that never opted in.
-    if (o.bare) {
-      const r = ACCOUNTS.bridgeSyncText(me.uid, text);
-      if (r.ok && r.thread) { dmPoke(r.thread); dmMirror(r.thread); dmReplyTarget.set(String(chat), { thread: r.thread, at: Date.now() }); }
+    // The line's own Telegram id rides in (build 2026.09.24-99) and is mapped to the row it became,
+    // so an edit made to it in Telegram, or a delete made to the row here, can find the other side.
+    if (o.bare || o.file) {
+      const r = o.file ? ACCOUNTS.bridgeSyncFile(me.uid, o.file.name, o.file.bytes, text) : ACCOUNTS.bridgeSyncText(me.uid, text);
+      if (r.ok && r.thread) {
+        if (o.tgId) ACCOUNTS.tgMapAdd(String(chat), o.tgId, [r.id], me.uid, "in", o.file ? 1 : 0);
+        dmPoke(r.thread); dmMirror(r.thread); dmReplyTarget.set(String(chat), { thread: r.thread, at: Date.now() });
+      }
       return r.ok ? { ok: true, thread: r.thread } : { ok: false, error: tgEsc(r.error), silent: !!r.silent };
+    }
+    // An edit made in Telegram to a line that came in over the bridge: the row is rewritten under
+    // the same rules as an edit in the composer, the room repaints it, and every OTHER synced chat
+    // carrying it is repainted too. An edit to anything unmapped is silently inert.
+    if (o.edit) {
+      const r = ACCOUNTS.bridgeEdit(me.uid, String(chat), o.tgId, text);
+      if (r.ok) { dmPoke(r.thread, { refresh: Number(r.thread) }); dmTgRepaint(r.message.id); return { ok: true, thread: r.thread }; }
+      return { ok: false, error: tgEsc(r.error), silent: !!r.silent };
+    }
+    // A reaction changed in Telegram. Only on a Telegram message that carries exactly ONE row (a
+    // packed burst is ambiguous about which line was meant), and only reactions with a meaning in
+    // the site's vocabulary; the rest are ignored without a word.
+    if (o.reaction) {
+      const pack = ACCOUNTS.tgMapPack(String(chat), o.reaction.tgId);
+      const ids = [...new Set(pack.map((x) => x.msg))];
+      if (ids.length !== 1) return { ok: false, error: "not-mapped", silent: true };
+      const add = (o.reaction.added || []).map(tgReactIn).filter(Boolean), drop = (o.reaction.removed || []).map(tgReactIn).filter(Boolean);
+      if (!add.length && !drop.length) return { ok: false, error: "no-meaning", silent: true };
+      const r = ACCOUNTS.reactApply(me.uid, ids[0], add, drop);
+      if (!r.ok) return { ok: false, error: tgEsc(r.error), silent: true };
+      if (r.changed) { dmPoke(r.thread, { refresh: Number(r.thread) }); dmTgReact(ids[0], String(chat)); }
+      return { ok: true, thread: r.thread };
     }
     const ctx = dmReplyTarget.get(String(chat));
     const thread = (ctx && Date.now() - ctx.at < DM_REPLY_CONTEXT_MS) ? ctx.thread : 0;
     const r = ACCOUNTS.bridgeReply(me.uid, text, thread);
     if (r.ok && r.thread) { dmPoke(r.thread); dmMirror(r.thread); dmReplyTarget.set(String(chat), { thread: r.thread, at: Date.now() }); }
     return r.ok ? { ok: true, text: "Sent." } : { ok: false, error: tgEsc(r.error) };
-  });
+  }, { fileMax: ACCOUNT_DM_FILE_MAX });
 
   // ===== Telegram sync: the outbound mirror (build 2026.09.21-83) ================================
   // A member who ticked "sync to Telegram" on a conversation gets every message in it on their
@@ -1835,29 +1864,62 @@ async function buildServer() {
   //     live conversation for an hour. Telegram's own per-chat pacing still applies in the drain.
   const DM_MIRROR_MAX = 10;
   const DM_MIRROR_CHARS = 3500;
-  const dmMirrorLine = (r) => {
+  const DM_MIRROR_CAPTION = 700;    // Telegram caps a caption at 1024 visible characters; name + quote fit in the rest
+  // `caption` (build 2026.09.24-99): the line under an uploaded photo or document, so it drops
+  // the paperclip stub (the file is right there) and bounds the words to Telegram's caption size.
+  const dmMirrorLine = (r0, caption) => {
+    const r = caption && r0.body && r0.body.length > DM_MIRROR_CAPTION ? Object.assign({}, r0, { body: r0.body.slice(0, DM_MIRROR_CAPTION) + "\u2026" }) : r0;
     if (r.sys) return "<i>" + tgEsc(r.sys) + "</i>";
     let out = "<b>" + tgEsc(r.mine ? "you" : r.who) + "</b>";
+    if (r.edited) out += " <i>\u00b7 edited" + (r.editedBy ? " by " + tgEsc(r.editedBy) : "") + "</i>";
     if (r.reply && r.reply.sender) out += "\n<i>\u21a9 " + tgEsc(r.reply.sender) + ": " + tgEsc(String(r.reply.body || "").slice(0, 80)) + "</i>";
     if (r.cmd) out += "\n\u25b8 " + tgEsc(r.cmd) + (r.body ? "\n<pre>" + tgEsc(r.body.slice(0, 1500)) + (r.body.length > 1500 ? "\u2026" : "") + "</pre>" : "");
     // A shared card: its header line as prose, the rest as the padded block the terminal drew.
     else if (r.card && r.body) { const nl = r.body.indexOf("\n"); out += "\n" + tgEsc(nl >= 0 ? r.body.slice(0, nl) : r.body) + (nl >= 0 ? "\n<pre>" + tgEsc(r.body.slice(nl + 1, nl + 1500)) + "</pre>" : ""); }
     else if (r.body) out += "\n" + tgEsc(r.body);
-    if (r.file) out += "\n\ud83d\udcce " + tgEsc(r.file);
+    if (r.file && !caption) out += "\n\ud83d\udcce " + tgEsc(r.file);
     return out;
   };
-  function dmMirrorText(m) {
-    const parts = [];
+  // The tick's rows as SENDS, in order (build 2026.09.24-99): consecutive text rows pack into one
+  // message as before, and a row carrying an attachment breaks the pack and goes as its own photo
+  // or document with its line as the caption. Every part names the row ids it carries — the sync
+  // map is written from them once Telegram answers with a message_id.
+  function dmMirrorParts(m) {
+    const kept = [];
     let used = 0, cut = 0;
     // Newest first for the budget, then back into order: the freshest lines are the ones a phone
     // must not lose to a long command dump above them.
     for (let i = m.rows.length - 1; i >= 0; i--) {
       const line = dmMirrorLine(m.rows[i]);
-      if (used + line.length > DM_MIRROR_CHARS && parts.length) { cut = i + 1; break; }
-      parts.unshift(line); used += line.length + 2;
+      if (used + line.length > DM_MIRROR_CHARS && kept.length) { cut = i + 1; break; }
+      kept.unshift({ row: m.rows[i], line }); used += line.length + 2;
     }
     const skipped = m.skipped + cut;
-    return (skipped ? "<i>+" + skipped + " earlier message" + (skipped === 1 ? "" : "s") + " not mirrored \u2014 open Messages</i>\n\n" : "") + parts.join("\n\n");
+    const parts = [];
+    let cur = null;
+    for (const k of kept) {
+      if (k.row.fileId && !k.row.sys) { cur = null; parts.push({ file: k.row, text: dmMirrorLine(k.row, true), fallback: k.line, ids: [k.row.id] }); continue; }
+      if (!cur) { cur = { lines: [], ids: [] }; parts.push(cur); }
+      cur.lines.push(k.line); cur.ids.push(k.row.id);
+    }
+    for (const p of parts) if (p.lines) p.text = p.lines.join("\n\n");
+    if (skipped) {
+      const head = "<i>+" + skipped + " earlier message" + (skipped === 1 ? "" : "s") + " not mirrored \u2014 open Messages</i>";
+      if (parts[0] && parts[0].lines) parts[0].text = head + "\n\n" + parts[0].text; else parts.unshift({ text: head, ids: [] });
+    }
+    return parts;
+  }
+  // One part onto the outbox for one chat. A file goes as sendPhoto (the four raster types the
+  // store verified, minus gif, which Telegram would flatten to a still) or sendDocument; if
+  // Telegram refuses the upload the wire falls back to the plain line with the file's name.
+  function dmMirrorSend(chat, uid, part) {
+    const onSent = part.ids.length ? (res, it) => ACCOUNTS.tgMapAdd(chat, res && res.message_id, part.ids, uid, "out", it && it.file ? 1 : 0) : null;
+    if (!part.file) { poller.pushSyncNow(chat, part.text, { onSent }); return; }
+    const f = part.file, photo = f.fileInline && f.fileMime !== "image/gif";
+    poller.pushSyncNow(chat, part.fallback, {
+      method: photo ? "sendPhoto" : "sendDocument", payload: { caption: part.text, parse_mode: "HTML" }, onSent, fallback: part.fallback,
+      file: { field: photo ? "photo" : "document", name: f.file, mime: f.fileMime,
+        load: () => { const rf = ACCOUNTS.readFile(uid, f.fileId); return rf.ok ? fs.readFileSync(rf.path) : null; } } });
   }
   function dmMirror(threadId, uidOnly) {
     if (!poller.pushEnqueueNow || !poller.pushRecipientsFor) return 0;
@@ -1877,14 +1939,80 @@ async function buildServer() {
       // What you typed at the phone is already on the phone.
       const rows = m.rows.filter((r) => !(r.mine && r.via === "telegram"));
       if (rows.length) {
-        const text = dmMirrorText(Object.assign({}, m, { rows }));
+        const parts = dmMirrorParts(Object.assign({}, m, { rows }));
         for (const chat of targets) {
-          poller.pushEnqueueNow(chat, text, true);
+          for (const part of parts) {
+            if (poller.pushSyncNow) dmMirrorSend(chat, uid, part);
+            else poller.pushEnqueueNow(chat, part.fallback || part.text, true);
+          }
           dmReplyTarget.set(String(chat), { thread: +threadId, at: Date.now() });
         }
         n++;
       }
       ACCOUNTS.markEscalated(uid, threadId, m.upTo);
+    }
+    return n;
+  }
+  // ===== Telegram sync: edits, deletions and reactions (build 2026.09.24-99) =====================
+  // Everything already mirrored is found through the sync map (site row <-> Telegram message, per
+  // chat) and changed in place: an edit here repaints the Telegram message carrying it; a delete
+  // shrinks a packed message, or deletes it when nothing live is left; a reaction here sets the
+  // bot's one reaction on it. Each is a queued outbox call like any send — same pacing, same 429
+  // backoff — and a refusal from Telegram is logged and skipped, never retried into a wedge.
+  // Limits that are Telegram's, not ours: a bot cannot edit a line the MEMBER typed (only delete
+  // it, in a private chat), deleting a message older than 48 hours is refused, and a bot holds
+  // ONE reaction per message — so the chat shows the conversation's most-used reaction.
+  function dmTgTargets(msgId, skipChat) {
+    let maps;
+    try { maps = ACCOUNTS.tgMapFor(msgId); } catch (e) { log("tg sync map read failed (isolated): " + (e && e.message)); return []; }
+    const seen = new Set(), out = [];
+    for (const mp of maps) {
+      const key = mp.chat + ":" + mp.tgId;
+      if (seen.has(key) || mp.chat === skipChat) continue;
+      seen.add(key);
+      // A chat since unlinked or blocked has nothing to repaint into.
+      if (!(poller.pushRecipientsFor ? poller.pushRecipientsFor(mp.uid) : []).includes(mp.chat)) continue;
+      out.push(mp);
+    }
+    return out;
+  }
+  function dmTgRepaint(msgId) {
+    if (!poller.pushSyncNow) return 0;
+    let n = 0;
+    for (const mp of dmTgTargets(msgId)) {
+      try {
+        if (mp.dir === "in") {
+          // The member's own line: gone here means gone there (bots may delete incoming messages
+          // in a private chat). An edit here to a line typed in Telegram cannot be carried back.
+          const row = ACCOUNTS.mirrorRowsById(mp.uid, [mp.msg])[0];
+          if (row && row.deleted) { poller.pushSyncNow(mp.chat, "", { method: "deleteMessage", payload: { message_id: mp.tgId } }); n++; }
+          continue;
+        }
+        const ids = ACCOUNTS.tgMapPack(mp.chat, mp.tgId).filter((x) => x.dir === "out").map((x) => x.msg);
+        const rows = ACCOUNTS.mirrorRowsById(mp.uid, ids);
+        if (!rows.length) continue;          // no longer a member: their old chat is left as it was
+        const live = rows.filter((r) => !r.deleted);
+        if (!live.length) poller.pushSyncNow(mp.chat, "", { method: "deleteMessage", payload: { message_id: mp.tgId } });
+        else if (mp.media) poller.pushSyncNow(mp.chat, "", { method: "editMessageCaption", payload: { message_id: mp.tgId, caption: dmMirrorLine(live[0], true), parse_mode: "HTML" } });
+        else poller.pushSyncNow(mp.chat, "", { method: "editMessageText",
+          payload: { message_id: mp.tgId, text: live.map((r) => dmMirrorLine(r)).join("\n\n"), parse_mode: "HTML", disable_web_page_preview: true } });
+        n++;
+      } catch (e) { log("tg sync repaint failed (isolated): " + (e && e.message)); }
+    }
+    return n;
+  }
+  function dmTgReact(msgId, skipChat) {
+    if (!poller.pushSyncNow) return 0;
+    let top;
+    try { top = ACCOUNTS.reactTop(msgId); } catch (_) { return 0; }
+    const tg = top ? tgReactOut(top) : null;
+    let n = 0;
+    for (const mp of dmTgTargets(msgId, skipChat)) {
+      // A packed message is several lines in one bubble: a reaction on it would claim all of them.
+      if (new Set(ACCOUNTS.tgMapPack(mp.chat, mp.tgId).map((x) => x.msg)).size !== 1) continue;
+      poller.pushSyncNow(mp.chat, "", { method: "setMessageReaction",
+        payload: { message_id: mp.tgId, reaction: tg ? [{ type: "emoji", emoji: tg }] : [] } });
+      n++;
     }
     return n;
   }
@@ -3231,7 +3359,9 @@ async function main() {
   poller.start().catch((e) => log("poller start error: " + (e && e.message)));
 }
 
-module.exports = { buildServer, VERSION };
+// _poller is a testing seam (build 2026.09.24-99): the Telegram sync suite binds chats and drains
+// the outbox against a stubbed Bot API through it. Nothing in the app reads it.
+module.exports = { buildServer, VERSION, _poller: () => poller };
 if (require.main === module) main().catch((e) => { console.error(e); process.exit(1); });
 
 // Graceful stop: flush EVERYTHING that persists on a timer, not just features + ledger — the

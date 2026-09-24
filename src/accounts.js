@@ -309,6 +309,23 @@ CREATE TABLE IF NOT EXISTS dm_reaction (
   PRIMARY KEY (msg, uid, emoji)
 ) STRICT, WITHOUT ROWID;
 
+-- Telegram sync (build 2026.09.24-99): which Telegram message carries which message here, per
+-- chat. An edit, a delete or a reaction on either side needs the other side's id, and Telegram
+-- has no lookup by content. One Telegram message can carry SEVERAL rows (the mirror packs a burst
+-- into one send), so the key is the triple. dir 'out' = the bot's mirror post; 'in' = the member's
+-- own line typed at the bot, which became the row. media = a photo/document post, whose words are
+-- a caption (editMessageCaption), not a text (editMessageText).
+CREATE TABLE IF NOT EXISTS dm_tg (
+  chat TEXT NOT NULL,
+  tgId INTEGER NOT NULL,
+  msg INTEGER NOT NULL,
+  uid TEXT NOT NULL,
+  dir TEXT NOT NULL,
+  media INTEGER NOT NULL DEFAULT 0,
+  at INTEGER NOT NULL,
+  PRIMARY KEY (chat, tgId, msg)
+) STRICT, WITHOUT ROWID;
+
 -- The row is the record; the bytes live on the volume under dm-files/<id>. mime is what WE sniffed
 -- from the first bytes, never what the uploader claimed — see safeMime.
 CREATE TABLE IF NOT EXISTS dm_file (
@@ -403,6 +420,7 @@ CREATE INDEX IF NOT EXISTS dm_member_uid ON dm_member(uid, leftAt);
 CREATE INDEX IF NOT EXISTS dm_by_thread ON dm_msg(thread, id);
 CREATE INDEX IF NOT EXISTS dm_by_sender ON dm_msg(sender, ts);
 CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
+CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
 `);
 
   // ---- statements ------------------------------------------------------------------------------
@@ -546,6 +564,11 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     reactDrop: db.prepare("DELETE FROM dm_reaction WHERE msg = ? AND uid = ? AND emoji = ?"),
     reactOf: db.prepare("SELECT * FROM dm_reaction WHERE msg = ?"),
     reactMine: db.prepare("SELECT 1 AS x FROM dm_reaction WHERE msg = ? AND uid = ? AND emoji = ?"),
+
+    tgMapIns: db.prepare("INSERT OR IGNORE INTO dm_tg (chat, tgId, msg, uid, dir, media, at) VALUES (?,?,?,?,?,?,?)"),
+    tgMapOfMsg: db.prepare("SELECT * FROM dm_tg WHERE msg = ? ORDER BY chat, tgId"),
+    tgMapOfTg: db.prepare("SELECT * FROM dm_tg WHERE chat = ? AND tgId = ? ORDER BY msg"),
+    tgMapPurge: db.prepare("DELETE FROM dm_tg WHERE msg = ?"),
 
     fileIns: db.prepare("INSERT INTO dm_file (id, thread, uid, name, mime, size, inline, createdAt) VALUES (?,?,?,?,?,?,?,?)"),
     fileById: db.prepare("SELECT * FROM dm_file WHERE id = ?"),
@@ -1324,7 +1347,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     if (!rows.length) return 0;
     db.exec("BEGIN IMMEDIATE");
     try {
-      for (const r of rows) { S.reactPurge.run(r.id); S.retainDrop.run(r.id); }
+      for (const r of rows) { S.reactPurge.run(r.id); S.tgMapPurge.run(r.id); S.retainDrop.run(r.id); }
       db.exec("COMMIT");
     } catch (e) { try { db.exec("ROLLBACK"); } catch (_) {} return 0; }
     // File bytes go after the rows are committed gone — a crash mid-sweep leaves an orphaned file
@@ -1925,12 +1948,98 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     const rows = all.slice(-n);
     return { thread: t.id, name: threadName(t, uid), kind: t.kind, skipped: all.length - rows.length,
       upTo: raw[raw.length - 1].id,
-      rows: rows.map((m) => ({ id: m.id, sender: m.sender || "", mine: m.sender === uid, via: m.via || null,
-        who: m.sender ? ((users.get(m.sender) || {}).display || "—") : "",
-        sys: m.sys ? sysLine(m) : "",
-        cmd: m.cmd || "", body: m.body || "", ref: m.ref || null, card: !!m.card,
-        file: m.fileId ? ((S.fileById.get(m.fileId) || {}).name || "attachment") : "",
-        reply: m.replyTo ? replyPreview(m.replyTo, uid) : null })) };
+      rows: rows.map((m) => mirrorRow(m, uid)) };
+  }
+  // One row in the mirror's shape. The attachment rides as its id and sniffed type too (build
+  // 2026.09.24-99): the mirror uploads the bytes to the chat rather than naming the file.
+  function mirrorRow(m, uid) {
+    const f = m.fileId && !m.deletedAt ? S.fileById.get(m.fileId) : null;
+    return { id: m.id, sender: m.sender || "", mine: m.sender === uid, via: m.via || null,
+      who: m.sender ? ((users.get(m.sender) || {}).display || "—") : "",
+      sys: m.sys ? sysLine(m) : "",
+      cmd: m.cmd || "", body: m.body || "", ref: m.ref || null, card: !!m.card,
+      file: m.fileId ? ((f || {}).name || "attachment") : "",
+      fileId: f ? f.id : null, fileMime: f ? f.mime : null, fileInline: f ? !!f.inline : false,
+      edited: !!m.editedAt, editedBy: m.editedBy ? ((users.get(m.editedBy) || {}).display || "—") : "",
+      deleted: !!m.deletedAt,
+      reply: m.replyTo ? replyPreview(m.replyTo, uid) : null };
+  }
+  // ---- Telegram sync: edits, deletions, reactions, attachments (build 2026.09.24-99) ------------
+  // The map from a message here to the Telegram message(s) carrying it, per chat. Written by the
+  // wire once Telegram has answered a send with its message_id (out), or when a line typed at the
+  // bot becomes a row (in). Read to repaint, delete or react on the other side.
+  function tgMapAdd(chat, tgId, msgIds, uid, dir, media) {
+    const id = Math.trunc(+tgId);
+    if (!chat || !(id > 0)) return 0;
+    let n = 0;
+    for (const m of [].concat(msgIds || [])) {
+      if (!(+m > 0)) continue;
+      try { n += Number(S.tgMapIns.run(String(chat), id, Math.trunc(+m), String(uid || ""), dir === "in" ? "in" : "out", media ? 1 : 0, Date.now()).changes); } catch (_) {}
+    }
+    return n;
+  }
+  const tgMapFor = (msgId) => S.tgMapOfMsg.all(Math.trunc(+msgId) || 0);
+  const tgMapPack = (chat, tgId) => S.tgMapOfTg.all(String(chat), Math.trunc(+tgId) || 0);
+  // The rows one Telegram message carries, in the mirror's shape, deleted ones flagged rather than
+  // dropped: the repaint decides whether the message shrinks or goes. Membership is re-checked —
+  // a member removed from a group keeps their old chat, but it stops being repainted from here.
+  function mirrorRowsById(uid, ids) {
+    const out = [];
+    for (const id of [].concat(ids || [])) {
+      const m = S.msgById.get(+id);
+      if (!m || !isMember(m.thread, uid)) continue;
+      out.push(mirrorRow(m, uid));
+    }
+    return out;
+  }
+  // A file sent at the bot, into the synced conversation, through the SAME door the composer's
+  // upload uses: the magic-byte sniff, the type allowlist and the 8 MB / 3 MB caps are putFile's,
+  // not re-implemented for Telegram. A refused file posts nothing and says why.
+  function bridgeSyncFile(uid, name, buf, caption) {
+    const who = users.get(uid);
+    if (!who || who.disabledAt) return { ok: false, error: "that chat is not linked to an account" };
+    const thread = tgSyncThread(uid);
+    if (!thread) return { ok: false, error: "not-synced", silent: true };
+    const f = putFile(uid, thread, name, buf);
+    if (!f.ok) return f;
+    const r = send(uid, null, String(caption == null ? "" : caption).trim(), null, { thread, via: "telegram", fileId: f.file.id });
+    if (!r.ok) removeFile(f.file.id);
+    return r;
+  }
+  // An edit made in Telegram to a line that came in over the bridge. Only the member's OWN line,
+  // found by the map (chat + Telegram id + 'in'), and through edit() itself: the same "not a
+  // command result, not a card, not deleted" rules and the same editedAt the composer sets. An
+  // edit to anything else in that chat (a /command, a line from before sync) is silently inert.
+  function bridgeEdit(uid, chat, tgId, text) {
+    const hit = tgMapPack(chat, tgId).find((x) => x.dir === "in" && x.uid === uid);
+    if (!hit) return { ok: false, error: "not-mapped", silent: true };
+    return edit(uid, hit.msg, text, false);
+  }
+  // A reaction change from Telegram, already translated into the site's vocabulary: the emoji the
+  // member added and the ones they took away. Explicit add/drop rather than "set to exactly this",
+  // because Telegram only knows the reactions made THERE — a set would wipe the ones made here.
+  function reactApply(uid, msgId, add, dropList) {
+    const m = S.msgById.get(+msgId);
+    if (!m || !isMember(m.thread, uid)) return { ok: false, error: "no such message" };
+    if (m.deletedAt || m.sys) return { ok: false, error: "that message was deleted" };
+    let changed = 0;
+    for (const e of [].concat(dropList || [])) if (REACTIONS.includes(e) && S.reactMine.get(m.id, uid, e)) { S.reactDrop.run(m.id, uid, e); changed++; }
+    for (const e of [].concat(add || [])) if (REACTIONS.includes(e) && !S.reactMine.get(m.id, uid, e)) { S.reactAdd.run(m.id, uid, e, Date.now()); changed++; }
+    return { ok: true, thread: m.thread, id: m.id, changed };
+  }
+  // The one reaction a bot may show on a message: the most-used here, the most recent on a tie.
+  // null when nothing (or nothing live) is left, which the wire turns into clearing the reaction.
+  function reactTop(msgId) {
+    const m = S.msgById.get(+msgId);
+    if (!m || m.deletedAt) return null;
+    const by = new Map();
+    for (const r of S.reactOf.all(m.id)) {
+      const e = by.get(r.emoji) || { n: 0, at: 0 };
+      e.n++; e.at = Math.max(e.at, r.at || 0); by.set(r.emoji, e);
+    }
+    let best = null;
+    for (const [emoji, e] of by) if (!best || e.n > best.n || (e.n === best.n && e.at > best.at)) best = { emoji, n: e.n, at: e.at };
+    return best ? best.emoji : null;
   }
   // Plain text typed in a synced chat. Silent no-op when nothing is synced: stray text at the bot
   // has never posted anywhere, and an opt-in elsewhere must not change that for a chat that did
@@ -2338,6 +2447,7 @@ CREATE INDEX IF NOT EXISTS dm_reaction_msg ON dm_reaction(msg);
     setMarkSource, threadFor, threadPeers, isMember, memberUids, send, edit, drop,
     threads, history, sync, search, markRead, setMuted, setBoardNotify,
     setTgSync, tgSyncThread, tgSyncAll, mirrorRows, bridgeSyncText,
+    tgMapAdd, tgMapFor, tgMapPack, mirrorRowsById, bridgeSyncFile, bridgeEdit, reactApply, reactTop,
     closeThread, reopenThread, clearHistory,
     createGroup, addMembers, removeMember, leaveGroup, renameGroup, deleteGroup,
     createBoard, joinBoard, listBoards, setTweetSource,
