@@ -54,6 +54,7 @@ function maybePullSidecars(){
     if(Date.now()-_setupLast > (vis?60*1000:5*60*1000)) loadEarnSetups(); }
   if(el('view-housing')&&!el('view-housing').hidden&&Date.now()-_hsgLast > 15*60*1000) loadHousing();   // 6h server refresh; only pulled while the tab is open
   if(el('view-liquidity')&&!el('view-liquidity').hidden&&Date.now()-_liqLast > 15*60*1000) loadLiquidity();
+  { const m=lazyLoaded('ematouch'); if(m) m.pollEmaTouch(); }   // (-115) EMA Touch: pulls only while its tab is open, 30s floor inside
   renderMacroStrip();   // cheap re-derive so the strip flips at 8:30 / 14:00 ET between pulls
   if(Date.now()-_newsLast > 3*60*1000) loadNews();   // rotation lands new names every minute server-side
 }

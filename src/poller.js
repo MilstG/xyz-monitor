@@ -8872,6 +8872,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     setInterval(safeTick(ma200Scan, "ma200Scan"), 5 * 60 * 1000);
     // Same silent first look for the 200 lane: any event bar already standing at boot is seeded.
     setTimeout(() => { try { ma200Scan(); } catch (_) {} maPrimed = true; log("ma200 alerts primed"); }, 6 * 60 * 1000);
+    // EMA touch feed (-115): a minute cadence, because an intrabar touch is a live read. Same silent
+    // first look before anything may announce; the on-deck board fills from the first pass.
+    setInterval(safeTick(emaScan, "emaScan"), 60 * 1000);
+    setTimeout(() => { try { emaScan(); } catch (_) {} emaPrimed = true; log("ema touch feed primed"); }, 6 * 60 * 1000);
     setInterval(safeTick(coverageScan, "coverageScan"), 10 * 60 * 1000);
     // Brief delivery runs on a 5-minute cadence: the hour match is exact, so a coarser tick would
     // miss a recipient whose hour opened and closed between polls.
@@ -12056,7 +12060,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         classFires.set(kv[0], kv[1].filter((t) => Number.isFinite(t)));
     const ep = d.episodes || {};
     const loadMap = (arr, map) => { if (Array.isArray(arr)) for (const kv of arr) if (Array.isArray(kv)) map.set(kv[0], kv[1]); };
-    loadMap(ep.trend, trendState); loadMap(ep.ma200, maState); loadMap(ep.regime, regimeArmed); loadMap(ep.coverage, coverageArmed); loadMap(ep.earn, earnAlerted);
+    loadMap(ep.trend, trendState); loadMap(ep.ma200, maState); loadMap(ep.ema, emaSt); loadMap(ep.regime, regimeArmed); loadMap(ep.coverage, coverageArmed); loadMap(ep.earn, earnAlerted);
     loadMap(ep.macro, macroAlerted);
     if (typeof ep.earnPrevDay === "string") earnPrevDay = ep.earnPrevDay;
     if (Array.isArray(ep.filings)) for (const id of ep.filings) if (typeof id === "string") filingSeen.add(id);
@@ -12064,6 +12068,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     // fresh boot (nothing restored) still gets the full silent seeding pass.
     if (trendState.size) trendPrimed = true;
     if (maState.size) maPrimed = true;
+    if (emaSt.size) emaPrimed = true;
+    if (Array.isArray(ep.emaCards)) {
+      emaCards = ep.emaCards.filter((c) => c && typeof c === "object" && Number.isFinite(c.id) && Number.isFinite(c.at)).slice(-EMA_CARD_MAX);
+      emaSeq = emaCards.reduce((m, c) => Math.max(m, c.id), 0);
+    }
     if (filingSeen.size) filingPrimed = true;
     if (macroAlerted.size) macroPrimed = true;
     return true;
@@ -12081,6 +12090,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       episodes: {
         trend: [...trendState.entries()].slice(-500),
         ma200: [...maState.entries()].slice(-500),
+        // -115: the touch feed's episode gates (armed / open card / zone / fired bars) and its cards —
+        // without them a redeploy re-announces every touch still standing and blanks the tab
+        ema: [...emaSt.entries()].slice(-800),
+        emaCards: emaCards.slice(-EMA_CARD_MAX),
         regime: [...regimeArmed.entries()],
         coverage: [...coverageArmed.entries()].slice(-200),
         filings: [...filingSeen].slice(-FILING_SEEN_MAX),
@@ -14741,6 +14754,247 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     return fired;
   }
 
+  // ---- EMA touch feed: 50 + 200 on H4 and D1 (build 2026.09.25-115) -----------------------------
+  // The EMA Touch tab's engine, and two alert lanes beside the ma200 one. One pass per minute over
+  // the full roster, both universes, four lines per name (H4/D1 x EMA50/200), each an SMA-seeded
+  // EMA over CLOSED bars extended to the live mark — the line a chart shows while the candle forms.
+  //
+  //   near    — the live gap in the rung's own bar sigma (sdTf, ma200Scan's exact construction) is
+  //             inside EMA_NEAR_SD. Hysteresis: in at <= 0.5 sigma, out only past 0.75, so a name
+  //             hovering at the edge is one entry, not a flicker. Feed-only, never pushed.
+  //   touch   — the FORMING bar's range brackets the live line. At most one card per line per
+  //             candle, and after a card the line must re-arm: a CLOSE at least EMA_REARM_SD clear of
+  //             it. Chop around the line is one episode; later touches fold into the open card as
+  //             retouches (counted once per candle) instead of announcing again.
+  //   resolve — at that candle's close the card resolves in place: held (closed back on the side it
+  //             came from) or thru (closed through). No second card.
+  //   ma50    — the ma200 lane's four close-confirmed shapes (reclaim / breakdown / bullish and
+  //             bearish retest), verbatim through compute.emaAlertState with N=50, its own class so
+  //             the 50 can be switched off without losing the 200.
+  //
+  // D1 is the SESSION series on a calendar market (the Trend board's D1 rung, -105), crypto the
+  // calendar days; H4 rides the spine buckets. A line needs N+16 closed bars (66 for the 50, 216 for
+  // the 200) — below that it is honest silence, the ma200 rule. Every episode seeds silently on its
+  // first look (boot, new name, history just deepened), and the state persists with the triggers.
+  // The intrabar touch classes (touch50 / touch200) only enter the alert stream while somebody has
+  // opted into them: at the H4-50's real rate they would otherwise wash the shared bell log.
+  const EMA_TFS = { D1: DAY, H4: 4 * HOUR };
+  const EMA_NS = [50, 200];
+  const EMA_NEAR_SD = 0.5, EMA_NEAR_EXIT_SD = 0.75, EMA_REARM_SD = 1.0, EMA_LIST_SD = 1.5;
+  const EMA_CARD_TTL = 48 * HOUR, EMA_CARD_MAX = 400;
+  const emaSt = new Map();       // coin -> { "H4|50": {s, armed, lastBar, open, zone, rb, g, fb}, ..., m50: { D1: {fired, seen, s}, H4 } }
+  let emaCards = [];             // touch + near entries, oldest first
+  let emaNear = [];              // the live on-deck board, rebuilt every scan
+  let emaSeq = 0, emaVer = 0, emaScanAt = 0, emaSavedAt = 0;
+  let emaPrimed = false;
+  function emaFeedSeries(r, tf, now) {
+    const src = tf === "D1" ? sessDailyBars(r) : bucketsFor(r, 4);
+    return { src, closed: closedBars(src, EMA_TFS[tf], now) };
+  }
+  // The SMA-seeded EMA of the closes, memoized per row+rung+N on the closed series' shape: a new
+  // closed bar (or a rewritten last close) rebuilds, every other scan reads the cached array.
+  function emaFeedArr(r, key, closed, N) {
+    const n = closed.length, last = n ? closed[n - 1] : null;
+    const sig = n + "|" + (last ? +last.t + ":" + +last.c : "");
+    const memo = r._emaM || (r._emaM = {});
+    const m = memo[key];
+    if (m && m.sig === sig) return m.v;
+    const k2 = 2 / (N + 1), v = new Array(n).fill(null);
+    let e = 0;
+    for (let i = 0; i < n; i++) { const c = +closed[i].c;
+      if (!(c > 0)) { memo[key] = { sig, v: null }; return null; }
+      if (i < N) { e += c; if (i === N - 1) { e /= N; v[i] = e; } } else { e = c * k2 + e * (1 - k2); v[i] = e; } }
+    memo[key] = { sig, v };
+    return v;
+  }
+  // Who wants an intrabar touch on their phone. Checked before the event exists at all.
+  function emaClassWanted(kind) {
+    for (const rc of pushRecipients.values())
+      if (rc && !rc.muted && rc.admin && Array.isArray(rc.classes) && rc.classes.includes(kind)) return true;
+    return false;
+  }
+  function emaCardAdd(c) {
+    c.id = ++emaSeq;
+    emaCards.push(c);
+    if (emaCards.length > EMA_CARD_MAX) emaCards = emaCards.slice(-EMA_CARD_MAX);
+    return c;
+  }
+  function emaScan(tNow) {
+    const now = Number.isFinite(tNow) ? tNow : Date.now();
+    const near = [];
+    let fired = 0, touched = 0;
+    const ver0 = emaVer;
+    const liveId = (id) => id != null && emaCards.some((c) => c.id === id && c.st === "live");
+    for (const r of rows.values()) {
+      if (r.delisted || !(r.px > 0)) continue;
+      const px = +r.px;
+      let st = emaSt.get(r.coin);
+      for (const tf of ["H4", "D1"]) {
+        const w = EMA_TFS[tf];
+        const { src, closed } = emaFeedSeries(r, tf, now);
+        if (!Array.isArray(closed) || closed.length < 66) continue;
+        const sdTf = retStd(dailyRets(closed.map((k) => [k.t, k.c])).slice(-90), 15);
+        if (!(sdTf > 0)) continue;
+        if (!st) { st = {}; emaSt.set(r.coin, st); }
+        // The forming bar: the source's own tail when it carries one (true intrabar h/l so far),
+        // else the clock's bar — and the scan's own running extremes of the mark on top, so a touch
+        // between two spine refreshes is still seen.
+        const tail = src.length > closed.length ? src[src.length - 1] : null;
+        const fbT = tail ? +tail.t : Math.floor(now / w) * w;
+        const L = closed.length - 1, lastC = closed[L];
+        // Both lines first: the stacked flag needs the other N's live line.
+        const lines = {};
+        for (const N of EMA_NS) {
+          if (closed.length < N + 16) continue;
+          const ema = emaFeedArr(r, tf + "|" + N, closed, N);
+          if (!ema || ema[L] == null) continue;
+          const k2 = 2 / (N + 1);
+          lines[N] = { ema, eC: ema[L], live: ema[L] + k2 * (px - ema[L]) };
+        }
+        for (const N of EMA_NS) {
+          const ln = lines[N];
+          if (!ln) continue;
+          const key = tf + "|" + N;
+          const K = st[key] || (st[key] = { s: 0, armed: true, lastBar: null, open: null, zone: 0, rb: null, g: [], fb: null });
+          // ---- a new closed bar: resolve this line's live cards, then the re-arm test ----------
+          if (K.rb !== +lastC.t) {
+            for (const c of emaCards) {
+              if (c.k !== "touch" || c.st !== "live" || c.coin !== r.coin || c.tf !== tf || c.n !== N) continue;
+              let i = L; while (i >= 0 && +closed[i].t > c.barT) i--;
+              if (i < 0 || +closed[i].t !== c.barT || ln.ema[i] == null) continue;   // its candle has not closed yet
+              const cl = +closed[i].c, e = ln.ema[i];
+              c.st = (c.from === "above" ? cl >= e : cl < e) ? "held" : "thru";
+              c.close = +cl.toPrecision(9); c.lineC = +e.toPrecision(9); c.resAt = now;
+              emaVer++;
+            }
+            if (Math.abs((lastC.c / ln.eC - 1) * 100) >= EMA_REARM_SD * sdTf) K.armed = true;
+            K.rb = +lastC.t;
+          }
+          // ---- live read -----------------------------------------------------------------------
+          if (!K.fb || K.fb.t !== fbT) K.fb = { t: fbT, h: px, l: px };
+          K.fb.h = Math.max(K.fb.h, px, tail && +tail.h > 0 ? +tail.h : px);
+          K.fb.l = Math.min(K.fb.l, px, tail && +tail.l > 0 ? +tail.l : px);
+          const gapPct = (px / ln.live - 1) * 100, gapSd = gapPct / sdTf;
+          K.g.push(+Math.abs(gapSd).toFixed(3)); if (K.g.length > 5) K.g.shift();
+          const from = lastC.c >= ln.eC ? "above" : "below";
+          const oth = lines[N === 50 ? 200 : 50];
+          const stacked = !!oth && Math.abs((oth.live / ln.live - 1) * 100) <= EMA_NEAR_SD * sdTf;
+          const touching = K.fb.l <= ln.live && ln.live <= K.fb.h;
+          const closeAt = fbT + w;
+          let nr = null;
+          if (Math.abs(gapSd) <= EMA_LIST_SD || touching) {
+            const g0 = K.g[0], g1 = K.g[K.g.length - 1];
+            near.push(nr = { coin: r.coin, t: r.ticker || r.coin, uni: r.uni === "main" ? "crypto" : "stocks", tf, n: N,
+              px, line: +ln.live.toPrecision(9), gapPct: +gapPct.toFixed(3), gapSd: +gapSd.toFixed(3), sd: +sdTf.toFixed(3),
+              from, stacked: stacked ? 1 : 0, inBand: Math.abs(gapSd) <= EMA_NEAR_SD ? 1 : 0, touching: touching ? 1 : 0,
+              closing: K.g.length >= 3 && g1 < g0 - 0.05 ? 1 : 0, closeAt, open: liveId(K.open) ? K.open : null });
+          }
+          // ---- seeding: the first look records, never announces -------------------------------
+          if (!emaPrimed || !K.s) {
+            K.s = 1; K.zone = Math.abs(gapSd) <= EMA_NEAR_SD ? 1 : 0;
+            if (touching) { K.lastBar = fbT; K.armed = false; }
+            continue;
+          }
+          // ---- near band, with hysteresis -------------------------------------------------------
+          if (!K.zone && Math.abs(gapSd) <= EMA_NEAR_SD && !touching) {
+            K.zone = 1;
+            emaCardAdd({ k: "near", coin: r.coin, t: r.ticker || r.coin, uni: r.uni === "main" ? "crypto" : "stocks", tf, n: N,
+              from, at: now, px, line: +ln.live.toPrecision(9), gapPct: +gapPct.toFixed(3), gapSd: +gapSd.toFixed(3) });
+            emaVer++;
+          } else if (K.zone && Math.abs(gapSd) > EMA_NEAR_EXIT_SD) K.zone = 0;
+          // ---- touch ----------------------------------------------------------------------------
+          if (!touching) continue;
+          K.zone = 1;   // a touch is inside the band by definition — no "near" entry after it
+          if (K.lastBar === fbT) continue;                     // this candle already counted
+          if (!K.armed) {                                      // same episode: fold, once per candle
+            K.lastBar = fbT;
+            const oc = K.open != null ? emaCards.find((c) => c.id === K.open) : null;
+            if (oc) { oc.retouch = (oc.retouch || 0) + 1; emaVer++; }
+            continue;
+          }
+          K.lastBar = fbT; K.armed = false;
+          const card = emaCardAdd({ k: "touch", coin: r.coin, t: r.ticker || r.coin, uni: r.uni === "main" ? "crypto" : "stocks",
+            tf, n: N, from, at: now, barT: fbT, closeAt, px, line: +ln.live.toPrecision(9), sd: +sdTf.toFixed(3),
+            gapPct: +gapPct.toFixed(3), stacked: stacked ? 1 : 0, retouch: 0, st: "live" });
+          K.open = card.id; emaVer++; touched++;
+          if (nr) nr.open = card.id;
+          const kind = "touch" + N;
+          if (emaClassWanted(kind)) {
+            emitTrig(kind, { coin: r.coin, t: r.ticker || r.coin, side: from === "above" ? "long" : "short", sub: "touch", tf, n: N,
+              px, ema: card.line, dist: card.gapPct, from, stacked: card.stacked, closeAt,
+              title: tf + " touching EMA" + N,
+              text: from === "above" ? "pulled back into the " + N + " from above — support test, candle still open"
+                : "rallied into the " + N + " from below — resistance test, candle still open" }, now);
+            fired++;
+          }
+        }
+        // ---- ma50: the ma200 lane's four closed shapes on the 50 --------------------------------
+        if (closed.length >= 66) {
+          const M = st.m50 || (st.m50 = {});
+          const S = M[tf] || (M[tf] = { fired: {}, seen: {}, s: 0 });
+          let ev = null;
+          try { ev = emaAlertState(closed, sdTf, { N: 50 }); } catch (_) { ev = null; }
+          const key = ev ? ev.sub + "|" + ev.side : null;
+          if (!emaPrimed || !S.s) { S.s = 1; if (key) S.fired[key] = ev.barT; }
+          else {
+            if (ev && S.fired[key] !== ev.barT) {
+              S.fired[key] = ev.barT;
+              const confAt = ev.barT + w;
+              const seenAt = S.seen[key] != null && S.seen[key] < confAt ? S.seen[key] : undefined;
+              delete S.seen[key];
+              const rts = ev.sub === "retest";
+              emitTrig("ma50", { coin: r.coin, t: r.ticker || r.coin, side: ev.side, sub: ev.sub, tf,
+                px, ema: ev.ema, dist: ev.dist, held: ev.held, probe: rts ? ev.probe : undefined,
+                confTf: tf, confAt, seenAt,
+                title: tf + " " + (rts ? (ev.side === "long" ? "bullish" : "bearish") + " retest of EMA50" : "EMA50 " + ev.sub),
+                text: rts
+                  ? (ev.side === "long" ? "pullback probed the 50 from above, close held it" : "rally probed the 50 from below, close rejected it")
+                  : (ev.sub === "reclaim"
+                    ? `closed back above the 50 after ${ev.held} ${tf} bar${ev.held === 1 ? "" : "s"} below it`
+                    : `closed below the 50 for the first time in ${ev.held} ${tf} bar${ev.held === 1 ? "" : "s"}`) }, now);
+              fired++;
+            }
+            // live sighting: the same detector over closed + the forming bar carrying the mark
+            const K50 = st[tf + "|50"];
+            const fb = K50 && K50.fb && K50.fb.t === fbT ? K50.fb : { t: fbT, h: px, l: px };
+            let lv = null;
+            try { lv = emaAlertState(closed.concat([{ t: fbT, c: px, h: Math.max(fb.h, px), l: Math.min(fb.l, px) }]), sdTf, { N: 50 }); } catch (_) { lv = null; }
+            const lkey = lv ? lv.sub + "|" + lv.side : null;
+            for (const k of Object.keys(S.seen)) if (k !== lkey) delete S.seen[k];
+            if (lkey && S.seen[lkey] == null) S.seen[lkey] = now;
+          }
+        }
+      }
+    }
+    for (const c of [...emaSt.keys()]) if (!rows.has(c) || rows.get(c).delisted) emaSt.delete(c);
+    const cut = now - EMA_CARD_TTL;
+    if (emaCards.length && emaCards[0].at < cut) emaCards = emaCards.filter((c) => c.at >= cut || c.st === "live");
+    near.sort((a, b) => Math.abs(a.gapSd) - Math.abs(b.gapSd));
+    emaNear = near;
+    // Persist on a real change (a card, a resolution, a fold, a lane fire), else at most every 10
+    // minutes for the drifting gate state — the file is ~300KB and this runs once a minute.
+    if (emaVer !== ver0 || fired || now - emaSavedAt >= 10 * 60 * 1000) { persistTriggers(); emaSavedAt = now; }
+    emaScanAt = now; emaVer++;
+    if (fired) log(`ema alerts: ${fired} event(s)`);
+    return { fired, touched };
+  }
+  function getEmaFeed() {
+    const now = Date.now();
+    const cards = emaCards.slice().reverse();
+    const day = (emaScanAt || now) - DAY;   // the scan's clock: the counts describe the payload they ride
+    return { ts: now, dataTs: emaVer, scanAt: emaScanAt || null, primed: emaPrimed,
+      params: { nearSd: EMA_NEAR_SD, exitSd: EMA_NEAR_EXIT_SD, rearmSd: EMA_REARM_SD, listSd: EMA_LIST_SD,
+        ttlH: EMA_CARD_TTL / HOUR, ns: EMA_NS, tfs: Object.keys(EMA_TFS) },
+      counts: { live: cards.filter((c) => c.k === "touch" && c.st === "live").length,
+        touches24: cards.filter((c) => c.k === "touch" && c.at >= day).length,
+        held24: cards.filter((c) => c.k === "touch" && c.at >= day && c.st === "held").length,
+        thru24: cards.filter((c) => c.k === "touch" && c.at >= day && c.st === "thru").length,
+        folded24: cards.filter((c) => c.k === "touch" && c.at >= day).reduce((a, c) => a + (c.retouch || 0), 0),
+        near24: cards.filter((c) => c.k === "near" && c.at >= day).length,
+        lines: emaNear.length },
+      near: emaNear, cards };
+  }
+
   // ---- ma200 class: reclaim / breakdown / bullish + bearish retest, H4 + D1 (build -32) --------
   // The notification lane for the 200-EMA — the -26 study measures these events, the -28 shadows
   // earn a record on two of them, and this scan is how ANY of the four reach a phone TODAY (the
@@ -14758,8 +15012,11 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
   const MA200_TFS = { D1: DAY, H4: 4 * HOUR };
   const maState = new Map();   // coin -> { D1: { fired: {sub|side: barT}, seen: {sub|side: ts} }, H4: {...} }
   let maPrimed = false;
+  // D1 is the SESSION series on a calendar market (build 2026.09.25-115, the Trend board's D1 rung and
+  // the EMA Touch tab's): "EMA200" = 200 sessions, and a weekend no longer closes two bars of its own
+  // that the tab — and the chart — never draw. Crypto keeps calendar days (sessDailyBars is identity).
   function maSeries(r, tf, now) {
-    const src = tf === "D1" ? mergedDailyBars(r) : bucketsFor(r, 4);
+    const src = tf === "D1" ? sessDailyBars(r) : bucketsFor(r, 4);
     return closedBars(src, MA200_TFS[tf], now);
   }
   // The forming bar for the live sighting: the untrimmed tail bucket when it exists (true
@@ -14768,9 +15025,13 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
   function maLiveBars(r, tf, closed, now) {
     const w = MA200_TFS[tf], t0 = Math.floor(now / w) * w, px = +r.px;
     if (!(px > 0)) return null;
-    const src = tf === "D1" ? mergedDailyBars(r) : bucketsFor(r, 4);
+    const src = tf === "D1" ? sessDailyBars(r) : bucketsFor(r, 4);
     const tail = src.length ? src[src.length - 1] : null;
-    const f = tail && +tail.t === t0
+    // the source's own forming bar — on a session series that can be the NEXT session's fold (a
+    // weekend's prints), stamped ahead of the clock's bar; either way it is the unclosed tail
+    const f = tail && +tail.t + w > now
+      ? { t: +tail.t, c: px, h: Math.max(+tail.h, px), l: Math.min(+tail.l, px) }
+      : tail && +tail.t === t0
       ? { t: t0, c: px, h: Math.max(+tail.h, px), l: Math.min(+tail.l, px) }
       : { t: t0, c: px, h: px, l: px };
     return closed.concat([f]);
@@ -15505,6 +15766,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     getEarnSetups,   // pre-earnings setup cards (build 2026.09.24-100) — /api/earnings/setups
     voidEarnPrint,
     getTrend,
+    getEmaFeed,   // EMA Touch tab (-115): the on-deck board + touch/near cards
     getTrendPair,
     getD1Retest,   // D1 retest study (Backtest tab, build 2026.09.24-96)
     getActionable,
@@ -15587,6 +15849,9 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     trendScanNow: trendScan,
     trendPrimeNow: () => { trendPrimed = true; },
     ma200ScanNow: ma200Scan,
+    emaScanNow: emaScan,
+    emaPrimeNow: () => { emaPrimed = true; },
+    emaStateNow: () => emaSt,
     ma200PrimeNow: () => { maPrimed = true; },
     ma200StateNow: () => maState,
     trendIndexNow: () => trendByCoin,

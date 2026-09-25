@@ -36,6 +36,31 @@ instant, and the per-IP rate limit stops being a per-user problem.
 - **`/api/earnings/setups`** — pre-earnings setup cards for names reporting within 5 sessions:
   reaction study + positioning into the print + run-up + implied vs typical, with a rule-composed
   verdict line (build 2026.09.24-100; see the entry below).
+- **EMA Touch tab** (`/api/ema-feed`, build 2026.09.25-115) — every name's **50 and 200 EMA on the
+  4H and 1D** candles: which are touching a line right now, and which are about to. Scanned
+  server-side once a minute (`poller.emaScan`), full roster, both universes. The line is the
+  SMA-seeded EMA over closed candles carried to the live mark; 1D is the **session** series on a
+  calendar market (the Trend board's D1 rung), calendar days on crypto; a line needs N+16 closed
+  candles (66 / 216) or it is silent.
+  - **Near a line**: every line within 1.5σ of the mark, σ = the rung's own bar-return stdev over
+    90 candles (the ma200 lane's unit), with the % beside it; the 0.5σ near band shaded, a
+    closing-gap marker, and *stacked* when the 50 and 200 sit within 0.5σ of each other.
+  - **Feed / cooldown**: a touch (the forming candle's range reaches the live line) opens **one card
+    per episode**, resolved in place at that candle's close (*held* / *closed through*). At most one
+    card per line per candle; after a card the line must **re-arm** with a close ≥ 1σ clear of it,
+    and touches before that fold into the card as retouches (once per candle). Near-band entries
+    (in at 0.5σ, out only past 0.75σ) are optional in the feed. Cards live 48h and persist with the
+    trigger state, as do the episode gates, so a redeploy re-announces nothing.
+  - **Alert classes**, each picked separately in the bell's delivery panel: `ma200` (unchanged),
+    **`ma50`** (the same four close-confirmed shapes — reclaim, breakdown, bullish/bearish retest —
+    through `compute.emaAlertState` with N=50), and **`touch200` / `touch50`** (intrabar touches,
+    opt-in; they only enter the alert stream while an operator has opted in, so the H4-50's rate
+    cannot wash the shared bell log). `ma50` and the touch classes are operator-only while the tab
+    soaks; the tab ships admin-only (`ematouch` in the feature manifest, Signals menu).
+  - **`ma200` lane, D1 now on sessions**: its D1 series is the session series on a calendar market
+    too (it read UTC days), so the tab, the chart and the alert agree on what a daily candle is — a
+    weekend's perp prints fold into Monday's session instead of closing two candles of their own.
+  - Design mock: `docs/xyz-monitor-ema-touch-feed-mock.html`.
 - **Housing tab** (`/api/housing`) — macro housing / MBS board: 30y mortgage rate, single-family vs
   multifamily starts, months' supply, new-home sales, median price and a BBB OAS proxy for non-QM
   spreads. Seven FRED series pulled in full history (needs `FRED_KEY`), refreshed every 6h,

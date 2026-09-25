@@ -912,6 +912,7 @@ function applyScope(){
   if(state.view==='corr' && !el('view-corr').hidden){ state.corr.pair=null; state.corr.selected=null; renderCorr(); setTimeout(compgAuto,60); }   // repaint the matrix for the new universe/data source, then auto-open COMP/G for it
   if(state.view==='trend') renderTrend();   // scope flip repaints the board for the new universe
   if(state.view==='drawdown') lazyCall('drawdown','renderDrawdown');   // same study, the other universe's closes
+  if(state.view==='ematouch') lazyCall('ematouch','renderEmaTouch');   // the feed carries both universes; the switcher only filters
   state.backtest.picks=[];   // a backtest target belongs to one universe: xyz names don't exist in the crypto scope and vice versa
   if(state.view==='backtest') drawBacktest();   // scope flip re-runs the test on the new universe + benchmark
   if(state.view==='sessions'){ syncAnalyticsSlot(); lazyCall('positioning','drawSessions'); loadAnalytics(); }   // -17: repaint sessions for the new universe (its own analytics payload)
@@ -980,6 +981,7 @@ function showView(v){
   setHidden('view-charts', v!=='charts');
   setHidden('view-sectors', v!=='sectors');
   setHidden('view-drawdown', v!=='drawdown');
+  setHidden('view-ematouch', v!=='ematouch');
   setHidden('view-corr', v!=='corr');
   setHidden('view-funding', v!=='funding');
   setHidden('view-sessions', v!=='sessions');
@@ -1020,6 +1022,7 @@ function showView(v){
   if(v==='admin'){ if(el('view-admin')&&IS_ADMIN) openAdmin(); else { showView('markets'); return; } }
   if(v==='sectors') renderSectors();
   if(v==='drawdown'){ if(el('view-drawdown')) lazyCall('drawdown','openDrawdown'); else { showView('markets'); return; } }
+  if(v==='ematouch'){ if(el('view-ematouch')) lazyCall('ematouch','openEmaTouch'); else { showView('markets'); return; } }
   if(v==='housing'){ if(el('view-housing')) openHousing(); else { showView('markets'); return; } }
   if(v==='liquidity'){ if(el('view-liquidity')) openLiquidity(); else { showView('markets'); return; } }
   if(!state.detail) setHash(v==='markets'?'':v);

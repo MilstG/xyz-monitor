@@ -958,7 +958,7 @@ test("retest study -96: /api/retest-study rides the Backtest tab's gate, answers
   assert.equal(d.scope, "stocks"); assert.equal(d.params.def, "touch"); assert.equal(d.params.cd, 10);
   assert.deepEqual(d.params.horizons, [1, 3, 5, 10, 20]);
   // (-107) the build and a per-boot nonce ride the tag: a restart never 304s onto another body
-  assert.match(r.headers.etag, /^W\/"rt-2026\.09\.24-114-[0-9a-z]+-stocks-touch-10-0-[0-9a-z]+-[^"]+"$/);
+  assert.match(r.headers.etag, /^W\/"rt-2026\.09\.25-115-[0-9a-z]+-stocks-touch-10-0-[0-9a-z]+-[^"]+"$/);
   assert.equal(r.headers["cache-control"], "no-cache");
   assert.equal((await get("/api/retest-study?u=stocks&def=touch&cd=10", gus, { "if-none-match": r.headers.etag })).statusCode, 304);
   const bad = JSON.parse((await get("/api/retest-study?u=moon&def=%3Cx%3E&cd=999", gus)).body);
@@ -967,6 +967,23 @@ test("retest study -96: /api/retest-study rides the Backtest tab's gate, answers
   assert.notEqual(cx.headers.etag, r.headers.etag, "the universes never share a validator");
   const C = require("../src/compute");
   assert.ok(C.FEATURES.find((f) => f.key === "backtest").routes.includes("/api/retest-study"), "the manifest owns the route");
+});
+
+// ===== build 2026.09.25-115: the EMA Touch feed over the wire ========================================
+test("ema feed -115: /api/ema-feed rides the EMA Touch tab's admin gate, serves the empty payload, 304s on dataTs", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const cara = jar(); cara.absorb(await post("/login", { handle: "cara", password: "yet-another-long-pw" }));
+  assert.equal((await get("/api/ema-feed")).statusCode, 401, "the site gate first");
+  assert.equal((await get("/api/ema-feed", cara)).statusCode, 403, "a member is refused while the tab soaks admin-only");
+  const r = await get("/api/ema-feed", gus);
+  assert.equal(r.statusCode, 200);
+  const d = JSON.parse(r.body);
+  assert.ok(Array.isArray(d.near) && Array.isArray(d.cards) && d.params && d.counts, "the tab's payload shape");
+  assert.equal(r.headers["cache-control"], "no-cache");
+  assert.equal((await get("/api/ema-feed", gus, { "if-none-match": r.headers.etag })).statusCode, 304);
+  // the tab's visibility rides the boot flags: hidden for a member, shown for the operator
+  assert.ok((await get("/", cara)).body.includes('"ematouch":false'), "a member's shell hides the tab");
+  assert.ok((await get("/", gus)).body.includes('"ematouch":true'), "the operator's shell shows it");
 });
 
 test("earnings setups -100: the route is session-gated, serves the empty payload honestly, and revalidates to a 304", async () => {

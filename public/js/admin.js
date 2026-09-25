@@ -597,7 +597,7 @@ function featureOn(key){ return FLAGS_VIEW ? !!FLAGS_VIEW[key] : true; }
 // drifted apart once; it lives here now and both callers read it.
 // funding joins the crypto set: the heatmap is built per universe and the 24/7 book is where
 // carry is most worth watching — nothing on the board is an equities-only concept.
-const CRYPTO_VIEWS=new Set(['markets','trend','charts','report','drawdown','corr','backtest','sessions','funding','signals','actionable','dm','notes']);   // dm/notes: not universe-specific — pruning them made the chat dock land on Markets. drawdown: the study runs on either universe's closes   // dm/notes: not universe-specific — pruning them made the chat dock land on Markets
+const CRYPTO_VIEWS=new Set(['markets','trend','charts','report','drawdown','ematouch','corr','backtest','sessions','funding','signals','actionable','dm','notes']);   // dm/notes: not universe-specific — pruning them made the chat dock land on Markets. drawdown: the study runs on either universe's closes   // dm/notes: not universe-specific — pruning them made the chat dock land on Markets
 // NOT named inScope: that name was already taken at the top of this file by the predicate that
 // decides whether a market ROW belongs to the active universe. Function declarations hoist, so the
 // later definition silently won, activeRows() started asking "is this row object one of the six

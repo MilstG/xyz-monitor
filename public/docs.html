@@ -415,6 +415,18 @@ footer.docfoot{max-width:1320px;margin:0 auto;padding:18px 34px 40px;color:var(-
 <p class="sec">Window, weighting and CSV export follow the same conventions as Markets. A weekly <b>classification audit</b> (AI-assisted, operator-reviewed) proposes overlay changes to the curated tables; applied overlays are revertable from Admin.</p>
 </section>
 
+<section id="tab-ematouch" data-feature="ematouch" data-def="admin">
+<h3>EMA Touch — the 50 and 200 EMA on 4H and 1D, touching now or about to</h3>
+<ul>
+  <li><b>The line</b> — an SMA-seeded EMA over closed candles, carried to the live mark: what a chart draws while the candle forms. 1D is the session series on a US name (weekends and exchange holidays fold into the next session), calendar days on crypto. A line needs 66 closed candles for the 50 and 216 for the 200; below that the name is silent on that line.</li>
+  <li><b>Near a line</b> — every line within 1.5σ of the mark, nearest first. σ is that rung's own bar-return stdev over the last 90 candles (the same unit the EMA200 alerts use), so 0.5σ is equally close on every name; the % is beside it. <i>stacked</i> = the 50 and the 200 sit within half a sigma of each other. ▼ = the gap is closing. Click a row for the drawer.</li>
+  <li><b>Feed</b> — a <i>touch</i> (the forming candle's high–low range reaches the line) opens a card. At that candle's close it resolves in place: <i>held</i> (closed back on the side it came from) or <i>closed through</i>. Cards stay 48 hours.</li>
+  <li><b>Cooldown</b> — at most one card per line per candle, and after a card the line must <i>re-arm</i>: a close at least 1σ clear of it. Until then later touches fold into the open card as retouches, counted once per candle. <i>+ near</i> adds a faint line when a name enters the 0.5σ band (it leaves only past 0.75σ, so an edge-hugger is one entry).</li>
+  <li><b>Alerts</b> — four classes, each chosen separately in the bell's delivery panel: <code>ma200</code> and <code>ma50</code> (close-confirmed reclaim, breakdown, bullish and bearish retests) and <code>touch200</code> / <code>touch50</code> (intrabar touches, opt-in). ma50 and the touch classes are operator-only while the tab soaks. Every line seeds silently for the first ~6 minutes after a deploy.</li>
+</ul>
+<p class="sec">Scanned server-side once a minute; the tab refreshes every 30 seconds while open. Follows the Stocks|Crypto switcher.</p>
+</section>
+
 <section id="tab-drawdown" data-feature="drawdown" data-def="admin">
 <h3>Drawdown — return since a date against the drawdown it cost</h3>
 <ul>
