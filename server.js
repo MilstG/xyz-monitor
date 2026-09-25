@@ -15,7 +15,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.25-116";
+const VERSION = "2026.09.25-117";
 // (build 2026.09.24-107) Distinguishes this process from the last one in ETags built on
 // per-process counters (a restart must never 304 a client onto a different body).
 const BOOT_NONCE = Date.now().toString(36) + crypto.randomBytes(3).toString("hex");
@@ -571,13 +571,25 @@ const cspPolicy = (nonce) => [
 ].join("; ");
 // Violation ledger: a count and the last few distinct (directive, blocked) pairs. Memory only —
 // a report is a diagnostic, and a deploy that clears it is a deploy that may have fixed it.
-const CSP_REPORTS = { n: 0, dropped: 0, recent: [], minute: 0, inMinute: 0, lastLog: 0 };
-function cspRecord(body) {
+const CSP_REPORTS = { n: 0, dropped: 0, foreign: 0, recent: [], minute: 0, inMinute: 0, lastLog: 0, byIp: new Map() };
+// (build 2026.09.25-117) The route is open (the login page reports too), so one sender must not be
+// able to fill the ledger with noise and push real violations out of it before the operator decides
+// on CSP_ENFORCE: 10 reports per IP per minute (inside the 120 site-wide), and a report about a
+// document on some OTHER host is counted as foreign and never enters the ledger.
+const CSP_PER_IP_MIN = 10;
+function cspRecord(body, ip, host) {
   const items = Array.isArray(body) ? body.map((r) => r && r.body).filter(Boolean)
     : body && body["csp-report"] ? [body["csp-report"]] : body && typeof body === "object" ? [body] : [];
   const min = Math.floor(Date.now() / 60000);
-  if (min !== CSP_REPORTS.minute) { CSP_REPORTS.minute = min; CSP_REPORTS.inMinute = 0; }
+  if (min !== CSP_REPORTS.minute) { CSP_REPORTS.minute = min; CSP_REPORTS.inMinute = 0; CSP_REPORTS.byIp.clear(); }
+  const ipKey = String(ip || "?");
   for (const r of items) {
+    const doc = String(r["document-uri"] || r.documentURL || r.documentURI || "");
+    if (doc && host) { let h; try { h = new URL(doc).host; } catch (_) { h = null; }
+      if (h !== host) { CSP_REPORTS.foreign++; continue; } }
+    const mine = (CSP_REPORTS.byIp.get(ipKey) || 0) + 1;
+    if (CSP_REPORTS.byIp.size < 5000 || CSP_REPORTS.byIp.has(ipKey)) CSP_REPORTS.byIp.set(ipKey, mine);
+    if (mine > CSP_PER_IP_MIN) { CSP_REPORTS.dropped++; continue; }
     if (++CSP_REPORTS.inMinute > 120) { CSP_REPORTS.dropped++; continue; }   // a page in a loop is not 10k log lines
     // (build 2026.09.25-116) the route is open, so these are attacker text: control characters
     // (CR/LF above all) are stripped before they reach the ledger or a log line
@@ -2102,6 +2114,11 @@ async function buildServer() {
         const closed = !featureVisible(flags, "dm.terminal", adm) ? "dm.terminal"
           : (b.cmdAi && !featureVisible(flags, "dm.ask", adm)) ? "dm.ask" : null;
         if (closed) return reply.code(403).send({ ok: false, error: "feature-gated", feature: closed });
+        // (build 2026.09.25-117) "alert …" and "target …" results are posted by the SERVER (a rule
+        // firing, a target resolving, /alert confirmations) — a member's client never sends them, so
+        // one arriving here is somebody dressing their own text up as the engine's. Refused.
+        if (/^\s*(?:alert|alerts|target|targets)\b/i.test(b.cmd))
+          return reply.code(400).send({ ok: false, error: "that label is reserved for posts the server makes" });
       }
       // An applied reading rides as `call: {side, days}` — the sender's explicit choice, made in
       // the composer before the send; accounts.js bounds both and the words decide otherwise.
@@ -3045,8 +3062,16 @@ async function buildServer() {
     return reply.header("cache-control", "no-cache").type(DOC_IMG_TYPES[m[2]]).send(buf);
   });
 
-  fastify.get("/api/snapshot", (req, reply) =>
-    serveCached(req, reply, poller.getSnapshot(), { ts: 0, dataTs: 0, benchCoin: null, markets: [] }));
+  fastify.get("/api/snapshot", (req, reply) => {
+    // (build 2026.09.25-117) the note digests ride only to callers the Notes tab is open to; the
+    // stripped body keeps the dataTs (the client's freshness clock) under its own validator, so an
+    // audience change can never 304 onto the other copy
+    if (!featureVisible(poller.getFlags(), "notes", isAdmin(req))) {
+      const b = poller.getSnapshotNoNotes ? poller.getSnapshotNoNotes() : null;
+      if (b) return sendCachedBody(req, reply, b, 'W/"' + b.dataTs + '-nn"');
+    }
+    return serveCached(req, reply, poller.getSnapshot(), { ts: 0, dataTs: 0, benchCoin: null, markets: [] });
+  });
   fastify.get("/api/daily", (req, reply) =>
     serveCached(req, reply, poller.getDaily(), { ts: 0, daily: {} }));
   fastify.get("/api/analytics", (req, reply) => {
@@ -4019,7 +4044,8 @@ async function buildServer() {
   fastify.addContentTypeParser(["application/csp-report", "application/reports+json"], { parseAs: "string", bodyLimit: 8192 },
     (req, body, done) => { try { done(null, JSON.parse(body)); } catch (_) { done(null, null); } });
   fastify.post("/api/csp-report", { bodyLimit: 8192 }, (req, reply) => {
-    try { cspRecord(req.body); } catch (_) {}
+    const host = String((TRUST_PROXY && req.headers["x-forwarded-host"]) || req.headers.host || "").split(",")[0].trim();
+    try { cspRecord(req.body, clientIp(req), host); } catch (_) {}
     return reply.code(204).header("cache-control", "no-store").send();
   });
   fastify.get("/api/health", (req) => {
@@ -4035,7 +4061,7 @@ async function buildServer() {
       stale: poller.lastPollAt() > 0 && Date.now() - poller.lastPollAt() > STALE_MS, lastPollAgoMs: poller.lastPollAt() > 0 ? Date.now() - poller.lastPollAt() : null,
       volume: { boots: HEARTBEAT.boots, firstBoot: HEARTBEAT.firstBoot, dataDir: DATA_DIR },
       loop: { ...loopSample(), sinceMs: Date.now() - loopResetAt, windowMs: LOOP_WINDOW, maxEver: loopMaxEver, hist: loopRing },
-      csp: { mode: CSP_ENFORCE ? "enforce" : "report-only", reports: CSP_REPORTS.n, dropped: CSP_REPORTS.dropped, recent: CSP_REPORTS.recent.map(({ key, ...r }) => r) },
+      csp: { mode: CSP_ENFORCE ? "enforce" : "report-only", reports: CSP_REPORTS.n, dropped: CSP_REPORTS.dropped, foreign: CSP_REPORTS.foreign, recent: CSP_REPORTS.recent.map(({ key, ...r }) => r) },
       ...poller.stats(), ts: Date.now() };
     // Railway's healthcheck needs {ok} and nothing else. The full picture — the volume path, the
     // AI provider and model names, the backup repo, limiter usage, per-coin failure state, the

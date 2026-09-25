@@ -70,7 +70,18 @@ is added without it. The list below is the tour.
     control characters; `/docs/ref/constructor` and friends are 404s; `TRUST_PROXY` defaults on only
     on Railway.
   - Not changed, on purpose: the site stays open when `SITE_PASSWORD` is unset (documented
-    posture; the boot log warns); command-result badges on chat posts remain client-labelled.
+    posture; the boot log warns).
+- **Security pass, round two** (build 2026.09.25-117) — the audit's remaining findings:
+  - **Note digests** (`nt` on every snapshot row: how many notes, when, at what mark) ride only to
+    callers the Notes tab is open to; everyone else gets the same body without them, same `dataTs`,
+    its own ETag (`…-nn`), memoized per snapshot.
+  - **Forged engine output**: a chat command result can no longer carry the `alert …` / `target …`
+    labels — only the server posts those (rule fires, resolved targets, `/alert` confirmations).
+  - **CSP report flooding**: 10 reports per IP per minute inside the 120 site-wide, and a report
+    about a document on another host is counted (`foreign` on `/api/health`), never stored.
+  - **Open-site ceilings**: 2,000 alert rules site-wide (60 per owner stands), at most 3 live link
+    codes per caller and 500 in all, and the Telegram test cooldown is per caller instead of one
+    global stamp anyone could hold.
 - **EMA Touch tab** (`/api/ema-feed`, build 2026.09.25-115) — every name's **50 and 200 EMA on the
   4H and 1D** candles: which are touching a line right now, and which are about to. Scanned
   server-side once a minute (`poller.emaScan`), full roster, both universes. The line is the

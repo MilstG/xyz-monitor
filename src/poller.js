@@ -11339,6 +11339,21 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   }
   rebuildNotesIdx();
   function noteDigest(coin) { return notesIdx.get(coin); }
+  // (build 2026.09.25-117) Every snapshot row carries `nt` — how many notes the operator has on that
+  // name, when, at what mark. That is the Notes tab's content in summary, and the tab is operator-
+  // only by default, so a caller it is closed to gets the same body with `nt` dropped. Built once per
+  // snapshot object (the per-request cost is one identity check); same dataTs, so the client's
+  // freshness logic is untouched — the route gives it its own ETag.
+  let snapNnSrc = null, snapNnBody = null;
+  function getSnapshotNoNotes() {
+    const src = snapshotCache;
+    if (!src) return null;
+    if (snapNnSrc === src) return snapNnBody;
+    const strip = (arr) => (Array.isArray(arr) ? arr.map((m) => { if (!m || m.nt == null) return m; const o = Object.assign({}, m); delete o.nt; return o; }) : arr);
+    snapNnBody = Object.assign({}, src, { markets: strip(src.markets), mainMarkets: strip(src.mainMarkets) });
+    snapNnSrc = src;
+    return snapNnBody;
+  }
   function getNotesPayload() {
     return { ts: Date.now(), rev: notesRev, maxLen: NOTE_MAX_LEN, total: notes.length,
              notes: notes.map((n) => ({ id: n.id, coin: n.coin, body: n.body, at: n.at, px: n.px, edited: !!n.edited, tags: noteTags(n.body) })) };
@@ -12305,7 +12320,8 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   let pushQueue = [];               // [{ chat, text, tries, at }]
   let pushHoldUntil = 0;            // global send pacing / 429 backoff
   let pushSending = false, pushDirty = false, pushBootAt = Date.now();
-  let pushDropped = 0, pushLog = [], pushLastErr = null, pushLastTest = 0, pushVer = 0;
+  let pushDropped = 0, pushLog = [], pushLastErr = null, pushVer = 0;
+  const pushTestAt = new Map();   // (-117) caller -> last test fire, pruned past the 30 s cooldown
   // Set by server.js. Left null here so the poller has no opinion about accounts or messages: it
   // owns the Telegram wire, and forwarding a command is the whole of its involvement.
   let dmBridge = null;
@@ -12390,6 +12406,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   function pushMintCode(owner, isAdmin) {
     const now = Date.now();
     for (const [c, v] of pushCodes) if (now - v.t > PUSH_LINK_TTL) pushCodes.delete(c);
+    // (build 2026.09.25-117) bounded: a caller holds at most 3 live codes (minting a 4th retires its
+    // oldest), and the table at most 500 — an open site used to let a script grow it without limit
+    const mine = [...pushCodes.entries()].filter(([, v]) => v.owner === (owner || "")).sort((a, b) => a[1].t - b[1].t);
+    while (mine.length >= 3) pushCodes.delete(mine.shift()[0]);
+    if (pushCodes.size >= 500) return { ok: false, error: "busy" };
     let code = "";
     for (let i = 0; i < 6; i++) code += PUSH_CODE_ALPHABET[require("crypto").randomInt(PUSH_CODE_ALPHABET.length)];   // binds a chat AND stamps admin: never Math.random
     pushCodes.set(code, { t: now, owner: owner || "", admin: !!isAdmin });
@@ -13036,6 +13057,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // disagree with the number on the board. The cost is that rule latency is the snapshot cadence
   // (15s) rather than the WebSocket's ~2s — the right trade for a threshold, and the level alerts
   // that genuinely need speed run off the live mark instead (see levelScan).
+  const RULE_GLOBAL_MAX = 2000;              // (-117) the whole list's ceiling — 60 each for ~33 people
   const RULE_MAX = 60;                       // a bounded, shared list; past this it is a screener, not an alert
   const RULE_DEFAULT_COOLDOWN = 30 * 60e3;
   const RULE_STATE_MAX = 4000;               // bounded edge state — 60 rules x the roster, with headroom
@@ -13149,6 +13171,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     // The cap is PER PERSON now that rules are personal — one prolific author must not be able to
     // exhaust the list for everyone else.
     if (alertRules.filter((r) => r.owner === (owner || "")).length >= RULE_MAX) return { ok: false, error: "cap" };
+    // (build 2026.09.25-117) and a ceiling for the whole list: every rule is evaluated each cycle
+    // and persisted, and on an open site a script could mint owners (and rules) without end
+    if (alertRules.length >= RULE_GLOBAL_MAX) return { ok: false, error: "full" };
     const v = validateRule(rule);
     if (!v.ok) return v;
     v.rule.id = ++ruleSeq;
@@ -15136,13 +15161,17 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
   function pushTest(chat, owner, isAdmin) {
     if (!pushOn()) return { ok: false, error: "disabled" };
     const now = Date.now();
-    if (now - pushLastTest < 30 * 1000) return { ok: false, error: "cooldown" };
+    // (build 2026.09.25-117) the cooldown is per caller: one global stamp let anybody keep
+    // everybody else's test button in cooldown
+    const tk = isAdmin ? "@admin" : String(owner || "");
+    for (const [k, t] of pushTestAt) if (now - t >= 30 * 1000) pushTestAt.delete(k);
+    if (pushTestAt.has(tk)) return { ok: false, error: "cooldown" };
     // Scoped: a test fire must never let one visitor ping another visitor's phone. With no chat
     // named it hits only the caller's OWN recipients (admin: all of them).
     const targets = (chat ? [String(chat)] : [...pushRecipients.keys()])
       .filter((c) => pushOwns(pushRecipients.get(c), owner, isAdmin));
     if (!targets.length) return { ok: false, error: chat ? "forbidden" : "no-recipients" };
-    pushLastTest = now;
+    pushTestAt.set(tk, now);
     for (const c of targets) {
       pushEnqueue(c, `<b>Test alert</b>\nbuild ${version || "dev"} \u00b7 the wire works.`, true);
     }
@@ -15658,6 +15687,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
   return {
     start,
     getSnapshot: () => snapshotCache,
+    getSnapshotNoNotes,   // (-117) the same body without the note digests, for callers the Notes tab is closed to
     getDaily: () => dailyCache,
     getAnalytics: (scope) => {
       const cr = scope === "crypto";
