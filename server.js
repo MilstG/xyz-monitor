@@ -16,7 +16,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.25-117";
+const VERSION = "2026.09.25-118";
 // (build 2026.09.24-107) Distinguishes this process from the last one in ETags built on
 // per-process counters (a restart must never 304 a client onto a different body).
 const BOOT_NONCE = Date.now().toString(36) + crypto.randomBytes(3).toString("hex");
@@ -1578,14 +1578,16 @@ async function buildServer() {
     return r;
   });
   // ===== usage beacon + "Your usage" (build 2026.09.24-109) ======================================
-  // First-party, members only: which tab is on screen and for how long, rolled into daily
+  // First-party, members (and, since build -117, signed-out visitors as anonymous totals): which tab is on screen and for how long, rolled into daily
   // aggregates (accounts.js usage_day). The beacon carries {tabs:{view -> visible ms}, pwa} and
   // nothing else — no tickers, no search text, no filters, and the device class is derived HERE
   // from the User-Agent and stored as one of three words; the UA itself is never kept.
   // (build 2026.09.25-117) Signed-out visitors are counted too — cookielessly, as sitewide totals only
-  // (uid '-1'; src/usage-public.js has the whole design). ON by default: the operator's toggle in the
-  // Usage fold (usage_cfg.publicOn) decides, and env USAGE_PUBLIC=0 forces it off whatever the toggle
-  // says. Was: a no-op flag, off, with the visitor path deliberately not built (builds -109 → -116).
+  // (uid '-1'; src/usage-public.js has the whole design). (build 2026.09.25-118) The owner's decision
+  // as it stands: the owner first decided OFF (builds -109 → -116: a no-op USAGE_PUBLIC=1 flag with the
+  // visitor path deliberately not built) and later reversed it — public counting is ON BY DEFAULT, the
+  // admin toggle in the Usage fold (usage_cfg.publicOn) switches it, and env USAGE_PUBLIC=0 forces it
+  // off whatever the toggle says. Every per-day public figure shown obeys k ≥ 3 visitors (accounts.js).
   const usagePubForcedOff = () => process.env.USAGE_PUBLIC === "0";   // read live: a string compare
   const usagePubOn = () => !usagePubForcedOff() && ACCOUNTS.usageCfg().publicOn !== false;
   const USAGE_MIN_GAP_MS = 30000;          // one accepted beacon per member PAGE SESSION per 30s; earlier ones are held (-110 follow-up)
@@ -1785,13 +1787,32 @@ async function buildServer() {
   }
   // ET midnight: what the old day's gate still holds lands (counted against the old day's visitor
   // state), then the gate, the salt and every per-visitor map are thrown away together.
+  // (build 2026.09.25-118) ...and it lands ON the old day: released and recorded at that day's last
+  // millisecond, so its 'pv' / 'ptr' / 'pmin' moves stay with the day whose visitor state they were
+  // computed from (recorded "now", a visitor's −1 from yesterday's minutes bucket was written into
+  // today, a negative bucket). With counting switched off it is discarded instead (usagePubDiscard).
   function usagePubRoll(now) {
     if (!usagePub.stale(now)) return false;
-    usagePubGate.sweep(now, (k, p) => usagePubStore(k, p, now), true);
+    if (usagePubOn()) {
+      const end = usagePubDayEnd(usagePub.day(), now);
+      usagePubGate.sweep(end, (k, p) => usagePubStore(k, p, end), true);
+    }
     usagePubGate = usagePubGateNew();
     usagePub.rotate(now);
     return true;
   }
+  // (build 2026.09.25-118) The last millisecond of ET day `day` ('YYYY-MM-DD'): the next day's ET
+  // midnight is 04:00 UTC (EDT) or 05:00 UTC (EST) — midnight is never inside a DST change — minus 1.
+  function usagePubDayEnd(day, now) {
+    const m = /^(\d{4})-(\d\d)-(\d\d)$/.exec(String(day || ""));
+    if (!m) return now;
+    const { etDayStr } = require("./src/compute");
+    for (const h of [4, 5]) { const t = Date.UTC(+m[1], +m[2] - 1, +m[3] + 1, h); if (etDayStr(t) !== day && etDayStr(t - 1) === day) return Math.min(now, t - 1); }
+    return now;
+  }
+  // (build 2026.09.25-118) Counting switched off (the toggle or USAGE_PUBLIC=0): the public gate's held
+  // early beacons are thrown away, never released into storage — off stops storage at once.
+  function usagePubDiscard() { if (usagePubGate.held() || usagePubGate.sessions()) usagePubGate = usagePubGateNew(); }
   function usagePublicBeacon(req, reply) {
     if (!usagePubOn() || isAdmin(req)) return reply.code(204).send();
     const now = Date.now();
@@ -1851,8 +1872,9 @@ async function buildServer() {
   function usageSweep(now, all) {
     const t = now != null ? now : Date.now();
     usageGate.sweep(t, (uid, p) => usageStore(uid, p, t), all);
-    // (build 2026.09.25-117) the public gate too, and the midnight rotation even when nobody beacons
-    if (!usagePubRoll(t)) usagePubGate.sweep(t, (k, p) => usagePubStore(k, p, t), all);
+    // (build 2026.09.25-117) the public gate too, and the midnight rotation even when nobody beacons;
+    // (build 2026.09.25-118) with counting off, whatever the gate holds is discarded, not released
+    if (!usagePubRoll(t)) { if (usagePubOn()) usagePubGate.sweep(t, (k, p) => usagePubStore(k, p, t), all); else usagePubDiscard(); }
   }
   USAGE_SWEEP = usageSweep;   // main()'s 60s flush and shutdown reach it here (buildServer's scope)
   fastify.decorate("usageSweep", usageSweep);
@@ -2559,6 +2581,7 @@ async function buildServer() {
     if (!usageBodyOk(req.body) || typeof req.body.on !== "boolean") return reply.code(400).send({ ok: false, error: "bad body" });
     const r = ACCOUNTS.usageCfgSet({ publicOn: req.body.on }, adminUid(req));
     if (!r.ok) return reply.code(400).send(r);
+    if (!usagePubOn()) usagePubDiscard();   // (build 2026.09.25-118) off: held public beacons go now
     log("usage: public visitor counting switched " + (r.publicOn ? "ON" : "off") + " by an admin" + (usagePubForcedOff() ? " (USAGE_PUBLIC=0 still forces it off)" : ""));
     return { ok: true, toggle: r.publicOn, on: usagePubOn(), forcedOff: usagePubForcedOff() };
   });

@@ -122,6 +122,8 @@ function digestLines(data, o) {
   L.push("");
   L.push("🐞 " + B("ERRORS"));
   L.push(ne.length + " new · " + rg.length + " regressed" + (R.open != null ? " · " + R.open + " open in triage" : ""));
+  // (build 2026.09.25-118) errors only signed-out pages hit: a count, never their location or text
+  if ((+R.pubOnly || 0) > 0) L.push((+R.pubOnly) + " new on signed-out pages only (public-only; no text kept)");
   const eLine = (tag, e) => tag + ": " + E(clip(e.loc, 40)) + (e.msg ? " · " + E(clip(e.msg, 70)) : "") + " (" + (+e.members || 0) + " member" + (e.members === 1 ? "" : "s") + ")";
   for (const e of rg.slice(0, o.errLines)) L.push(eLine("regressed", e));
   for (const e of ne.slice(0, o.errLines)) L.push(eLine("new", e));

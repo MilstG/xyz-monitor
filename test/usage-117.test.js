@@ -106,22 +106,23 @@ test("-117 pv / ptr / pmin: distinct visitors per day, per-tab reach per day (me
   // today: 2 visitors, both on markets (V1 again: a NEW key today, counted again — never linked)
   pubBeat(A, T, "V1", { markets: 65000 }, now);
   pubBeat(A, T, "V5", { markets: 10000 }, now + 1);
+  pubBeat(A, T, "V6", { markets: 5000 }, now + 2);   // (build 2026.09.25-118) a third visitor: a day under 3 is hidden (usage-118)
   A.usageFlush();
   const R = (kind) => rowsOf(A, "SELECT day, key, n FROM usage_day WHERE uid = '-1' AND kind = ? AND n <> 0 ORDER BY day, key", kind);
-  assert.deepEqual(R("pv"), [{ day: yday, key: yday, n: 4 }, { day: today, key: today, n: 2 }]);
-  assert.deepEqual(R("ptr"), [{ day: yday, key: yday + "|markets", n: 2 }, { day: yday, key: yday + "|trend", n: 3 }, { day: today, key: today + "|markets", n: 2 }]);
+  assert.deepEqual(R("pv"), [{ day: yday, key: yday, n: 4 }, { day: today, key: today, n: 3 }]);
+  assert.deepEqual(R("ptr"), [{ day: yday, key: yday + "|markets", n: 2 }, { day: yday, key: yday + "|trend", n: 3 }, { day: today, key: today + "|markets", n: 3 }]);
   // yesterday's visitor-day totals: V1 610s (≥ 600s bucket), V2 20s (0), V3 70s (60s), V4 5s (0); today V1 65s (60s), V5 10s (0)
   assert.deepEqual(R("pmin").filter((r) => r.day === yday).map((r) => [+r.key, r.n]).sort((a, b) => a[0] - b[0]), [[0, 2], [60000, 1], [600000, 1]]);
   assert.equal(pubMinBucket(610000), 600000); assert.deepEqual(PUB_MIN_BUCKETS.slice(0, 3), [0, 60000, 120000]);
   const s = A.usageSummary({ r: 7, tabs: TABS, now, pubOnline: 3 });
   const P = s.pub;
-  assert.deepEqual([P.kpi.visitorsToday, P.kpi.activeToday, P.kpi.visitorDays, P.kpi.activeVisitorDays, P.kpi.online], [2, 1, 6, 3, 3]);
+  assert.deepEqual([P.kpi.visitorsToday, P.kpi.activeToday, P.kpi.visitorDays, P.kpi.activeVisitorDays, P.kpi.online], [3, 1, 7, 3, 3]);
   assert.equal(P.kpi.medMinPerDay, 1.5, "active visitor-days 70s, 610s, 65s → buckets 60s, 600s, 60s → median bucket 1–2 min, midpoint 1.5");
   const mk = P.tabs.find((t) => t.key === "markets"), tr = P.tabs.find((t) => t.key === "trend");
-  assert.equal(mk.reach, (2 / 4 + 2 / 2) / 2, "mean daily reach: 50% yesterday, 100% today");
-  assert.equal(tr.reach, (3 / 4 + 0 / 2) / 2);
-  assert.equal(mk.ms, 90000 + 90000 + 20000 + 65000 + 10000);
-  assert.deepEqual(P.series.slice(-2), [{ day: yday, n: 2, v: 4 }, { day: today, n: 1, v: 2 }]);
+  assert.equal(mk.reach, (2 / 4 + 3 / 3) / 2, "mean daily reach: 50% yesterday, 100% today");
+  assert.equal(tr.reach, (3 / 4 + 0 / 3) / 2);
+  assert.equal(mk.ms, 90000 + 90000 + 20000 + 65000 + 10000 + 5000);
+  assert.deepEqual(P.series.slice(-2), [{ day: yday, n: 2, v: 4 }, { day: today, n: 1, v: 3 }]);
   // never mixed: members see none of it
   assert.equal(s.kpi.activeRange, 0); assert.equal(s.kpi.activeToday, 0);
   assert.ok(s.tabs.every((t) => t.ms === 0), "the members' tab table carries no public time");
@@ -155,7 +156,7 @@ test("-117 k-threshold for public paths / controls / devices: ≥ 7-day range, c
   const beat = (ua, t) => pubBeat(A, T, ua, { markets: 30000 }, t, { tr: { "markets>trend": 2 }, en: "markets", ctl: { "markets.window=1d": 1 } });
   beat("a", y); beat("b", y);
   let s = A.usageSummary({ r: 7, tabs: TABS, now }).pub;
-  assert.equal(s.site.withheld, "k"); assert.equal(s.site.threshold.members, 2, "the contributor bound is the day's distinct visitors");
+  assert.equal(s.site.withheld, "k"); assert.equal(s.site.threshold.members, 0, "(build 2026.09.25-118) a 2-visitor day is hidden entirely: it contributes nothing");
   beat("a", now); beat("b", now); beat("c", now);
   assert.equal(A.usageSummary({ r: 7, tabs: TABS, now }).pub.site.withheld, "k", "today is never a complete day");
   beat("c", y);
@@ -170,7 +171,11 @@ test("-117 k-threshold for public paths / controls / devices: ≥ 7-day range, c
   pubBeat(B, TB, "z", { markets: 30000 }, y, { tr: { "markets>trend": 1 } });
   const sb = B.usageSummary({ r: 7, tabs: TABS, now });
   assert.equal(sb.site.withheld, "k", "two members alone: withheld"); assert.equal(sb.pub.site.withheld, "k", "one visitor alone: withheld");
-  assert.equal(sb.pub.both.site.withheld, null, "2 members + 1 visitor on one day = 3"); assert.equal(sb.pub.both.site.paths.total, 3);
+  // (build 2026.09.25-118) a 1-visitor day adds nothing to "both" either: every per-day public figure needs k ≥ 3 visitors
+  assert.equal(sb.pub.both.site.withheld, "k", "2 members + a hidden 1-visitor day = still 2");
+  for (const ua of ["z2", "z3"]) pubBeat(B, TB, ua, { markets: 30000 }, y, { tr: { "markets>trend": 1 } });
+  const sb3 = B.usageSummary({ r: 7, tabs: TABS, now });
+  assert.equal(sb3.pub.both.site.withheld, null); assert.equal(sb3.pub.both.site.paths.total, 5, "2 members' + 3 visitors' moves");
   A.close(); B.close();
 });
 
@@ -213,10 +218,11 @@ test("-117 digest: a public line — visitor-days this week vs last, the top pub
   pubBeat(A, T, "d", { trend: 600000 }, at(w.a.to));
   pubBeat(A, T, "e", { markets: 60000 }, at(w.b.from));
   const d = A.usageDigestData({ day: D, tabs: TABS });
-  assert.deepEqual([d.public.visitorDays, d.public.visitorDaysPrev], [4, 1]);
-  assert.deepEqual(d.public.top.map((t) => t.key), ["markets", "trend"]);
+  // (build 2026.09.25-118) k ≥ 3: the 1-visitor days (w.a.to, w.b.from) are left out
+  assert.deepEqual([d.public.visitorDays, d.public.visitorDaysPrev], [3, 0]);
+  assert.deepEqual(d.public.top.map((t) => t.key), ["markets"]);
   const text = UDG.digestText(d, { html: false });
-  assert.ok(text.includes("🌐 PUBLIC 4 visitor-days (last week 1, +300%)") && text.includes("top public tabs: Markets 3.0h, Trend 10m"), text);
+  assert.ok(text.includes("🌐 PUBLIC 3 visitor-days (last week 0)") && text.includes("top public tabs: Markets 3.0h"), text);
   assert.equal(d.members.active, 0, "the members' numbers never include a visitor");
   A.close();
 });
@@ -267,7 +273,7 @@ test("-117 client: a signed-out page beacons (no id, same payload shape) only wh
   M = usageModule({ window: { __USPUB: true, __ME: { uid: "u1" } }, document: fakeDoc().doc, navigator: nav });
   assert.equal(M.usPublic(), false); assert.equal(M.usOn(), true);
   M.US.mine = { ok: true, keepDays: 30, activeDays: 1, ms: 60000, tabs: [], acts: [] };
-  assert.ok(M.usageCardHtml().includes("Signed out, this site counts only anonymous sitewide totals") && M.usageCardHtml().includes("can’t be linked across days"));
+  assert.ok(M.usageCardHtml().includes("Signed out, this site counts only anonymous sitewide totals") && M.usageCardHtml().includes("not linked across days, and days with fewer than 3 visitors aren’t shown"));
 });
 
 test("-117 client: the signed-out notice renders once per tab and its dismissal is remembered in sessionStorage", () => {
@@ -278,7 +284,7 @@ test("-117 client: the signed-out notice renders once per tab and its dismissal 
   assert.equal(F.kids.length, 1);
   const n = F.kids[0];
   assert.equal(n.id, "usPubNote"); assert.equal(n.className, "us-pubnote"); assert.equal(n.attrs.role, "note");
-  for (const w of ["Anonymous usage totals are counted", "no cookies, no IPs stored", "can’t be linked across days", 'href="/docs#public-usage"', 'data-uspubx="1"'])
+  for (const w of ["Anonymous usage totals are counted", "no cookies, no IPs stored", "not linked across days", "days with fewer than 3 visitors aren’t shown", 'href="/docs#public-usage"', 'data-uspubx="1"'])
     assert.ok(n.innerHTML.includes(w), w);
   assert.equal(M.usPubNotice(), null, "never twice on one page");
   n.h.click({ target: { closest: () => null } });
@@ -369,9 +375,9 @@ test("-117 HTTP: the shell says whether a signed-out page beacons; a signed-out 
   assert.deepEqual(pubRows("tab").map((r) => [r.key, r.ms]), [["markets", 60000]], "unknown tabs dropped; the operator's beacon not stored");
   assert.deepEqual(pubRows("pv"), [{ day: today, key: today, n: 1, ms: 0 }]);
   assert.deepEqual(pubRows("ptr").map((r) => r.key), [today + "|markets"]);
-  assert.equal(d.publicOn, true); assert.equal(d.pub.kpi.visitorsToday, 1);
+  assert.equal(d.publicOn, true); assert.equal(d.pub.kpi.visitorsToday, "<3", "(build 2026.09.25-118) one visitor today: shown as <3");
   assert.deepEqual(d.pub.live.caps, { perMin: 600, visitors: 20000 }); assert.equal(d.pub.live.forcedOff, false); assert.equal(d.pub.live.toggle, true);
-  assert.equal(d.pub.tabs.find((t) => t.key === "markets").ms, 60000);
+  assert.equal(d.pub.tabs.find((t) => t.key === "markets").ms, 0, "(build 2026.09.25-118) a 1-visitor day's time is hidden");
   assert.equal(d.tabs.find((t) => t.key === "markets").ms, 0, "the members' table never carries it");
   assert.ok(dbRows("SELECT COUNT(*) AS n FROM usage_day WHERE uid NOT IN ('-1') AND kind IN ('tr','en','ctl','tdev')")[0].n === 0, "the sitewide '0' rows got nothing from a visitor");
 });
@@ -497,14 +503,14 @@ test("-117 HTTP: anonymous online-now counts open signed-out streams — not mem
   });
   const held = [];
   try {
-    for (const j of [null, null, bob, bg]) { const c = await open(j); assert.equal(c.res.statusCode, 200); held.push(c); }
+    for (const j of [null, null, null, bob, bg]) { const c = await open(j); assert.equal(c.res.statusCode, 200); held.push(c); }
     await new Promise((r) => setTimeout(r, 50));
     let d = await adminUsage(gus);
-    assert.equal(d.pub.kpi.online, 2, "two signed-out tabs"); assert.equal(d.kpi.online, 1, "bob, a member, counts as a member");
+    assert.equal(d.pub.kpi.online, 3, "three signed-out tabs"); assert.equal(d.kpi.online, 1, "bob, a member, counts as a member");
     held[0].req.destroy();
     await new Promise((r) => setTimeout(r, 150));
     d = await adminUsage(gus);
-    assert.equal(d.pub.kpi.online, 1, "a closed stream leaves the count (and the cache key)");
+    assert.equal(d.pub.kpi.online, "<3", "a closed stream leaves the count (and the cache key); (build 2026.09.25-118) 1–2 read <3");
   } finally { for (const c of held) c.req.destroy(); await new Promise((r) => setTimeout(r, 150)); }
 });
 
@@ -556,16 +562,16 @@ test("-117 who: one payload carries members, public and both; each view labels i
 
 test("-117 disclosure: README, the manual (API reference, the note, the env var), the card and the mock say it", () => {
   const readme = src("README.md"), docs = src("public/docs.html"), mock = src("docs/xyz-monitor-usage-stats-mock.html");
-  for (const w of ["(build 2026.09.25-117)", "HMAC-SHA256(dailySalt, ip | userAgent | host)", "cannot be linked across days", "uid `'-1'`", "**20,000 distinct visitors per ET day**",
+  for (const w of ["(build 2026.09.25-117)", "HMAC-SHA256(dailySalt, ip | userAgent | host)", "not linked across days", "uid `'-1'`", "**20,000 distinct visitors per ET day**",
     "**600 public beacons per minute**", "`USAGE_PUBLIC=0` forces it off", "a visitor who returns later that day is counted again", "`sessionStorage`", "**Privacy summary**"])
     assert.ok(readme.includes(w), "README: " + w);
   const note = docs.slice(docs.indexOf('id="public-usage"'), docs.indexOf("</div>", docs.indexOf('id="public-usage"')));
-  for (const w of ["No cookies", "can't be linked across days", "never stored", "at least 3 visitors on one day", "A server restart can count a returning visitor twice"])
+  for (const w of ["No cookies", "not linked across days", "never stored", "at least 3 visitors on one day", "A server restart can count a returning visitor twice"])
     assert.ok(note.includes(w), "manual: " + w);
   assert.ok(docs.includes("<code>POST /api/admin/usage/public</code>") && docs.includes("<tr><td><code>USAGE_PUBLIC</code></td>"));
   assert.ok(/Built in build 2026\.09\.25-117/.test(mock) && mock.includes("<h3>Public visitors, cookieless</h3>"), "the mock marks it built");
   const sv = src("server.js");
-  assert.ok(sv.includes('const VERSION = "2026.09.25-117"'));
+  assert.ok(sv.includes('const VERSION = "2026.09.25-118"'));
   assert.ok(sv.includes("const v = usagePub.admit(clientIp(req), ua, String(req.headers.host || \"\"), now);"), "the key's IP is clientIp(): TRUST_PROXY decides, never wider");
   assert.ok(sv.includes('if (!me) return usagePublicBeacon(req, reply);'));
 });

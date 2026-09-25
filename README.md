@@ -823,7 +823,7 @@ is added without it. The list below is the tour.
   - **Visitor key**: `HMAC-SHA256(dailySalt, ip | userAgent | host)`, truncated, computed per request
     (`src/usage-public.js`). The salt is 32 random bytes per **ET day**, held **only in memory** —
     never persisted, logged or returned — and replaced at ET midnight together with every map keyed
-    by it, so a visitor **cannot be linked across days**. The IP (`clientIp`: the socket, or the last
+    by it, so a visitor is **not linked across days**. The IP (`clientIp`: the socket, or the last
     `X-Forwarded-For` element only under `TRUST_PROXY`), the User-Agent and the key are **never
     stored**. A restart mints a new salt, so a visitor who returns later that day is counted again.
   - **Storage**: sitewide totals only, under **uid `'-1'`** in `usage_day` (never a member, never
@@ -854,7 +854,28 @@ is added without it. The list below is the tour.
     the Your usage card and the manual say the same. The weekly digest gains a public line
     (visitor-days this week vs last, top public tabs).
   - **Privacy summary**: no cookies, no identifiers on the client, no IP, User-Agent, key or salt at
-    rest; aggregates only; nothing linkable across days.
+    rest; aggregates only; nothing linked across days; days with fewer than 3 visitors aren't shown
+    (build 2026.09.25-118, below).
+- **Usage fixes, public visitors** (build 2026.09.25-118):
+  - **k ≥ 3 per day, everywhere**: an ET day with fewer than **3** distinct visitors (`pv`) is left
+    out of every public figure the operator sees — tab time and "vs prior", mean daily reach (`ptr`),
+    the minutes histogram (`pmin`), the heatmap, paths / controls / devices, first paint, errors
+    (public health, and the triage's public column), the digest's public line — and that day's own
+    figures ("visitors today", "active today", the chip) read **"<3"**; range KPIs sum qualifying
+    days only, and the fold says "days with fewer than 3 visitors are hidden". Anonymous online-now
+    reads "<3" at 1–2. The rows are still stored (30 days); they are never shown.
+  - **Errors**: only a **member's** hit reopens a resolved error or marks it regressed
+    (`usage_err.memAt`, the last member hit; a signed-out hit moves `lastAt` only). An error only
+    signed-out pages hit keeps **no message text** (`msg = ''`: its file:line and the hash in its
+    key) until a member hits it; triage shows it as "public-only · file:line", and the digest's
+    new/regressed lines list members' errors only (public-only ones are a count line). Rows
+    written by -117 are repaired at boot.
+  - **Midnight**: the public gate's held beacons are recorded at the old ET day's last millisecond,
+    and the distinct counts (`pv`/`ptr`/`pmin`) go under the day the visitor state belongs to — no
+    negative minutes bucket in the new day.
+  - **"vs prior"** on the public tab table is blank (with a note) when the prior window starts
+    before the 30-day public retention (r > 15). **Toggle off** discards the gate's held public
+    beacons at once instead of releasing them into storage.
 - **Admin panel folds** — the panel had grown to eight full-height boxes, so reaching the one you
   wanted meant scrolling past the seven you did not. Every segment is now a collapsed row naming
   what is inside it, with an expand-all/collapse-all control. Each fold wraps its box from

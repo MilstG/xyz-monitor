@@ -232,7 +232,7 @@ function usageFlush(force){
 // ---- (build 2026.09.25-117) the signed-out visitor's notice ------------------------------------------
 const US_PUB_NOTE_KEY='xyz-uspub-note-ok';
 function usPubNoticeHtml(){
-  return '<span>Anonymous usage totals are counted on this site: no cookies, no IPs stored, and a visit can’t be linked across days.</span>'
+  return '<span>Anonymous usage totals are counted on this site: no cookies, no IPs stored, a visit is not linked across days, and days with fewer than 3 visitors aren’t shown.</span>'
     +'<a href="/docs#public-usage">details</a><button type="button" class="us-pubx" data-uspubx="1" aria-label="dismiss this notice" title="dismiss">×</button>';
 }
 function usPubNotice(){
@@ -295,7 +295,7 @@ function usageCardHtml(){
       +usMonthsHtml(d)
       +((d.acts||[]).some(a=>a.n>0)?'<div class="us-acts">'+(d.acts||[]).filter(a=>a.n>0).map(a=>'<span class="acc-chip on">'+esc(US_ACT_CHIP[a.key]||a.key)+' '+(+a.n||0)+'</span>').join('')+'</div>':''):'')
     // (build 2026.09.25-117) the signed-out side, said here too
-    +'<div class="us-disc">Signed out, this site counts only anonymous sitewide totals (the same kinds of numbers, never linked to anyone): no cookies, no IPs stored, and a visit can’t be linked across days. Details in the member guide (Access → signed-out visitors).</div>'
+    +'<div class="us-disc">Signed out, this site counts only anonymous sitewide totals (the same kinds of numbers, never linked to anyone): no cookies, no IPs stored, a visit is not linked across days, and days with fewer than 3 visitors aren’t shown. Details in the member guide (Access → signed-out visitors).</div>'
     +'<div class="us-row"><span class="acc-chip'+(paused?'':' on')+'">'+(paused?'paused':'sharing usage')+'</span>'
     +'<button type="button" class="dm-tool" data-uspause="'+(paused?'0':'1')+'"'+(US.busy?' disabled':'')+'>'+(paused?'Resume':'Pause for me')+'</button></div>'
     +'<div class="us-disc" style="margin-top:6px">'+(paused?'Paused: nothing is recorded for this account, and the operator sees “paused”.':'Pausing stops the beacon for this account; the operator sees “paused”.')+'</div>'

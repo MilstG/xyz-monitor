@@ -82,7 +82,10 @@ function createUsagePublic(opts) {
     const minFrom = s.bucket;
     s.ms += tot;
     s.bucket = pubMinBucket(s.ms);
-    return { newVisitor, newTabs, minFrom, minTo: s.bucket, q: s.q };
+    // (build 2026.09.25-118) `day`: the ET day this visitor state belongs to — accounts.js files the
+    // distinct counts under it, so a payload recorded across midnight can never split a visitor's
+    // −1 / +1 minutes-bucket move over two days
+    return { newVisitor, newTabs, minFrom, minTo: s.bucket, q: s.q, day };
   }
   return { admit, note, rotate, stale, keyOf, day: () => day, visitors: () => vis.size, counted: () => { let n = 0; for (const s of vis.values()) if (s.counted) n++; return n; },
     perMin: () => perMin, _opts: o };

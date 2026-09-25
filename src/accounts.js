@@ -445,8 +445,12 @@ CREATE TABLE IF NOT EXISTS usage_err (
   loc TEXT NOT NULL,
   msg TEXT NOT NULL,
   firstAt INTEGER NOT NULL,
-  lastAt INTEGER NOT NULL
+  lastAt INTEGER NOT NULL,
+  memAt INTEGER
 ) STRICT;
+-- (build 2026.09.25-118) memAt: the last time a MEMBER hit this key (NULL = only signed-out pages
+-- ever did). Only a member hit reopens a resolved error; and a public-only key keeps no message
+-- text at all (msg = ''): its loc and the hash in its key only, the text filled in if a member hits it.
 -- (build 2026.09.24-110 follow-up) The builds this deployment has actually SERVED, newest last:
 -- the server notes its VERSION at every boot and only the last USAGE_BUILDS_KEEP stay. A beacon's
 -- build stamp is believed only when it is one of these — a client-chosen string can no longer mint
@@ -516,6 +520,7 @@ CREATE TABLE IF NOT EXISTS usage_nudge (
   // what produced "table dm_msg has no column named sys" the first time round.
   const ADDED_COLUMNS = {
     user: [["usagePaused", "INTEGER NOT NULL DEFAULT 0"]],   // (build 2026.09.24-109)
+    usage_err: [["memAt", "INTEGER"]],   // (build 2026.09.25-118)
     dm_thread: [["kind", "TEXT NOT NULL DEFAULT 'dm'"], ["pairKey", "TEXT"], ["title", "TEXT"], ["createdBy", "TEXT"]],
     dm_msg: [["sys", "TEXT"], ["fileId", "TEXT"], ["via", "TEXT"], ["pinnedAt", "INTEGER"], ["pinnedBy", "TEXT"], ["replyTo", "INTEGER"], ["side", "TEXT"],
       ["cmd", "TEXT"], ["cmdAi", "INTEGER"], ["card", "TEXT"], ["callH", "INTEGER"], ["closedAt", "INTEGER"], ["closePx", "REAL"],
@@ -2686,8 +2691,16 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     wkAll: db.prepare("SELECT uid, day FROM usage_day WHERE kind = 'wk'"),
     wkMin: db.prepare("SELECT MIN(day) AS d FROM usage_day WHERE kind = 'wk'"),
     wkDrop: db.prepare("DELETE FROM usage_day WHERE kind = 'wk' AND day < ?"),
-    errUp: db.prepare(`INSERT INTO usage_err (key, build, loc, msg, firstAt, lastAt) VALUES (?,?,?,?,?,?)
-      ON CONFLICT(key) DO UPDATE SET lastAt = MAX(lastAt, excluded.lastAt)`),
+    // (build 2026.09.25-118) + memAt (the last MEMBER hit; NULL for a signed-out one) and the text: a
+    // public-only row keeps msg = '' until a member's hit brings the text
+    errUp: db.prepare(`INSERT INTO usage_err (key, build, loc, msg, firstAt, lastAt, memAt) VALUES (?,?,?,?,?,?,?)
+      ON CONFLICT(key) DO UPDATE SET lastAt = MAX(lastAt, excluded.lastAt),
+        memAt = CASE WHEN excluded.memAt IS NULL THEN usage_err.memAt WHEN usage_err.memAt IS NULL THEN excluded.memAt ELSE MAX(usage_err.memAt, excluded.memAt) END,
+        msg = CASE WHEN usage_err.msg = '' AND excluded.memAt IS NOT NULL THEN excluded.msg ELSE usage_err.msg END`),
+    // (build 2026.09.25-118) the boot-time repair: a row some member's hit is on record for gets memAt;
+    // a row no member ever hit loses its text (rows written by build -117 kept a visitor's message)
+    errMemFill: db.prepare(`UPDATE usage_err SET memAt = lastAt WHERE memAt IS NULL AND key IN (SELECT key FROM usage_day WHERE kind = 'err' AND uid <> '${USAGE_PUB}')`),
+    errPubBlank: db.prepare("UPDATE usage_err SET msg = '' WHERE memAt IS NULL AND msg <> ''"),
     errIdx: db.prepare("SELECT key, build, lastAt FROM usage_err"),   // (-110 follow-up) <= USAGE_ERR_TOTAL rows by construction
     errOne: db.prepare("SELECT key, build, loc, msg FROM usage_err WHERE key = ?"),
     errDel: db.prepare("DELETE FROM usage_err WHERE key = ?"),
@@ -2706,8 +2719,11 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     tabKept: db.prepare(`SELECT day, uid, key, ms FROM usage_day WHERE kind = 'tab' AND uid NOT IN ${USAGE_NOT_MEMBER} AND day >= ? AND day <= ?`),
     // (build 2026.09.25-117) members only: an anonymous beacon never feeds a regression alert
     regRows: db.prepare("SELECT uid, kind, key, n FROM usage_day WHERE kind IN ('load','perf','err') AND day >= ? AND uid <> '-1'"),
-    errAll: db.prepare("SELECT key, build, loc, msg, firstAt, lastAt FROM usage_err"),
-    errHits: db.prepare("SELECT uid, key, SUM(n) AS n FROM usage_day WHERE kind = 'err' GROUP BY uid, key"),
+    errAll: db.prepare("SELECT key, build, loc, msg, firstAt, lastAt, memAt FROM usage_err"),
+    errHits: db.prepare("SELECT uid, key, SUM(n) AS n FROM usage_day WHERE kind = 'err' AND uid <> '-1' GROUP BY uid, key"),
+    // (build 2026.09.25-118) the public hits per day, and the days' visitor counts (the k ≥ 3 rule)
+    errPubDays: db.prepare("SELECT day, key, SUM(n) AS n FROM usage_day WHERE kind = 'err' AND uid = '-1' GROUP BY day, key"),
+    pvDays: db.prepare("SELECT day, SUM(n) AS n FROM usage_day WHERE kind = 'pv' AND uid = '-1' GROUP BY day"),
     triAll: db.prepare("SELECT sig, resolvedAt, resolvedBuild, regressedAt, regressedBuild FROM usage_triage"),
     triSet: db.prepare(`INSERT INTO usage_triage (sig, resolvedAt, resolvedBuild, regressedAt, regressedBuild) VALUES (?,?,?,?,?)
       ON CONFLICT(sig) DO UPDATE SET resolvedAt = excluded.resolvedAt, resolvedBuild = excluded.resolvedBuild, regressedAt = excluded.regressedAt, regressedBuild = excluded.regressedBuild`),
@@ -2752,6 +2768,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     for (const r of US.errIdx.all()) if (!usageErrDel.has(r.key)) add(r.key, r.build, r.lastAt);
     for (const r of usageErrPend.values()) add(r.key, r.build, r.lastAt);
   }
+  try { US.errMemFill.run(); US.errPubBlank.run(); } catch (_) {}   // (build 2026.09.25-118) idempotent
   usageErrReload();
   // (-110 follow-up) The known builds, newest first. usageBuildSeen is the server's boot call.
   let usageBuildList = US.buildAll.all().map((r) => r.build);
@@ -2873,7 +2890,12 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   // holds USAGE_ERR_CAP, or this member already introduced USAGE_ERR_NEW_PER_DAY new ones today.
   // (-110 follow-up) Past USAGE_ERR_TOTAL rows overall, the least-recently-seen row is evicted.
   // e = {msg, loc} already truncated and cleaned by the server; the text is never trusted anywhere.
+  // (build 2026.09.25-118) A signed-out sighting ('-1') neither stores the message text (a key only
+  // visitors hit keeps msg = '': its loc and the hash in the key) nor moves memAt — the time a MEMBER
+  // last hit it, which is the only thing that can reopen a resolved error. A member's later hit on the
+  // same key brings the text and memAt with it.
   function usageErrNote(uid, build, e, now) {
+    const member = uid !== USAGE_PUB;
     const key = build + "|" + e.loc + "|" + crypto.createHash("sha1").update(e.msg).digest("hex").slice(0, 12);
     const known = usageErrIdx.get(key);
     if (known) known.lastAt = Math.max(known.lastAt, now);
@@ -2895,8 +2917,10 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       usageErrDel.delete(key);
     }
     const p = usageErrPend.get(key);
-    if (p) p.lastAt = Math.max(p.lastAt, now);
-    else usageErrPend.set(key, { key, build, loc: e.loc, msg: e.msg, firstAt: now, lastAt: now });
+    if (p) {
+      p.lastAt = Math.max(p.lastAt, now);
+      if (member) { p.memAt = Math.max(p.memAt || 0, now); if (!p.msg) p.msg = e.msg; }
+    } else usageErrPend.set(key, { key, build, loc: e.loc, msg: member ? e.msg : "", firstAt: now, lastAt: now, memAt: member ? now : null });
     return key;
   }
   // ---- (build 2026.09.24-112) sitewide-only: tab paths, entry tabs, control usage, device per tab ----
@@ -2914,6 +2938,14 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   // (build 2026.09.25-117) public visitors: 30 days of uid '-1' totals; ALL signed-out visitors together
   // may introduce at most 10 new distinct errors per ET day (a member may introduce 20 on their own)
   const USAGE_PUB_KEEP_DAYS = 30, USAGE_PUB_ERR_NEW_PER_DAY = 10;
+  // (build 2026.09.25-118) the owner's k ≥ 3 rule for EVERY per-day public figure: an ET day with
+  // fewer than USAGE_PUB_K distinct visitors ('pv') is left out of every public number the operator
+  // sees — tab time, reach, the minutes histogram, the heatmap, paths / controls / devices, first
+  // paint and errors (the triage's public column too) — and its own day figures read "<3". The rows
+  // are still kept (and still age out at 30 days); they are simply never shown. Anonymous online-now
+  // reads "<3" at 1–2 open signed-out tabs.
+  const USAGE_PUB_K = 3, USAGE_PUB_LOW = "<3";
+  const usagePubLow = (n) => (n > 0 && n < USAGE_PUB_K ? USAGE_PUB_LOW : n);
   const USAGE_TR_N = 30, USAGE_CTL_N = 20, USAGE_SITE_KEYS = 40;
   const USAGE_TAB_SET = new Set(FEATURES.filter((f) => f.kind === "tab").map((f) => f.key));
   const USAGE_CTL = usageControls();
@@ -3028,11 +3060,14 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       if (key) { usageAdd(USAGE_PUB, day, "err", key, e.c, 0); errs += e.c; } else errDropped++;
     }
     const site = usageSiteRecord(USAGE_PUB, day, tabs, dev, x, P.q || { day, n: 0, en: 0 });
-    if (P.newVisitor) usageAdd(USAGE_PUB, day, "pv", day, 1, 0);
-    for (const k of P.newTabs || []) if (USAGE_TAB_SET.has(k)) usageAdd(USAGE_PUB, day, "ptr", day + "|" + k, 1, 0);
+    // (build 2026.09.25-118) the distinct counts go under the day the visitor state is OF (P.day), which
+    // is the recording day unless a caller records an old day's payload late — never split across two
+    const vd = typeof P.day === "string" && /^\d{4}-\d\d-\d\d$/.test(P.day) ? P.day : day;
+    if (P.newVisitor) usageAdd(USAGE_PUB, vd, "pv", vd, 1, 0);
+    for (const k of P.newTabs || []) if (USAGE_TAB_SET.has(k)) usageAdd(USAGE_PUB, vd, "ptr", vd + "|" + k, 1, 0);
     if (P.minTo != null && P.minTo !== P.minFrom) {
-      if (P.minFrom != null) usageAdd(USAGE_PUB, day, "pmin", String(P.minFrom), -1, 0);
-      usageAdd(USAGE_PUB, day, "pmin", String(P.minTo), 1, 0);
+      if (P.minFrom != null) usageAdd(USAGE_PUB, vd, "pmin", String(P.minFrom), -1, 0);
+      usageAdd(USAGE_PUB, vd, "pmin", String(P.minTo), 1, 0);
     }
     return { ok: true, stored: true, ms: tot, perf, errs, errDropped, site, visitor: !!P.newVisitor };
   }
@@ -3098,7 +3133,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       }
       for (const uid of lasts) { const x = usageLast.get(uid); if (x) US.lastUp.run(uid, x.build, x.at); }
       for (const k of dels) US.errDel.run(k);   // (-110 follow-up) evicted past USAGE_ERR_TOTAL
-      for (const e of errs) US.errUp.run(e.key, e.build, e.loc, e.msg, e.firstAt, e.lastAt);
+      for (const e of errs) US.errUp.run(e.key, e.build, e.loc, e.msg, e.firstAt, e.lastAt, e.memAt != null ? e.memAt : null);
       // (-110) the weekly bits for every week this flush touched (from the Monday of its oldest day)
       let wkFrom = null;
       for (const r of rows) if (r.kind === "tab" && (!wkFrom || r.day < wkFrom)) wkFrom = r.day;
@@ -3240,6 +3275,8 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   // A resolved error reopens when a build NEWER than the one it was resolved on (deploy order, from
   // usage_build) hits it after the click; a stale tab still on the old build never reopens it. A
   // resolved build that aged out of the known list is older than every known one.
+  // (build 2026.09.25-118) "hits it" = a MEMBER hits it (usage_err.memAt): a signed-out page on a
+  // newer build never reopens a resolved error nor marks it regressed.
   function usageTriageSweep(now) {
     usageFlush();
     const tri = US.triAll.all().filter((r) => r.resolvedAt != null);
@@ -3252,7 +3289,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       const base = at.has(r.resolvedBuild) ? at.get(r.resolvedBuild) : -Infinity;
       let hit = null;
       for (const e of rows) {
-        if (e.sig !== r.sig || e.lastAt <= r.resolvedAt || e.build === r.resolvedBuild || !at.has(e.build) || at.get(e.build) <= base) continue;
+        if (e.sig !== r.sig || !(e.memAt > r.resolvedAt) || e.build === r.resolvedBuild || !at.has(e.build) || at.get(e.build) <= base) continue;
         if (!hit || at.get(e.build) > at.get(hit.build)) hit = e;
       }
       if (hit) { US.triSet.run(r.sig, null, null, t, hit.build); n++; }
@@ -3268,20 +3305,30 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     const by = new Map();
     for (const e of US.errAll.all()) { const sig = usageSig(e.key); if (!sig) continue; if (!by.has(sig)) by.set(sig, []); by.get(sig).push(e); }
     const hits = new Map(), who = new Map(), pubHits = new Map();
-    for (const r of US.errHits.all()) {
+    for (const r of US.errHits.all()) {   // members' rows (and the folded '0'), never '-1'
       const sig = usageSig(r.key); if (!by.has(sig)) continue;
       hits.set(sig, (hits.get(sig) || 0) + r.n);
-      // (build 2026.09.25-117) signed-out hits are counted apart and never as "members affected"
-      if (r.uid === USAGE_PUB) { pubHits.set(sig, (pubHits.get(sig) || 0) + r.n); continue; }
       if (r.uid !== USAGE_SITE) { if (!who.has(sig)) who.set(sig, new Set()); who.get(sig).add(r.uid); }
+    }
+    // (build 2026.09.25-117) signed-out hits are counted apart and never as "members affected";
+    // (build 2026.09.25-118) and only on ET days with ≥ USAGE_PUB_K visitors
+    const pvDay = new Map(US.pvDays.all().map((r) => [r.day, r.n]));
+    for (const r of US.errPubDays.all()) {
+      const sig = usageSig(r.key); if (!by.has(sig) || !((pvDay.get(r.day) || 0) >= USAGE_PUB_K)) continue;
+      hits.set(sig, (hits.get(sig) || 0) + r.n); pubHits.set(sig, (pubHits.get(sig) || 0) + r.n);
     }
     const tri = new Map(US.triAll.all().map((r) => [r.sig, r]));
     const out = [];
     for (const [sig, rows] of by) {
       let first = rows[0], last = rows[0];
       for (const e of rows) { if (e.firstAt < first.firstAt) first = e; if (e.lastAt > last.lastAt) last = e; }
+      // (build 2026.09.25-118) public-only = no member ever hit any of its keys: no text exists for it,
+      // and it is listed only once some of its public hits fall on a day with ≥ USAGE_PUB_K visitors
+      const pubOnly = !rows.some((e) => e.memAt != null);
+      if (pubOnly && !pubHits.get(sig)) continue;
+      const withText = rows.filter((e) => e.msg).sort((a, b) => b.lastAt - a.lastAt)[0];
       const r = tri.get(sig) || {};
-      out.push({ sig, loc: last.loc, msg: last.msg, firstBuild: first.build, lastBuild: last.build, firstAt: first.firstAt, lastAt: last.lastAt,
+      out.push({ sig, loc: last.loc, msg: pubOnly ? null : withText ? withText.msg : last.msg, pubOnly, firstBuild: first.build, lastBuild: last.build, firstAt: first.firstAt, lastAt: last.lastAt,
         builds: rows.length, hits: hits.get(sig) || 0, members: (who.get(sig) || new Set()).size, pubHits: pubHits.get(sig) || 0,
         resolved: r.resolvedAt != null, resolvedAt: r.resolvedAt != null ? r.resolvedAt : null,
         regressed: r.regressedAt != null, regressedAt: r.regressedAt != null ? r.regressedAt : null, regressedBuild: r.regressedBuild || null });
@@ -3522,7 +3569,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       return { build: t.build || parts[0], loc: t.loc || parts[1] || "?", msg: t.msg != null ? t.msg : "(message not kept)", hits, members };
     });
     // (build 2026.09.25-117) the public (signed-out) view and the members + public combinations
-    const pub = o.lite ? null : usagePublicSummary({ rows: pubRows, r, today, days, inRange, tabs, build, errBuilds, online: o.pubOnline,
+    const pub = o.lite ? null : usagePublicSummary({ rows: pubRows, r, today, days, pFrom, inRange, tabs, build, errBuilds, online: o.pubOnline,
       navOrder: o.navOrder, memberSite: site, memberTabRows: tabRows, memberDayMin, memberPerf: perfHist, memberErrHits: errHits, memberErrWho: errWho });
     return { ok: true, r, today, days, keepDays: USAGE_KEEP_DAYS, priorKept, gen: usageGeneration, pub,
       trendBasis: priorKept ? "range" : "month", moDays: moTrend ? { cur: moTrend.curDays, prev: moTrend.prevDays } : null,
@@ -3563,6 +3610,10 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   //   both    members + public: the median over both populations' visitor/member-days (bucketed),
   //           the combined sitewide sections (threshold on members + visitors per day) and health
   //   drops   beacons the server-wide caps refused, today and in range, by reason
+  // (build 2026.09.25-118) Every figure above except drops obeys k ≥ 3: rows of an ET day with fewer
+  // than USAGE_PUB_K visitors are skipped (prior-window days too), today's own figures and online-now
+  // read "<3" at 1–2, the series marks such days {n: null, v: null, low: true} and kpi.hiddenDays
+  // counts them; priorKept = the prior window lies inside the 30-day public retention.
   const PUB_MIN_B = require("./usage-public").PUB_MIN_BUCKETS;
   function usageMinMedian(hist) {   // hist: Map(bucket ms -> n); over days with ≥ a minute; → minutes
     const bins = [...hist].filter(([b, n]) => b >= USAGE_ACTIVE_MS && n > 0).sort((a, b) => a[0] - b[0]);
@@ -3578,9 +3629,20 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     const pv = new Map(), pact = new Map(), ptr = new Map(), ptab = new Map(), ptabPrev = new Map(), hist = new Map(), drops = { today: { rate: 0, visitors: 0 }, range: { rate: 0, visitors: 0 } };
     const heat = Array.from({ length: 7 }, () => new Array(24).fill(0)), perf = new Map(), errHits = new Map();
     const site = { tr: new Map(), en: new Map(), ctl: new Map(), tdev: new Map(), sc: new Map() };
+    // (build 2026.09.25-118) k ≥ 3: a day with fewer than USAGE_PUB_K visitors contributes nothing below
+    // (the prior window's days too); `low` = the range's days that had 1–2 visitors (hidden, said so)
+    const pvAll = new Map();
+    for (const row of c.rows) if (row.kind === "pv") bump(pvAll, row.day, row.n);
+    const dayOk = (d) => (pvAll.get(d) || 0) >= USAGE_PUB_K;
+    const low = c.days.filter((d) => (pvAll.get(d) || 0) > 0 && !dayOk(d));
+    // (build 2026.09.25-118) "vs prior" only while the whole prior window is inside the public
+    // retention (30 days: at r > 15 its start has been deleted) — the members' priorKept rule
+    const priorKept = c.pFrom >= usageDayShift(c.today, -(USAGE_PUB_KEEP_DAYS - 1));
     for (const row of c.rows) {
       const cur = c.inRange.has(row.day);
-      if (row.kind === "tab") { bump(cur ? ptab : ptabPrev, row.key, row.ms); continue; }
+      if (row.kind === "pdrop") { if (cur && row.key in drops.range) { drops.range[row.key] += row.n; if (row.day === c.today) drops.today[row.key] += row.n; } continue; }
+      if (!dayOk(row.day)) continue;
+      if (row.kind === "tab") { if (cur || priorKept) bump(cur ? ptab : ptabPrev, row.key, row.ms); continue; }
       if (!cur) continue;
       if (row.kind === "pv") { bump(pv, row.day, row.n); if (row.day !== c.today) bump(site.sc, row.day, row.n); }
       else if (row.kind === "pmin") { const b = +row.key; if (!Number.isFinite(b)) continue; bump(hist, b, row.n); if (b >= USAGE_ACTIVE_MS) bump(pact, row.day, row.n); }
@@ -3592,7 +3654,6 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
         if (!perf.has(b)) perf.set(b, new Map());
         bump(perf.get(b), +row.key.slice(i + 1), row.n);
       } else if (row.kind === "err") { if (c.errBuilds.has(row.key.slice(0, row.key.indexOf("|")))) bump(errHits, row.key, row.n); }
-      else if (row.kind === "pdrop") { if (row.key in drops.range) { drops.range[row.key] += row.n; if (row.day === c.today) drops.today[row.key] += row.n; } }
       else if (row.day === c.today) continue;   // the sitewide kinds: complete days only
       else if (row.kind === "tr") bump(site.tr, row.key, row.n);
       else if (row.kind === "en") bump(site.en, row.key, row.n);
@@ -3605,7 +3666,8 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       let reachSum = 0, nd = 0, opened = 0;
       for (const d of c.days) { const v = pv.get(d) || 0; if (!v) continue; nd++; const u = ptr.get(t.key + "|" + d) || 0; opened += u; reachSum += Math.min(1, u / v); }
       const ms = ptab.get(t.key) || 0, prev = ptabPrev.get(t.key) || 0;
-      return { key: t.key, label: t.label, gate: t.gate, reach: nd ? reachSum / nd : null, reachDays: nd, visitorDays: opened, ms, prevMs: prev, delta: prev > 0 ? (ms - prev) / prev : null };
+      return { key: t.key, label: t.label, gate: t.gate, reach: nd ? reachSum / nd : null, reachDays: nd, visitorDays: opened, ms,
+        prevMs: priorKept ? prev : null, delta: priorKept && prev > 0 ? (ms - prev) / prev : null };
     }).filter((t) => t.ms > 0 || t.prevMs > 0 || t.gate !== "off");
     let heatTot = 0, core = 0, peak = null;
     for (let d = 0; d < 7; d++) for (let h = 0; h < 24; h++) { const v = heat[d][h]; heatTot += v; if (h >= 8 && h < 16) core += v; if (v > 0 && (!peak || v > peak.ms)) peak = { dow: d, h, ms: v }; }
@@ -3617,7 +3679,8 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
       const all = [...E].map(([k, hits]) => ({ k, hits, members: W ? (W.get(k) || new Set()).size : null })).sort((a, b) => b.hits - a.hits);
       const top = all.slice(0, 5).map(({ k, hits, members }) => {
         const t = usageErrPend.get(k) || US.errOne.get(k) || {}, parts = k.split("|");
-        return { build: t.build || parts[0], loc: t.loc || parts[1] || "?", msg: t.msg != null ? t.msg : "(message not kept)", hits, members };
+        // (build 2026.09.25-118) a key only signed-out pages hit keeps no text: msg null, pubOnly
+        return { build: t.build || parts[0], loc: t.loc || parts[1] || "?", msg: t.msg ? t.msg : t.msg === "" ? null : "(message not kept)", pubOnly: t.msg === "", hits, members };
       });
       return { build: c.build, perf: { cur: perfOf(c.build), prev: perfOf(prev) }, errors: { distinct: all.length, hits: all.reduce((s2, e) => s2 + e.hits, 0), top } };
     };
@@ -3629,9 +3692,15 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     const mixSite = {};
     for (const k of ["tr", "en", "ctl", "tdev", "sc"]) mixSite[k] = mergeMaps(c.memberSite[k], site[k]);
     return {
-      kpi: { online: c.online != null ? +c.online || 0 : null, visitorsToday: pv.get(c.today) || 0, activeToday: pact.get(c.today) || 0,
-        visitorDays, activeVisitorDays, meanDaily: visitorDays / c.days.length, peakDaily: Math.max(0, ...pv.values()), medMinPerDay: usageMinMedian(hist) },
-      series: c.days.map((d) => ({ day: d, n: pact.get(d) || 0, v: pv.get(d) || 0 })),
+      // (build 2026.09.25-118) today's figures and online-now read "<3" at 1–2; the range figures sum
+      // the days with ≥ USAGE_PUB_K visitors only (hiddenDays = the range's days left out)
+      kpi: { online: c.online != null ? usagePubLow(+c.online || 0) : null,
+        visitorsToday: dayOk(c.today) ? pv.get(c.today) || 0 : usagePubLow(pvAll.get(c.today) || 0),
+        activeToday: dayOk(c.today) ? pact.get(c.today) || 0 : (pvAll.get(c.today) || 0) > 0 ? USAGE_PUB_LOW : 0,
+        visitorDays, activeVisitorDays, meanDaily: visitorDays / c.days.length, peakDaily: Math.max(0, ...pv.values()), medMinPerDay: usageMinMedian(hist),
+        k: USAGE_PUB_K, hiddenDays: low.length },
+      series: c.days.map((d) => (low.includes(d) ? { day: d, n: null, v: null, low: true } : { day: d, n: pact.get(d) || 0, v: pv.get(d) || 0 })),
+      priorKept,
       tabs: tabRows, heat: { ms: heat, total: heatTot, peak, coreShare: heatTot ? core / heatTot : null },
       site: usageSitewide(site, c.tabs, tabRows, c.navOrder, false, span),
       health: healthOf(perf, errHits, null), drops,
@@ -3830,8 +3899,13 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     // (build 2026.09.25-117) the public line: visitor-days (daily distinct visitors summed — a visitor
     // is never linked across days) this week vs last, and the week's top public tabs by screen time
     const pubV = { a: 0, b: 0 }, pubTab = new Map();
-    for (const r of US.range.all(b.from, D)) {
+    const rangeRows = US.range.all(b.from, D);
+    // (build 2026.09.25-118) k ≥ 3: only the days with ≥ USAGE_PUB_K visitors count
+    const pubPv = new Map();
+    for (const r of rangeRows) if (r.uid === USAGE_PUB && r.kind === "pv") bump(pubPv, r.day, r.n);
+    for (const r of rangeRows) {
       if (r.uid === USAGE_PUB) {
+        if (!((pubPv.get(r.day) || 0) >= USAGE_PUB_K)) continue;
         const w = r.day <= b.to ? "b" : r.day <= a.to ? "a" : null;
         if (w && r.kind === "pv") pubV[w] += r.n;
         if (w === "a" && r.kind === "tab") bump(pubTab, r.key, r.ms);
@@ -3874,10 +3948,14 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     // quiet: member-visible tabs (not switched off, not admin-only) opened by < 10% of this week's actives
     const quiet = activeA.size ? tabs.filter((t) => t.gate !== "off" && t.gate !== "admin" && t.reach < 0.1).sort((x, y) => x.reach - y.reach || y.ms - x.ms) : [];
     // errors, from the triage list: new = first seen this week (or since) and still open; regressed = reopened and open
+    // (build 2026.09.25-118) the error LINES are members' errors only (members > 0): an error only
+    // signed-out pages hit is a count ("pubOnly"), never its location or text
     const tri = usageTriage(now);
     const pick = (e) => ({ loc: e.loc, msg: e.msg, members: e.members, hits: e.hits, build: e.lastBuild });
-    const fresh = tri.rows.filter((e) => !e.resolved && !e.regressed && etDayStr(e.firstAt) >= a.from).map(pick);
-    const regressed = tri.rows.filter((e) => e.regressed && !e.resolved).map(pick);
+    const newOpen = tri.rows.filter((e) => !e.resolved && !e.regressed && etDayStr(e.firstAt) >= a.from);
+    const fresh = newOpen.filter((e) => !e.pubOnly && e.members > 0).map(pick);
+    const pubOnly = newOpen.filter((e) => e.pubOnly || !(e.members > 0)).length;
+    const regressed = tri.rows.filter((e) => e.regressed && !e.resolved && !e.pubOnly && e.members > 0).map(pick);
     const lbl = new Map((opt.tabs || []).map((t) => [t.key, t.label]));
     const pubTop = [...pubTab].filter(([, ms]) => ms > 0).sort((x, y) => y[1] - x[1]).slice(0, 3).map(([k, ms]) => ({ key: k, label: lbl.get(k) || k, ms }));
     return { day: D, week: usageDigestMod().digestWeekKey(D), a, b,
@@ -3886,7 +3964,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
         stickiness: activeA.size ? sumDaily / 7 / activeA.size : null, newJoined: joined.length,
         newActive: joined.filter((u) => activeA.has(u.uid)).length },
       lapsed, returning, tabs: { top, mover, quiet: quiet.map((t) => ({ key: t.key, label: t.label, reach: t.reach })) },
-      errors: { fresh, regressed, open: tri.open }, verdict: opt.build ? usageRegress(opt.build, now) : null };
+      errors: { fresh, regressed, pubOnly, open: tri.open }, verdict: opt.build ? usageRegress(opt.build, now) : null };
   }
   // Per member, the inputs of the nudge rules (usage-digest.js nudgeCheck) minus the channels (the
   // server knows those): the last active ET day inside the window, last seen, the last nudge.

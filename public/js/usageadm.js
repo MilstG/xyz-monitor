@@ -233,13 +233,13 @@ function uaTriageHtml(T){
     +(UA.triErr?'<div class="acc-note neg" style="margin:0 0 var(--sp-1)">could not update — '+esc(UA.triErr)+'</div>':'')
     +'<div class="us-tw"><table class="us-tbl us-errs us-tri"><thead><tr><th>state</th><th>file:line · message</th><th>builds</th><th>first seen</th><th>last seen</th><th class="n">hits</th><th class="n">members</th><th class="n" title="hits from signed-out pages (anonymous; never counted as members)">public</th><th></th></tr></thead><tbody>'
     +rows.map(e=>'<tr'+(e.resolved?' class="us-res"':'')+'><td>'+st(e)+'</td>'
-      +'<td class="us-emsg"><span class="mono">'+esc(e.loc)+'</span> · '+esc(e.msg)+'</td>'
+      +'<td class="us-emsg">'+(e.pubOnly?'<span class="acc-chip">public-only</span> · <span class="mono">'+esc(e.loc)+'</span>':'<span class="mono">'+esc(e.loc)+'</span> · '+esc(e.msg))+'</td>'
       +'<td class="mono">'+esc(uaShort(e.firstBuild))+(e.lastBuild!==e.firstBuild?' → '+esc(uaShort(e.lastBuild)):'')+'</td>'
       +'<td class="mono">'+esc(uaWhen(e.firstAt))+'</td><td class="mono">'+esc(uaWhen(e.lastAt))+'</td>'
       +'<td class="n">'+(+e.hits||0)+'</td><td class="n">'+(+e.members||0)+'</td><td class="n">'+(+e.pubHits||0)+'</td>'
       +'<td><button type="button" class="btn" data-uatri="'+esc(e.sig)+'" data-on="'+(e.resolved?'0':'1')+'"'+(UA.triBusy?' disabled':'')+'>'+(UA.triBusy===e.sig?'…':e.resolved?'reopen':'resolve')+'</button></td></tr>').join('')
     +'</tbody></table></div>'
-    +'<div class="acc-note">One row per distinct error (file + message, across builds and line moves). Members is a count, never who, and never includes a signed-out page (its hits are the “public” column, part of hits). Resolving stamps the newest build (in deploy order) it was seen on; a hit from a build deployed after that one reopens it as “regressed”, while stale tabs on that or older builds do not.</div>';
+    +'<div class="acc-note">One row per distinct error (file + message, across builds and line moves). Members is a count, never who, and never includes a signed-out page (its hits are the “public” column, part of hits, counted only on days with 3+ visitors). “public-only” = only signed-out pages hit it: no message text is kept for it. Only a member’s hit reopens a resolved error. Resolving stamps the newest build (in deploy order) it was seen on; a hit from a build deployed after that one reopens it as “regressed”, while stale tabs on that or older builds do not.</div>';
 }
 function uaMarkWord(m){
   const d=String(m.detail||'');
@@ -372,39 +372,43 @@ function uaHeatSum(a,b){
   for(let d=0;d<7;d++) for(let h=0;h<24;h++){ const v=ms[d][h]; total+=v; if(h>=8&&h<16) core+=v; if(v>0&&(!peak||v>peak.ms)) peak={dow:d,h,ms:v}; }
   return {ms,total,peak,coreShare:total?core/total:null};
 }
+// (build 2026.09.25-118) k ≥ 3: a public day figure (or online-now) of 1–2 arrives as the string "<3"
+const uaKn=(v)=>typeof v==='string'?esc(v):String(+v||0);
+const uaKadd=(a,b)=>typeof b==='string'?((+a||0)?(+a||0)+' + '+esc(b):esc(b)):String((+a||0)+(+b||0));
+const UA_PUB_K_NOTE='days with fewer than 3 visitors are hidden';
 function uaPubChip(D){
   const P=D.pub, L=P&&P.live;
   if(!D.publicOn||!L) return '<span class="acc-chip">public off'+(L&&L.forcedOff?' · USAGE_PUBLIC=0':'')+'</span>';
   const K=P.kpi||{}, dr=(P.drops&&P.drops.today)||{}, nd=(+dr.rate||0)+(+dr.visitors||0);
-  return '<span class="acc-chip on" title="signed-out visitors, counted without cookies or ids: distinct visitors today (ET) and beacons the server-wide caps dropped today">public on · '+(+K.visitorsToday||0)+' visitor'+(K.visitorsToday===1?'':'s')+' today · '+nd+' dropped</span>';
+  return '<span class="acc-chip on" title="signed-out visitors, counted without cookies or ids: distinct visitors today (ET) and beacons the server-wide caps dropped today">public on · '+uaKn(K.visitorsToday)+' visitor'+(K.visitorsToday===1?'':'s')+' today · '+nd+' dropped</span>';
 }
 function uaPubCtlHtml(D){
   const L=(D.pub&&D.pub.live)||{}, forced=!!L.forcedOff, tog=L.toggle!==false;
   return '<div class="us-pubctl"><label><input type="checkbox" data-uapub="1"'+(tog?' checked':'')+(UA.pubBusy||forced?' disabled':'')+'> count signed-out visitors (anonymous totals)</label>'
     +(forced?'<span class="acc-chip warn">USAGE_PUBLIC=0 forces this off</span>':'')
     +(UA.pubErr?'<span class="neg">could not update — '+esc(UA.pubErr)+'</span>':'')
-    +'<span class="acc-mu">no cookies or ids; a daily-salted key held in memory only, so a visit can’t be linked across days · caps '+(+((L.caps||{}).visitors)||20000)+' visitors/day, '+(+((L.caps||{}).perMin)||600)+' beacons/min</span></div>';
+    +'<span class="acc-mu">no cookies or ids; a daily-salted key held in memory only, so a visit is not linked across days; '+UA_PUB_K_NOTE+' · caps '+(+((L.caps||{}).visitors)||20000)+' visitors/day, '+(+((L.caps||{}).perMin)||600)+' beacons/min</span></div>';
 }
 function uaKpisHtml(D,who){
   const K=D.kpi||{}, P=D.pub||{}, PK=P.kpi||{};
   const kp=(k,v,s)=>'<div class="us-kpi"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="s">'+s+'</div></div>';
   if(who==='public'){ const dr=(P.drops&&P.drops.today)||{};
     return '<div class="us-kpis">'
-      +kp('<span class="us-live"></span>online now',PK.online==null?'—':String(PK.online),'public · open signed-out tabs (not people)')
-      +kp('visitors today',String(+PK.visitorsToday||0),'public · distinct visitors, ET day')
-      +kp('active today',String(+PK.activeToday||0),'public · visitors ≥60s on screen')
+      +kp('<span class="us-live"></span>online now',PK.online==null?'—':uaKn(PK.online),'public · open signed-out tabs (not people)')
+      +kp('visitors today',uaKn(PK.visitorsToday),'public · distinct visitors, ET day')
+      +kp('active today',uaKn(PK.activeToday),'public · visitors ≥60s on screen')
       +kp('visitor-days · '+D.r+'d',String(+PK.visitorDays||0),'public · daily visitors summed (never linked across days)')
       +kp('mean / day',PK.meanDaily==null?'—':uaMin(PK.meanDaily),'public · visitors per day in range')
       +kp('median / day',PK.medMinPerDay==null?'—':'≈'+uaMin(PK.medMinPerDay)+' min','public · per active visitor-day (bucketed)')
-      +kp('dropped today',String((+dr.rate||0)+(+dr.visitors||0)),'public · beacons over the server-wide caps')+'</div>';
+      +kp('dropped today',String((+dr.rate||0)+(+dr.visitors||0)),'public · beacons over the server-wide caps')+'</div>'+uaPubKNote(PK);
   }
   if(who==='both'){ const B=P.both||{};
     return '<div class="us-kpis">'
-      +kp('<span class="us-live"></span>online now',String((+K.online||0)+(+PK.online||0)),(+K.online||0)+' members + '+(+PK.online||0)+' signed-out tabs')
-      +kp('active today',String((+K.activeToday||0)+(+PK.activeToday||0)),(+K.activeToday||0)+' members + '+(+PK.activeToday||0)+' public visitors (≥60s)')
+      +kp('<span class="us-live"></span>online now',uaKadd(K.online,PK.online),(+K.online||0)+' members + '+uaKn(PK.online)+' signed-out tabs')
+      +kp('active today',uaKadd(K.activeToday,PK.activeToday),(+K.activeToday||0)+' members + '+uaKn(PK.activeToday)+' public visitors (≥60s)')
       +kp('active · '+D.r+'d',(+K.activeRange||0)+' + '+(+PK.activeVisitorDays||0),'distinct members + active public visitor-days')
       +kp('median / day',B.medMinPerDay==null?'—':'≈'+uaMin(B.medMinPerDay)+' min','members + public · per active member- or visitor-day (bucketed)')
-      +kp('visitors today',String(+PK.visitorsToday||0),'public · distinct, ET day')+'</div>';
+      +kp('visitors today',uaKn(PK.visitorsToday),'public · distinct, ET day')+'</div>'+uaPubKNote(PK);
   }
   return '<div class="us-kpis">'
     +kp('<span class="us-live"></span>online now',String(K.online||0),'members with an open tab')
@@ -414,14 +418,21 @@ function uaKpisHtml(D,who){
     +kp('median / day',K.medMinPerDay==null?'—':uaMin(K.medMinPerDay)+' min','per active member-day')
     +kp('new members',String(K.newMembers||0),'in range · '+(K.newActive||0)+' active')+'</div>';
 }
+// (build 2026.09.25-118) the k ≥ 3 rule, said under the public / both KPIs
+function uaPubKNote(PK){
+  const n=+PK.hiddenDays||0;
+  return '<div class="acc-note" style="margin:var(--sp-1) 0 0">Public: '+UA_PUB_K_NOTE+' (“&lt;3”, and left out of every public figure and range total, online-now included)'
+    +(n?' — '+n+' day'+(n===1?'':'s')+' in this range':'')+'.</div>';
+}
 // The tab table for public / both. Public reach = the MEAN DAILY reach (visitors who opened the tab that
 // day ÷ that day's visitors, averaged over the range's days with visitors).
 function uaPubTabsHtml(D,who){
   const pt=new Map(((D.pub&&D.pub.tabs)||[]).map(t=>[t.key,t])), mt=new Map((D.tabs||[]).map(t=>[t.key,t]));
+  const pk=!(D.pub&&D.pub.priorKept===false);   // (build 2026.09.25-118) the public prior window is still kept
   const keys=[...new Set([...(D.tabs||[]).map(t=>t.key),...pt.keys()])];
   const rows=keys.map(k=>{ const m=mt.get(k)||{}, p=pt.get(k)||{};
     const ms=who==='both'?(+m.ms||0)+(+p.ms||0):(+p.ms||0), prev=who==='both'?(+m.prevMs||0)+(+p.prevMs||0):(+p.prevMs||0);
-    return {key:k,label:m.label||p.label||k,gate:m.gate||p.gate||'',reach:who==='both'?m.reach:p.reach,preach:p.reach,ms,delta:prev>0?(ms-prev)/prev:null}; })
+    return {key:k,label:m.label||p.label||k,gate:m.gate||p.gate||'',reach:who==='both'?m.reach:p.reach,preach:p.reach,ms,delta:pk&&prev>0?(ms-prev)/prev:null}; })
     .filter(t=>t.ms>0||t.gate!=='off');
   const tval=(t,k)=>k==='label'?String(t.label).toLowerCase():k==='gate'?t.gate:t[k];
   const tRows=uaSorted(rows,UA.tsort,tval), maxMs=Math.max(1,...rows.map(t=>t.ms));
@@ -437,7 +448,9 @@ function uaPubTabsHtml(D,who){
       +'<td class="n">'+uaDelta(t.delta)+'</td><td><span class="acc-chip'+(t.gate==='admin'?' on':t.gate==='off'?' warn':'')+'">'+esc(t.gate)+'</span></td></tr>').join('')
     +'</tbody></table></div>'
     +'<div class="acc-note">Public reach is the mean daily reach: on each day with visitors, the share of that day’s distinct visitors who opened the tab, averaged over those days — a visitor is never linked across days, so a range-wide share of “people” does not exist for them.'
-    +(who==='both'?' “members used” is the members’ own reach (members active in range who opened it); hours add both populations.':' Only tabs open to signed-out visitors can get public time.')+'</div>';
+    +(who==='both'?' “members used” is the members’ own reach (members active in range who opened it); hours add both populations.':' Only tabs open to signed-out visitors can get public time.')
+    +(pk?'':' “vs prior” is blank: the prior window beyond retention (public rows are kept '+(+((D.pub||{}).keepDays)||30)+' days).')
+    +' Days with fewer than 3 visitors are hidden.</div>';
 }
 function uaPubHealthHtml(D,who){
   const P=D.pub||{}, H=who==='both'?(P.both||{}).health:P.health;
@@ -449,12 +462,12 @@ function uaPubHealthHtml(D,who){
     cur?cur.n+' page load'+(cur.n===1?'':'s')+(prev?' · build '+esc(prev.build)+': '+uaSec(prev.p50)+' / '+uaSec(prev.p75):''):'no samples on this build yet');
   const top=(E.top||[])[0];
   const errs=kc('JS errors',lbl+' · this build and the previous one',(+E.distinct||0)+' <span class="acc-mu">distinct · '+(+E.hits||0)+' hits</span>',
-    top?'top: <span class="neg">'+esc(top.loc)+' · '+esc(top.msg)+'</span>'+(who==='both'&&top.members!=null?' · '+(+top.members||0)+' member'+(top.members===1?'':'s')+' (visitors never counted as members)':''):'none in range');
+    top?'top: <span class="neg">'+esc(top.loc)+' · '+(top.msg==null?'public-only':esc(top.msg))+'</span>'+(who==='both'&&top.members!=null?' · '+(+top.members||0)+' member'+(top.members===1?'':'s')+' (visitors never counted as members)':''):'none in range');
   const list=(E.top||[]).length?'<div class="us-tw" style="margin-top:var(--sp-2)"><table class="us-tbl us-errs"><thead><tr><th>build</th><th>file:line</th><th>message</th><th class="n">hits · '+esc(lbl)+'</th>'+(who==='both'?'<th class="n">members</th>':'')+'</tr></thead><tbody>'
-    +(E.top||[]).map(e=>'<tr><td class="mono">'+esc(e.build)+'</td><td class="mono">'+esc(e.loc)+'</td><td class="us-emsg">'+esc(e.msg)+'</td><td class="n">'+(+e.hits||0)+'</td>'+(who==='both'?'<td class="n">'+(+e.members||0)+'</td>':'')+'</tr>').join('')
+    +(E.top||[]).map(e=>'<tr><td class="mono">'+esc(e.build)+'</td><td class="mono">'+esc(e.loc)+'</td><td class="us-emsg">'+(e.msg==null?'<span class="acc-mu">public-only · text not kept</span>':esc(e.msg))+'</td><td class="n">'+(+e.hits||0)+'</td>'+(who==='both'?'<td class="n">'+(+e.members||0)+'</td>':'')+'</tr>').join('')
     +'</tbody></table></div>':'';
   return '<div class="dm-sh" style="padding-left:0;margin-top:var(--sp-3)">Client health'+uaPopTag(who)+'</div><div class="us-health">'+perf+errs+'</div>'+list
-    +'<div class="acc-note">Signed-out pages report first paint and errors under the same rules (known builds only, quoted text removed, 200 characters); all visitors together may add at most 10 new distinct errors a day, and public numbers never trigger the post-deploy alerts. The verdict, stale builds and error triage are under who → members (triage also shows public hits per error).</div>';
+    +'<div class="acc-note">Signed-out pages report first paint and errors under the same rules (known builds only, quoted text removed, 200 characters); an error only signed-out pages hit keeps its file:line but no message text (the text appears once a member hits it); all visitors together may add at most 10 new distinct errors a day, public numbers never trigger the post-deploy alerts nor reopen a resolved error, and days with fewer than 3 visitors are hidden. The verdict, stale builds and error triage are under who → members (triage also shows public hits per error).</div>';
 }
 
 // ---- the daily-active chart: bars per ET day + the trailing 7-day mean ---------------------------
