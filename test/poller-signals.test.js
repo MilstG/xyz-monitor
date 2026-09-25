@@ -400,7 +400,7 @@ test("HTF shadow batch 2: failbrk mirror, pead reaction gate, fundext restored a
   const stale = flat.map((k) => [k[0], k[1]]);
   stale[stale.length - 2][1] = hi - 1; stale[stale.length - 1][1] = hi - 1;
   assert.equal(C.detectFailBrk(stale, hi - 0.4), null, "an aged-out break never fires");
-  // ---- pead: completed outsized reaction drifts. (re-pinned -121) The reaction is the study's own
+  // ---- pead: completed outsized reaction drifts. (re-pinned -122) The reaction is the study's own
   // earnReactWindow: last cash close before the print -> first cash close after it, entry after
   // that close, freshness counted in US sessions. Fixed calendar (September 2026), UTC-day bars.
   const U = (m, d, h) => Date.UTC(2026, m - 1, d, h || 0);

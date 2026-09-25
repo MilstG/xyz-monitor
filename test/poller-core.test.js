@@ -2731,7 +2731,10 @@ test("study wiring 2026.09.20: hourly funding nets the daily base rates, the 5m 
   assert.ok(pol.includes("split: r._st.ovsplit || null"), "the ondrift card carries the overnight split");
   assert.ok(pol.includes("st.gap = studyGapFade(hs, wins, 3 * HOUR, fine);") && pol.includes("st.ondrift = offDriftStats(hs, wins, 3 * HOUR, fine);"), "gap and drift studies take the fine series");
   assert.ok(pol.includes("earnReactionsFor(prints, row.dailyRaw, now, row.hourlyRaw, { off: sessOffOf(row), fine })") && pol.includes("const fine = fineAround(row, earnFineWins(prints));") && pol.includes("earnReactionCurve(prints, row.hourlyRaw, { now })"), "the earnings study anchors on the hourly spine and ships the curve");
-  assert.ok(pol.includes("detectPead(prints, r.dailyRaw, r.px, sd30, r.hourlyRaw, now, { off: sessOffOf(r) })"), "PEAD reads earnReactWindow's cash closes off the hourly spine, the session calendar for its fallback (-121)");
+  assert.ok(pol.includes("detectPead(prints, r.dailyRaw, r.px, sd30, r.hourlyRaw, now, { off: sessOffOf(r), fine })"), "PEAD reads earnReactWindow's cash closes off the hourly spine and the 5m archive, the session calendar for its fallback (-122)");
+  // (build 2026.09.25-122) the 5m neighbourhoods the study reads, and no PEAD on home-market names
+  assert.ok(pol.includes("fineAround(r, earnFineWins(recent))"), "PEAD reads the study's 5m archive neighbourhoods");
+  assert.ok(/r\.uni === "xyz" && r\.dailyRaw && r\.dailyRaw\.length >= 25 && !homeMkt\(r\.ticker, r\.uni\)/.test(pol), "PEAD skips home-market (foreign-listed) names");
   assert.ok(pol.includes("meanPairwiseCorr(top.map((r) => sessFoldOf(r, r.dailyRaw)), REGIME_LOOKBACK, Date.now())"), "the regime correlation excludes the open day");
   assert.ok(/rvolMulti\(hs, RVOL_WINS, nowMs, undefined, r\.uni === "xyz" \? "ET" : undefined\)/.test(pol), "equity rvol is keyed on the ET clock");
 });

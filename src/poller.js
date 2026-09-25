@@ -2385,7 +2385,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           mktR: "benchmark 24h move % at fire (BTC for the crypto universe, the SPX proxy for xyz)",
           gw: "gapfade shadow only: void width as a multiple of the market's own gap σ (1.0 or 1.5)",
           emv: "pead shadow only: the frozen earnings-reaction move, %",
-          ew: "pead only, from build -121: the reaction was earnReactWindow's cash-close window (last cash close before the print -> first after it), read off the hourly spine (cash) or session bars (daily); absent = the pre-121 trigger (print day's UTC bar vs the bar before, or hourly +24h)",
+          ew: "pead only, from build -122: the reaction was earnReactWindow's cash-close window (last cash close before the print -> first after it), read off the hourly spine (cash) or session bars (daily); absent = the pre-122 trigger (print day's UTC bar vs the bar before, or hourly +24h)",
           lvn: "structural-void families (lvlhold/lvlrej/squeeze2/unwind2): confirmed pivot touches on the anchoring cluster at fire",
           lva: "structural-void families: days since that cluster's most recent touch, at fire",
           vpw: "volume-node families (vphold/vprej): the anchoring node's share of total profile volume at fire, %",
@@ -3383,12 +3383,18 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
             }
           }
           // post-earnings drift, xyz only: enter with a completed outsized reaction (the
-          // detector enforces completeness, freshness and the 1.5σ magnitude floor). (-121) The
+          // detector enforces completeness, freshness and the 1.5σ magnitude floor). (-122) The
           // reaction is earnReactWindow's cash-close window; `ew` stamps its price tier, which
-          // also marks the fire as -121-trigger (absent = the -104 print-day-bar trigger).
-          if (r.uni === "xyz" && r.dailyRaw && r.dailyRaw.length >= 25) {
+          // also marks the fire as -122-trigger (absent = the -104 print-day-bar trigger).
+          // (build 2026.09.25-122) The 5m archive neighbourhoods the study reads (earnFineWins over
+          // the prints still inside the freshness window) resolve the anchors here too, so a spine
+          // missing the bell bar agrees with the study. Home-market (foreign-listed) names are
+          // skipped: earnReactWindow's anchors are US cash closes on the US calendar.
+          if (r.uni === "xyz" && r.dailyRaw && r.dailyRaw.length >= 25 && !homeMkt(r.ticker, r.uni)) {
             const prints = earnPrintsByTk.get(r.ticker);
-            const pd = prints ? detectPead(prints, r.dailyRaw, r.px, sd30, r.hourlyRaw, now, { off: sessOffOf(r) }) : null;
+            const recent = prints ? prints.filter((p) => { const w = earnReactWindow(p); return w && w.post <= now && now - w.post < 10 * DAY; }) : null;
+            const fine = recent && recent.length ? fineAround(r, earnFineWins(recent)) : null;
+            const pd = prints ? detectPead(prints, r.dailyRaw, r.px, sd30, r.hourlyRaw, now, { off: sessOffOf(r), fine }) : null;
             if (pd && stopGeometryOk(pd.side, r.px, pd.stop))
               openLedger(r, "pead", { score: 0, reading: "" }, pd.side === "long" ? 1 : -1,
                 { sd0: +sd30.toFixed(3), psd: pd.side, pn: 1, stp: pd.stop,

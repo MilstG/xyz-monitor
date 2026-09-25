@@ -1590,7 +1590,7 @@ async function buildServer() {
     return r;
   });
   // ===== usage beacon + "Your usage" (build 2026.09.24-109) ======================================
-  // First-party, members (and, since build -120, signed-out visitors as anonymous totals): which tab is on screen and for how long, rolled into daily
+  // First-party, members (and, since build -122, signed-out visitors as anonymous totals): which tab is on screen and for how long, rolled into daily
   // aggregates (accounts.js usage_day). The beacon carries {tabs:{view -> visible ms}, pwa} and
   // nothing else — no tickers, no search text, no filters, and the device class is derived HERE
   // from the User-Agent and stored as one of three words; the UA itself is never kept.

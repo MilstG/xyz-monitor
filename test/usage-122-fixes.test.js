@@ -47,7 +47,7 @@ function pubBeat(A, T, ua, tabs, t, extra) {
 const E1 = { msg: "Cannot read x", loc: "/js/a.js:10", c: 1 };
 
 // ---- 1. errors ---------------------------------------------------------------------------------------------------------------------
-test("-120 triage: a signed-out hit on a newer build never reopens a resolved error; a member's hit does", () => {
+test("-122 triage: a signed-out hit on a newer build never reopens a resolved error; a member's hit does", () => {
   const A = withMembers(3), T = createUsagePublic();
   const now = Date.now();
   A.usageBuildSeen("B1", now - 3 * DAY); A.usageBuildSeen("B2", now - DAY);
@@ -69,7 +69,40 @@ test("-120 triage: a signed-out hit on a newer build never reopens a resolved er
   A.close();
 });
 
-test("-120 public-only errors: no message text stored (loc + hash), triage shows 'public-only · loc', the digest counts them and never quotes them", () => {
+test("-122 a signed-out hit moves pubAt only: triage's last-seen time and last build stay the members' (build 2026.09.25-122)", () => {
+  const A = withMembers(2), T = createUsagePublic();
+  const now = Date.now(), t1 = now - 2 * HOUR;
+  A.usageBuildSeen("B1", now - 3 * DAY); A.usageBuildSeen("B2", now - DAY);
+  A.usageRecord(U(0), {}, null, t1, { build: "B1", errs: [E1] });
+  A.usageFlush();
+  // later, three visitors hit the same key (the ON CONFLICT path: already flushed) and the same error on B2
+  for (const ua of ["a", "b", "c"]) pubBeat(A, T, ua, { markets: 1000 }, now, { build: "B1", errs: [E1] });
+  for (const ua of ["a", "b", "c"]) pubBeat(A, T, ua, { markets: 1000 }, now + 5, { build: "B2", errs: [E1] });
+  A.usageFlush();
+  const b1 = rowsOf(A, "SELECT lastAt, memAt, pubAt FROM usage_err WHERE build = 'B1'")[0];
+  assert.deepEqual(b1, { lastAt: t1, memAt: t1, pubAt: now }, "the public hit went to pubAt; lastAt / memAt stay the member's");
+  const r = A.usageTriage(now + 10).rows[0];
+  assert.equal(r.pubOnly, false); assert.equal(r.pubHits, 6);
+  assert.equal(r.lastAt, t1, "last seen = the last MEMBER hit"); assert.equal(r.lastBuild, "B1", "last build = the member's, not the visitors' B2");
+  // an unflushed public hit (the pending path) moves nothing either
+  pubBeat(A, T, "a", { markets: 1000 }, now + 20, { build: "B1", errs: [E1] });
+  assert.equal(A.usageTriage(now + 30).rows[0].lastAt, t1);
+  // a member's hit moves them
+  A.usageRecord(U(1), {}, null, now + 40, { build: "B2", errs: [E1] });
+  const r2 = A.usageTriage(now + 50).rows[0];
+  assert.deepEqual([r2.lastAt, r2.lastBuild], [now + 40, "B2"]);
+  // retention reads the later of the two: a recent public hit keeps a row whose member hit is old
+  A.usageFlush();
+  A._db.prepare("UPDATE usage_err SET lastAt = 1, memAt = 1, pubAt = ? WHERE build = 'B1'").run(now);
+  A.usageRetain(now + 60);
+  assert.equal(rowsOf(A, "SELECT COUNT(*) AS n FROM usage_err WHERE build = 'B1'")[0].n, 1, "kept on its public hit");
+  A._db.prepare("UPDATE usage_err SET pubAt = 1 WHERE build = 'B1'").run();
+  A.usageRetain(now + 60);
+  assert.equal(rowsOf(A, "SELECT COUNT(*) AS n FROM usage_err WHERE build = 'B1'")[0].n, 0, "pruned once neither is inside the window");
+  A.close();
+});
+
+test("-122 public-only errors: no message text stored (loc + hash), triage shows 'public-only · loc', the digest counts them and never quotes them", () => {
   const A = withMembers(2), T = createUsagePublic();
   const now = Date.now();
   A.usageBuildSeen("B2", now - DAY);
@@ -110,7 +143,7 @@ test("-120 public-only errors: no message text stored (loc + hash), triage shows
   A.close();
 });
 
-test("-120 boot repair: rows written before the memAt column get memAt from the members' hits, and public-only ones lose their text", () => {
+test("-122 boot repair: rows written before the memAt column get memAt from the members' hits, and public-only ones lose their text", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-usage-122-fixes-boot-"));
   let A = withMembers(1, dir);
   const now = Date.now(), day = etDayStr(now);
@@ -128,7 +161,7 @@ test("-120 boot repair: rows written before the memAt column get memAt from the 
 });
 
 // ---- 3. vs prior ----------------------------------------------------------------------------------------------------------------------
-test("-120 public 'vs prior': blank when the prior window starts before the 30-day public retention (r > 15)", () => {
+test("-122 public 'vs prior': blank when the prior window starts before the 30-day public retention (r > 15)", () => {
   const A = withMembers(0), T = createUsagePublic(), T2 = createUsagePublic();
   const now = Date.now();
   for (const ua of ["a", "b", "c"]) pubBeat(A, T, ua, { markets: 60000 }, now - 20 * DAY);
@@ -151,7 +184,7 @@ test("-120 public 'vs prior': blank when the prior window starts before the 30-d
 });
 
 // ---- 5. k ≥ 3 -------------------------------------------------------------------------------------------------------------------------
-test("-120 k ≥ 3: a day with fewer than 3 visitors is left out of every public figure; today's figures and online-now read '<3'", () => {
+test("-122 k ≥ 3: a day with fewer than 3 visitors is left out of every public figure; today's figures and online-now read '<3'", () => {
   const A = withMembers(0);
   const now = Date.now(), y = now - DAY, y2 = now - 2 * DAY, today = etDayStr(now);
   A.usageBuildSeen("b-1", now - 5 * DAY);
@@ -202,7 +235,7 @@ test("-120 k ≥ 3: a day with fewer than 3 visitors is left out of every public
   A.close(); B.close();
 });
 
-test("-120 k ≥ 3 in the fold: '<3' in the chip and the KPIs, the note, and 'both' adds a number to '<3' without arithmetic", () => {
+test("-122 k ≥ 3 in the fold: '<3' in the chip and the KPIs, the note, and 'both' adds a number to '<3' without arithmetic", () => {
   const A = withMembers(0), T = createUsagePublic();
   const now = Date.now();
   pubBeat(A, T, "a", { markets: 70000 }, now);
@@ -224,7 +257,7 @@ test("-120 k ≥ 3 in the fold: '<3' in the chip and the KPIs, the note, and 'bo
   A.close();
 });
 
-test("-120 triage render: a public-only row shows 'public-only · loc' and no text; the public health list says the text is not kept", () => {
+test("-122 triage render: a public-only row shows 'public-only · loc' and no text; the public health list says the text is not kept", () => {
   const F = fold();
   const html = F.uaTriageHtml({ open: 1, total: 1, rows: [{ sig: "/js/a.js|abc", loc: "/js/a.js:1", msg: null, pubOnly: true, firstBuild: "b", lastBuild: "b", firstAt: 1, lastAt: 2, hits: 3, members: 0, pubHits: 3 }] });
   assert.ok(html.includes('<span class="acc-chip">public-only</span> · <span class="mono">/js/a.js:1</span>'), html);
@@ -288,7 +321,7 @@ async function admin() {
 }
 const flush = async (j) => (await get("/api/admin/usage?r=7", j)).statusCode;
 
-test("-120 HTTP midnight: the old day's held public beacon lands on the OLD day — no negative minutes bucket in the new one", async () => {
+test("-122 HTTP midnight: the old day's held public beacon lands on the OLD day — no negative minutes bucket in the new one", async () => {
   const gus = await admin();
   const oldDay = etDayStr(MID - 1), newDay = etDayStr(MID);
   NOW = MID - 40000;
@@ -312,7 +345,7 @@ test("-120 HTTP midnight: the old day's held public beacon lands on the OLD day 
   assert.ok(src("server.js").includes("const end = usagePubDayEnd(usagePub.day(), now);"));
 });
 
-test("-120 HTTP toggle off: the public gate's held beacons are discarded at once, never released into storage", async () => {
+test("-122 HTTP toggle off: the public gate's held beacons are discarded at once, never released into storage", async () => {
   const gus = await admin();
   NOW = MID + HOUR;
   const tabMs = () => dbRows("SELECT COALESCE(SUM(ms), 0) AS s FROM usage_day WHERE uid = '-1' AND kind = 'tab' AND key = 'sectors'")[0].s;
@@ -345,7 +378,7 @@ test("-120 HTTP toggle off: the public gate's held beacons are discarded at once
 });
 
 // ---- 6. words and pins ----------------------------------------------------------------------------------------------------------------
-test("-120 words: the comment states the owner's later decision; the notice, the card, the manual and README say 'not linked' and k ≥ 3", () => {
+test("-122 words: the comment states the owner's later decision; the notice, the card, the manual and README say 'not linked' and k ≥ 3", () => {
   const sv = src("server.js");
   assert.ok(sv.includes('const VERSION = "2026.09.25-122"'));
   assert.ok(sv.includes("later reversed it — public counting is ON BY DEFAULT, the") && sv.includes("admin toggle in the Usage fold (usage_cfg.publicOn) switches it, and env USAGE_PUBLIC=0 forces it"));

@@ -218,7 +218,7 @@ test("-109 admin usage: operator-only, cached on the flush generation, the drill
   const r = await get("/api/admin/usage?r=90", gus);
   assert.equal(r.statusCode, 200);
   const d = JSON.parse(r.body);
-  assert.equal(d.r, 30, "range max = the 30-day retention"); assert.equal(d.publicOn, true, "(build -120) public counting defaults on"); assert.equal(d.keepDays, 30);
+  assert.equal(d.r, 30, "range max = the 30-day retention"); assert.equal(d.publicOn, true, "(build -122) public counting defaults on"); assert.equal(d.keepDays, 30);
   assert.ok(d.kpi && Array.isArray(d.series) && Array.isArray(d.tabs) && Array.isArray(d.members));
   const b = d.members.find((m) => m.handle === "bob");
   assert.ok(b && b.days === 1 && b.dev === "mobile-pwa" && b.top[0] === "Markets", JSON.stringify(b));

@@ -60,7 +60,7 @@ function pubBeat(A, T, ua, tabs, t, extra) {
 }
 
 // ---- 1. the key ----------------------------------------------------------------------------------------------------------------
-test("-120 key: deterministic within an ET day, input-sensitive, unrelated after the midnight rotation (fresh salt, fresh maps)", () => {
+test("-122 key: deterministic within an ET day, input-sensitive, unrelated after the midnight rotation (fresh salt, fresh maps)", () => {
   const T = createUsagePublic();
   const noon = Date.UTC(2026, 8, 25, 16), later = noon + 5 * HOUR, tomorrow = noon + DAY;
   const k1 = T.keyOf("198.51.100.1", "UA-one", "app.test", noon);
@@ -81,7 +81,7 @@ test("-120 key: deterministic within an ET day, input-sensitive, unrelated after
   assert.notEqual(createUsagePublic().keyOf("198.51.100.1", "UA-one", "app.test", noon), k1);
 });
 
-test("-120 caps: per-minute beacons and per-day distinct visitors, each a drop with its reason", () => {
+test("-122 caps: per-minute beacons and per-day distinct visitors, each a drop with its reason", () => {
   const T = createUsagePublic({ maxPerMin: 5, maxVisitors: 3 });
   const t = Date.UTC(2026, 8, 25, 16);
   const r = [];
@@ -92,7 +92,7 @@ test("-120 caps: per-minute beacons and per-day distinct visitors, each a drop w
 });
 
 // ---- 7. pv / ptr / pmin math, 6. never mixed, retention ------------------------------------------------------------------------
-test("-120 pv / ptr / pmin: distinct visitors per day, per-tab reach per day (mean daily reach), minutes histogram — all under '-1'", () => {
+test("-122 pv / ptr / pmin: distinct visitors per day, per-tab reach per day (mean daily reach), minutes histogram — all under '-1'", () => {
   const A = withMembers(2);
   const T = createUsagePublic();
   const now = Date.now(), y = now - DAY, today = etDayStr(now), yday = etDayStr(y);
@@ -131,7 +131,7 @@ test("-120 pv / ptr / pmin: distinct visitors per day, per-tab reach per day (me
   A.close();
 });
 
-test("-120 retention: public rows keep 30 days and are then deleted — never folded into the members' sitewide '0'", () => {
+test("-122 retention: public rows keep 30 days and are then deleted — never folded into the members' sitewide '0'", () => {
   const A = withMembers(1);
   const T = createUsagePublic();
   const now = Date.now();
@@ -149,7 +149,7 @@ test("-120 retention: public rows keep 30 days and are then deleted — never fo
 });
 
 // ---- 10. k-threshold -----------------------------------------------------------------------------------------------------------
-test("-120 k-threshold for public paths / controls / devices: ≥ 7-day range, complete days, ≥ 3 distinct visitors on one day", () => {
+test("-122 k-threshold for public paths / controls / devices: ≥ 7-day range, complete days, ≥ 3 distinct visitors on one day", () => {
   const A = withMembers(0);
   const T = createUsagePublic();
   const now = Date.now(), y = now - DAY;
@@ -175,12 +175,51 @@ test("-120 k-threshold for public paths / controls / devices: ≥ 7-day range, c
   assert.equal(sb.pub.both.site.withheld, "k", "2 members + a hidden 1-visitor day = still 2");
   for (const ua of ["z2", "z3"]) pubBeat(B, TB, ua, { markets: 30000 }, y, { tr: { "markets>trend": 1 } });
   const sb3 = B.usageSummary({ r: 7, tabs: TABS, now });
-  assert.equal(sb3.pub.both.site.withheld, null); assert.equal(sb3.pub.both.site.paths.total, 5, "2 members' + 3 visitors' moves");
+  // (build 2026.09.25-122) the members' own view is withheld (2 < k), so "both" is too: shown beside the
+  // public view it would difference to the two members' rows (both − public)
+  assert.equal(sb3.pub.site.withheld, null, "3 visitors: the public view shows");
+  assert.equal(sb3.pub.both.site.withheld, "k", "members withheld -> both withheld");
+  assert.equal(sb3.pub.both.site.paths, null); assert.equal(sb3.pub.both.site.threshold.members, 5, "the threshold still reports the combined bound");
+  B._db.prepare("INSERT OR IGNORE INTO user (uid, handle, display, pw, epoch, isAdmin, createdAt, lastSeen) VALUES (?,?,?,?,1,0,?,0)").run(U(2), "m2", "m2", "x", Date.UTC(2026, 0, 1));
+  B.hydrate();
+  B.usageRecord(U(2), { markets: 30000 }, "desktop", y, { tr: { "markets>trend": 1 } });
+  const sb4 = B.usageSummary({ r: 7, tabs: TABS, now });
+  assert.equal(sb4.site.withheld, null); assert.equal(sb4.pub.site.withheld, null);
+  assert.equal(sb4.pub.both.site.withheld, null); assert.equal(sb4.pub.both.site.paths.total, 6, "3 members' + 3 visitors' moves once both populations pass k");
   A.close(); B.close();
 });
 
+test("-122 'both' never differences to a withheld population: a lone member's sitewide rows stay hidden (build 2026.09.25-122)", () => {
+  // the reviewer's diff-leak: 1 member (withheld) + 3 visitors (shown). Before, both.site showed
+  // corr>sectors=4, the member's controls and a mobile device split — both − public = the lone member.
+  const A = withMembers(1), T = createUsagePublic();
+  const now = Date.now(), y = now - DAY;
+  A.usageRecord(U(0), { markets: 30000 }, "mobile", y, { tr: { "corr>sectors": 4 }, ctl: { "markets.window=1d": 2 } });
+  for (const ua of ["a", "b", "c"]) pubBeat(A, T, ua, { markets: 30000 }, y, { tr: { "markets>trend": 1 } });
+  const s = A.usageSummary({ r: 7, tabs: TABS, now });
+  assert.equal(s.site.withheld, "k"); assert.equal(s.pub.site.withheld, null);
+  assert.equal(s.pub.both.site.withheld, "k", "either population withheld -> both withheld");
+  assert.equal(s.pub.both.site.paths, null); assert.equal(s.pub.both.site.controls, null); assert.equal(s.pub.both.site.devices, null);
+  assert.ok(!JSON.stringify(s.pub).includes("corr>sectors") && !JSON.stringify(s.pub.both.site).includes("mobile"), "nothing of the member's rows reaches the public payload");
+  // and the mirror: 3 members shown, the public view withheld (a 2-visitor day contributes nothing at all)
+  const B = withMembers(3), TB = createUsagePublic();
+  for (let i = 0; i < 3; i++) B.usageRecord(U(i), { markets: 30000 }, "desktop", y, { tr: { "markets>trend": 1 } });
+  for (const ua of ["a", "b", "c"]) pubBeat(B, TB, ua, { markets: 30000 }, now - 3 * DAY, { tr: { "corr>sectors": 1 } });
+  const sb = B.usageSummary({ r: 7, tabs: TABS, now });
+  assert.equal(sb.site.withheld, null); assert.equal(sb.pub.site.withheld, null);
+  assert.equal(sb.pub.both.site.withheld, null, "both populations past k: shown");
+  const C = withMembers(3), TC = createUsagePublic();
+  for (let i = 0; i < 3; i++) C.usageRecord(U(i), { markets: 30000 }, "desktop", y, { tr: { "markets>trend": 1 } });
+  for (const ua of ["a", "b", "c"]) pubBeat(C, TC, ua, { markets: 30000 }, now, { tr: { "corr>sectors": 1 } });   // today only: never a complete day
+  const sc = C.usageSummary({ r: 7, tabs: TABS, now });
+  assert.equal(sc.site.withheld, null); assert.equal(sc.pub.site.withheld, "k");
+  assert.equal(sc.pub.both.site.withheld, "k", "public withheld -> both withheld");
+  assert.equal(C.usageSummary({ r: 6, tabs: TABS, now }).pub.both.site.withheld, "range");
+  A.close(); B.close(); C.close();
+});
+
 // ---- 13. errors ----------------------------------------------------------------------------------------------------------------
-test("-120 public errors: counted as public hits, never as members affected, never a regression alert, 10 new distinct a day", () => {
+test("-122 public errors: counted as public hits, never as members affected, never a regression alert, 10 new distinct a day", () => {
   const A = withMembers(30);
   const T = createUsagePublic();
   const now = Date.now();
@@ -207,7 +246,7 @@ test("-120 public errors: counted as public hits, never as members affected, nev
   A.close();
 });
 
-test("-120 digest: a public line — visitor-days this week vs last, the top public tabs", () => {
+test("-122 digest: a public line — visitor-days this week vs last, the top public tabs", () => {
   const A = withMembers(1);
   const T = createUsagePublic();
   const UDG = require("../src/usage-digest");
@@ -244,7 +283,7 @@ function fakeDoc() {
   return { doc, kids };
 }
 function fakeStore() { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), m }; }
-test("-120 client: a signed-out page beacons (no id, same payload shape) only when the server's shell says public counting is on", () => {
+test("-122 client: a signed-out page beacons (no id, same payload shape) only when the server's shell says public counting is on", () => {
   const sent = [];
   const nav = { sendBeacon: (u, b) => { sent.push([u, b]); return true; } };
   // on
@@ -276,7 +315,7 @@ test("-120 client: a signed-out page beacons (no id, same payload shape) only wh
   assert.ok(M.usageCardHtml().includes("Signed out, this site counts only anonymous sitewide totals") && M.usageCardHtml().includes("not linked across days, and days with fewer than 3 visitors aren’t shown"));
 });
 
-test("-120 client: the signed-out notice renders once per tab and its dismissal is remembered in sessionStorage", () => {
+test("-122 client: the signed-out notice renders once per tab and its dismissal is remembered in sessionStorage", () => {
   const store = fakeStore();
   let F = fakeDoc();
   let M = usageModule({ window: { __USPUB: true }, document: F.doc, navigator: {}, sessionStorage: store });
@@ -357,7 +396,7 @@ async function people() {
 const UA_A = "Mozilla/5.0 (X11; Linux x86_64) PublicVisitorAlpha/117.0", UA_B = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Mobile PublicVisitorBeta/1";
 const pubRows = (kind) => dbRows("SELECT day, key, n, ms FROM usage_day WHERE uid = '-1' AND kind = ? ORDER BY day, key", kind);
 
-test("-120 HTTP: the shell says whether a signed-out page beacons; a signed-out beacon is stored under '-1' only", async () => {
+test("-122 HTTP: the shell says whether a signed-out page beacons; a signed-out beacon is stored under '-1' only", async () => {
   const { gus, bob, bg } = await people();
   assert.ok((await get("/")).body.includes("window.__USPUB=true;"), "signed out, public on (the default)");
   assert.ok((await get("/", bob)).body.includes("window.__USPUB=false;"), "a member beacons as a member");
@@ -382,7 +421,7 @@ test("-120 HTTP: the shell says whether a signed-out page beacons; a signed-out 
   assert.ok(dbRows("SELECT COUNT(*) AS n FROM usage_day WHERE uid NOT IN ('-1') AND kind IN ('tr','en','ctl','tdev')")[0].n === 0, "the sitewide '0' rows got nothing from a visitor");
 });
 
-test("-120 HTTP: the rate gate clamps per visitor (held early beacon, wall-time clamp); another visitor is unaffected", async () => {
+test("-122 HTTP: the rate gate clamps per visitor (held early beacon, wall-time clamp); another visitor is unaffected", async () => {
   const { gus } = await people();
   skew += 5 * 60000;
   const before = (pubRows("tab").find((r) => r.key === "corr") || { ms: 0 }).ms;
@@ -401,7 +440,7 @@ test("-120 HTTP: the rate gate clamps per visitor (held early beacon, wall-time 
   assert.equal(pubRows("tab").find((r) => r.key === "sectors").ms, 120000);
 });
 
-test("-120 HTTP: nothing identifying is stored — no IP, User-Agent or key in any usage table, and no salt anywhere on disk", async () => {
+test("-122 HTTP: nothing identifying is stored — no IP, User-Agent or key in any usage table, and no salt anywhere on disk", async () => {
   const { gus } = await people();
   await adminUsage(gus);
   assert.ok(SALTS.length >= 1, "the salt the server minted was observed");
@@ -429,7 +468,7 @@ test("-120 HTTP: nothing identifying is stored — no IP, User-Agent or key in a
   assert.ok(!src("src/usage-public.js").includes("log("), "the tracker logs nothing");
 });
 
-test("-120 HTTP: a new ET day mints a new salt — the same browser is a new, unlinked visitor; toggle off and USAGE_PUBLIC=0 ignore beacons", async () => {
+test("-122 HTTP: a new ET day mints a new salt — the same browser is a new, unlinked visitor; toggle off and USAGE_PUBLIC=0 ignore beacons", async () => {
   const { gus, bob } = await people();
   const n0 = SALTS.length;
   skew += DAY;
@@ -469,7 +508,7 @@ test("-120 HTTP: a new ET day mints a new salt — the same browser is a new, un
   assert.ok((await get("/")).body.includes("window.__USPUB=true;"));
 });
 
-test("-120 HTTP: the server-wide per-minute cap drops (204) and counts; the operator sees today's drops", async () => {
+test("-122 HTTP: the server-wide per-minute cap drops (204) and counts; the operator sees today's drops", async () => {
   const { gus } = await people();
   skew += 2 * 60000;
   const t = Date.now(), freeze = Date.now;
@@ -492,7 +531,7 @@ test("-120 HTTP: the server-wide per-minute cap drops (204) and counts; the oper
 });
 
 // ---- 8. anonymous online-now -----------------------------------------------------------------------------------------------------
-test("-120 HTTP: anonymous online-now counts open signed-out streams — not members, not the break-glass operator", async () => {
+test("-122 HTTP: anonymous online-now counts open signed-out streams — not members, not the break-glass operator", async () => {
   const { gus, bob, bg } = await people();
   const http = require("http");
   await app.listen({ port: 0, host: "127.0.0.1" });
@@ -522,7 +561,7 @@ function fold() {
   F.out = () => nodes.admUsageBox.innerHTML;
   return F;
 }
-test("-120 who: one payload carries members, public and both; each view labels its population; members-only sections say so", async () => {
+test("-122 who: one payload carries members, public and both; each view labels its population; members-only sections say so", async () => {
   const { gus } = await people();
   const d = await adminUsage(gus, 7);
   for (const k of ["kpi", "series", "tabs", "heat", "site", "health", "both", "drops", "live"]) assert.ok(k in d.pub, "pub." + k);
@@ -560,7 +599,7 @@ test("-120 who: one payload carries members, public and both; each view labels i
   assert.ok(src("public/js/usageadm.js").includes("<td class=\"n\">'+(+e.pubHits||0)+'</td>"));
 });
 
-test("-120 disclosure: README, the manual (API reference, the note, the env var), the card and the mock say it", () => {
+test("-122 disclosure: README, the manual (API reference, the note, the env var), the card and the mock say it", () => {
   const readme = src("README.md"), docs = src("public/docs.html"), mock = src("docs/xyz-monitor-usage-stats-mock.html");
   for (const w of ["(build 2026.09.25-122)", "HMAC-SHA256(dailySalt, ip | userAgent | host)", "not linked across days", "uid `'-1'`", "**20,000 distinct visitors per ET day**",
     "**600 public beacons per minute**", "`USAGE_PUBLIC=0` forces it off", "a visitor who returns later that day is counted again", "`sessionStorage`", "**Privacy summary**"])

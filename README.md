@@ -896,7 +896,9 @@ is added without it. The list below is the tour.
     days only, and the fold says "days with fewer than 3 visitors are hidden". Anonymous online-now
     reads "<3" at 1–2. The rows are still stored (30 days); they are never shown.
   - **Errors**: only a **member's** hit reopens a resolved error or marks it regressed
-    (`usage_err.memAt`, the last member hit; a signed-out hit moves `lastAt` only). An error only
+    (`usage_err.memAt`, the last member hit). A signed-out hit moves only `usage_err.pubAt` — never
+    `lastAt` or `memAt` — and the triage's "last seen" and last build of an error members hit are
+    the last **member** hit's (retention and eviction read the later of `lastAt`/`pubAt`). An error only
     signed-out pages hit keeps **no message text** (`msg = ''`: its file:line and the hash in its
     key) until a member hits it; triage shows it as "public-only · file:line", and the digest's
     new/regressed lines list members' errors only (public-only ones are a count line). Rows
@@ -907,6 +909,10 @@ is added without it. The list below is the tour.
   - **"vs prior"** on the public tab table is blank (with a note) when the prior window starts
     before the 30-day public retention (r > 15). **Toggle off** discards the gate's held public
     beacons at once instead of releasing them into storage.
+  - **"Both" never differences to a withheld population**: the members + public sitewide sections
+    (paths / controls / devices) are withheld whenever the members' own **or** the public's own
+    sections are (either population under k, or a range under 7 days). Before, one member beside
+    three shown visitors was exposed as both − public.
 - **Admin panel folds** — the panel had grown to eight full-height boxes, so reaching the one you
   wanted meant scrolling past the seven you did not. Every segment is now a collapsed row naming
   what is inside it, with an expand-all/collapse-all control. Each fold wraps its box from
@@ -1356,9 +1362,17 @@ close, and freshness counts US sessions since it (weekends no longer age a signa
 come off the hourly spine (the -107 rule: a bar closing ON the anchor, never an hourly close up
 to 3h early), which waits up to 3h for the bell bar; without it, BMO/DMH fall back to
 session bars and AMC does not fire (that window spans two sessions). Untimed (TBD) prints no longer
-fire. **The trigger changed under the same event type:** `pead` ledger records opened before this
-build used the old reaction; records from -121 carry `ew` (`cash` / `daily`, the price tier), so
-the accrued record splits cleanly on its presence — read pre- and post-121 fires as two samples.
+fire. Finality: a close counts only once the series holds a row at or after it
+(`compute.anchorLanded` — the hourly spine's last row can be the forming 15:00–16:00 candle, its
+tail refreshed every 10 min and restored as-is on boot), in `detectPead`, the Earnings study's
+`final` state and the pooled study alike; the daily fallback needs a later daily bar before it
+trusts the reaction bar. PEAD reads the same 5m-archive neighbourhoods as the study
+(`fineAround(r, earnFineWins(…))`), so a spine missing the bell bar agrees with it; home-market
+(foreign-listed) names are skipped. Freshness counts sessions by **ET** day (no flip at 00:00Z),
+and only the newest print that has begun is a candidate: while its reaction is still open (or it
+is untimed) an older print does not fire. **The trigger changed under the same event type:** `pead` ledger records opened before this
+build used the old reaction; records from -122 carry `ew` (`cash` / `daily`, the price tier), so
+the accrued record splits cleanly on its presence — read pre- and post-122 fires as two samples.
 
 ## Optional: earnings calendar (Finnhub)
 

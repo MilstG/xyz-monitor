@@ -474,7 +474,7 @@ test("-110 admin fold: heatmap, funnel, cohorts, features row and health render 
     "Feature adoption", "(of 4 active)", "opened Markets", "made a call", ">3 · 75%<", "exported CSV",
     "Retention by join week", ">w0<", ">w2<", ">100<", ">50<", "week in progress", "not measured",
     "Client health", "First paint → table", "0.9s", "/ 1.3s", "−0.4s", "JS errors", ">2 <span class=\"acc-mu\">distinct · 11 hits", "2 members",
-    "Stale builds", ">2<", "at most 200 distinct errors", "never feed the post-deploy alerts"])   // (build -120) was "deliberately not built"
+    "Stale builds", ">2<", "at most 200 distinct errors", "never feed the post-deploy alerts"])   // (build -122) was "deliberately not built"
     assert.ok(out.includes(pin), "fold carries: " + pin);
   assert.equal((out.match(/class="us-heatc"/g) || []).length, 7 * 24, "a full weekday × hour grid");
   // the drill-in's features row
