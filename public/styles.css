@@ -491,6 +491,23 @@ table.ptbl td:first-child{text-align:left}
 .emt-act{font-size:var(--fs-sm);color:var(--text);margin-top:4px;line-height:1.45}
 .emt-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:var(--fs-xs);color:var(--muted);margin:var(--sp-2) 2px 0;line-height:1.5}
 .emt-legend b{margin-right:4px;margin-left:0}
+/* (-119) time-first cards, NEW, stage sections */
+.emt-ev{display:grid;grid-template-columns:64px minmax(0,1fr);gap:10px;align-items:start}
+.emt-body{min-width:0}
+.emt-when{display:flex;flex-direction:column;align-items:flex-start;border-right:1px solid var(--border);padding-right:8px;font-family:var(--mono);line-height:1.2}
+.emt-when b{font-size:var(--fs-lg);font-weight:600;color:var(--text)}
+.emt-when small{font-size:var(--fs-2xs);color:var(--dim)}
+.emt-when.hot b{color:var(--accent)}
+.emt-when.old b{color:var(--muted);font-weight:500}
+.emt-new{font-family:var(--mono);font-size:var(--fs-2xs);font-weight:700;letter-spacing:.08em;background:var(--accent);color:#1a1205;border-radius:var(--r-1);padding:1px 5px}
+.emt-ev.isnew{box-shadow:inset 0 0 0 1px var(--accent-dim)}
+.emt-newct{color:var(--accent);font-weight:600}
+.emt-sec{display:flex;align-items:baseline;gap:8px;margin:10px 2px 2px;font-size:var(--fs-sm);font-weight:600;color:var(--text)}
+.emt-sec:first-child{margin-top:0}
+.emt-sec i{font-style:normal;font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted);border:1px solid var(--border);border-radius:var(--r-1);padding:0 5px}
+.emt-sec em{font-style:normal;font-weight:400;font-size:var(--fs-xs);color:var(--muted)}
+.emt-sec.live span{color:var(--accent)}
+.emt-sec.fading span{color:var(--muted)}
 /* ===== Drawdown tab (build 2026.09.23-92): return vs drawdown scatter + table ===== */
 .rvd-title{font-family:var(--disp);font-size:var(--fs-lg);font-weight:600;margin:2px 2px 2px}
 .rvd-sub{color:var(--muted);font-size:var(--fs-md);line-height:1.55;margin:0 2px var(--sp-2);max-width:100ch}
