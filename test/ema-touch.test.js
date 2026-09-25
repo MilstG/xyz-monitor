@@ -227,7 +227,7 @@ test("ema touch tab client: renders both panes from a payload, filters by scope/
   const ctx = { state: { scope: "stocks" }, store: { get: () => null, set: () => {} }, el: () => null, esc: (s) => String(s), fmtPrice: (v) => String(v),
     fetchJSON: async () => ({}), openDetail: () => {}, Date, JSON, Math, String };
   vm.createContext(ctx);
-  vm.runInContext(body + "\nthis.emtPass=emtPass; this.EMT=EMT; this.emtCardTitle=emtCardTitle; this.emtCardAction=emtCardAction; this.emtRelSort=emtRelSort;", ctx);
+  vm.runInContext(body + "\nthis.emtPass=emtPass; this.EMT=EMT; this.emtCardTitle=emtCardTitle; this.emtCardAction=emtCardAction; this.emtGroups=emtGroups; this.emtAgo=emtAgo;", ctx);
   // (-118) the words on a card: a plain title, and one action line with its invalidation
   const held = { st: "held", from: "above", tf: "H4", lineC: 148.05 };
   assert.equal(ctx.emtCardTitle(held), "Support held");
@@ -239,13 +239,20 @@ test("ema touch tab client: renders both panes from a payload, filters by scope/
   assert.equal(ctx.emtCardTitle({ st: "live", from: "above" }), "Testing support");
   assert.match(ctx.emtCardAction({ st: "live", from: "above", tf: "H4", line: 10 }), /^Watch the 4H close: above 10 = support held, below = breakdown\.$/);
   assert.match(ctx.emtCardAction({ st: "held", from: "above", tf: "H4", lineC: 10, failed: 1 }), /^Failed/);
-  // relevance: live first (soonest close), then fresh (1D, the 200, stacked first), then fading, failed last
-  const cs = [{ id: "fail", st: "held", failed: 1, stage: "fading", tf: "D1", n: 200, at: 9 },
+  // (-119) grouped by what you can do, NEWEST first inside each group — no hidden weighting
+  const cs = [{ id: "fail", st: "held", failed: 1, stage: "fresh", tf: "D1", n: 200, at: 9 },
     { id: "fade", st: "held", stage: "fading", tf: "H4", n: 50, at: 8 },
-    { id: "freshH4", st: "held", stage: "fresh", tf: "H4", n: 50, at: 7 },
-    { id: "freshD1", st: "thru", stage: "fresh", tf: "D1", n: 50, at: 1 },
+    { id: "freshOld", st: "thru", stage: "fresh", tf: "D1", n: 200, at: 1 },
+    { id: "freshNew", st: "held", stage: "fresh", tf: "H4", n: 50, at: 7 },
     { id: "live2", st: "live", closeAt: 20 }, { id: "live1", st: "live", closeAt: 10 }];
-  assert.deepEqual(cs.slice().sort(ctx.emtRelSort).map((c) => c.id), ["live1", "live2", "freshD1", "freshH4", "fade", "fail"]);
+  const g = ctx.emtGroups(cs);
+  assert.deepEqual(Array.from(g.live, (c) => c.id), ["live1", "live2"], "touching now: the soonest close first");
+  assert.deepEqual(Array.from(g.fresh, (c) => c.id), ["freshNew", "freshOld"], "fresh: newest first, whatever the rung");
+  assert.deepEqual(Array.from(g.fading, (c) => c.id), ["fail", "fade"], "a failed card is fading at once, newest first");
+  // the time on the card
+  const ago = (ms) => ctx.emtAgo(Date.now() - ms);
+  assert.equal(ago(20e3), "now"); assert.equal(ago(12 * 60e3), "12m"); assert.equal(ago(3 * 3600e3 + 20 * 60e3), "3h 20m");
+  assert.equal(ago(14 * 3600e3), "14h"); assert.equal(ago(30 * 3600e3), "1d 6h");
   const x = { uni: "stocks", tf: "H4", n: 50 };
   assert.equal(ctx.emtPass(x), true);
   ctx.EMT.tf = "D1"; assert.equal(ctx.emtPass(x), false);

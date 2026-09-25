@@ -71,6 +71,13 @@ is added without it. The list below is the tour.
     on Railway.
   - Not changed, on purpose: the site stays open when `SITE_PASSWORD` is unset (documented
     posture; the boot log warns).
+- **EMA Touch: time-first cards** (build 2026.09.25-119) — every card now leads with how long ago it
+  touched, big (`12m`, `3h 20m`, `1d 6h`), the clock time under it; **NEW** marks touches since your
+  last visit (the newest card id seen is kept per browser; the first visit marks nothing). The feed is
+  grouped into **Touching now** (soonest close first), **Fresh** and **Fading**, **newest first inside
+  each** — the hidden 1D/200/stacked weighting is gone, so the top card of a group is always its
+  newest. Each card's right edge says how much life it has left ("fresh for 2 bars more", "leaves in
+  1 session"). *View: newest first* drops the groups.
 - **EMA Touch: decay, outcomes, action lines** (build 2026.09.25-118) — cards now age in candles of
   their own timeframe instead of a flat 48 hours: **fresh** for 3 bars (4H) / 2 sessions (1D) after
   the touch, **fading** (dimmed) until 6 bars / 5 sessions, then gone. Each resolved card tracks its
