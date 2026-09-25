@@ -15,7 +15,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.25-119";
+const VERSION = "2026.09.25-120";
 // (build 2026.09.24-107) Distinguishes this process from the last one in ETags built on
 // per-process counters (a restart must never 304 a client onto a different body).
 const BOOT_NONCE = Date.now().toString(36) + crypto.randomBytes(3).toString("hex");

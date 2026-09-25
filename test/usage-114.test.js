@@ -424,7 +424,7 @@ test("-114 HTTP: a Telegram reminder holds inside the member's quiet hours (not 
 
 test("-114 HTTP: the regression tick stops for a build that alerted every condition or is > 3 days past first-seen; triage sweeps every 10 min", async () => {
   await people();
-  const VERSION = "2026.09.25-119";
+  const VERSION = "2026.09.25-120";
   assert.notEqual(app.usageRegressTick().state, "done", "a fresh build is checked");
   for (const k of ["new-errors", "err-rate", "perf"]) dbRun("INSERT INTO usage_mark (at, kind, detail) VALUES (?, 'alert', ?)", Date.now(), VERSION + "|" + k);
   assert.deepEqual(app.usageRegressTick(), { state: "done", sent: 0, why: "alerted" });
@@ -434,5 +434,5 @@ test("-114 HTTP: the regression tick stops for a build that alerted every condit
   assert.deepEqual(app.usageRegressTick(), { state: "done", sent: 0, why: "age" });
   const tick = between(src("server.js"), "function usageRegressTick(now) {", "\n  }");
   assert.ok(tick.includes("if (t - usageTriageAt >= USAGE_TRIAGE_EVERY_MS) { usageTriageAt = t; ACCOUNTS.usageTriageSweep(t); }") && src("server.js").includes("USAGE_TRIAGE_EVERY_MS = 10 * 60000"));
-  assert.ok(src("server.js").includes('const VERSION = "2026.09.25-119"'));
+  assert.ok(src("server.js").includes('const VERSION = "2026.09.25-120"'));
 });

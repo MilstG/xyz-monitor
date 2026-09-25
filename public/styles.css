@@ -427,7 +427,7 @@ table.ptbl td:first-child{text-align:left}
 .emt-kpi .k{font-family:var(--mono);font-size:var(--fs-2xs);letter-spacing:.1em;text-transform:uppercase;color:var(--dim)}
 .emt-kpi .v{font-family:var(--mono);font-size:var(--fs-xl);font-weight:500;margin:2px 0 0}
 .emt-kpi .s{font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted)}
-.emt-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:var(--sp-3)}
+.emt-grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:var(--sp-3)}
 @media (max-width:860px){.emt-grid{grid-template-columns:minmax(0,1fr)}}
 .emt-card{background:var(--panel2);border:1px solid var(--border);border-radius:var(--r-2);padding:var(--sp-3);min-width:0}
 .emt-h{font-family:var(--mono);font-size:var(--fs-2xs);letter-spacing:.12em;text-transform:uppercase;color:var(--dim);margin:0 0 var(--sp-2)}

@@ -71,6 +71,9 @@ is added without it. The list below is the tour.
     on Railway.
   - Not changed, on purpose: the site stays open when `SITE_PASSWORD` is unset (documented
     posture; the boot log warns).
+- **EMA Touch layout** (build 2026.09.25-120) — the Touches feed is now the left (wider) pane and
+  *Near a line* the right (on a phone, Touches comes first); every card reads ticker first, then its
+  status ("NVDA · Testing support").
 - **EMA Touch: time-first cards** (build 2026.09.25-119) — every card now leads with how long ago it
   touched, big (`12m`, `3h 20m`, `1d 6h`), the clock time under it; **NEW** marks touches since your
   last visit (the newest card id seen is kept per browser; the first visit marks nothing). The feed is
