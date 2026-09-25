@@ -434,10 +434,10 @@ test("HTF shadow batch 2: failbrk mirror, pead reaction gate, fundext restored a
   assert.equal(C.detectPead(printsA, daily, 107, 2, hsA, fri + 24 * HOUR), null, "Saturday is not the reaction close");
   assert.equal(C.detectPead(printsA, daily, 107, 2, hsA.filter((k) => k[0] + HOUR < mon), mon + HOUR), null, "the bell bar has not landed: wait for it");
   assert.equal(C.detectPead(printsA, daily, 107, 2, hsA.filter((k) => k[0] + HOUR < mon), mon + 4 * HOUR), null, "still missing past the wait: the daily tier, which an AMC print never fires on");
-  // (build 2026.09.25-121) look-ahead guard: the spine already holds Monday's 16:00 bar (a replayed or
+  // (build 2026.09.25-122) look-ahead guard: the spine already holds Monday's 16:00 bar (a replayed or
   // back-filled series), but at 15:30 ET the reaction session has not closed — nothing reads it early
   assert.equal(C.detectPead(printsA, daily, 107, 2, hsA, mon - 30 * 60000), null, "no fire before w.post, even with the close on the spine");
-  // (build 2026.09.25-121) BMO on the spine: the bell-bar wait, then the labelled session-bar fallback
+  // (build 2026.09.25-122) BMO on the spine: the bell-bar wait, then the labelled session-bar fallback
   const tue = C.etWallToUtc(2026, 9, 15, 16, 0), monC = C.etWallToUtc(2026, 9, 14, 16, 0);
   const hsB = []; for (let t = monC - 48 * HOUR; t < tue + 24 * HOUR; t += HOUR) { const e = t + HOUR; hsB.push([t, 0, 0, 0, e <= monC ? 100 : e < tue ? 103 : 106, 1]); }
   const pb = C.detectPead(printsB, daily, 107, 2, hsB, tue + HOUR);
@@ -446,7 +446,7 @@ test("HTF shadow batch 2: failbrk mirror, pead reaction gate, fundext restored a
   assert.equal(C.detectPead(printsB, daily, 107, 2, hsBnoBell, tue + HOUR), null, "the bell bar has not landed: wait (no stale 15:00 close)");
   const pbD = C.detectPead(printsB, daily, 107, 2, hsBnoBell, tue + 5 * HOUR);
   assert.ok(pbD && pbD.src === "daily" && pbD.mv === 6, "past EARN_BELL_WAIT, and past the UTC bar's close: BMO falls back to session bars");
-  // (build 2026.09.25-121) holidays: Labor Day is Monday 2026-09-07.
+  // (build 2026.09.25-122) holidays: Labor Day is Monday 2026-09-07.
   // Daily tier, BMO Tuesday 09-08: the reference is FRIDAY 09-04's session bar — the perp's weekend and
   // holiday bars (103) are not session closes — so the reaction is +6%, not +2.9% (under the 3% gate).
   const dH = []; for (let i = 0; i < 30; i++) dH.push({ t: U(8, 20) + i * DAY, c: 100, o: 100 });

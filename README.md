@@ -71,6 +71,9 @@ is added without it. The list below is the tour.
     on Railway.
   - Not changed, on purpose: the site stays open when `SITE_PASSWORD` is unset (documented
     posture; the boot log warns).
+- **EMA Touch layout** (build 2026.09.25-120) — the Touches feed is now the left (wider) pane and
+  *Near a line* the right (on a phone, Touches comes first); every card reads ticker first, then its
+  status ("NVDA · Testing support").
 - **EMA Touch: time-first cards** (build 2026.09.25-119) — every card now leads with how long ago it
   touched, big (`12m`, `3h 20m`, `1d 6h`), the clock time under it; **NEW** marks touches since your
   last visit (the newest card id seen is kept per browser; the first visit marks nothing). The feed is
@@ -628,7 +631,7 @@ is added without it. The list below is the tour.
   **pause** it; the operator then sees "paused". The sitewide panel is not logged; **opening one
   member's detail is**, as `view-usage` in the same audit log as the message read-through.
   Signed-out tracking is a server flag (`USAGE_PUBLIC=1`), off, and in this build collects nothing
-  even when set (superseded by build 2026.09.25-120: cookieless public visitor counting, below). Routes: `POST /api/usage`, `GET /api/usage/me`, `POST /api/usage/pause`,
+  even when set (superseded by build 2026.09.25-122: cookieless public visitor counting, below). Routes: `POST /api/usage`, `GET /api/usage/me`, `POST /api/usage/pause`,
   `GET /api/admin/usage?r=7|30`, `GET /api/admin/usage/member?h=`.
 - **Usage, stages B + C** (build 2026.09.24-110) — the same fold gains adoption, retention, a
   heatmap and client health, all from the same `usage_day` aggregates:
@@ -843,7 +846,7 @@ is added without it. The list below is the tour.
     JSON object (400 otherwise — a text/plain body was a 500); a `usage_day(kind, day)` index; the
     regression tick stops for a build once every condition has alerted or it is more than 3 days
     past first-seen, and the triage sweep runs every 10 minutes instead of every tick.
-- **Usage: public (signed-out) visitors, counted without cookies** (build 2026.09.25-120) —
+- **Usage: public (signed-out) visitors, counted without cookies** (build 2026.09.25-122) —
   Plausible-style. A signed-out page sends the **same beacon** a member's page sends (tab time, hour
   buckets, tab paths, entry tab, control counts, device class / PWA flag, first paint, errors) and
   **nothing that identifies it**: no cookie, no `localStorage`, no id (`s` is per page load and never
@@ -883,8 +886,8 @@ is added without it. The list below is the tour.
     (visitor-days this week vs last, top public tabs).
   - **Privacy summary**: no cookies, no identifiers on the client, no IP, User-Agent, key or salt at
     rest; aggregates only; nothing linked across days; days with fewer than 3 visitors aren't shown
-    (build 2026.09.25-120, below).
-- **Usage fixes, public visitors** (build 2026.09.25-120):
+    (build 2026.09.25-122, below).
+- **Usage fixes, public visitors** (build 2026.09.25-122):
   - **k ≥ 3 per day, everywhere**: an ET day with fewer than **3** distinct visitors (`pv`) is left
     out of every public figure the operator sees — tab time and "vs prior", mean daily reach (`ptr`),
     the minutes histogram (`pmin`), the heatmap, paths / controls / devices, first paint, errors
@@ -1341,7 +1344,7 @@ periods/yr), and the level map's structure and volume profile keep every UTC bar
   the target contradicts is refused with the word named. Preview, stamp and target row count
   days to the same deadline, rounded up.
 
-**Accuracy (build 2026.09.25-121): post-earnings drift runs on the study's reaction.** The
+**Accuracy (build 2026.09.25-122): post-earnings drift runs on the study's reaction.** The
 `pead` shadow still read the -104 convention: the print day's own UTC bar against the bar before
 (or, with the hourly spine, the print-time price → +24h), so a Friday AMC reaction ended on
 Saturday's perp print and the 1.5σ gate and the 3-session entry window ran off a different bar

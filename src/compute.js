@@ -1865,7 +1865,7 @@ function regime200(closes, px) {
 
 // Post-earnings drift (xyz only): a reaction bigger than 1.5x the name's own daily σ tends to
 // keep drifting its own way for weeks — entered AFTER the reaction session's close, within 3
-// sessions of it, drifting WITH the move. (build 2026.09.25-121) The reaction is the study's own:
+// sessions of it, drifting WITH the move. (build 2026.09.25-122) The reaction is the study's own:
 // earnReactWindow's last cash close before the print -> the first cash close after it (BMO/DMH:
 // the prior close -> the print day's; AMC: the print day's close -> the next session's, so a
 // Friday AMC reacts into Monday's close, never a Saturday perp print; holidays skipped, 13:00 on

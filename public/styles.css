@@ -427,7 +427,7 @@ table.ptbl td:first-child{text-align:left}
 .emt-kpi .k{font-family:var(--mono);font-size:var(--fs-2xs);letter-spacing:.1em;text-transform:uppercase;color:var(--dim)}
 .emt-kpi .v{font-family:var(--mono);font-size:var(--fs-xl);font-weight:500;margin:2px 0 0}
 .emt-kpi .s{font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted)}
-.emt-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:var(--sp-3)}
+.emt-grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:var(--sp-3)}
 @media (max-width:860px){.emt-grid{grid-template-columns:minmax(0,1fr)}}
 .emt-card{background:var(--panel2);border:1px solid var(--border);border-radius:var(--r-2);padding:var(--sp-3);min-width:0}
 .emt-h{font-family:var(--mono);font-size:var(--fs-2xs);letter-spacing:.12em;text-transform:uppercase;color:var(--dim);margin:0 0 var(--sp-2)}
@@ -2982,7 +2982,7 @@ tr[data-wlsep] td:first-child{position:relative} tr[data-wlsep] td:first-child::
 .dm-usage .us-kpi .v{font-size:var(--fs-lg)}
 .dm-usage .us-row{margin:0}
 .us-disc{font-family:var(--mono);font-size:var(--fs-2xs);color:var(--dim);line-height:1.5}
-/* (build 2026.09.25-120) the signed-out visitor's one-line notice (usage.js), and the fold's public bits */
+/* (build 2026.09.25-122) the signed-out visitor's one-line notice (usage.js), and the fold's public bits */
 .us-pubnote{position:fixed;left:50%;bottom:var(--sp-3);transform:translateX(-50%);z-index:60;max-width:min(680px,calc(100vw - 24px));box-sizing:border-box;
   display:flex;align-items:center;gap:var(--sp-2);background:var(--panel2);border:1px solid var(--border);border-radius:var(--r-2);
   padding:6px 6px 6px 12px;font-size:var(--fs-xs);color:var(--muted);box-shadow:0 6px 24px rgba(0,0,0,.35)}

@@ -172,7 +172,7 @@ const who = async () => (P = P || await people());
 test("-109 /api/usage: signed-out is a no-op; a member's beacon is validated, clamped to wall time, rate-limited and device-classed", async () => {
   const { bob } = await who();
   const anon = await post("/api/usage", { tabs: { markets: 60000 } });
-  assert.equal(anon.statusCode, 204, "signed out: acknowledged (build -120: counted as anonymous totals under uid '-1', never a member — test/usage-120.test.js)");
+  assert.equal(anon.statusCode, 204, "signed out: acknowledged (build -122: counted as anonymous totals under uid '-1', never a member — test/usage-122.test.js)");
   assert.equal((await post("/api/usage", { tabs: { markets: 1 } }, bob, { "sec-fetch-site": "cross-site" })).statusCode, 403, "the cross-site write lock covers it");
   assert.equal((await post("/api/usage", JSON.stringify({ tabs: { markets: 1 }, pad: "x".repeat(5000) }), bob)).statusCode, 413, "4 KB body cap");
   assert.equal((await post("/api/usage", { tabs: [1, 2] }, bob)).statusCode, 400);

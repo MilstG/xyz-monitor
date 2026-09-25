@@ -1,5 +1,5 @@
 "use strict";
-// ===== build 2026.09.25-120: usage fixes for the public (signed-out) visitors ========================================================
+// ===== build 2026.09.25-122: usage fixes for the public (signed-out) visitors ========================================================
 // 1. only a MEMBER hit reopens a resolved error / marks it regressed; an error only signed-out pages hit keeps no message text
 //    (loc + hash only; the text arrives with a member's hit), triage shows it "public-only · loc", the digest counts it, never quotes it
 // 2. ET midnight: the gate's held public beacons land on the OLD day (no negative minutes bucket in the new one)
@@ -11,7 +11,7 @@ const test = require("node:test");
 const assert = require("node:assert");
 const fs = require("fs"), path = require("path"), os = require("os");
 
-const DATA = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-usage-120-fixes-"));
+const DATA = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-usage-122-fixes-"));
 process.env.DATA_DIR = DATA;
 delete process.env.SITE_PASSWORD;
 process.env.ADMIN_PASSWORD = "break-glass-pw-1";
@@ -31,7 +31,7 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&
 const U = (i) => "uid-q" + String(i).padStart(12, "0");
 const TABS = ["markets", "trend", "corr", "sectors"].map((k) => ({ key: k, label: k[0].toUpperCase() + k.slice(1), gate: "public" }));
 function withMembers(n, dir) {
-  const A = openAccounts(dir || fs.mkdtempSync(path.join(os.tmpdir(), "xyz-usage-120-fixes-acc-")));
+  const A = openAccounts(dir || fs.mkdtempSync(path.join(os.tmpdir(), "xyz-usage-122-fixes-acc-")));
   for (let i = 0; i < n; i++)
     A._db.prepare("INSERT OR IGNORE INTO user (uid, handle, display, pw, epoch, isAdmin, createdAt, lastSeen) VALUES (?,?,?,?,1,0,?,0)").run(U(i), "q" + i, "q" + i, "x", Date.UTC(2026, 0, 1));
   A.hydrate();
@@ -111,7 +111,7 @@ test("-120 public-only errors: no message text stored (loc + hash), triage shows
 });
 
 test("-120 boot repair: rows written before the memAt column get memAt from the members' hits, and public-only ones lose their text", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-usage-120-fixes-boot-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-usage-122-fixes-boot-"));
   let A = withMembers(1, dir);
   const now = Date.now(), day = etDayStr(now);
   A._db.exec("ALTER TABLE usage_err DROP COLUMN memAt");   // a database from before the column
@@ -234,7 +234,7 @@ test("-120 triage render: a public-only row shows 'public-only · loc' and no te
   assert.ok(h.includes("public-only · text not kept") && h.includes("top: <span class=\"neg\">/js/a.js:1 · public-only</span>") && !h.includes("null"), h);
 });
 
-// ---- the client fold harness (as in usage-120) ------------------------------------------------------------------------------------
+// ---- the client fold harness (as in usage-122) ------------------------------------------------------------------------------------
 function fold() {
   const body = src("public/js/usageadm.js").split("\n").filter((l) => !/^import /.test(l) && !/^export \{/.test(l)).join("\n");
   const nodes = { admUsageBox: { innerHTML: "", addEventListener() {} }, admUsageSub: { textContent: "" } };
@@ -347,7 +347,7 @@ test("-120 HTTP toggle off: the public gate's held beacons are discarded at once
 // ---- 6. words and pins ----------------------------------------------------------------------------------------------------------------
 test("-120 words: the comment states the owner's later decision; the notice, the card, the manual and README say 'not linked' and k ≥ 3", () => {
   const sv = src("server.js");
-  assert.ok(sv.includes('const VERSION = "2026.09.25-121"'));
+  assert.ok(sv.includes('const VERSION = "2026.09.25-122"'));
   assert.ok(sv.includes("later reversed it — public counting is ON BY DEFAULT, the") && sv.includes("admin toggle in the Usage fold (usage_cfg.publicOn) switches it, and env USAGE_PUBLIC=0 forces it"));
   const u = src("public/js/usage.js");
   assert.ok(u.includes("a visit is not linked across days, and days with fewer than 3 visitors aren’t shown."));
@@ -356,7 +356,7 @@ test("-120 words: the comment states the owner's later decision; the notice, the
   for (const w of ["not linked across days", "Days with fewer than 3 visitors aren't shown", "not its message text"]) assert.ok(note.includes(w), "manual: " + w);
   assert.ok(!note.includes("can't be linked"));
   const readme = src("README.md");
-  assert.ok(readme.includes("(build 2026.09.25-120)") && readme.includes("**k ≥ 3 per day, everywhere**") && readme.includes("nothing linked across days; days with fewer than 3 visitors aren't shown"));
+  assert.ok(readme.includes("(build 2026.09.25-122)") && readme.includes("**k ≥ 3 per day, everywhere**") && readme.includes("nothing linked across days; days with fewer than 3 visitors aren't shown"));
   assert.ok(!readme.includes("cannot be linked across days"));
   assert.ok(src("public/js/usageadm.js").includes("so a visit is not linked across days; '+UA_PUB_K_NOTE+'"));
 });

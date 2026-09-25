@@ -7,7 +7,7 @@ const gzipAsync = require("util").promisify(zlib.gzip);   // -08: threadpool gzi
 const Fastify = require("fastify");
 const { openStore } = require("./src/store");
 const { createUsageGate } = require("./src/usage-gate");
-const { createUsagePublic } = require("./src/usage-public");   // (build 2026.09.25-120) cookieless signed-out counting
+const { createUsagePublic } = require("./src/usage-public");   // (build 2026.09.25-122) cookieless signed-out counting
 const { createPoller } = require("./src/poller");
 const { openAccounts, PW_MIN: ACCOUNT_PW_MIN, DM_MAX_LEN: ACCOUNT_DM_MAX,
   FILE_MAX: ACCOUNT_DM_FILE_MAX } = require("./src/accounts");
@@ -16,7 +16,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.25-121";
+const VERSION = "2026.09.25-122";
 // (build 2026.09.24-107) Distinguishes this process from the last one in ETags built on
 // per-process counters (a restart must never 304 a client onto a different body).
 const BOOT_NONCE = Date.now().toString(36) + crypto.randomBytes(3).toString("hex");
@@ -1594,8 +1594,8 @@ async function buildServer() {
   // aggregates (accounts.js usage_day). The beacon carries {tabs:{view -> visible ms}, pwa} and
   // nothing else — no tickers, no search text, no filters, and the device class is derived HERE
   // from the User-Agent and stored as one of three words; the UA itself is never kept.
-  // (build 2026.09.25-120) Signed-out visitors are counted too — cookielessly, as sitewide totals only
-  // (uid '-1'; src/usage-public.js has the whole design). (build 2026.09.25-120) The owner's decision
+  // (build 2026.09.25-122) Signed-out visitors are counted too — cookielessly, as sitewide totals only
+  // (uid '-1'; src/usage-public.js has the whole design). (build 2026.09.25-122) The owner's decision
   // as it stands: the owner first decided OFF (builds -109 → -116: a no-op USAGE_PUBLIC=1 flag with the
   // visitor path deliberately not built) and later reversed it — public counting is ON BY DEFAULT, the
   // admin toggle in the Usage fold (usage_cfg.publicOn) switches it, and env USAGE_PUBLIC=0 forces it
@@ -1778,7 +1778,7 @@ async function buildServer() {
     if (r.stored) ACCOUNTS.touch(uid);
     return r;
   }
-  // ---- (build 2026.09.25-120) the signed-out path ------------------------------------------------------
+  // ---- (build 2026.09.25-122) the signed-out path ------------------------------------------------------
   // Same body, same validation (usageClamp: allowlists, clamps, the 4 KB cap, the cross-site refusal
   // that runs before every POST), and the same rate gate design — a SEPARATE gate instance keyed by the
   // in-memory visitor key + the page session id, so the wall-time clamp, held early beacons and the
@@ -1799,7 +1799,7 @@ async function buildServer() {
   }
   // ET midnight: what the old day's gate still holds lands (counted against the old day's visitor
   // state), then the gate, the salt and every per-visitor map are thrown away together.
-  // (build 2026.09.25-120) ...and it lands ON the old day: released and recorded at that day's last
+  // (build 2026.09.25-122) ...and it lands ON the old day: released and recorded at that day's last
   // millisecond, so its 'pv' / 'ptr' / 'pmin' moves stay with the day whose visitor state they were
   // computed from (recorded "now", a visitor's −1 from yesterday's minutes bucket was written into
   // today, a negative bucket). With counting switched off it is discarded instead (usagePubDiscard).
@@ -1813,7 +1813,7 @@ async function buildServer() {
     usagePub.rotate(now);
     return true;
   }
-  // (build 2026.09.25-120) The last millisecond of ET day `day` ('YYYY-MM-DD'): the next day's ET
+  // (build 2026.09.25-122) The last millisecond of ET day `day` ('YYYY-MM-DD'): the next day's ET
   // midnight is 04:00 UTC (EDT) or 05:00 UTC (EST) — midnight is never inside a DST change — minus 1.
   function usagePubDayEnd(day, now) {
     const m = /^(\d{4})-(\d\d)-(\d\d)$/.exec(String(day || ""));
@@ -1822,7 +1822,7 @@ async function buildServer() {
     for (const h of [4, 5]) { const t = Date.UTC(+m[1], +m[2] - 1, +m[3] + 1, h); if (etDayStr(t) !== day && etDayStr(t - 1) === day) return Math.min(now, t - 1); }
     return now;
   }
-  // (build 2026.09.25-120) Counting switched off (the toggle or USAGE_PUBLIC=0): the public gate's held
+  // (build 2026.09.25-122) Counting switched off (the toggle or USAGE_PUBLIC=0): the public gate's held
   // early beacons are thrown away, never released into storage — off stops storage at once.
   function usagePubDiscard() { if (usagePubGate.held() || usagePubGate.sessions()) usagePubGate = usagePubGateNew(); }
   function usagePublicBeacon(req, reply) {
@@ -1844,7 +1844,7 @@ async function buildServer() {
   fastify.post("/api/usage", { bodyLimit: 4 * 1024 }, (req, reply) => {
     reply.header("cache-control", "no-store");
     const me = meOf(req);
-    if (!me) return usagePublicBeacon(req, reply);          // (build 2026.09.25-120) signed out: the cookieless public path
+    if (!me) return usagePublicBeacon(req, reply);          // (build 2026.09.25-122) signed out: the cookieless public path
     if (ACCOUNTS.usagePaused(me.uid)) return reply.code(204).send();
     const now = Date.now();
     const c = usageClamp(req.body);
@@ -1884,8 +1884,8 @@ async function buildServer() {
   function usageSweep(now, all) {
     const t = now != null ? now : Date.now();
     usageGate.sweep(t, (uid, p) => usageStore(uid, p, t), all);
-    // (build 2026.09.25-120) the public gate too, and the midnight rotation even when nobody beacons;
-    // (build 2026.09.25-120) with counting off, whatever the gate holds is discarded, not released
+    // (build 2026.09.25-122) the public gate too, and the midnight rotation even when nobody beacons;
+    // (build 2026.09.25-122) with counting off, whatever the gate holds is discarded, not released
     if (!usagePubRoll(t)) { if (usagePubOn()) usagePubGate.sweep(t, (k, p) => usagePubStore(k, p, t), all); else usagePubDiscard(); }
   }
   USAGE_SWEEP = usageSweep;   // main()'s 60s flush and shutdown reach it here (buildServer's scope)
@@ -2550,7 +2550,7 @@ async function buildServer() {
     if (ACCOUNTS.usagePending()) ACCOUNTS.usageFlush();
     const online = dmOnline();
     const stale = usageStale();   // (build 2026.09.24-110) in memory, so it joins the cache key
-    const anon = sseAnonCount(), pubOn = usagePubOn();   // sseAnonCount: the SSE block below (called at request time)   // (build 2026.09.25-120) both join the cache key too
+    const anon = sseAnonCount(), pubOn = usagePubOn();   // sseAnonCount: the SSE block below (called at request time)   // (build 2026.09.25-122) both join the cache key too
     const key = [BOOT_NONCE, ACCOUNTS.usageGen(), r, ACCOUNTS.countUsers(), [...online].sort().join(","), stale, anon, pubOn, Math.floor(Date.now() / 60000)].join(".");
     let hit = usageBodies.get(r);
     if (!hit || hit.key !== key) {
@@ -2560,7 +2560,7 @@ async function buildServer() {
       try { navOrder = poller.getNavGroups().reduce((a, g) => a.concat(g.views || []), []); } catch (_) {}
       const body = ACCOUNTS.usageSummary({ r, online, tabs: USAGE_TABS(), build: VERSION, stale, navOrder, pubOnline: anon });
       body.publicOn = pubOn; body.beacon = true;
-      // (build 2026.09.25-120) the public path's live state: the toggle, the env override, the caps
+      // (build 2026.09.25-122) the public path's live state: the toggle, the env override, the caps
       const cfg = ACCOUNTS.usageCfg();
       if (body.pub) body.pub.live = { on: pubOn, toggle: cfg.publicOn !== false, forcedOff: usagePubForcedOff(), setAt: cfg.publicSetAt || null,
         caps: { perMin: USAGE_PUB_MAX_PER_MIN, visitors: USAGE_PUB_MAX_VISITORS } };
@@ -2589,7 +2589,7 @@ async function buildServer() {
     if (!r.ok) return reply.code(r.error === "no such error" ? 404 : 400).send(r);
     return r;
   });
-  // (build 2026.09.25-120) The public-visitor toggle: {on: true|false}, admin-only, refused cross-site
+  // (build 2026.09.25-122) The public-visitor toggle: {on: true|false}, admin-only, refused cross-site
   // like every POST. Persisted in usage_cfg.publicOn (default on); USAGE_PUBLIC=0 still forces it off,
   // which the answer says (forcedOff). The shell tells signed-out pages the resolved state at load.
   fastify.post("/api/admin/usage/public", { bodyLimit: 1024 }, (req, reply) => {
@@ -2598,7 +2598,7 @@ async function buildServer() {
     if (!usageBodyOk(req.body) || typeof req.body.on !== "boolean") return reply.code(400).send({ ok: false, error: "bad body" });
     const r = ACCOUNTS.usageCfgSet({ publicOn: req.body.on }, adminUid(req));
     if (!r.ok) return reply.code(400).send(r);
-    if (!usagePubOn()) usagePubDiscard();   // (build 2026.09.25-120) off: held public beacons go now
+    if (!usagePubOn()) usagePubDiscard();   // (build 2026.09.25-122) off: held public beacons go now
     log("usage: public visitor counting switched " + (r.publicOn ? "ON" : "off") + " by an admin" + (usagePubForcedOff() ? " (USAGE_PUBLIC=0 still forces it off)" : ""));
     return { ok: true, toggle: r.publicOn, on: usagePubOn(), forcedOff: usagePubForcedOff() };
   });
@@ -3085,7 +3085,7 @@ async function buildServer() {
     ";window.__ADMIN=" + (admin ? "true" : "false") +
     ";window.__NAVGROUPS=" + jsonForScript(poller.getNavGroups()) +
     ";window.__ME=" + jsonForScript(me ? Object.assign(ACCOUNTS.pub(me), { usagePaused: ACCOUNTS.usagePaused(me.uid) }) : null) +   // -109: the beacon starts paused when the member paused it
-    // (build 2026.09.25-120) whether a SIGNED-OUT page beacons (anonymous totals): off for members,
+    // (build 2026.09.25-122) whether a SIGNED-OUT page beacons (anonymous totals): off for members,
     // the break-glass operator, and whenever the operator's toggle or USAGE_PUBLIC=0 says so
     ";window.__USPUB=" + (!me && !admin && usagePubOn() ? "true" : "false") + ";";
   const serveIndex = (req, reply) => {
@@ -3981,7 +3981,7 @@ async function buildServer() {
   // Presence, deliberately in memory and nowhere else: a live stream IS the signal, so there is
   // nothing to persist, nothing to expire, and nothing to be wrong across a restart.
   const dmOnline = () => new Set(sseByUid.keys());
-  // (build 2026.09.25-120) open signed-out streams (tabs, not people): a number, for the Usage fold
+  // (build 2026.09.25-122) open signed-out streams (tabs, not people): a number, for the Usage fold
   const sseAnonCount = () => { let n = 0; for (const e of sseClients) if (e.anon) n++; return n; };
   function sseFrame() {
     const s = poller.getSnapshot();
@@ -4051,7 +4051,7 @@ async function buildServer() {
     });
     // Identity is resolved ONCE, at connect. A session that expires mid-stream keeps delivering to
     // that connection until it drops, which is the same lifetime the browser tab already has.
-    // (build 2026.09.25-120) anon: a signed-out visitor's stream (not the break-glass operator) — the
+    // (build 2026.09.25-122) anon: a signed-out visitor's stream (not the break-glass operator) — the
     // Usage fold's anonymous "online now" is a COUNT of these, nothing else is read off them
     const entry = { res, uid: me ? me.uid : "", ip, anon: !me && !isAdmin(req) };
     // Initial frame on connect: the client syncs immediately instead of waiting for the first

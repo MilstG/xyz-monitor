@@ -88,6 +88,7 @@ function emtCardAction(c){
     ? `Bearish: ${L} is now resistance. A ${tfLbl(c.tf)} close back above invalidates.`
     : `Bullish: ${L} is now support. A ${tfLbl(c.tf)} close back below invalidates.`;
 }
+// (-120) Touches is the left (wider) pane, Near a line the right; the ticker reads before its status.
 // (-119) The time a card touched is its FIRST, biggest element — "how long ago" is the question the
 // eye asks before any other. Short, readable: now · 12m · 3h 20m · 1d 6h; the wall-clock time under
 // it, the full UTC stamp on hover.
@@ -124,7 +125,7 @@ function emtCardHtml(c,P){
   return `<div class="emt-ev ${tone}${faded?' fading':''}${isNew?' isnew':''}" data-coin="${esc(c.coin)}">
     <div class="emt-when ${whenCls}" title="touched ${esc(new Date(c.at).toISOString().slice(0,16).replace('T',' '))} UTC"><b>${emtAgo(c.at)}</b><small>${emtAgo(c.at)==='now'?'touching':'ago'}</small><small>${emtClock(c.at)}</small></div>
     <div class="emt-body"><div class="l1">
-      ${isNew?'<span class="emt-new">NEW</span>':''}<span class="emt-pill ${tone}">${emtCardTitle(c)}</span><span class="tk">${esc(c.t)}</span><span class="emt-chip">${tfLbl(c.tf)}</span><span class="emt-chip e${c.n}">EMA${c.n}</span>${c.stacked?'<span class="emt-chip stack" title="the 50 and the 200 sit on the same level — one touch tests both">stacked</span>':''}${emtOutcomeHtml(c,P)}
+      ${isNew?'<span class="emt-new">NEW</span>':''}<span class="tk">${esc(c.t)}</span><span class="emt-pill ${tone}">${emtCardTitle(c)}</span><span class="emt-chip">${tfLbl(c.tf)}</span><span class="emt-chip e${c.n}">EMA${c.n}</span>${c.stacked?'<span class="emt-chip stack" title="the 50 and the 200 sit on the same level — one touch tests both">stacked</span>':''}${emtOutcomeHtml(c,P)}
       ${right}</div>
     <div class="emt-act">${emtCardAction(c)}</div>
     <div class="l3"><span>touched ${fmtPrice(c.px)}${c.st!=='live'?` · closed ${fmtPrice(c.close)} vs line ${fmtPrice(c.lineC)}`:''}</span>${ft}
@@ -174,11 +175,11 @@ function renderEmaTouch(){
     <div class="emt-sub">Which ${cr?'coins':'names'} are touching their 50 or 200 EMA right now, and which are about to. Distance is in each rung’s own bar sigma (the % beside it), so “close” means the same on every name. ${d.primed?'':'<b class="warn">Priming:</b> the first ~6 minutes after a deploy seed every line silently, so nothing already standing is announced as new. '}${d.scanAt?`Scanned ${agoTxt(d.scanAt)}.`:'Waiting for the first scan.'}</div>
     <div class="emt-kpis">${kpi('touching now',liveN,'candle still open')}${kpi('fresh setups',freshN,'just resolved, still actionable')}${kpi('worked',touchesU.filter(c=>c.worked&&!c.failed).length,`moved ≥ ${P.workedSd||1}σ the right way`)}${kpi('failed',touchesU.filter(c=>c.failed).length,'a later close went back through')}${kpi('near a line',near.length,`${near.filter(r=>r.inBand||r.touching).length} inside ${P.nearSd||0.5}σ`)}</div>
     <div class="emt-grid">
-      <div class="emt-card"><div class="emt-h">Near a line <span>${near.length} line${near.length===1?'':'s'} within ${P.listSd||1.5}σ</span></div><div class="emt-deck">${deckHtml(near.slice(0,40),P)}</div>
-        <p class="emt-cap">Gauge: the mark's distance to the line, the shaded part is the near band (${P.nearSd||0.5}σ). <span class="pos">▼</span> = the gap is closing. The line is the EMA over closed candles carried to the live mark: what a chart draws while the candle forms. ${cr?'Crypto reads calendar days.':'1D is the session series: weekends and holidays fold into the next session.'}</p></div>
       <div class="emt-card"><div class="emt-h">Touches <span>${cards.length} card${cards.length===1?'':'s'} · ${EMT.sort==='new'?'newest first':'by stage, newest first in each'}${newN?` · <b class="emt-newct">${newN} new since your last visit</b>`:''}</span></div><div class="emt-feed">${emtFeedHtml(cards,P)}</div>
         <div class="emt-legend"><span><b>12m / 3h / 1d</b> how long ago it touched</span><span><b class="emt-new">NEW</b> since your last visit</span><span><b class="emt-stage fresh">Fresh</b> the first ${((P.freshBars||{}).H4)||3} bars (4H) / ${((P.freshBars||{}).D1)||2} sessions (1D) after the touch: actionable</span><span><b class="emt-stage fading">Fading</b> after that, or failed: context; gone after ${((P.keepBars||{}).H4)||6} bars / ${((P.keepBars||{}).D1)||5} sessions</span><span><b class="emt-out ok">✓ worked</b> moved ≥ ${P.workedSd||1}σ the expected way</span><span><b class="emt-out bad">✕ failed</b> a later close went back through the line</span></div>
         <p class="emt-cap">One card per touch, resolved at the candle's close. Until a close lands at least ${P.rearmSd||1}σ clear of the line, later touches fold into the same card. Phone alerts, operator-only while this tab soaks: <b>ma200</b> / <b>ma50</b> (reclaim, breakdown, retests, close-confirmed) and <b>touch200</b> / <b>touch50</b> (intrabar, opt-in), each chosen separately in the bell's delivery panel.</p></div>
+      <div class="emt-card"><div class="emt-h">Near a line <span>${near.length} line${near.length===1?'':'s'} within ${P.listSd||1.5}σ</span></div><div class="emt-deck">${deckHtml(near.slice(0,40),P)}</div>
+        <p class="emt-cap">Gauge: the mark's distance to the line, the shaded part is the near band (${P.nearSd||0.5}σ). <span class="pos">▼</span> = the gap is closing. The line is the EMA over closed candles carried to the live mark: what a chart draws while the candle forms. ${cr?'Crypto reads calendar days.':'1D is the session series: weekends and holidays fold into the next session.'}</p></div>
     </div>`;
   wrap.querySelectorAll('[data-coin]').forEach(n=>n.addEventListener('click',()=>{ const c=n.dataset.coin; if(state.rows.has(c)) openDetail(c); }));
   emtMarkSeen();

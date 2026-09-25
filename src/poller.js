@@ -14907,7 +14907,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     let fired = 0, touched = 0;
     const ver0 = emaVer;
     const emaByKey = new Map();   // coin|tf|N -> its touch cards, built once per scan
-    emaCards = emaCards.filter((c) => c.k === "touch");   // (-118) near entries left the feed: the list on the left is their live view
+    emaCards = emaCards.filter((c) => c.k === "touch");   // (-118) near entries left the feed: the Near a line list is their live view
     for (const c of emaCards) { const k = c.coin + "|" + c.tf + "|" + c.n; if (!emaByKey.has(k)) emaByKey.set(k, []); emaByKey.get(k).push(c); }
     const liveId = (id) => id != null && emaCards.some((c) => c.id === id && c.st === "live");
     for (const r of rows.values()) {

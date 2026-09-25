@@ -1,5 +1,5 @@
 "use strict";
-// usage-public.js — cookieless counting of signed-out visitors (build 2026.09.25-120).
+// usage-public.js — cookieless counting of signed-out visitors (build 2026.09.25-122).
 //
 // Plausible-style: a signed-out page sends the same usage beacon a member's page sends, and carries
 // NO identifier of any kind — no cookie, no localStorage, no id. The server derives a visitor key
@@ -82,7 +82,7 @@ function createUsagePublic(opts) {
     const minFrom = s.bucket;
     s.ms += tot;
     s.bucket = pubMinBucket(s.ms);
-    // (build 2026.09.25-120) `day`: the ET day this visitor state belongs to — accounts.js files the
+    // (build 2026.09.25-122) `day`: the ET day this visitor state belongs to — accounts.js files the
     // distinct counts under it, so a payload recorded across midnight can never split a visitor's
     // −1 / +1 minutes-bucket move over two days
     return { newVisitor, newTabs, minFrom, minTo: s.bucket, q: s.q, day };
