@@ -600,7 +600,7 @@ is added without it. The list below is the tour.
   **pause** it; the operator then sees "paused". The sitewide panel is not logged; **opening one
   member's detail is**, as `view-usage` in the same audit log as the message read-through.
   Signed-out tracking is a server flag (`USAGE_PUBLIC=1`), off, and in this build collects nothing
-  even when set. Routes: `POST /api/usage`, `GET /api/usage/me`, `POST /api/usage/pause`,
+  even when set (superseded by build 2026.09.25-117: cookieless public visitor counting, below). Routes: `POST /api/usage`, `GET /api/usage/me`, `POST /api/usage/pause`,
   `GET /api/admin/usage?r=7|30`, `GET /api/admin/usage/member?h=`.
 - **Usage, stages B + C** (build 2026.09.24-110) — the same fold gains adoption, retention, a
   heatmap and client health, all from the same `usage_day` aggregates:
@@ -815,6 +815,46 @@ is added without it. The list below is the tour.
     JSON object (400 otherwise — a text/plain body was a 500); a `usage_day(kind, day)` index; the
     regression tick stops for a build once every condition has alerted or it is more than 3 days
     past first-seen, and the triage sweep runs every 10 minutes instead of every tick.
+- **Usage: public (signed-out) visitors, counted without cookies** (build 2026.09.25-117) —
+  Plausible-style. A signed-out page sends the **same beacon** a member's page sends (tab time, hour
+  buckets, tab paths, entry tab, control counts, device class / PWA flag, first paint, errors) and
+  **nothing that identifies it**: no cookie, no `localStorage`, no id (`s` is per page load and never
+  stored). The shell tells the page whether to beacon (`window.__USPUB`); off, it sends nothing.
+  - **Visitor key**: `HMAC-SHA256(dailySalt, ip | userAgent | host)`, truncated, computed per request
+    (`src/usage-public.js`). The salt is 32 random bytes per **ET day**, held **only in memory** —
+    never persisted, logged or returned — and replaced at ET midnight together with every map keyed
+    by it, so a visitor **cannot be linked across days**. The IP (`clientIp`: the socket, or the last
+    `X-Forwarded-For` element only under `TRUST_PROXY`), the User-Agent and the key are **never
+    stored**. A restart mints a new salt, so a visitor who returns later that day is counted again.
+  - **Storage**: sitewide totals only, under **uid `'-1'`** in `usage_day` (never a member, never
+    folded into `'0'`, never a per-visitor row): `tab`, `hr`, `tr`/`en`/`ctl`/`tdev`, `perf`, `err`
+    (into `usage_err` and triage, counted there as **public hits** — never as members affected — and
+    never feeding the post-deploy alerts; all visitors together may add **10 new distinct errors a
+    day**), plus `pv` (key = the day, n = distinct visitors that day, from the in-memory set), `ptr`
+    (key `<day>|<tab>`, n = distinct visitors who opened that tab that day — reach), `pmin` (a
+    histogram of visitor-day minutes, so a median exists without per-visitor rows) and `pdrop`
+    (beacons the caps refused). Kept **30 days**, then deleted.
+  - **Abuse bounds**: a separate instance of the members' rate gate keyed by the in-memory visitor key
+    + page session (wall-time clamp, held early beacons, per-visitor budget), the members' per-day
+    sitewide bounds per visitor, the same 4 KB body / allowlists / cross-site refusal, and two
+    server-wide caps — **20,000 distinct visitors per ET day** and **600 public beacons per minute** —
+    past which a beacon is dropped (204) and counted for the operator.
+  - **Control**: on by default; **Admin → Usage** has a toggle (`usage_cfg.publicOn`,
+    `POST /api/admin/usage/public {on}`), and env **`USAGE_PUBLIC=0` forces it off**. Members and the
+    break-glass operator are never counted as visitors.
+  - **The fold**: a **who** control — members | public | both — over the KPIs (online now = open
+    signed-out streams, a count; visitors / active visitors today; visitor-days in range, since a
+    visitor is never linked across days; the median minutes per active visitor-day, bucketed), the
+    daily chart (stacked for both), the heatmap, the tab table (public reach = **mean daily reach**),
+    paths / controls / devices (public: ≥ 7 complete days and **≥ 3 distinct visitors on one day**)
+    and client health. The members table, drill-in, adoption and cohorts stay members-only and say
+    so. The chip shows the live state, today's visitors and today's drops.
+  - **Disclosure**: signed-out pages show a one-line dismissible notice (dismissal remembered for the
+    tab in `sessionStorage`) linking to the manual's *signed-out visitors* note (`/docs#public-usage`);
+    the Your usage card and the manual say the same. The weekly digest gains a public line
+    (visitor-days this week vs last, top public tabs).
+  - **Privacy summary**: no cookies, no identifiers on the client, no IP, User-Agent, key or salt at
+    rest; aggregates only; nothing linkable across days.
 - **Admin panel folds** — the panel had grown to eight full-height boxes, so reaching the one you
   wanted meant scrolling past the seven you did not. Every segment is now a collapsed row naming
   what is inside it, with an expand-all/collapse-all control. Each fold wraps its box from

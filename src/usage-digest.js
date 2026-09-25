@@ -108,6 +108,16 @@ function digestLines(data, o) {
     if (q.length && o.quietN > 0) L.push(E("quiet (<10% reach): ") + q.slice(0, o.quietN).map((t) => E(clip(t.label, 20))).join(", ") + (q.length > o.quietN ? " +" + (q.length - o.quietN) + " more" : ""));
     else if (q.length) L.push(E("quiet (<10% reach): " + q.length + " tabs"));
   }
+  // (build 2026.09.25-117) signed-out visitors: visitor-days (daily distinct visitors summed; a visitor
+  // is never linked across days, so there is no weekly distinct count) and the week's top public tabs
+  const Pb = d.public || {};
+  if ((+Pb.visitorDays || 0) > 0 || (+Pb.visitorDaysPrev || 0) > 0) {
+    const v = +Pb.visitorDays || 0, vp = +Pb.visitorDaysPrev || 0;
+    L.push("");
+    L.push("🌐 " + B("PUBLIC") + " " + v + " visitor-days (last week " + vp + (vp > 0 ? ", " + pct((v - vp) / vp) : "") + ")");
+    const pt = Pb.top || [];
+    if (pt.length) L.push("top public tabs: " + pt.map((t) => E(clip(t.label, 20)) + " " + hrs(t.ms)).join(", "));
+  }
   const R = d.errors || {}, ne = R.fresh || [], rg = R.regressed || [];
   L.push("");
   L.push("🐞 " + B("ERRORS"));
