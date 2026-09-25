@@ -22,7 +22,9 @@ test("funding heatmap: a cell is the funding a 1x long paid over the bucket, at 
 
 test("funding heatmap: buckets are epoch-anchored, complete, and nest 24h = 3 x 8h", () => {
   const { fundingHeat } = require("../src/compute");
-  const end = Date.now();
+  // mid-bucket, never within a minute of an 8h boundary: Date.now() alone made "t0 is stable within a
+  // bucket" fail whenever the suite ran in the last minute before 00/08/16 UTC
+  const end = Math.floor(Date.now() / (8 * HOUR)) * 8 * HOUR + 4 * HOUR;
   // Epoch anchoring is what makes two rows comparable column-for-column: t0 must not move with the
   // caller's clock inside a bucket, or two markets built a second apart land on different columns.
   const a = fundingHeat([], { bucketHours: 8, buckets: 5, end });
