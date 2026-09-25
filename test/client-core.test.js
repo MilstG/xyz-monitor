@@ -1058,7 +1058,7 @@ test("ma200 lane manifest: closed source, dedup by the bar itself, full-roster s
     "restored state IS the seed — keeping the priming delay after a restore would only eat real transitions");
   // Client: the bell log reads the same event through the shared stamp.
   const app = require("./_client").clientSource();
-  assert.ok(app.includes("if(k==='ma200')") && /ma200:\['MA200'/.test(app), "alertText branch + feed tag");
+  assert.ok(app.includes("if(k==='ma200'||k==='ma50')") && /ma200:\['MA200'/.test(app), "alertText branch + feed tag (-115: shared with ma50)");
 });
 
 test("panel: your recipients only in the bell, everyone's in the admin panel, collapsed", () => {

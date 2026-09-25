@@ -256,7 +256,7 @@ test("perf -103 lazy modules: one import per module, boots run once before the f
 
 test("perf -103 lazy modules: no eager module statically imports a lazy one; the entry and harness agree", () => {
   const lazy = require("./_client").lazyModules();
-  assert.deepEqual(lazy, ["charts", "drawdown", "funds", "insiders", "positioning", "usageadm"]);   // -109: the Admin Usage fold
+  assert.deepEqual(lazy, ["charts", "drawdown", "ematouch", "funds", "insiders", "positioning", "usageadm"]);   // -109: the Admin Usage fold; -115: the EMA Touch tab
   const app = src("public/app.js");
   for (const m of lazy) assert.ok(!app.includes(`"./js/${m}.js"`), `the entry must not import ${m}`);
   for (const f of fs.readdirSync(path.join(ROOT, "public", "js"))) {

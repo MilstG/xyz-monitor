@@ -347,6 +347,7 @@ function detectBenchmark(){
 const LAZY_IMPORTERS={
   charts:()=>import("./charts.js"),
   drawdown:()=>import("./drawdown.js"),
+  ematouch:()=>import("./ematouch.js"),   // (build 2026.09.25-115) the EMA Touch tab
   funds:()=>import("./funds.js"),
   insiders:()=>import("./insiders.js"),
   positioning:()=>import("./positioning.js"),

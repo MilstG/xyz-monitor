@@ -5570,12 +5570,14 @@ function trigEligible(row, cfg) {
 // name would be a lie about what the event is. Three sub-events per release (day-ahead, imminent,
 // result) at ~7 releases a month is ~20 messages a month, which is why it can fire individually
 // instead of being batched the way headlines are.
-const PUSH_CLASSES = ["setup", "ledger", "rule", "trend", "ma200", "filing", "earnings", "macro", "ai", "regime", "coverage", "congress", "ops"];
+const PUSH_CLASSES = ["setup", "ledger", "rule", "trend", "ma200", "ma50", "touch200", "touch50", "filing", "earnings", "macro", "ai", "regime", "coverage", "congress", "ops"];
 // Classes only an operator should receive. Ops is server health — a stalled poller is actionable if
 // you can redeploy and noise if you cannot, and the group should not be woken by the plumbing.
 // Enforced in delivery AND in the in-app feed, not just hidden in the panel: a class the public
 // cannot act on should not be readable either.
-const PUSH_ADMIN_CLASSES = ["ops"];
+// ma50 / touch200 / touch50 (build 2026.09.25-115): the EMA Touch tab's lanes ride the tab's
+// admin-only soak — operator-only in delivery and in the feed until the tab opens to the group.
+const PUSH_ADMIN_CLASSES = ["ops", "ma50", "touch200", "touch50"];
 // Which classes a recipient gets when they have NOT chosen. The deploy-notice mistake in miniature:
 // a class that seems informative in isolation becomes noise at its real frequency, and "all classes
 // by default" means every new class I add silently starts spamming everyone already linked. So the
@@ -5652,7 +5654,8 @@ function pushEligible(ev, sub) {
   // Macro has no per-recipient threshold that would mean anything: there is no R:R on a CPI print
   // and no ticker to mute. The class chip IS the control.
   if (kind === "macro") return true;
-  if (kind === "regime" || kind === "coverage" || kind === "trend" || kind === "ma200") return true;
+  if (kind === "regime" || kind === "coverage" || kind === "trend" || kind === "ma200" || kind === "ma50"
+    || kind === "touch200" || kind === "touch50") return true;
   return trigEligible(ev, s.trig || {});           // setup: the SHARED gate, never a private copy
 }
 
@@ -5664,7 +5667,7 @@ function pushEligible(ev, sub) {
 // DOES have: a monospace <pre> block, and glyphs. The geometry goes in <pre> so the numbers column-
 // align exactly as they do on the board; everything else stays prose. One leading glyph per message
 // and a side dot — enough to sort a class at a glance on a lock screen, not enough to become soup.
-const PUSH_GLYPH = { setup: "\u26a1", ledger: "\u23f1", rule: "\u{1f4d0}", trend: "\u{1f4c8}", ma200: "\u{1f4cf}",
+const PUSH_GLYPH = { setup: "\u26a1", ledger: "\u23f1", rule: "\u{1f4d0}", trend: "\u{1f4c8}", ma200: "\u{1f4cf}", ma50: "\u{1f4cf}", touch200: "\u{1f3af}", touch50: "\u{1f3af}",
   filing: "\u{1f4c4}", earnings: "\u{1f4c5}", macro: "\u{1f3db}\ufe0f", ai: "\u{1f9e0}", regime: "\u{1f30a}",
   coverage: "\u26a0\ufe0f", congress: "\u{1f3db}\ufe0f", ops: "\u{1f527}" };
 const sideDot = (s) => (s === "long" ? "\u{1f7e2}" : s === "short" ? "\u{1f534}" : "");
@@ -5755,7 +5758,20 @@ function pushFmt(ev, opts) {
     return out([head, body, tgEsc(ev.text || ""), when ? "\u23f1 " + tgEsc(when) : "", link("open " + (ev.t || ev.coin))]);
   }
 
-  if (kind === "ma200") {
+  if (kind === "touch200" || kind === "touch50") {
+    // Intrabar, so no confirmation stamp: the line it states is the LIVE one, and the close that
+    // decides held vs through is still ahead — the message says when.
+    const n = kind === "touch50" ? 50 : 200;
+    const head = g + " <b>" + name + "</b> " + sideDot(ev.side) + " \u00b7 " + tgEsc(ev.title || ("touching EMA" + n));
+    const left = ev.closeAt ? Math.max(0, Math.round((ev.closeAt - (ev.at || Date.now())) / 60000)) : null;
+    const body = preRows([["mark", pxs(ev.px)], ["EMA" + n, pxs(ev.ema)],
+      ["dist", ev.dist != null && isFinite(ev.dist) ? nums(ev.dist, 2, true) + "%" : null],
+      ["closes", left != null ? (left >= 60 ? Math.floor(left / 60) + "h " : "") + (left % 60) + "m" : null]]);
+    return out([head, body, tgEsc(ev.text || "") + (ev.stacked ? " \u00b7 the other EMA sits on the same level" : ""),
+      link("open " + (ev.t || ev.coin))]);
+  }
+
+  if (kind === "ma200" || kind === "ma50") {
     // Same grammar as the trend class — glyph flips with the side, geometry in <pre>, one prose
     // line, the -25 confirmation stamp. `held` is the message's own quality signal (how long the
     // prior side held, in the rung's bars); `probe` ships on retests only — the extreme that
@@ -5763,7 +5779,7 @@ function pushFmt(ev, opts) {
     const up = ev.side === "long";
     const head = (up ? "\u{1f4c8}" : "\u{1f4c9}") + " <b>" + name + "</b> " + sideDot(ev.side)
       + " \u00b7 " + tgEsc(ev.title || "");
-    const body = preRows([["mark", pxs(ev.px)], ["EMA200", pxs(ev.ema)],
+    const body = preRows([["mark", pxs(ev.px)], [kind === "ma50" ? "EMA50" : "EMA200", pxs(ev.ema)],
       ["dist", ev.dist != null && isFinite(ev.dist) ? nums(ev.dist, 2, true) + "%" : null],
       ["probe", pxs(ev.probe)],
       ["held", ev.held != null ? ev.held + " " + tgEsc(ev.tf || "") + " bars" : null]]);
@@ -6679,7 +6695,7 @@ const FEATURE_NEVER_GATE = new Set(["/api/health", "/login", "/logout",
 // defaults are stored — renaming a menu back, or moving a tab home, leaves no residue behind.
 const NAV_GROUPS = [
   { key: "tape",     label: "Tape",     views: ["trend", "charts", "treemap", "sectors", "drawdown", "corr", "funding", "sessions"] },
-  { key: "signals",  label: "Signals",  views: ["signals", "actionable", "focus", "backtest"] },
+  { key: "signals",  label: "Signals",  views: ["signals", "actionable", "focus", "backtest", "ematouch"] },
   { key: "macro",    label: "Macro",    views: ["earnings", "news", "housing", "liquidity"] },
   { key: "research", label: "Research", views: ["report", "funds", "congress", "insiders", "notes"] },
 ];
@@ -6797,6 +6813,10 @@ const FEATURES = [
   { key: "dm",         kind: "tab", label: "Messages",    def: "public", routes: ["/api/dm"] },
   { key: "report",     kind: "tab", label: "AI Report",   def: "public", routes: ["/api/ai-report", "/api/ai-reports"] },
   { key: "actionable", kind: "tab", label: "Actionable",  def: "admin",  routes: ["/api/actionable"] },
+  // EMA TOUCH (build 2026.09.25-115): names touching their 50 / 200 EMA on H4 and D1 right now, and
+  // the ones inside half a sigma of it — one card per touch episode, resolved at the candle's close.
+  // Admin-only while it soaks; its alert classes (ma50, touch200, touch50) are operator-only too.
+  { key: "ematouch",   kind: "tab", label: "EMA Touch",   def: "admin",  routes: ["/api/ema-feed"] },
   { key: "backtest",   kind: "tab", label: "Backtest",    def: "admin",  routes: ["/api/duel", "/api/retest-study"] },   // -96: the D1 retest study rides the tab's gate
   // FOCUS (build 2026.08.15-01): the frozen-at-open 6-seat tradeable watchlist. Admin while it
   // soaks — same doctrine as baskets/actionable. One route; the chart's 1m fetch rides

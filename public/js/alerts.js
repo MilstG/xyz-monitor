@@ -124,7 +124,8 @@ function alertText(ev){
   if(k==='ai') return `${ev.t} \u00b7 analyst read flipped: ${ev.from} \u2192 ${ev.to}`;
   if(k==='trend'){ const w=trendWhenTxt(ev);
     return `${ev.t} \u00b7 ${ev.title}${ev.score!=null?' \u00b7 '+ev.score+'/4':''}${ev.text?' \u00b7 '+ev.text:''}${w?' \u00b7 \u23f1 '+w:''}`; }
-  if(k==='ma200'){ const w=trendWhenTxt(ev);
+  if(k==='touch200'||k==='touch50') return `${ev.t} \u00b7 ${ev.title}${ev.dist!=null?' \u00b7 '+(+ev.dist).toFixed(2)+'% from the line':''}${ev.text?' \u00b7 '+ev.text:''}`;
+  if(k==='ma200'||k==='ma50'){ const w=trendWhenTxt(ev);
     return `${ev.t} ${String(ev.side||'').toUpperCase()} \u00b7 ${ev.title}${ev.held!=null?' \u00b7 held '+ev.held+' bars':''}${ev.text?' \u00b7 '+ev.text:''}${w?' \u00b7 \u23f1 '+w:''}`; }
   if(k==='regime') return `${ev.scope==='main'?'crypto':'stocks'} positioning \u00b7 ${ev.title} \u00b7 ${ev.text||''}`;
   if(k==='coverage') return `\u26a0 ${ev.t} \u00b7 data gap \u00b7 ${ev.text||''}`;
@@ -162,7 +163,7 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
   // in-tab rule fires (die with the tab, until their server-side replacement lands).
   const ATAG={setup:['SETUP','pos'], ledger:['LEDGER',''], ops:['OPS','sec'], rule:['RULE','sec'],
     filing:['FILING',''], earnings:['EARN','sec'], ai:['AI',''], regime:['REGIME','sec'], coverage:['GAP','neg'],
-    trend:['TREND','pos'], ma200:['MA200','pos'], macro:['MACRO','sec']};
+    trend:['TREND','pos'], ma200:['MA200','pos'], ma50:['MA50','pos'], touch200:['TOUCH','sec'], touch50:['TOUCH','sec'], macro:['MACRO','sec']};
   const feedRows=A.feed.filter(e=>(e.seq||0)>(A.clearedSeq||0)).map(e=>({t:e.at||0, seq:e.seq||0,
     kind:(e.kind||'setup'), sub:e.sub||null, text:alertText(e), coin:e.coin||null}));
   const localRows=A.log.map(e=>({t:e.t, seq:0, kind:'rule', sub:null, text:e.text, coin:null}));
@@ -364,5 +365,5 @@ window.addEventListener('hashchange',()=>{ if(!_hashSelf) applyHash(); });
    // a pasted #t=… into an open tab now works
 let _hashSelf=false;
 function setHash(h){ _hashSelf=true; try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} setTimeout(()=>{ _hashSelf=false; },0); }
-const HASH_VIEWS=new Set(['markets','focus','funds','trend','charts','sectors','drawdown','corr','funding','sessions','signals','earnings','news','backtest','report','actionable','admin','housing','liquidity','notes','congress','insiders','dm']);
+const HASH_VIEWS=new Set(['markets','focus','funds','trend','charts','sectors','drawdown','ematouch','corr','funding','sessions','signals','earnings','news','backtest','report','actionable','admin','housing','liquidity','notes','congress','insiders','dm']);
 export { HASH_VIEWS, alertMarkRead, alertText, buildAlertsPanel, evaluateAlerts, loadAlerts, notifyNewBuild, pushToast, saveAlerts, schedDaysClient, setHash, tickerOf, updateBell };

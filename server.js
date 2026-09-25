@@ -15,7 +15,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.24-114";
+const VERSION = "2026.09.25-115";
 // (build 2026.09.24-107) Distinguishes this process from the last one in ETags built on
 // per-process counters (a restart must never 304 a client onto a different body).
 const BOOT_NONCE = Date.now().toString(36) + crypto.randomBytes(3).toString("hex");
@@ -3047,6 +3047,11 @@ async function buildServer() {
     // (build 2026.09.24-107) the build and this boot are in the tag, never only a per-process counter
     return sendCachedBody(req, reply, body, 'W/"rt-' + VERSION + "-" + BOOT_NONCE + "-" + body.key + '"');
   });
+  // EMA Touch tab (build 2026.09.25-115): the on-deck board (every H4/D1 x EMA50/200 line within
+  // 1.5 sigma of the mark) plus the touch / near cards of the last 48h. Gated by the ematouch
+  // manifest key; the ETag rides dataTs (bumped every scan), so an idle poll inside a minute 304s.
+  fastify.get("/api/ema-feed", (req, reply) =>
+    serveCached(req, reply, poller.getEmaFeed(), { ts: 0, dataTs: 0, scanAt: null, primed: false, params: {}, counts: {}, near: [], cards: [] }));
   // EMA 13/21 trend ladder (D1 · H12 · H4 · H1) — ranked long/short leaderboards per universe.
   fastify.get("/api/trend", (req, reply) => {
     const q = req.query || {};

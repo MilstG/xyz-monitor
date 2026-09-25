@@ -1,0 +1,546 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EMA Touch Feed</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ── tokens lifted verbatim from public/styles.css (build 2026.09.24-108) ── */
+:root{
+  color-scheme:dark;
+  --bg:#0E1116; --panel:#151A21; --panel2:#1B222B; --border:#262E39;
+  --text:#E8E3D7; --muted:#8A93A0; --faint:#4C5662; --dim:#7A8592;
+  --accent:#E3A53C; --accent-dim:#8a6a28; --blue:#6f93c9;
+  --up:#46B97E; --down:#E5604D; --grid:#1A212A;
+  --mono:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;
+  --disp:'Space Grotesk',system-ui,sans-serif;
+  --fs-2xs:10px; --fs-xs:11px; --fs-sm:12px; --fs-md:13px; --fs-lg:15px; --fs-xl:20px;
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:20px;
+  --r-1:4px; --r-2:7px; --r-3:10px;
+  --ctl-h:28px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:var(--disp);-webkit-font-smoothing:antialiased;font-feature-settings:"tnum" 1}
+body{padding:22px 16px 70px;max-width:1180px;margin:0 auto}
+.pos{color:var(--up)} .neg{color:var(--down)} .sec{color:var(--muted)} .na{color:var(--faint)}
+b{font-weight:600}
+/* ── mock frame (same furniture as the other docs/ mocks) ── */
+.mockhd{border-bottom:1px solid var(--border);padding-bottom:16px;margin-bottom:22px}
+.eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin:0 0 8px}
+h1{font-size:27px;font-weight:700;letter-spacing:-.4px;margin:0 0 10px;text-wrap:balance}
+.lede{color:var(--muted);font-size:13.5px;line-height:1.62;max-width:80ch;margin:0 0 12px}
+.lede b{color:var(--text);font-weight:500}
+.lede code,.cap code{font-family:var(--mono);font-size:11.5px;color:var(--blue)}
+.mockchip{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--blue);border:1px solid var(--blue);border-radius:3px;padding:2px 7px;opacity:.9}
+.frame{border:1px dashed var(--accent-dim);border-radius:12px;padding:18px 18px 20px;margin:0 0 8px;position:relative}
+.frame::before{content:"live prototype · synthetic data · simulated clock";position:absolute;top:-8px;left:16px;background:var(--bg);padding:0 7px;font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent-dim)}
+.s-sec{margin:34px 0 12px;font-size:13px;line-height:1.4}
+.s-sec .t{color:var(--accent);font-weight:600;letter-spacing:.3px}
+.s-sec .d{color:var(--muted);font-weight:400;font-size:12px}
+.notegrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+.notecard{background:var(--panel);border:1px solid var(--border);border-radius:9px;padding:14px 16px}
+.notecard h3{font-size:12.5px;margin:0 0 8px;color:var(--text);font-weight:600;letter-spacing:.2px}
+.notecard p,.notecard li{margin:0;font-size:11.5px;line-height:1.65;color:var(--muted)}
+.notecard p+p{margin-top:8px}
+.notecard ul,.notecard ol{margin:6px 0 0;padding-left:16px}
+.notecard code{font-family:var(--mono);font-size:10.5px;color:var(--blue)}
+.notecard em{color:var(--text);font-style:normal;font-weight:500}
+.notecard.q{border-color:var(--accent-dim)}
+.notecard.q h3{color:var(--accent)}
+.notecard.rec{border-color:rgba(70,185,126,.45)}
+.notecard.rec h3{color:var(--up)}
+.cap{color:var(--muted);font-size:11.5px;margin:10px 2px 0;line-height:1.6;max-width:110ch}
+.cap b{color:var(--text)}
+
+/* ── app furniture (styles.css .seg / .btn / chips) ── */
+.row{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-2);margin:0 0 var(--sp-3)}
+.row .right{margin-left:auto;display:flex;gap:var(--sp-2);align-items:center;flex-wrap:wrap}
+.seg{display:inline-flex;align-items:center;gap:2px;background:var(--panel2);border:1px solid var(--border);border-radius:var(--r-2);padding:2px;height:var(--ctl-h)}
+.seg .lbl{font-size:var(--fs-xs);color:var(--muted);padding:0 6px}
+.seg button{background:transparent;border:none;color:var(--muted);font-family:var(--mono);font-size:var(--fs-sm);padding:0 9px;height:100%;border-radius:5px;cursor:pointer}
+.seg button.on{background:var(--accent);color:#1a1205;font-weight:600}
+.btn{background:var(--panel2);border:1px solid var(--border);color:var(--text);font-family:var(--disp);font-size:var(--fs-sm);height:var(--ctl-h);padding:0 10px;border-radius:var(--r-2);cursor:pointer}
+.btn:hover{border-color:var(--dim)}
+.chip{display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:var(--fs-2xs);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);border:1px solid var(--border);border-radius:var(--r-1);padding:1px 6px;white-space:nowrap}
+.chip.tf{color:var(--text)}
+.chip.e50{color:var(--blue);border-color:rgba(111,147,201,.5)}
+.chip.e200{color:var(--accent);border-color:var(--accent-dim)}
+.chip.on{color:var(--up);border-color:rgba(70,185,126,.45)}
+.chip.bad{color:var(--down);border-color:rgba(229,96,77,.5)}
+.chip.stack{color:#c9a0ff;border-color:rgba(201,160,255,.45)}
+.dm-sh{font-family:var(--mono);font-size:var(--fs-2xs);letter-spacing:.12em;text-transform:uppercase;color:var(--dim);margin:0 0 var(--sp-2);display:flex;align-items:center;gap:8px}
+.dm-sh .ct{color:var(--muted);letter-spacing:.04em;text-transform:none}
+.mono{font-family:var(--mono)}
+.muted{color:var(--muted)}
+
+/* ── tab header (mirrors the app's tab strip) ── */
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--border);margin:0 0 var(--sp-3);overflow-x:auto;scrollbar-width:none}
+.tabs span{font-size:var(--fs-md);color:var(--muted);padding:8px 12px;white-space:nowrap;border-bottom:2px solid transparent}
+.tabs span.on{color:var(--text);border-bottom-color:var(--accent);font-weight:600}
+.tabs span .dot{display:inline-block;min-width:16px;height:16px;line-height:16px;border-radius:8px;background:var(--accent);color:#1a1205;font-family:var(--mono);font-size:10px;text-align:center;margin-left:6px;padding:0 4px;font-weight:600}
+
+/* KPI strip */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:var(--sp-2);margin:0 0 var(--sp-3)}
+.kpi{background:var(--panel2);border:1px solid var(--border);border-radius:var(--r-2);padding:var(--sp-2) var(--sp-3)}
+.kpi .k{font-size:var(--fs-2xs);letter-spacing:.1em;text-transform:uppercase;color:var(--dim);font-family:var(--mono)}
+.kpi .v{font-family:var(--mono);font-size:var(--fs-xl);font-weight:500;margin:2px 0 0}
+.kpi .s{font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted)}
+.kpi.sel{border-color:var(--accent-dim)}
+.kpi .v .live{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--up);margin-right:6px;vertical-align:middle;box-shadow:0 0 0 3px rgba(70,185,126,.18)}
+
+.grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:var(--sp-3)}
+@media (max-width:860px){.grid2{grid-template-columns:minmax(0,1fr)}}
+.card{background:var(--panel2);border:1px solid var(--border);border-radius:var(--r-2);padding:var(--sp-3);min-width:0}
+
+/* on-deck list */
+.deck{display:flex;flex-direction:column}
+.dk{display:grid;grid-template-columns:62px 1fr 92px;align-items:center;gap:8px;padding:6px 2px;border-bottom:1px solid var(--grid);font-size:var(--fs-sm)}
+.dk:last-child{border-bottom:0}
+.dk .tk{font-weight:600}
+.dk .tk small{display:block;font-family:var(--mono);font-size:var(--fs-2xs);color:var(--faint);font-weight:400}
+.dk .mid{display:flex;flex-direction:column;gap:4px;min-width:0}
+.dk .chips{display:flex;gap:4px;flex-wrap:wrap}
+.gauge{position:relative;height:6px;border-radius:3px;background:var(--grid);overflow:hidden}
+.gauge .zone{position:absolute;top:0;bottom:0;left:0;background:rgba(227,165,60,.18)}
+.gauge .pt{position:absolute;top:-1px;width:8px;height:8px;border-radius:50%;margin-left:-4px;background:var(--dim)}
+.gauge .pt.in{background:var(--accent);box-shadow:0 0 0 3px rgba(227,165,60,.2)}
+.dk .num{text-align:right;font-family:var(--mono);font-size:var(--fs-xs);line-height:1.35}
+.dk .num b{font-size:var(--fs-sm);font-weight:500;color:var(--text)}
+.dk .num .cl{color:var(--up)} .dk .num .op{color:var(--faint)}
+.dk.in{background:linear-gradient(90deg,rgba(227,165,60,.06),transparent 70%)}
+.empty{color:var(--faint);font-size:var(--fs-sm);padding:18px 4px;text-align:center}
+
+/* feed */
+.feed{display:flex;flex-direction:column;gap:6px;max-height:560px;overflow-y:auto;padding-right:2px}
+.ev{border:1px solid var(--border);border-left:3px solid var(--dim);border-radius:var(--r-2);padding:8px 10px;background:var(--panel);animation:in .35s ease-out}
+@keyframes in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+.ev.touch{border-left-color:var(--accent)}
+.ev.held{border-left-color:var(--up)}
+.ev.thru{border-left-color:var(--down)}
+.ev.near{border-left-color:var(--faint);opacity:.8}
+.ev .l1{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.ev .l1 .tk{font-weight:700;font-size:var(--fs-md)}
+.ev .l1 .ts{margin-left:auto;font-family:var(--mono);font-size:var(--fs-2xs);color:var(--faint)}
+.ev .l2{font-size:var(--fs-sm);color:var(--muted);margin-top:3px;line-height:1.5}
+.ev .l2 b{color:var(--text);font-weight:500}
+.ev .l3{display:flex;gap:10px;flex-wrap:wrap;font-family:var(--mono);font-size:var(--fs-2xs);color:var(--dim);margin-top:4px}
+.pill{font-family:var(--mono);font-size:var(--fs-2xs);letter-spacing:.06em;text-transform:uppercase;padding:1px 6px;border-radius:var(--r-1);font-weight:600}
+.pill.live{background:rgba(227,165,60,.15);color:var(--accent)}
+.pill.live::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--accent);margin-right:5px;vertical-align:1px;animation:pulse 1.2s infinite}
+@keyframes pulse{50%{opacity:.25}}
+.pill.held{background:rgba(70,185,126,.14);color:var(--up)}
+.pill.thru{background:rgba(229,96,77,.14);color:var(--down)}
+.pill.near{background:var(--grid);color:var(--muted)}
+.push{color:var(--accent)}
+.fold{color:var(--faint)}
+
+/* sim controls */
+.clock{font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted);display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.clock .bar{display:inline-block;width:60px;height:4px;border-radius:2px;background:var(--grid);position:relative;vertical-align:middle;overflow:hidden}
+.clock .bar i{position:absolute;left:0;top:0;bottom:0;background:var(--dim)}
+
+/* diagram */
+svg{display:block;width:100%;height:auto}
+.axis{font-family:var(--mono);font-size:10px;fill:var(--dim)}
+.dlab{font-family:var(--mono);font-size:10px}
+.legend{display:flex;gap:var(--sp-3);flex-wrap:wrap;font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted);margin-top:var(--sp-2)}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+
+/* policy table */
+.tw{overflow-x:auto;border:1px solid var(--border);border-radius:var(--r-2)}
+table{width:100%;border-collapse:collapse;font-size:var(--fs-sm)}
+th{font-family:var(--mono);font-size:var(--fs-2xs);letter-spacing:.08em;text-transform:uppercase;color:var(--dim);font-weight:500;text-align:left;padding:7px 10px;border-bottom:1px solid var(--border);background:var(--panel2);white-space:nowrap}
+td{padding:7px 10px;border-bottom:1px solid var(--grid);vertical-align:top;line-height:1.5}
+tr:last-child td{border-bottom:0}
+td:first-child{white-space:nowrap;font-weight:600}
+
+/* telegram preview */
+.tg{background:#17212b;border-radius:10px;padding:10px 12px;font-family:system-ui,sans-serif;font-size:13px;line-height:1.45;color:#e9eef3;max-width:360px}
+.tg b{font-weight:700}
+.tg .m{color:#7f91a4;font-size:11px;text-align:right;margin-top:4px}
+</style>
+
+<header class="mockhd">
+  <p class="eyebrow">Design mock · proposal</p>
+  <h1>EMA touch feed: 50 / 200 on H4 and D1, plus what's about to touch</h1>
+  <p class="lede">A tab that answers two questions: <b>which names are touching their 50 or 200 EMA right now</b>, and
+    <b>which are about to</b>. Most of the machinery already exists. The <code>ma200</code> alert lane
+    (<code>src/poller.js</code> <code>ma200Scan</code>, build -32) already reads H4 and D1 EMA200 over closed bars,
+    fires reclaim / breakdown / retest, and dedupes on the firing bar's timestamp. It pushes to the bell and Telegram,
+    but it only speaks <b>after the close</b>, has <b>no EMA50</b>, and has <b>no proximity view</b>. This mock adds
+    those three and gives them a tab.</p>
+  <span class="mockchip">built · build 2026.09.25-115 (ma50 gets the full four shapes; 50 and 200 alerts are separate classes)</span>
+</header>
+
+<!-- ═══════════════════ PROTOTYPE ═══════════════════ -->
+<div class="frame">
+  <div class="tabs"><span>Markets</span><span>Trend</span><span>Signals</span><span class="on">EMA Touch<span class="dot" id="tabdot">0</span></span><span>Charts</span><span>Earnings</span><span>Funding</span></div>
+
+  <div class="row">
+    <div class="seg" data-k="tf"><span class="lbl">TF</span><button data-v="all" class="on">both</button><button data-v="H4">4H</button><button data-v="D1">1D</button></div>
+    <div class="seg" data-k="ema"><span class="lbl">EMA</span><button data-v="all" class="on">both</button><button data-v="50">50</button><button data-v="200">200</button></div>
+    <div class="seg" data-k="uni"><span class="lbl">Universe</span><button data-v="all" class="on">all</button><button data-v="stocks">stocks</button><button data-v="crypto">crypto</button></div>
+    <div class="seg" data-k="band"><span class="lbl">Near</span><button data-v="0.5" class="on">0.5σ</button><button data-v="1">1σ</button><button data-v="p1">1%</button><button data-v="p2">2%</button></div>
+    <div class="seg" data-k="nearfeed"><span class="lbl">Feed</span><button data-v="0" class="on">touches</button><button data-v="1">+ near</button></div>
+  </div>
+  <div class="row">
+    <div class="seg" data-k="policy"><span class="lbl">Cooldown</span><button data-v="none">none</button><button data-v="bar">1 per candle</button><button data-v="rearm" class="on">1 per candle + re-arm</button></div>
+    <div class="right clock">
+      <span>sim <b id="simt" class="mono" style="color:var(--text)">—</b></span>
+      <span>H4 <span class="bar"><i id="h4p"></i></span></span>
+      <span>D1 <span class="bar"><i id="d1p"></i></span></span>
+      <button class="btn" id="pause">pause</button>
+      <div class="seg" data-k="speed"><button data-v="1" class="on">1×</button><button data-v="4">4×</button></div>
+    </div>
+  </div>
+
+  <div class="kpis" id="kpis"></div>
+
+  <div class="grid2">
+    <div class="card">
+      <p class="dm-sh">On deck <span class="ct" id="deckct"></span></p>
+      <div class="deck" id="deck"></div>
+      <p class="cap" style="margin-top:8px;font-size:var(--fs-xs)">Distance to the line in the rung's own σ (bar-return stdev, the same unit the
+        ma200 buffer uses), with % beside it. The shaded part of the gauge is the near band. <span class="pos">▼ closing</span> = the gap shrank over the last few ticks.
+        <span class="chip stack">stacked</span> = the 50 and 200 sit within one band of each other, so a touch hits both.</p>
+    </div>
+    <div class="card">
+      <p class="dm-sh">Feed <span class="ct" id="feedct"></span></p>
+      <div class="feed" id="feed"></div>
+    </div>
+  </div>
+</div>
+<p class="cap">Everything above is a random walk around synthetic EMAs, sped up so one simulated H4 candle closes every ~5s and a D1 candle every ~30s.
+  The KPI strip runs all three cooldown policies <b>in parallel on the same price path</b>, so the counts compare like for like.
+  Switch the Cooldown control to see what each policy would put in the feed. <b>none</b> is what "notify on every touch" means in practice.</p>
+
+<!-- ═══════════════════ COOLDOWN ═══════════════════ -->
+<p class="s-sec"><span class="t">Cooldown: once per candle is necessary but not enough</span> <span class="d">· what the re-arm rule adds</span></p>
+<div class="card">
+  <svg viewBox="0 0 760 250" id="diag" role="img" aria-label="Candles around an EMA showing which touches fire and which are suppressed"></svg>
+  <div class="legend">
+    <span><i style="background:var(--accent)"></i>fires a card</span>
+    <span><i style="background:transparent;border:1.5px solid var(--faint)"></i>touch folded into the open card (no ping)</span>
+    <span><i style="background:var(--up)"></i>episode re-armed</span>
+    <span><i style="background:rgba(227,165,60,.25);border-radius:2px"></i>near band</span>
+  </div>
+</div>
+<p class="cap">Candles 3–5 chop through the line. <b>"1 per candle"</b> fires three times; that is one fight, not three signals. With <b>re-arm</b>, a new
+  card needs a close outside the re-arm distance first (candle 6). The retouches in 4 and 5 land on the open card as "+2 retouches".
+  Candle 8 is a fresh approach from clear air, so it fires. Candle 9 closes through, which <b>resolves candle 8's card</b> (closed through → breakdown)
+  instead of opening a new one. This is the same clear-air arm the ma200 retest detector already uses (prior close ≥0.25σ clear and didn't touch),
+  applied as persistent state so it also covers the intrabar touch.</p>
+
+<div class="tw" style="margin-top:14px">
+<table>
+  <thead><tr><th>Event</th><th>When it can fire</th><th>Cooldown / dedupe key</th><th>Where it goes (default)</th></tr></thead>
+  <tbody>
+    <tr><td><span class="pill near">near</span></td><td>Gap enters the near band (≤ 0.5σ by default)</td><td>Hysteresis: enter ≤ band, leave only at > 1.5 × band. One per episode.</td><td>On-deck list, faint feed line. <b>No push.</b></td></tr>
+    <tr><td><span class="pill live">touch</span></td><td>Intrabar: the forming candle's high/low brackets the line (live mark)</td><td><code class="mono" style="color:var(--blue);font-size:11px">coin · tf · N · barT</code> + re-arm gate. Retouches fold into the open card.</td><td>Feed card. Push <b>opt-in</b>, per rung (e.g. D1 only).</td></tr>
+    <tr><td><span class="pill held">held</span> / <span class="pill thru">through</span></td><td>At that candle's close. The touch card resolves in place.</td><td>Same card, never a second one. Closed-bar dedupe as ma200 does today.</td><td>Card updates. For N=200 this <b>is</b> the existing ma200 push (retest / reclaim / breakdown), unchanged.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<!-- ═══════════════════ DECISIONS ═══════════════════ -->
+<p class="s-sec"><span class="t">Recommended defaults</span> <span class="d">· the parts I'd ship as-is, and why</span></p>
+<div class="notegrid">
+  <div class="notecard rec">
+    <h3>σ, not flat %, for "near"</h3>
+    <p>1% is a normal hour on HYPE and a big week on GOLD. A flat % band would keep the high-vol names permanently on deck and never show the quiet ones.
+      Distance in the rung's own bar σ (<code>retStd</code> over the last 90 bars, exactly what <code>ma200Scan</code> computes as <code>sdTf</code>) means
+      "0.5σ" is equally close on every name. The % stays on screen next to it, and the % presets remain as a switch.</p>
+  </div>
+  <div class="notecard rec">
+    <h3>Tab shows intrabar, phone shows closes</h3>
+    <p>The feed shows touches live, because watching a name tag the 200 is the point of the tab. By default a phone push fires only on the
+      <em>resolution</em> (held / closed through), since that is the confirmed event the -25 rule is built on and the ma200 lane already does it.
+      Intrabar pushes are an opt-in per rung. D1 touches are rare enough to be worth a ping; H4-50 touches are not.</p>
+  </div>
+  <div class="notecard rec">
+    <h3>One card per episode, resolved in place</h3>
+    <p>A touch opens a card, retouches fold into it, and the close resolves it. This keeps the feed at roughly
+      one line per real event. It also carries the existing <code>seenAt</code> disclosure: a confirmed ma200 event can say
+      "first seen intrabar 14:20, confirmed at the 16:00 close".</p>
+  </div>
+  <div class="notecard rec">
+    <h3>Reuse emaAlertState, add N=50</h3>
+    <p><code>compute.emaAlertState</code> already takes <code>opts.N</code>. EMA50 is a parameter, not a new detector. The seed cost drops too:
+      50 needs ~66 closed bars, while the 200 needs 216. EMA50 works on younger listings that the 200 lane is silent on today.</p>
+  </div>
+</div>
+
+<p class="s-sec"><span class="t">What a push would look like</span> <span class="d">· rides the existing alert outbox, class <code>ema</code></span></p>
+<div class="notegrid">
+  <div class="notecard">
+    <div class="tg"><b>NVDA · D1 bullish retest of EMA200</b><br>pullback probed the 200 from above, close held it · continuation zone<br>close 171.40 · EMA200 168.92 (+1.5%) · low 168.55<br>first seen intrabar 11:40 ET · 142 D1 bars above<div class="m">16:00</div></div>
+    <p style="margin-top:8px">Unchanged from today's ma200 message, with the <code>seenAt</code> line now fed by the touch card.</p>
+  </div>
+  <div class="notecard">
+    <div class="tg"><b>SOL · H4 touching EMA50</b> (opt-in, intrabar)<br>from above · mark 148.20 · EMA50 148.05<br>4H candle closes in 1h 12m · also 0.4σ from EMA200 (stacked)<div class="m">14:48</div></div>
+    <p style="margin-top:8px">Only for members who switched on intrabar pushes for that rung. It is held to the same hourly cap and quiet hours as every other alert class.</p>
+  </div>
+</div>
+
+<p class="s-sec"><span class="t">Open questions</span> <span class="d">· your call</span></p>
+<div class="notegrid">
+  <div class="notecard q">
+    <h3>1. Does EMA50 get the same four shapes?</h3>
+    <p>The 200's reclaim / breakdown / retest vocabulary has a study behind it (-26) and shadows earning a record (-28). The 50 has neither.
+      Options: (a) touch + near only for the 50, which is informational; (b) the full four shapes, labelled <em>no record yet</em>, with a shadow
+      stream so it earns one. I'd start with (a).</p>
+  </div>
+  <div class="notecard q">
+    <h3>2. D1 for stocks: session bars or 24h?</h3>
+    <p>The Trend board's D1 rung reads <em>session</em> bars for equities (-105: "200-day" = 200 sessions). Using them here keeps the feed consistent with the Trend chart,
+      so the line you see is the line that fires. The cost is that an off-hours touch on the perp doesn't count until the session bar forms. I'd keep session bars.</p>
+  </div>
+  <div class="notecard q">
+    <h3>3. Who sees it?</h3>
+    <p>New tabs usually ship admin-only while they soak (Housing, Liquidity, Backtest). The same here, then open to members once the push volume
+      is known. The KPI strip on the real tab would show the actual 24h counts per policy, which makes that decision easy.</p>
+  </div>
+  <div class="notecard q">
+    <h3>4. Anything beyond 50/200?</h3>
+    <p>If the MA set becomes a user setting (e.g. 21 / 100), the Trend pair board already accepts arbitrary pairs (<code>/api/trend?fast=&amp;slow=</code>).
+      I'd keep this tab fixed at 50/200 so the counts and pushes mean one thing, and leave custom MAs to per-member alert rules.</p>
+  </div>
+</div>
+
+<p class="s-sec"><span class="t">Build sketch</span> <span class="d">· roughly one build</span></p>
+<div class="notegrid">
+  <div class="notecard">
+    <h3>Server</h3>
+    <ol>
+      <li>Generalise <code>ma200Scan</code> → <code>emaScan</code> over <code>N ∈ {50, 200}</code> × <code>{D1, H4}</code>. The N=200 path stays bit-identical; the existing <code>ma200</code> trigger class keeps its name and payload.</li>
+      <li>On the mark-extended series <code>maLiveBars</code> already builds: compute <code>gapσ</code>, <code>gap%</code>, a closing/widening flag and the intrabar touch. Keep per-key episode state <code>{armed, openCard, retouches, inZone}</code>, persisted with <code>persistTriggers</code>.</li>
+      <li><code>GET /api/ema-feed</code>: <code>{near:[…], cards:[…]}</code> with a ring buffer of ~48h of cards and ETag on the scan version, served via <code>serveCached</code>.</li>
+      <li>New push class <code>ema</code> (intrabar, opt-in, off by default). Resolutions for N=200 keep riding <code>ma200</code>.</li>
+    </ol>
+  </div>
+  <div class="notecard">
+    <h3>Client</h3>
+    <ol>
+      <li>New tab with the two panes above. It polls <code>/api/ema-feed</code> on the snapshot cadence, and 304s when nothing moved.</li>
+      <li>A row click opens the existing Trend chart modal at that rung (<code>/api/candles?tf=4h|1d</code> already serves the exact bars the EMAs are computed on).</li>
+      <li>The tab badge counts open (live) touch cards.</li>
+      <li>Alerts panel: an <code>ema</code> class toggle with per-rung checkboxes.</li>
+    </ol>
+  </div>
+</div>
+
+<script>
+/* ─────────── simulation ─────────── */
+let seed=7; const rnd=()=>{ seed=(seed*16807)%2147483647; return (seed-1)/2147483646; };
+const gauss=()=>{ let u=0,v=0; while(!u)u=rnd(); while(!v)v=rnd(); return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v); };
+const TICK_MIN=20, H4_TICKS=12, D1_TICKS=72;           // one tick = 20 sim-minutes
+const TF={H4:{n:H4_TICKS},D1:{n:D1_TICKS}};
+const NAMES=[
+  ['NVDA','stocks',171.2,1.3],['TSLA','stocks',412,2.0],['AAPL','stocks',236,0.9],['MSFT','stocks',508,0.8],['AMZN','stocks',221,1.1],
+  ['META','stocks',742,1.2],['GOOGL','stocks',246,1.0],['HOOD','stocks',118,2.4],['COIN','stocks',334,2.3],['PLTR','stocks',182,2.2],
+  ['AMD','stocks',161,1.8],['MSTR','stocks',341,2.6],['XYZ100','stocks',24310,0.7],['GOLD','stocks',3740,0.6],['SILVER','stocks',44.1,1.1],
+  ['BTC','crypto',112400,1.0],['ETH','crypto',4120,1.5],['SOL','crypto',148.2,2.0],['HYPE','crypto',44.6,2.8],['DOGE','crypto',0.241,2.4]];
+const S={tf:'all',ema:'all',uni:'all',band:'0.5',policy:'rearm',nearfeed:'0',speed:1,paused:false};
+let tick=0; const t0=Date.UTC(2026,8,25,4,0);
+const tickers=NAMES.map(([t,uni,px,sH4])=>{
+  const o={t,uni,px,sig:{H4:sH4,D1:sH4*Math.sqrt(6)},bar:{},lines:{},hist:[]};
+  for(const tf of ['H4','D1']){
+    o.bar[tf]={o:px,h:px,l:px};
+    for(const N of [50,200]){
+      // start lines within a few sigma so the sim has action; 200s further out on average
+      const off=(rnd()<.5?-1:1)*(0.2+rnd()*(N===50?2.4:4.2))*o.sig[tf]/100;
+      o.lines[tf+N]={N,tf,v:px*(1-off),gapHist:[]};
+    }
+  }
+  return o;
+});
+// drift so paths wander toward lines sometimes rather than pure noise
+tickers.forEach(o=>{o.drift=0;});
+
+/* policy state: 3 policies computed in parallel over the same path */
+const POL=['none','bar','rearm'];
+const st={}; POL.forEach(p=>st[p]={keys:{},cards:[],fired:0,folded:0,pushes:0});
+const nearCards=[];                                      // near events are policy-independent (they have their own hysteresis)
+const zone={};
+
+function bandFor(o,tf){ // returns band in % of price
+  if(S.band==='p1') return 1; if(S.band==='p2') return 2;
+  return (+S.band)*o.sig[tf];
+}
+const fmtT=(k)=>{ const d=new Date(t0+k*TICK_MIN*60000); return d.toISOString().slice(5,16).replace('T',' '); };
+const fmtPx=(v)=>v>=1000?v.toFixed(0):v>=100?v.toFixed(2):v>=1?v.toFixed(2):v.toFixed(4);
+
+function step(){
+  tick++;
+  for(const o of tickers){
+    o.drift=o.drift*0.97+gauss()*0.04;
+    const r=(o.drift+gauss())*o.sig.H4/Math.sqrt(H4_TICKS)/100;
+    const prev=o.px; o.px=o.px*(1+r);
+    for(const tf of ['H4','D1']){
+      const b=o.bar[tf]; b.h=Math.max(b.h,o.px); b.l=Math.min(b.l,o.px);
+      const barT=Math.floor((tick-1)/TF[tf].n);
+      for(const N of [50,200]){
+        const L=o.lines[tf+N]; const key=o.t+'|'+tf+'|'+N;
+        const gapPct=(o.px/L.v-1)*100; const gapS=gapPct/o.sig[tf];
+        L.gapHist.push(Math.abs(gapS)); if(L.gapHist.length>6)L.gapHist.shift();
+        // ── near: hysteresis enter ≤ band, leave > 1.5 band ──
+        const band=bandFor(o,tf), zk=key;
+        if(!zone[zk] && Math.abs(gapPct)<=band){ zone[zk]=1; pushNear(o,tf,N,gapPct,gapS); }
+        else if(zone[zk] && Math.abs(gapPct)>1.5*band) zone[zk]=0;
+        // ── touch: forming bar range brackets the line ──
+        const touching=b.l<=L.v && L.v<=b.h;
+        const crossedNow=(prev-L.v)*(o.px-L.v)<=0;
+        if(!(touching&&crossedNow)) continue;          // count a touch at the tick the path meets the line
+        const from=b.o>=L.v?'above':'below';
+        for(const p of POL){
+          const K=st[p].keys[key]||(st[p].keys[key]={armed:true,lastBar:-1,open:null});
+          if(p==='none'){ fire(p,o,tf,N,L,from,barT,K); continue; }
+          if(K.lastBar===barT || (p==='rearm'&&!K.armed)){ st[p].folded++; if(K.open) K.open.retouch++; continue; }
+          fire(p,o,tf,N,L,from,barT,K);
+        }
+      }
+    }
+    // candle closes
+    for(const tf of ['H4','D1']){
+      if(tick%TF[tf].n!==0) continue;
+      const c=o.px;
+      for(const N of [50,200]){
+        const L=o.lines[tf+N]; const key=o.t+'|'+tf+'|'+N;
+        for(const p of POL){
+          const K=st[p].keys[key]; if(!K) continue;
+          // resolve every live card on this key at the close
+          for(const cd of st[p].cards) if(cd.key===key && cd.status==='live'){
+            const heldSide=cd.from==='above'? c>=L.v : c<L.v;
+            cd.status=heldSide?'held':'thru'; cd.close=c; cd.line=L.v; cd.resAt=tick;
+            if(N===200) { cd.push=true; st[p].pushes++; }
+          }
+          // re-arm: close clear of the line by ≥ 2 bands
+          const band=bandFor(o,tf);
+          if(Math.abs((c/L.v-1)*100)>=2*band) { K.armed=true; }
+        }
+        // EMA update on close
+        const k=2/(N+1); L.v=c*k+L.v*(1-k);
+      }
+      o.bar[tf]={o:c,h:c,l:c};
+    }
+  }
+}
+function fire(p,o,tf,N,L,from,barT,K){
+  const cd={key:o.t+'|'+tf+'|'+N,t:o.t,uni:o.uni,tf,N,from,px:o.px,line:L.v,at:tick,status:'live',retouch:0,
+    stacked:Math.abs((o.lines[tf+(N===50?200:50)].v/L.v-1)*100)<=bandFor(o,tf),barT};
+  st[p].cards.unshift(cd); if(st[p].cards.length>160) st[p].cards.pop();
+  st[p].fired++; K.lastBar=barT; K.armed=false; K.open=cd;
+}
+function pushNear(o,tf,N,gapPct,gapS){
+  nearCards.unshift({t:o.t,uni:o.uni,tf,N,gapPct,gapS,at:tick,from:gapPct>=0?'above':'below',status:'near'});
+  if(nearCards.length>120) nearCards.pop();
+}
+function pass(x){ return (S.tf==='all'||x.tf===S.tf)&&(S.ema==='all'||String(x.N)===S.ema)&&(S.uni==='all'||x.uni===S.uni); }
+
+/* ─────────── render ─────────── */
+function render(){
+  document.getElementById('simt').textContent=fmtT(tick)+' UTC';
+  document.getElementById('h4p').style.width=(tick%H4_TICKS)/H4_TICKS*100+'%';
+  document.getElementById('d1p').style.width=(tick%D1_TICKS)/D1_TICKS*100+'%';
+  // KPIs
+  const lbl={none:'no cooldown',bar:'1 per candle',rearm:'per candle + re-arm'};
+  const hrs=tick*TICK_MIN/60||1;
+  const live=st[S.policy].cards.filter(c=>c.status==='live'&&pass(c)).length;
+  document.getElementById('tabdot').textContent=live;
+  document.getElementById('kpis').innerHTML=
+    `<div class="kpi"><div class="k">live touches</div><div class="v"><span class="live"></span>${live}</div><div class="s">candle still open</div></div>`+
+    POL.map(p=>`<div class="kpi ${p===S.policy?'sel':''}"><div class="k">${lbl[p]}</div><div class="v">${st[p].fired}</div><div class="s">${(st[p].fired/hrs*24).toFixed(0)}/day · ${p==='none'?'—':st[p].folded+' folded'}</div></div>`).join('');
+  // deck
+  const rows=[];
+  for(const o of tickers){ if(S.uni!=='all'&&o.uni!==S.uni) continue;
+    for(const tf of ['H4','D1']){ if(S.tf!=='all'&&tf!==S.tf) continue;
+      for(const N of [50,200]){ if(S.ema!=='all'&&String(N)!==S.ema) continue;
+        const L=o.lines[tf+N]; const gp=(o.px/L.v-1)*100; const gs=gp/o.sig[tf]; const band=bandFor(o,tf);
+        const bandS=band/o.sig[tf];
+        const h=L.gapHist; const closing=h.length>=3 && h[h.length-1]<h[0]-0.02;
+        const other=o.lines[tf+(N===50?200:50)].v; const stacked=Math.abs((other/L.v-1)*100)<=band;
+        rows.push({o,tf,N,gp,gs,band,bandS,closing,stacked,inz:Math.abs(gp)<=band});
+      }}}
+  rows.sort((a,b)=>Math.abs(a.gs)-Math.abs(b.gs));
+  const show=rows.filter(r=>Math.abs(r.gp)<=r.band*3).slice(0,12);
+  document.getElementById('deckct').textContent=`${rows.filter(r=>r.inz).length} in band · ${show.length} shown of ${rows.length} lines`;
+  document.getElementById('deck').innerHTML=show.length?show.map(r=>{
+    const scale=r.bandS*3; const pos=Math.min(1,Math.abs(r.gs)/scale)*100;
+    return `<div class="dk ${r.inz?'in':''}">
+      <div class="tk">${r.o.t}<small>${fmtPx(r.o.px)}</small></div>
+      <div class="mid"><div class="chips"><span class="chip tf">${r.tf==='H4'?'4H':'1D'}</span><span class="chip e${r.N}">EMA${r.N}</span>
+        <span class="chip">${r.gp>=0?'from above':'from below'}</span>${r.stacked?'<span class="chip stack">stacked</span>':''}</div>
+        <div class="gauge"><span class="zone" style="width:${100/3}%"></span><span class="pt ${r.inz?'in':''}" style="left:${Math.max(2,pos)}%"></span></div></div>
+      <div class="num"><b>${Math.abs(r.gs).toFixed(2)}σ</b><br>${Math.abs(r.gp).toFixed(2)}% ${r.closing?'<span class="cl">▼</span>':'<span class="op">·</span>'}</div>
+    </div>`;}).join(''):'<div class="empty">Nothing within 3 bands of a line under this filter.</div>';
+  // feed
+  const cards=st[S.policy].cards.filter(pass);
+  const nears=S.nearfeed==='1'?nearCards.filter(pass):[];
+  const all=cards.map(c=>({...c,k:'c'})).concat(nears.map(n=>({...n,k:'n'}))).sort((a,b)=>b.at-a.at).slice(0,60);
+  document.getElementById('feedct').textContent=`${cards.length} cards`+(S.nearfeed==='1'?` · ${nears.length} near-band entries`:'');
+  document.getElementById('feed').innerHTML=all.length?all.map(c=>{
+    const tfl=c.tf==='H4'?'4H':'1D';
+    if(c.k==='n') return `<div class="ev near"><div class="l1"><span class="pill near">near</span><span class="tk">${c.t}</span><span class="chip tf">${tfl}</span><span class="chip e${c.N}">EMA${c.N}</span><span class="ts">${fmtT(c.at)}</span></div>
+      <div class="l2">entered the band ${c.from==='above'?'above':'below'} the line · ${Math.abs(c.gapS).toFixed(2)}σ / ${Math.abs(c.gapPct).toFixed(2)}% away</div></div>`;
+    const res=c.status!=='live';
+    const role=c.from==='above'?'support':'resistance';
+    const verdict=c.status==='held'?(c.from==='above'?'closed back above: support held':'closed back below: resistance rejected')
+      :c.status==='thru'?(c.from==='above'?'closed below the line: breakdown':'closed above the line: reclaim'):'';
+    const left=TF[c.tf].n-(tick%TF[c.tf].n); const mins=left*TICK_MIN;
+    return `<div class="ev ${c.status==='live'?'touch':c.status}"><div class="l1">
+      <span class="pill ${c.status}">${c.status==='live'?'touching':c.status==='held'?'held':'closed through'}</span>
+      <span class="tk">${c.t}</span><span class="chip tf">${tfl}</span><span class="chip e${c.N}">EMA${c.N}</span>${c.stacked?'<span class="chip stack">stacked</span>':''}
+      <span class="ts">${fmtT(c.at)}</span></div>
+      <div class="l2">${res?`<b>${verdict}</b> · close ${fmtPx(c.close)} vs ${fmtPx(c.line)}`:`tagged the ${c.N} from ${c.from} (${role} test) at <b>${fmtPx(c.px)}</b> · line ${fmtPx(c.line)}`}</div>
+      <div class="l3">${res?`<span>first touch ${fmtT(c.at)} → resolved ${fmtT(c.resAt)}</span>`:`<span>${tfl} closes in ${Math.floor(mins/60)}h ${String(mins%60).padStart(2,'0')}m</span>`}
+        ${c.retouch?`<span class="fold">+${c.retouch} retouch${c.retouch>1?'es':''} folded</span>`:''}
+        ${c.push?'<span class="push">⚑ pushed on close</span>':(!res&&c.N===200?'<span class="fold">push on close</span>':'')}</div></div>`;
+  }).join(''):'<div class="empty">Waiting for the first touch…</div>';
+}
+
+/* controls */
+document.querySelectorAll('.seg[data-k]').forEach(seg=>seg.addEventListener('click',e=>{
+  const b=e.target.closest('button'); if(!b) return;
+  seg.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));
+  const k=seg.dataset.k; S[k]=k==='speed'?+b.dataset.v:b.dataset.v; render();
+}));
+document.getElementById('pause').onclick=e=>{ S.paused=!S.paused; e.target.textContent=S.paused?'resume':'pause'; };
+// warm up so the page opens mid-session with history
+for(let i=0;i<150;i++) step();
+render();
+setInterval(()=>{ if(S.paused) return; for(let i=0;i<S.speed;i++) step(); render(); },420);
+
+/* ─────────── cooldown diagram ─────────── */
+(function(){
+  const svg=document.getElementById('diag');
+  const X0=60, W=70, line=y=>110; // flat line for clarity
+  const band=10, rearm=2*band;
+  // o,c,h,l in y-coords (smaller = higher price)
+  const C=[[60,55,50,68],[55,80,52,88],[80,95,76,114],[95,104,90,118],[104,100,96,116],[100,78,72,106],[78,70,64,84],[72,102,68,116],[102,132,98,138]];
+  const marks={2:'fire',3:'fold',4:'fold',5:'rearm',7:'fire',8:'resolve'};
+  const perCandle={2:1,3:1,4:1,7:1,8:1};
+  let s='';
+  s+=`<rect x="40" y="${110-band}" width="700" height="${band*2}" fill="rgba(227,165,60,.12)"/>`;
+  s+=`<line x1="40" x2="740" y1="${110-rearm}" y2="${110-rearm}" stroke="var(--up)" stroke-dasharray="3 4" opacity=".6"/>`;
+  s+=`<text class="dlab" x="742" y="${110-rearm+3}" fill="var(--up)" text-anchor="end" dy="-6">re-arm distance</text>`;
+  s+=`<line x1="40" x2="740" y1="110" y2="110" stroke="var(--accent)" stroke-width="2"/>`;
+  s+=`<text class="dlab" x="42" y="106" fill="var(--accent)">EMA</text>`;
+  C.forEach(([o,c,h,l],i)=>{
+    const x=X0+i*W+20, up=c<o, col=up?'var(--up)':'var(--down)';
+    s+=`<line x1="${x}" x2="${x}" y1="${h}" y2="${l}" stroke="${col}" stroke-width="1.5"/>`;
+    s+=`<rect x="${x-9}" y="${Math.min(o,c)}" width="18" height="${Math.max(2,Math.abs(c-o))}" fill="${col}" rx="1.5"/>`;
+    s+=`<text class="axis" x="${x}" y="245" text-anchor="middle">${i+1}</text>`;
+    const m=marks[i];
+    if(m==='fire') s+=`<circle cx="${x}" cy="160" r="7" fill="var(--accent)"/><text class="dlab" x="${x}" y="182" fill="var(--accent)" text-anchor="middle">card</text>`;
+    if(m==='fold') s+=`<circle cx="${x}" cy="160" r="6" fill="none" stroke="var(--faint)" stroke-width="1.5"/><text class="dlab" x="${x}" y="182" fill="var(--faint)" text-anchor="middle">+1</text>`;
+    if(m==='rearm') s+=`<circle cx="${x}" cy="160" r="6" fill="var(--up)"/><text class="dlab" x="${x}" y="182" fill="var(--up)" text-anchor="middle">armed</text>`;
+    if(m==='resolve') s+=`<text class="dlab" x="${x}" y="164" fill="var(--down)" text-anchor="middle">✕ thru</text><text class="dlab" x="${x}" y="182" fill="var(--down)" text-anchor="middle">resolves 8</text>`;
+    if(perCandle[i]) s+=`<rect x="${x-4}" y="200" width="8" height="8" fill="var(--dim)" rx="1"/>`;
+  });
+  s+=`<text class="dlab" x="4" y="164" fill="var(--muted)">+re-arm</text>`;
+  s+=`<text class="dlab" x="4" y="207" fill="var(--dim)">1/candle</text>`;
+  s+=`<text class="dlab" x="${X0+2*W+20}" y="225" fill="var(--muted)" text-anchor="start">1/candle fires 5 · re-arm fires 2</text>`;
+  svg.innerHTML=s;
+})();
+</script>

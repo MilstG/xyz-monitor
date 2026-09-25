@@ -1773,7 +1773,7 @@ test("ma200 lane: seeds silently, fires once per closed bar, carries confAt and 
   const below = {};
   for (let k = 0; k < 8; k++) below[k] = { c: 96, h: 96, l: 96 };
   const daily = maDaily(nBars, 100, below, t0);
-  p.seedRowNow("EMA", { ticker: "EMAT", px: 96, uni: "xyz", dailyRaw: daily, hourlyRaw: [] });
+  p.seedRowNow("EMA", { ticker: "EMAT", px: 96, uni: "main", dailyRaw: daily, hourlyRaw: [] });   // -115: calendar days (a stock reads sessions — ema-touch.test.js)
   p.ma200PrimeNow();
 
   // Scans inside the still-open next day: the closed series is unchanged — nothing can exist yet.
@@ -1806,7 +1806,7 @@ test("ma200 lane: seeds silently, fires once per closed bar, carries confAt and 
   const snap = JSON.parse(JSON.stringify({ seq: 0, seen: [], events: [],
     episodes: { ma200: [...p.ma200StateNow().entries()] } }));
   const p2 = trendHarness();
-  p2.seedRowNow("EMA", { ticker: "EMAT", px: 104, uni: "xyz", dailyRaw: daily2, hourlyRaw: [] });
+  p2.seedRowNow("EMA", { ticker: "EMAT", px: 104, uni: "main", dailyRaw: daily2, hourlyRaw: [] });
   p2.hydrateTriggersNow(snap);
   p2.ma200ScanNow(dEnd + DAYMS + 20 * 60e3);
   assert.equal(p2.getTriggers(0, null, true).events.filter((e) => e.kind === "ma200").length, 0,
@@ -1814,7 +1814,7 @@ test("ma200 lane: seeds silently, fires once per closed bar, carries confAt and 
 
   // A fresh process WITHOUT the persisted state seeds the standing event silently (priming path).
   const p3 = trendHarness();
-  p3.seedRowNow("EMA", { ticker: "EMAT", px: 104, uni: "xyz", dailyRaw: daily2, hourlyRaw: [] });
+  p3.seedRowNow("EMA", { ticker: "EMAT", px: 104, uni: "main", dailyRaw: daily2, hourlyRaw: [] });
   p3.ma200ScanNow(dEnd + DAYMS + 60e3);   // unprimed first look
   p3.ma200PrimeNow();
   p3.ma200ScanNow(dEnd + DAYMS + 10 * 60e3);
@@ -1824,7 +1824,7 @@ test("ma200 lane: seeds silently, fires once per closed bar, carries confAt and 
 
 test("ops is operator-only, in delivery AND in the feed", () => {
   const C = require("../src/compute");
-  assert.deepEqual(C.PUSH_ADMIN_CLASSES, ["ops"]);
+  assert.deepEqual(C.PUSH_ADMIN_CLASSES, ["ops", "ma50", "touch200", "touch50"]);   // -115: the EMA Touch lanes soak operator-only with their tab
   const ops = { kind: "ops", title: "poller stalled", level: "warn" };
   assert.equal(C.pushEligible(ops, { admin: true }), true);
   assert.equal(C.pushEligible(ops, {}), false, "a public recipient never receives server health");

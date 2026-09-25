@@ -91,7 +91,7 @@ test("pre-epoch crypto purge: claims stamped under the OLD geometry leave the le
     "const shPanel=d&&d.shadows&&(state.scope==='crypto'?d.shadows.main:d.shadows.xyz);",
     // Signals and Actionable are in scope for crypto again; markets stays PINNED public so the
     // tabVisible fallback can never itself be gated.
-    "const CRYPTO_VIEWS=new Set(['markets','trend','charts','report','drawdown','corr','backtest','sessions','funding','signals','actionable','dm','notes'])",   // charts joined 2026.08.21-01, funding 2026.08.26-34, drawdown 2026.09.23-92 — all work in either universe
+    "const CRYPTO_VIEWS=new Set(['markets','trend','charts','report','drawdown','ematouch','corr','backtest','sessions','funding','signals','actionable','dm','notes'])",   // charts joined 2026.08.21-01, funding 2026.08.26-34, drawdown 2026.09.23-92 — all work in either universe
     "if(!tabVisible(v)){",
     "strategy shadows (earning their record)"])
     assert.ok(app.includes(pin), `client scope pin missing: ${pin}`);
