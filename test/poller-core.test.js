@@ -488,9 +488,14 @@ test("ask per-user cap: 5/day per owner over the shared pool, admin exempt and b
     assert.equal(c.ok, true, "admin bypasses the per-user cap");
     assert.equal(c.askDayLeft, sharedBefore, "admin asks must not burn the shared pool");
     assert.ok(calls > callsBefore, "the admin ask really hit the transport");
+    // (-116) the ask cache is the ASKER's: the context rides from the client, so another member's
+    // identical words get their own answer, never u1's
     const d = await p.askBoard("most crowded shorts?", { universe: uni }, { owner: "u2", admin: false });
-    assert.equal(d.cached, true, "another user re-asking the same question rides the cache");
-    assert.equal(d.askUserDayLeft, 1, "a cache hit burns nothing from the new user's budget");
+    assert.notEqual(d.cached, true, "another member's identical question is not served u1's cached answer");
+    assert.equal(d.askUserDayLeft, 0, "it is a real ask on u2's own budget");
+    const e = await p.askBoard("most crowded shorts?", { universe: uni }, { owner: "u2", admin: false });
+    assert.equal(e.cached, true, "re-asking your own question rides your cache");
+    assert.equal(e.askUserDayLeft, 0, "and a cache hit burns nothing");
   } finally { delete process.env.OPENAI_API_KEY; delete process.env.ASK_USER_PER_DAY; }
 });
 

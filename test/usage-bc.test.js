@@ -327,7 +327,7 @@ test("-110 call sites: share, alert (chat and panel) and push count server-side 
   assert.ok(JSON.parse((await post("/api/dm", { thread: sh.thread, alert: "any rvol > 3 unusual tape" }, bob)).body).ok);
   assert.ok(JSON.parse((await post("/api/dm", { thread: sh.thread, alert: "list" }, bob)).body).ok, "listing is not creating");
   assert.ok(JSON.parse((await post("/api/alerts/rules", { metric: "px", op: ">", value: 1 }, bob)).body).ok);
-  const push = await post("/api/dm/push-sub", { sub: { endpoint: "https://push.example/abc", keys: { p256dh: "k", auth: "a" } } }, bob);
+  const push = await post("/api/dm/push-sub", { sub: { endpoint: "https://fcm.googleapis.com/fcm/send/abc", keys: { p256dh: "k", auth: "a" } } }, bob);
   assert.equal(push.statusCode, 200, push.body);
   assert.equal((await post("/api/dm/push-sub", { sub: { endpoint: "nope" } }, bob)).statusCode, 400);
   const ask = await post("/api/ask", { q: "what is up" }, bob);   // no model key here: answered not-ok, not counted
@@ -342,7 +342,7 @@ test("-110 call sites: share, alert (chat and panel) and push count server-side 
   assert.ok(JSON.parse((await post("/api/usage/pause", { paused: true }, bob)).body).paused);
   await post("/api/dm", { thread: sh.thread, card }, bob);
   await post("/api/alerts/rules", { metric: "px", op: ">", value: 2 }, bob);
-  await post("/api/dm/push-sub", { sub: { endpoint: "https://push.example/def", keys: { p256dh: "k", auth: "a" } } }, bob);
+  await post("/api/dm/push-sub", { sub: { endpoint: "https://fcm.googleapis.com/fcm/send/def", keys: { p256dh: "k", auth: "a" } } }, bob);
   assert.ok(JSON.parse((await post("/api/usage/pause", { paused: false }, bob)).body).paused === false);
   assert.deepEqual(await myActs(bob), after, "paused means nothing from the click on");
   // the wiring for the routes this suite cannot drive end to end (no model key, no Telegram)

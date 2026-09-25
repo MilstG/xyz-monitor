@@ -548,7 +548,7 @@ test("server route manifest: every load-bearing API route is registered exactly 
   // payloads lack, so every coin would share W/"0" and a client could get a 304 for the wrong
   // coin's chart. serveKeyed supplies a collision-proof per-coin/tf/version ETag instead.
   assert.ok(srv.includes("function serveKeyed") && srv.includes("function sendCachedBody"), "serveKeyed + sendCachedBody must exist");
-  assert.ok(/get\("\/api\/candles"[\s\S]{0,1600}serveKeyed\(/.test(srv), "/api/candles must serve via serveKeyed");
+  assert.ok(/get\("\/api\/candles"[\s\S]{0,2400}serveKeyed\(/.test(srv), "/api/candles must serve via serveKeyed");
   assert.ok(/get\("\/api\/series"[\s\S]{0,1200}serveKeyed\(/.test(srv), "/api/series must serve via serveKeyed");
   assert.ok(!/get\("\/api\/candles"[\s\S]{0,200}no-store/.test(srv), "/api/candles must no longer be no-store");
   assert.ok(srv.includes('"candles|"') && srv.includes("cs.px > 0 ? Math.round(Math.log(cs.px)"), "tf-candles key must fold in the live-mark bucket so the forming bar can't freeze");
@@ -597,7 +597,8 @@ test("AI access model: open to authenticated users with per-user caps; xyzai is 
   // Authentication is still mandatory on the AI-cost paths.
   assert.ok(/AI_COST_PATHS[\s\S]{0,400}reqAuthed\(req\)/.test(srv), "AI-cost hook must still require authentication");
   // Identity threading: one aiWho helper (xyzown owner + xyzai/xyzadm admin) feeds all three surfaces.
-  assert.ok(/const aiWho = \(req, reply\) => \(\{ owner: ownerFor\(req, reply\)/.test(srv), "aiWho helper missing");
+  // (-116) an account-less caller keys on its IP, never on the self-minted xyzown cookie
+  assert.ok(/const aiWho = \(req, reply\) => \{\s*const me = meOf\(req\);\s*return \{ owner: me \? ownerFor\(req, reply\) : "ip:" \+ clientIp\(req\)/.test(srv), "aiWho helper missing");
   // With accounts, "who" is the signed-in uid and only falls back to the anonymous browser handle.
   // Every per-user surface must resolve it the SAME way or the quota shown differs from the quota
   // spent — so ensureOwner survives only as ownerFor's fallback, never as a call site of its own.
@@ -1197,7 +1198,7 @@ test("server: admin-view lease is a distinct secret from the AI unlock, fails cl
   // The login damper is spent, not the terminal-unlock lockout — otherwise a group member with a fat
   // finger could lock the operator out of the panel.
   assert.ok(srv.includes("function adminPwOk"), "login needs its own constant-time admin compare");
-  assert.ok(/adminPwOk[\s\S]{0,220}timingSafeEqual/.test(srv), "adminPwOk must be constant-time");
+  assert.ok(/adminPwOk[\s\S]{0,520}timingSafeEqual/.test(srv), "adminPwOk must be constant-time");
   assert.ok(/if \(adminPwOk\(pw\)\)[\s\S]{0,400}setAdminCookies/.test(srv), "login must mint the admin lease when the admin password is used");
   // Pin updated 2026.09.20: /logout is one handler on two verbs (POST for the state change, GET
   // for the nav button's same-origin navigation), so the cookie drops live in `logout`.
@@ -1214,7 +1215,7 @@ test("server: feature gate runs after the site gate, returns 403, and both /api/
   // Ordering is load-bearing: an unauthenticated caller must get 401 (log in), not 403 (you are not
   // admin). Fastify runs onRequest hooks in registration order, so source order IS the contract.
   const iSite = srv.indexOf('if (u.startsWith("/api/")) return reply.code(401)');
-  const iGate = srv.indexOf("featureGateFor(req.method, req.url");
+  const iGate = srv.indexOf("featureGateFor(req.method, p, flags, adm)");   // -116: judged on every candidate path
   assert.ok(iSite > 0 && iGate > 0, "both gates must exist");
   assert.ok(iGate > iSite, "the feature gate must be registered AFTER the site gate or 403 masks 401");
   // The same Fastify lifecycle trap the site gate documents: reply.send() alone does not stop the
@@ -1373,7 +1374,7 @@ test("baseline security headers ride every response", () => {
 test("stamped assets cache immutable; everything else still force-revalidates", () => {
   const fs = require("fs"), path = require("path");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(srv.includes('req.url.slice(q + 1) === "v=" + VERSION && reply.statusCode === 200 && !req.url.startsWith("/api/")'),
+  assert.ok(srv.includes('req.url.slice(q + 1) === "v=" + VERSION && reply.statusCode === 200 && gp && !gp.some((u) => u.startsWith("/api/"))'),
     "exact whole-query match against the CURRENT build, 200s only, never on /api/ — a stale stamp falls back to revalidation and no future v-param route can be frozen for a year");
   assert.ok(srv.includes('"public, max-age=31536000, immutable"'),
     "current-stamp requests cache immutable — the -84 lesson made free instead of merely cheap");
@@ -1408,7 +1409,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.09.25-115"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.09.25-116"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -1660,7 +1661,7 @@ test("brotli precompression 2026.07.29-06: boot compress, explicit routes, negot
   assert.ok(h.includes('req.headers["if-none-match"] === a.tag') && h.includes("code(304)"), "if-none-match answers 304");
   // The caching CONTRACT is unchanged: route starts at no-cache, the onSend stamped-upgrade pins survive.
   assert.ok(h.includes('header("cache-control", "no-cache")'), "route default stays no-cache — only the onSend hook may upgrade");
-  assert.ok(srv.includes('req.url.slice(q + 1) === "v=" + VERSION && reply.statusCode === 200 && !req.url.startsWith("/api/")'),
+  assert.ok(srv.includes('req.url.slice(q + 1) === "v=" + VERSION && reply.statusCode === 200 && gp && !gp.some((u) => u.startsWith("/api/"))'),
     "stamped-immutable upgrade untouched");
   assert.ok(srv.includes('"public, max-age=31536000, immutable"'), "immutable tier untouched");
   assert.ok(srv.includes('setHeaders(res) { res.setHeader("cache-control", "no-cache"); }'), "static fallback default untouched");

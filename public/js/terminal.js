@@ -5,7 +5,7 @@
 import { IS_ADMIN, applyHash, featureOn, tabVisible } from "./admin.js";
 import { showView } from "./backtest.js";
 import { earnDiffC, earnNext, earnSessLbl, loadEarnings, loadNews, secShort } from "./calendar.js";
-import { DAY, G, SCROLL_B, TF_MAP, activeRows, clamp, el, esc, fmtPrice, fmtUsd, inScope, lazyCall, median, state } from "./core.js";
+import { DAY, G, SCROLL_B, TF_MAP, activeRows, clamp, el, esc, fmtPrice, fmtUsd, inScope, lazyCall, median, safeHref, state } from "./core.js";
 import { BASKETS, RATIO, basketByName, basketMutate, dailyReturns, isBasketName, loadBaskets, openCompg, openRatio, renderCorr, syncCorrLookback, tfLabel } from "./corr.js";
 import { computeDerived, fetchJSON, loadDaily, loadSnapshot, renderAskBudget, updateFreshTray } from "./data.js";
 import { openDetail } from "./drawer.js";
@@ -217,7 +217,7 @@ async function termNewsCmd(tk,n){ n=n||8;
   if(tk) items=items.filter(a=>(a.tk||'').toUpperCase()===tk); else items=items.filter(a=>!!a.tk);   // bare: verified attributions only
   items=items.slice().sort((a,b)=>(b.pub||0)-(a.pub||0)).slice(0,n);
   if(!items.length) return termOut(`<span class="sec">no ${tk?tesc(tk)+' ':''}headlines in the 72h window</span>${tk?' <span class="tp-trans">(per-name coverage rotates — thin names surface less often)</span>':''}`);
-  const lines=items.map(a=>`<span class="tp-trans">${termAgo(a.pub||Date.now())}</span> ${a.tk?`<span role="button" tabindex="0" class="tp-deep" data-tcmd="${tesc(a.tk)}">${tpad(tesc(a.tk),6)}</span> `:''}${a.url?`<a href="${tesc(a.url)}" target="_blank" rel="noopener">${tesc(a.h||'')}</a>`:tesc(a.h||'')}`).join('\n');
+  const lines=items.map(a=>`<span class="tp-trans">${termAgo(a.pub||Date.now())}</span> ${a.tk?`<span role="button" tabindex="0" class="tp-deep" data-tcmd="${tesc(a.tk)}">${tpad(tesc(a.tk),6)}</span> `:''}${a.url?`<a href="${tesc(safeHref(a.url))}" target="_blank" rel="noopener">${tesc(a.h||'')}</a>`:tesc(a.h||'')}`).join('\n');
   termOut(`<span class="tp-hd">news${tk?' · '+tesc(tk):''}</span> <span class="tp-trans">· verified attributions · 72h window</span>\n${lines}\n<span role="button" tabindex="0" class="tp-deep" data-tview="news">open news tab ▸</span>`); }
 async function termReports(){ let d=state.report.list;
   if(!d){ try{ d=await fetchJSON('/api/ai-reports'); state.report.list=d; }catch(_){} }
