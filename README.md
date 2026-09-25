@@ -628,7 +628,7 @@ is added without it. The list below is the tour.
   **pause** it; the operator then sees "paused". The sitewide panel is not logged; **opening one
   member's detail is**, as `view-usage` in the same audit log as the message read-through.
   Signed-out tracking is a server flag (`USAGE_PUBLIC=1`), off, and in this build collects nothing
-  even when set (superseded by build 2026.09.25-117: cookieless public visitor counting, below). Routes: `POST /api/usage`, `GET /api/usage/me`, `POST /api/usage/pause`,
+  even when set (superseded by build 2026.09.25-120: cookieless public visitor counting, below). Routes: `POST /api/usage`, `GET /api/usage/me`, `POST /api/usage/pause`,
   `GET /api/admin/usage?r=7|30`, `GET /api/admin/usage/member?h=`.
 - **Usage, stages B + C** (build 2026.09.24-110) — the same fold gains adoption, retention, a
   heatmap and client health, all from the same `usage_day` aggregates:
@@ -843,7 +843,7 @@ is added without it. The list below is the tour.
     JSON object (400 otherwise — a text/plain body was a 500); a `usage_day(kind, day)` index; the
     regression tick stops for a build once every condition has alerted or it is more than 3 days
     past first-seen, and the triage sweep runs every 10 minutes instead of every tick.
-- **Usage: public (signed-out) visitors, counted without cookies** (build 2026.09.25-117) —
+- **Usage: public (signed-out) visitors, counted without cookies** (build 2026.09.25-120) —
   Plausible-style. A signed-out page sends the **same beacon** a member's page sends (tab time, hour
   buckets, tab paths, entry tab, control counts, device class / PWA flag, first paint, errors) and
   **nothing that identifies it**: no cookie, no `localStorage`, no id (`s` is per page load and never
@@ -883,8 +883,8 @@ is added without it. The list below is the tour.
     (visitor-days this week vs last, top public tabs).
   - **Privacy summary**: no cookies, no identifiers on the client, no IP, User-Agent, key or salt at
     rest; aggregates only; nothing linked across days; days with fewer than 3 visitors aren't shown
-    (build 2026.09.25-118, below).
-- **Usage fixes, public visitors** (build 2026.09.25-118):
+    (build 2026.09.25-120, below).
+- **Usage fixes, public visitors** (build 2026.09.25-120):
   - **k ≥ 3 per day, everywhere**: an ET day with fewer than **3** distinct visitors (`pv`) is left
     out of every public figure the operator sees — tab time and "vs prior", mean daily reach (`ptr`),
     the minutes histogram (`pmin`), the heatmap, paths / controls / devices, first paint, errors
@@ -897,7 +897,7 @@ is added without it. The list below is the tour.
     signed-out pages hit keeps **no message text** (`msg = ''`: its file:line and the hash in its
     key) until a member hits it; triage shows it as "public-only · file:line", and the digest's
     new/regressed lines list members' errors only (public-only ones are a count line). Rows
-    written by -117 are repaired at boot.
+    written before this rule (no `memAt` column yet) are repaired at boot.
   - **Midnight**: the public gate's held beacons are recorded at the old ET day's last millisecond,
     and the distinct counts (`pv`/`ptr`/`pmin`) go under the day the visitor state belongs to — no
     negative minutes bucket in the new day.

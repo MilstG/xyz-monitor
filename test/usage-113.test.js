@@ -513,5 +513,5 @@ test("-113 disclosure: the card, the member guide and README say one reminder if
   assert.ok(readme.includes("(build 2026.09.24-113)") && readme.includes("roadmap item 3") && readme.includes("`usage-nudge`") && readme.includes("OFF by default")
     && readme.includes("never email or SMS; nothing if neither") && readme.includes("dedupe is per ISO week"));
   assert.ok(/Built in build 2026\.09\.24-113<\/em> \(roadmap item 3\)/.test(src("docs/xyz-monitor-usage-stats-mock.html")));
-  assert.ok(src("server.js").includes('const VERSION = "2026.09.25-119"'));
+  assert.ok(src("server.js").includes('const VERSION = "2026.09.25-120"'));
 });

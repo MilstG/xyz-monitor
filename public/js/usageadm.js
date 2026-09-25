@@ -20,7 +20,7 @@
 // names and browser-supplied error messages in it, so it goes through esc() like everything else), the
 // "send test now" button, the opt-in lapsed-member nudge (toggle + the lead text) and the nudge log (the
 // dm_audit 'usage-nudge' rows). Reads GET /api/admin/usage/digest; writes POST …/digest and …/digest/test.
-// (build 2026.09.25-117) Public (signed-out) visitors: a "who" control — members | public | both — over
+// (build 2026.09.25-120) Public (signed-out) visitors: a "who" control — members | public | both — over
 // the KPIs, the daily chart (stacked for both), the heatmap, the tab table (public reach = the MEAN DAILY
 // reach, since a visitor is never linked across days), the sitewide sections and client health. Every
 // number says which population it counts. The deploy markers' reach, adoption, cohorts and the members
@@ -33,7 +33,7 @@ const UA={r:7,data:null,err:null,loading:false,loadedAt:0,msort:{k:'days',d:-1},
   triBusy:null,triErr:null,   // (-111) the triage toggle in flight, and its last error
   pathTab:null,ctlTab:null,   // (-112) the tab picked for "where people go from X", and for its controls
   dg:{data:null,err:null,busy:null,msg:null,draft:null},   // (-113) digest & nudges: payload, error, action in flight, last result, unsaved reminder text
-  who:'members',pubBusy:false,pubErr:null};   // (build 2026.09.25-117) the population shown; the public toggle in flight / its last error
+  who:'members',pubBusy:false,pubErr:null};   // (build 2026.09.25-120) the population shown; the public toggle in flight / its last error
 const UA_STALE_MS=60000;
 
 async function uaLoad(){
@@ -69,7 +69,7 @@ async function uaDgPost(url,body,what){
   UA.dg.busy=null;
   if(what==='test') await uaDgLoad(); else uaRender();
 }
-// (build 2026.09.25-117) the public-visitor toggle; the fold reloads (the payload's cache key carries it)
+// (build 2026.09.25-120) the public-visitor toggle; the fold reloads (the payload's cache key carries it)
 async function uaPubToggle(on){
   if(UA.pubBusy) return;
   UA.pubBusy=true; UA.pubErr=null; uaRender();
@@ -277,7 +277,7 @@ function uaSplitRows(rows,lblOf){
   return rows.map(r=>{ const w=Math.max(0,Math.min(100,(+r.share||0)*100));
     return '<div class="us-fr"><span>'+esc(lblOf(r))+'</span><span class="us-track"><span style="width:'+w.toFixed(1)+'%"></span></span><span class="v">'+(+r.n||0)+' · '+Math.round(w)+'%</span></div>'; }).join('');
 }
-// (build 2026.09.25-117) the population a sitewide section counts, for its heading
+// (build 2026.09.25-120) the population a sitewide section counts, for its heading
 const UA_POP={members:'members',public:'public visitors',both:'members + public'};
 const uaPopTag=(pop)=>' · <span class="us-pop">'+esc(UA_POP[pop||'members']||pop)+'</span>';
 function uaPathsHtml(S,pop){
@@ -343,7 +343,7 @@ function uaDevicesHtml(S,pop){
 }
 // (build 2026.09.24-114) the k-threshold: paths, controls and the device split cover the range's
 // complete days (never today), need a 7-day range, and show only when ≥ 3 members contributed.
-// (build 2026.09.25-117) the same rule for public visitors (≥ 3 distinct visitors on a complete day —
+// (build 2026.09.25-120) the same rule for public visitors (≥ 3 distinct visitors on a complete day —
 // 'pv', the day's distinct count) and for members + public (members + visitors on one day)
 function uaSiteWithheldHtml(S,pop){
   const K=S.threshold||{}, k=+K.k||3, days=+K.minDays||7;
@@ -360,7 +360,7 @@ function uaSiteHtml(D,pop){
   const S=pop==='public'?P&&P.site:pop==='both'?P&&P.both&&P.both.site:D&&D.site;
   if(!S) return ''; if(S.withheld) return uaSiteWithheldHtml(S,pop); return uaPathsHtml(S,pop)+uaControlsHtml(S,pop)+uaDevicesHtml(S,pop); }
 
-// ---- (build 2026.09.25-117) the population views: members | public | both ---------------------------
+// ---- (build 2026.09.25-120) the population views: members | public | both ---------------------------
 // Public numbers come from uid '-1' totals only. A visitor's key rotates at ET midnight, so over a range
 // there are visitor-DAYS, never "distinct visitors" — the labels say so. "both" adds the two populations
 // where the unit is the same (people online, people active today) and shows them side by side where not.
@@ -372,7 +372,7 @@ function uaHeatSum(a,b){
   for(let d=0;d<7;d++) for(let h=0;h<24;h++){ const v=ms[d][h]; total+=v; if(h>=8&&h<16) core+=v; if(v>0&&(!peak||v>peak.ms)) peak={dow:d,h,ms:v}; }
   return {ms,total,peak,coreShare:total?core/total:null};
 }
-// (build 2026.09.25-118) k ≥ 3: a public day figure (or online-now) of 1–2 arrives as the string "<3"
+// (build 2026.09.25-120) k ≥ 3: a public day figure (or online-now) of 1–2 arrives as the string "<3"
 const uaKn=(v)=>typeof v==='string'?esc(v):String(+v||0);
 const uaKadd=(a,b)=>typeof b==='string'?((+a||0)?(+a||0)+' + '+esc(b):esc(b)):String((+a||0)+(+b||0));
 const UA_PUB_K_NOTE='days with fewer than 3 visitors are hidden';
@@ -418,7 +418,7 @@ function uaKpisHtml(D,who){
     +kp('median / day',K.medMinPerDay==null?'—':uaMin(K.medMinPerDay)+' min','per active member-day')
     +kp('new members',String(K.newMembers||0),'in range · '+(K.newActive||0)+' active')+'</div>';
 }
-// (build 2026.09.25-118) the k ≥ 3 rule, said under the public / both KPIs
+// (build 2026.09.25-120) the k ≥ 3 rule, said under the public / both KPIs
 function uaPubKNote(PK){
   const n=+PK.hiddenDays||0;
   return '<div class="acc-note" style="margin:var(--sp-1) 0 0">Public: '+UA_PUB_K_NOTE+' (“&lt;3”, and left out of every public figure and range total, online-now included)'
@@ -428,7 +428,7 @@ function uaPubKNote(PK){
 // day ÷ that day's visitors, averaged over the range's days with visitors).
 function uaPubTabsHtml(D,who){
   const pt=new Map(((D.pub&&D.pub.tabs)||[]).map(t=>[t.key,t])), mt=new Map((D.tabs||[]).map(t=>[t.key,t]));
-  const pk=!(D.pub&&D.pub.priorKept===false);   // (build 2026.09.25-118) the public prior window is still kept
+  const pk=!(D.pub&&D.pub.priorKept===false);   // (build 2026.09.25-120) the public prior window is still kept
   const keys=[...new Set([...(D.tabs||[]).map(t=>t.key),...pt.keys()])];
   const rows=keys.map(k=>{ const m=mt.get(k)||{}, p=pt.get(k)||{};
     const ms=who==='both'?(+m.ms||0)+(+p.ms||0):(+p.ms||0), prev=who==='both'?(+m.prevMs||0)+(+p.prevMs||0):(+p.prevMs||0);
@@ -471,7 +471,7 @@ function uaPubHealthHtml(D,who){
 }
 
 // ---- the daily-active chart: bars per ET day + the trailing 7-day mean ---------------------------
-// (build 2026.09.25-117) `pub` (the public series, aligned by day) stacks public visitors on top of the
+// (build 2026.09.25-120) `pub` (the public series, aligned by day) stacks public visitors on top of the
 // members' bar ("both"); `only`==='public' draws the public series alone. The mean line follows the total.
 function uaDauSvg(series,marks,pub,only){
   const W=640,H=150,P={l:26,r:6,t:8,b:20}, n=series.length||1;
@@ -574,7 +574,7 @@ function uaRender(){
   if(sub) sub.textContent=K.activeToday+' active today · '+K.activeRange+' in '+D.r+'d · stickiness '+uaPct(K.stickiness);
   const seg='<div class="seg" id="uaRange"><span class="seglbl">range</span>'
     +[7,30].map(r=>'<button type="button" data-uar="'+r+'"'+(D.r===r?' class="active"':'')+'>'+r+'d</button>').join('')+'</div>';
-  // (build 2026.09.25-117) who: members | public | both (a view choice only; one payload carries all three)
+  // (build 2026.09.25-120) who: members | public | both (a view choice only; one payload carries all three)
   const who=D.pub&&UA_WHO.includes(UA.who)?UA.who:'members', P=D.pub||{};
   const wseg=D.pub?'<div class="seg" id="uaWho"><span class="seglbl">who</span>'
     +UA_WHO.map(w=>'<button type="button" data-uawho="'+w+'"'+(who===w?' class="active"':'')+'>'+w+'</button>').join('')+'</div>':'';
@@ -648,7 +648,7 @@ function uaWire(){
     const r=e.target.closest('[data-uar]');
     if(r){ const v=+r.dataset.uar; if(v!==UA.r){ UA.r=v; uaLoad(); } return; }
     if(e.target.closest('[data-uarefresh]')){ uaLoad(); return; }
-    const w=e.target.closest('[data-uawho]'); if(w){ UA.who=w.dataset.uawho; uaRender(); return; }   // (build 2026.09.25-117) a view choice only
+    const w=e.target.closest('[data-uawho]'); if(w){ UA.who=w.dataset.uawho; uaRender(); return; }   // (build 2026.09.25-120) a view choice only
     const tri=e.target.closest('[data-uatri]'); if(tri){ uaTriage(tri.dataset.uatri,tri.dataset.on==='1'); return; }   // (-111)
     if(e.target.closest('[data-uaclose]')){ UA.sel=null; UA.detail=null; uaRender(); return; }
     const th=e.target.closest('[data-uat]'); if(th){ sortBy(UA.tsort,th.dataset.uat); uaRender(); return; }
@@ -663,7 +663,7 @@ function uaWire(){
   box.addEventListener('keydown',(e)=>{ const row=e.target.closest&&e.target.closest('[data-uah]'); if(row&&e.key==='Enter') uaOpenMember(row.dataset.uah); });
   // (-112) the two tab pickers (a view choice only — nothing is fetched or written)
   box.addEventListener('change',(e)=>{
-    const pb=e.target.closest&&e.target.closest('[data-uapub]'); if(pb){ uaPubToggle(!!pb.checked); return; }   // (build 2026.09.25-117)
+    const pb=e.target.closest&&e.target.closest('[data-uapub]'); if(pb){ uaPubToggle(!!pb.checked); return; }   // (build 2026.09.25-120)
     const g=e.target.closest&&e.target.closest('[data-uadg]');   // (-113) the digest & nudge settings
     if(g){ const k=g.dataset.uadg; uaDgPost('/api/admin/usage/digest',{[k]:k==='digestDay'?+g.value:!!g.checked},'cfg'); return; }
     const s=e.target.closest&&e.target.closest('[data-uasel]'); if(!s) return;

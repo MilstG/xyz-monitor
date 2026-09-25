@@ -18,7 +18,7 @@
 // (member, s), so two tabs or devices never drop each other's minutes, and a beacon that arrives
 // inside the gap (the pagehide one) is held and merged server-side instead of refused — still
 // clamped to wall time (src/usage-gate.js). A paused member never beacons.
-// (build 2026.09.25-117) A SIGNED-OUT page sends the very same beacon — and nothing that identifies it:
+// (build 2026.09.25-120) A SIGNED-OUT page sends the very same beacon — and nothing that identifies it:
 // no cookie, no localStorage, no id (`s` is per page load, never stored). It does so only when the
 // shell says public counting is on (window.__USPUB, resolved by the server per request); the server
 // keys it with a daily-salted in-memory HMAC it never stores and keeps sitewide totals only
@@ -158,7 +158,7 @@ function usageSearch(k,now){
 }
 const US_ACTS_CLIENT=new Set(['csv','drawer-open']), US_ERR_MAX=20, US_ERRS_PER_BEACON=5, US_BODY_MAX=3800;
 function usSignedIn(){ return !!(typeof window!=='undefined'&&window.__ME&&window.__ME.uid); }
-// (build 2026.09.25-117) signed out AND the server says public counting is on: the anonymous beacon
+// (build 2026.09.25-120) signed out AND the server says public counting is on: the anonymous beacon
 function usPublic(){ return !usSignedIn()&&typeof window!=='undefined'&&window.__USPUB===true; }
 function usOn(){ return usSignedIn()||usPublic(); }
 function usNow(){ return Date.now(); }
@@ -229,7 +229,7 @@ function usageFlush(force){
   for(const e of (out.errs||[])){ const x=US.errs.get(e.m+'\u0001'+e.f+':'+e.l); if(x) x.c=0; }   // sent once; later hits ride as a count
   US.lastSent=now; return true;
 }
-// ---- (build 2026.09.25-117) the signed-out visitor's notice ------------------------------------------
+// ---- (build 2026.09.25-120) the signed-out visitor's notice ------------------------------------------
 const US_PUB_NOTE_KEY='xyz-uspub-note-ok';
 function usPubNoticeHtml(){
   return '<span>Anonymous usage totals are counted on this site: no cookies, no IPs stored, a visit is not linked across days, and days with fewer than 3 visitors aren’t shown.</span>'
@@ -248,7 +248,7 @@ function usPubNotice(){
 export function __boot_usage_1(){
   if(!usOn()) return;
   US.paused=usSignedIn()&&!!window.__ME.usagePaused;
-  if(usPublic()) usPubNotice();   // (build 2026.09.25-117)
+  if(usPublic()) usPubNotice();   // (build 2026.09.25-120)
   const vis=typeof document==='undefined'||document.visibilityState!=='hidden';
   US.acc=usAcc(usNow(),state.view||'markets',vis);
   US.tr=usTr(usNow(),state.view||'markets',vis);   // (-112) this page load's tab path starts on the tab it opened on; (-114) its clock runs only while visible
@@ -294,7 +294,7 @@ function usageCardHtml(){
     +(d&&d.ok&&!paused?'<div class="us-kpis">'+k('active days · '+(d.keepDays||30)+'d',String(d.activeDays||0))+k('on screen',usFmtH(d.ms||0))+k('top tab',top)+'</div>'
       +usMonthsHtml(d)
       +((d.acts||[]).some(a=>a.n>0)?'<div class="us-acts">'+(d.acts||[]).filter(a=>a.n>0).map(a=>'<span class="acc-chip on">'+esc(US_ACT_CHIP[a.key]||a.key)+' '+(+a.n||0)+'</span>').join('')+'</div>':''):'')
-    // (build 2026.09.25-117) the signed-out side, said here too
+    // (build 2026.09.25-120) the signed-out side, said here too
     +'<div class="us-disc">Signed out, this site counts only anonymous sitewide totals (the same kinds of numbers, never linked to anyone): no cookies, no IPs stored, a visit is not linked across days, and days with fewer than 3 visitors aren’t shown. Details in the member guide (Access → signed-out visitors).</div>'
     +'<div class="us-row"><span class="acc-chip'+(paused?'':' on')+'">'+(paused?'paused':'sharing usage')+'</span>'
     +'<button type="button" class="dm-tool" data-uspause="'+(paused?'0':'1')+'"'+(US.busy?' disabled':'')+'>'+(paused?'Resume':'Pause for me')+'</button></div>'

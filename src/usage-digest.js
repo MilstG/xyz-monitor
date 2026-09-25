@@ -108,7 +108,7 @@ function digestLines(data, o) {
     if (q.length && o.quietN > 0) L.push(E("quiet (<10% reach): ") + q.slice(0, o.quietN).map((t) => E(clip(t.label, 20))).join(", ") + (q.length > o.quietN ? " +" + (q.length - o.quietN) + " more" : ""));
     else if (q.length) L.push(E("quiet (<10% reach): " + q.length + " tabs"));
   }
-  // (build 2026.09.25-117) signed-out visitors: visitor-days (daily distinct visitors summed; a visitor
+  // (build 2026.09.25-120) signed-out visitors: visitor-days (daily distinct visitors summed; a visitor
   // is never linked across days, so there is no weekly distinct count) and the week's top public tabs
   const Pb = d.public || {};
   if ((+Pb.visitorDays || 0) > 0 || (+Pb.visitorDaysPrev || 0) > 0) {
@@ -122,7 +122,7 @@ function digestLines(data, o) {
   L.push("");
   L.push("🐞 " + B("ERRORS"));
   L.push(ne.length + " new · " + rg.length + " regressed" + (R.open != null ? " · " + R.open + " open in triage" : ""));
-  // (build 2026.09.25-118) errors only signed-out pages hit: a count, never their location or text
+  // (build 2026.09.25-120) errors only signed-out pages hit: a count, never their location or text
   if ((+R.pubOnly || 0) > 0) L.push((+R.pubOnly) + " new on signed-out pages only (public-only; no text kept)");
   const eLine = (tag, e) => tag + ": " + E(clip(e.loc, 40)) + (e.msg ? " · " + E(clip(e.msg, 70)) : "") + " (" + (+e.members || 0) + " member" + (e.members === 1 ? "" : "s") + ")";
   for (const e of rg.slice(0, o.errLines)) L.push(eLine("regressed", e));

@@ -1,5 +1,5 @@
 "use strict";
-// ===== build 2026.09.25-118: usage fixes for the public (signed-out) visitors ========================================================
+// ===== build 2026.09.25-120: usage fixes for the public (signed-out) visitors ========================================================
 // 1. only a MEMBER hit reopens a resolved error / marks it regressed; an error only signed-out pages hit keeps no message text
 //    (loc + hash only; the text arrives with a member's hit), triage shows it "public-only · loc", the digest counts it, never quotes it
 // 2. ET midnight: the gate's held public beacons land on the OLD day (no negative minutes bucket in the new one)
@@ -11,7 +11,7 @@ const test = require("node:test");
 const assert = require("node:assert");
 const fs = require("fs"), path = require("path"), os = require("os");
 
-const DATA = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-usage-118-"));
+const DATA = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-usage-120-fixes-"));
 process.env.DATA_DIR = DATA;
 delete process.env.SITE_PASSWORD;
 process.env.ADMIN_PASSWORD = "break-glass-pw-1";
@@ -31,7 +31,7 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&
 const U = (i) => "uid-q" + String(i).padStart(12, "0");
 const TABS = ["markets", "trend", "corr", "sectors"].map((k) => ({ key: k, label: k[0].toUpperCase() + k.slice(1), gate: "public" }));
 function withMembers(n, dir) {
-  const A = openAccounts(dir || fs.mkdtempSync(path.join(os.tmpdir(), "xyz-usage-118-acc-")));
+  const A = openAccounts(dir || fs.mkdtempSync(path.join(os.tmpdir(), "xyz-usage-120-fixes-acc-")));
   for (let i = 0; i < n; i++)
     A._db.prepare("INSERT OR IGNORE INTO user (uid, handle, display, pw, epoch, isAdmin, createdAt, lastSeen) VALUES (?,?,?,?,1,0,?,0)").run(U(i), "q" + i, "q" + i, "x", Date.UTC(2026, 0, 1));
   A.hydrate();
@@ -47,7 +47,7 @@ function pubBeat(A, T, ua, tabs, t, extra) {
 const E1 = { msg: "Cannot read x", loc: "/js/a.js:10", c: 1 };
 
 // ---- 1. errors ---------------------------------------------------------------------------------------------------------------------
-test("-118 triage: a signed-out hit on a newer build never reopens a resolved error; a member's hit does", () => {
+test("-120 triage: a signed-out hit on a newer build never reopens a resolved error; a member's hit does", () => {
   const A = withMembers(3), T = createUsagePublic();
   const now = Date.now();
   A.usageBuildSeen("B1", now - 3 * DAY); A.usageBuildSeen("B2", now - DAY);
@@ -69,7 +69,7 @@ test("-118 triage: a signed-out hit on a newer build never reopens a resolved er
   A.close();
 });
 
-test("-118 public-only errors: no message text stored (loc + hash), triage shows 'public-only · loc', the digest counts them and never quotes them", () => {
+test("-120 public-only errors: no message text stored (loc + hash), triage shows 'public-only · loc', the digest counts them and never quotes them", () => {
   const A = withMembers(2), T = createUsagePublic();
   const now = Date.now();
   A.usageBuildSeen("B2", now - DAY);
@@ -110,11 +110,11 @@ test("-118 public-only errors: no message text stored (loc + hash), triage shows
   A.close();
 });
 
-test("-118 boot repair: rows written by -117 (or before the column) get memAt from the members' hits, and public-only ones lose their text", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-usage-118-boot-"));
+test("-120 boot repair: rows written before the memAt column get memAt from the members' hits, and public-only ones lose their text", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyz-usage-120-fixes-boot-"));
   let A = withMembers(1, dir);
   const now = Date.now(), day = etDayStr(now);
-  A._db.exec("ALTER TABLE usage_err DROP COLUMN memAt");   // a -117 database
+  A._db.exec("ALTER TABLE usage_err DROP COLUMN memAt");   // a database from before the column
   const ins = A._db.prepare("INSERT INTO usage_err (key, build, loc, msg, firstAt, lastAt) VALUES (?,?,?,?,?,?)");
   ins.run("B|/js/p.js:1|aaaaaaaaaaaa", "B", "/js/p.js:1", "visitor text", now - 5, now - 1);
   ins.run("B|/js/m.js:1|bbbbbbbbbbbb", "B", "/js/m.js:1", "member text", now - 5, now - 2);
@@ -128,7 +128,7 @@ test("-118 boot repair: rows written by -117 (or before the column) get memAt fr
 });
 
 // ---- 3. vs prior ----------------------------------------------------------------------------------------------------------------------
-test("-118 public 'vs prior': blank when the prior window starts before the 30-day public retention (r > 15)", () => {
+test("-120 public 'vs prior': blank when the prior window starts before the 30-day public retention (r > 15)", () => {
   const A = withMembers(0), T = createUsagePublic(), T2 = createUsagePublic();
   const now = Date.now();
   for (const ua of ["a", "b", "c"]) pubBeat(A, T, ua, { markets: 60000 }, now - 20 * DAY);
@@ -151,7 +151,7 @@ test("-118 public 'vs prior': blank when the prior window starts before the 30-d
 });
 
 // ---- 5. k ≥ 3 -------------------------------------------------------------------------------------------------------------------------
-test("-118 k ≥ 3: a day with fewer than 3 visitors is left out of every public figure; today's figures and online-now read '<3'", () => {
+test("-120 k ≥ 3: a day with fewer than 3 visitors is left out of every public figure; today's figures and online-now read '<3'", () => {
   const A = withMembers(0);
   const now = Date.now(), y = now - DAY, y2 = now - 2 * DAY, today = etDayStr(now);
   A.usageBuildSeen("b-1", now - 5 * DAY);
@@ -202,7 +202,7 @@ test("-118 k ≥ 3: a day with fewer than 3 visitors is left out of every public
   A.close(); B.close();
 });
 
-test("-118 k ≥ 3 in the fold: '<3' in the chip and the KPIs, the note, and 'both' adds a number to '<3' without arithmetic", () => {
+test("-120 k ≥ 3 in the fold: '<3' in the chip and the KPIs, the note, and 'both' adds a number to '<3' without arithmetic", () => {
   const A = withMembers(0), T = createUsagePublic();
   const now = Date.now();
   pubBeat(A, T, "a", { markets: 70000 }, now);
@@ -224,7 +224,7 @@ test("-118 k ≥ 3 in the fold: '<3' in the chip and the KPIs, the note, and 'bo
   A.close();
 });
 
-test("-118 triage render: a public-only row shows 'public-only · loc' and no text; the public health list says the text is not kept", () => {
+test("-120 triage render: a public-only row shows 'public-only · loc' and no text; the public health list says the text is not kept", () => {
   const F = fold();
   const html = F.uaTriageHtml({ open: 1, total: 1, rows: [{ sig: "/js/a.js|abc", loc: "/js/a.js:1", msg: null, pubOnly: true, firstBuild: "b", lastBuild: "b", firstAt: 1, lastAt: 2, hits: 3, members: 0, pubHits: 3 }] });
   assert.ok(html.includes('<span class="acc-chip">public-only</span> · <span class="mono">/js/a.js:1</span>'), html);
@@ -234,7 +234,7 @@ test("-118 triage render: a public-only row shows 'public-only · loc' and no te
   assert.ok(h.includes("public-only · text not kept") && h.includes("top: <span class=\"neg\">/js/a.js:1 · public-only</span>") && !h.includes("null"), h);
 });
 
-// ---- the client fold harness (as in usage-117) ------------------------------------------------------------------------------------
+// ---- the client fold harness (as in usage-120) ------------------------------------------------------------------------------------
 function fold() {
   const body = src("public/js/usageadm.js").split("\n").filter((l) => !/^import /.test(l) && !/^export \{/.test(l)).join("\n");
   const nodes = { admUsageBox: { innerHTML: "", addEventListener() {} }, admUsageSub: { textContent: "" } };
@@ -288,7 +288,7 @@ async function admin() {
 }
 const flush = async (j) => (await get("/api/admin/usage?r=7", j)).statusCode;
 
-test("-118 HTTP midnight: the old day's held public beacon lands on the OLD day — no negative minutes bucket in the new one", async () => {
+test("-120 HTTP midnight: the old day's held public beacon lands on the OLD day — no negative minutes bucket in the new one", async () => {
   const gus = await admin();
   const oldDay = etDayStr(MID - 1), newDay = etDayStr(MID);
   NOW = MID - 40000;
@@ -312,7 +312,7 @@ test("-118 HTTP midnight: the old day's held public beacon lands on the OLD day 
   assert.ok(src("server.js").includes("const end = usagePubDayEnd(usagePub.day(), now);"));
 });
 
-test("-118 HTTP toggle off: the public gate's held beacons are discarded at once, never released into storage", async () => {
+test("-120 HTTP toggle off: the public gate's held beacons are discarded at once, never released into storage", async () => {
   const gus = await admin();
   NOW = MID + HOUR;
   const tabMs = () => dbRows("SELECT COALESCE(SUM(ms), 0) AS s FROM usage_day WHERE uid = '-1' AND kind = 'tab' AND key = 'sectors'")[0].s;
@@ -345,9 +345,9 @@ test("-118 HTTP toggle off: the public gate's held beacons are discarded at once
 });
 
 // ---- 6. words and pins ----------------------------------------------------------------------------------------------------------------
-test("-118 words: the comment states the owner's later decision; the notice, the card, the manual and README say 'not linked' and k ≥ 3", () => {
+test("-120 words: the comment states the owner's later decision; the notice, the card, the manual and README say 'not linked' and k ≥ 3", () => {
   const sv = src("server.js");
-  assert.ok(sv.includes('const VERSION = "2026.09.25-118"'));
+  assert.ok(sv.includes('const VERSION = "2026.09.25-120"'));
   assert.ok(sv.includes("later reversed it — public counting is ON BY DEFAULT, the") && sv.includes("admin toggle in the Usage fold (usage_cfg.publicOn) switches it, and env USAGE_PUBLIC=0 forces it"));
   const u = src("public/js/usage.js");
   assert.ok(u.includes("a visit is not linked across days, and days with fewer than 3 visitors aren’t shown."));
@@ -356,7 +356,7 @@ test("-118 words: the comment states the owner's later decision; the notice, the
   for (const w of ["not linked across days", "Days with fewer than 3 visitors aren't shown", "not its message text"]) assert.ok(note.includes(w), "manual: " + w);
   assert.ok(!note.includes("can't be linked"));
   const readme = src("README.md");
-  assert.ok(readme.includes("(build 2026.09.25-118)") && readme.includes("**k ≥ 3 per day, everywhere**") && readme.includes("nothing linked across days; days with fewer than 3 visitors aren't shown"));
+  assert.ok(readme.includes("(build 2026.09.25-120)") && readme.includes("**k ≥ 3 per day, everywhere**") && readme.includes("nothing linked across days; days with fewer than 3 visitors aren't shown"));
   assert.ok(!readme.includes("cannot be linked across days"));
   assert.ok(src("public/js/usageadm.js").includes("so a visit is not linked across days; '+UA_PUB_K_NOTE+'"));
 });
