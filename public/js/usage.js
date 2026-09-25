@@ -17,7 +17,13 @@
 // follow-up) The beacon carries `s`, a random id minted once per page load; the server gates per
 // (member, s), so two tabs or devices never drop each other's minutes, and a beacon that arrives
 // inside the gap (the pagehide one) is held and merged server-side instead of refused — still
-// clamped to wall time (src/usage-gate.js). Signed-out visitors never beacon; a paused member never beacons.
+// clamped to wall time (src/usage-gate.js). A paused member never beacons.
+// (build 2026.09.25-122) A SIGNED-OUT page sends the very same beacon — and nothing that identifies it:
+// no cookie, no localStorage, no id (`s` is per page load, never stored). It does so only when the
+// shell says public counting is on (window.__USPUB, resolved by the server per request); the server
+// keys it with a daily-salted in-memory HMAC it never stores and keeps sitewide totals only
+// (src/usage-public.js). Such a page shows a one-line dismissible notice saying so (usPubNotice);
+// the dismissal is remembered for the tab in sessionStorage — a UI flag, not an identifier.
 //
 // (build 2026.09.24-110) The same beacon carries three more things, and still nothing typed:
 //   acts  counts of the two actions that happen only in the browser — a CSV export and a ticker
@@ -140,7 +146,7 @@ function usTrGive(t,x){ for(const k in (x.tr||{})) t.tr[k]=Math.min(US_TR_N_MAX,
 // One control use, at the control's own handler. Anything outside the allowlist is ignored here (and
 // dropped by the server); paused or signed out, nothing is counted at all.
 function usageCtl(k){
-  if(!US_CTL_SET.has(k)||US.paused||!usSignedIn()) return false;
+  if(!US_CTL_SET.has(k)||US.paused||!usOn()) return false;
   if(!(k in US.ctl)&&Object.keys(US.ctl).length>=US_CTL_KEYS_MAX) return false;
   US.ctl[k]=Math.min(US_CTL_N_MAX,(US.ctl[k]||0)+1); return true;
 }
@@ -152,6 +158,9 @@ function usageSearch(k,now){
 }
 const US_ACTS_CLIENT=new Set(['csv','drawer-open']), US_ERR_MAX=20, US_ERRS_PER_BEACON=5, US_BODY_MAX=3800;
 function usSignedIn(){ return !!(typeof window!=='undefined'&&window.__ME&&window.__ME.uid); }
+// (build 2026.09.25-122) signed out AND the server says public counting is on: the anonymous beacon
+function usPublic(){ return !usSignedIn()&&typeof window!=='undefined'&&window.__USPUB===true; }
+function usOn(){ return usSignedIn()||usPublic(); }
 function usNow(){ return Date.now(); }
 function usPwa(){ try{ return !!(window.matchMedia&&window.matchMedia('(display-mode: standalone)').matches)||window.navigator&&window.navigator.standalone===true; }catch(_){ return false; } }
 // Called by showView (backtest.js) on every tab switch — the one door every switch goes through.
@@ -171,7 +180,7 @@ function usErrLoc(file){
   try{ const u=new URL(s,location.href); return u.origin===location.origin?u.pathname:'external'; }catch(_){ return 'external'; }
 }
 function usageErr(msg,file,line){
-  if(US.paused||!usSignedIn()) return;
+  if(US.paused||!usOn()) return;
   const m=Array.from(usUnquote(String(msg==null?'':msg).slice(0,800))).slice(0,200).join('')||'(no message)', f=usErrLoc(file), l=Math.max(0,Math.trunc(+line||0));
   const k=m+'\u0001'+f+':'+l;
   const e=US.errs.get(k);
@@ -189,7 +198,7 @@ function usErrWire(){
     const loc=usStackLoc(r&&r.stack); usageErr('unhandled rejection: '+msg,loc[0],loc[1]); }catch(_){ } }); }catch(_){ }
 }
 function usageFlush(force){
-  if(!US.acc||US.paused||!usSignedIn()) return false;
+  if(!US.acc||US.paused||!usOn()) return false;
   const now=usNow();
   if(!force&&US.lastSent&&now-US.lastSent<US_GAP_MS) return false;   // inside the server's gap: keep accumulating
   const tabs=usTake(US.acc,now), hr=usTakeHr(US.acc);
@@ -220,9 +229,26 @@ function usageFlush(force){
   for(const e of (out.errs||[])){ const x=US.errs.get(e.m+'\u0001'+e.f+':'+e.l); if(x) x.c=0; }   // sent once; later hits ride as a count
   US.lastSent=now; return true;
 }
+// ---- (build 2026.09.25-122) the signed-out visitor's notice ------------------------------------------
+const US_PUB_NOTE_KEY='xyz-uspub-note-ok';
+function usPubNoticeHtml(){
+  return '<span>Anonymous usage totals are counted on this site: no cookies, no IPs stored, a visit is not linked across days, and days with fewer than 3 visitors aren’t shown.</span>'
+    +'<a href="/docs#public-usage">details</a><button type="button" class="us-pubx" data-uspubx="1" aria-label="dismiss this notice" title="dismiss">×</button>';
+}
+function usPubNotice(){
+  if(!usPublic()||typeof document==='undefined'||!document.body) return null;
+  let ok=false; try{ ok=sessionStorage.getItem(US_PUB_NOTE_KEY)==='1'; }catch(_){ }
+  if(ok||document.getElementById('usPubNote')) return null;
+  const d=document.createElement('div'); d.className='us-pubnote'; d.id='usPubNote'; d.setAttribute('role','note'); d.innerHTML=usPubNoticeHtml();
+  d.addEventListener('click',(e)=>{ const x=e.target&&e.target.closest&&e.target.closest('[data-uspubx]'); if(!x) return;
+    try{ sessionStorage.setItem(US_PUB_NOTE_KEY,'1'); }catch(_){ }
+    d.remove(); });
+  document.body.appendChild(d); return d;
+}
 export function __boot_usage_1(){
-  if(!usSignedIn()) return;
-  US.paused=!!window.__ME.usagePaused;
+  if(!usOn()) return;
+  US.paused=usSignedIn()&&!!window.__ME.usagePaused;
+  if(usPublic()) usPubNotice();   // (build 2026.09.25-122)
   const vis=typeof document==='undefined'||document.visibilityState!=='hidden';
   US.acc=usAcc(usNow(),state.view||'markets',vis);
   US.tr=usTr(usNow(),state.view||'markets',vis);   // (-112) this page load's tab path starts on the tab it opened on; (-114) its clock runs only while visible
@@ -268,6 +294,8 @@ function usageCardHtml(){
     +(d&&d.ok&&!paused?'<div class="us-kpis">'+k('active days · '+(d.keepDays||30)+'d',String(d.activeDays||0))+k('on screen',usFmtH(d.ms||0))+k('top tab',top)+'</div>'
       +usMonthsHtml(d)
       +((d.acts||[]).some(a=>a.n>0)?'<div class="us-acts">'+(d.acts||[]).filter(a=>a.n>0).map(a=>'<span class="acc-chip on">'+esc(US_ACT_CHIP[a.key]||a.key)+' '+(+a.n||0)+'</span>').join('')+'</div>':''):'')
+    // (build 2026.09.25-122) the signed-out side, said here too
+    +'<div class="us-disc">Signed out, this site counts only anonymous sitewide totals (the same kinds of numbers, never linked to anyone): no cookies, no IPs stored, a visit is not linked across days, and days with fewer than 3 visitors aren’t shown. Details in the member guide (Access → signed-out visitors).</div>'
     +'<div class="us-row"><span class="acc-chip'+(paused?'':' on')+'">'+(paused?'paused':'sharing usage')+'</span>'
     +'<button type="button" class="dm-tool" data-uspause="'+(paused?'0':'1')+'"'+(US.busy?' disabled':'')+'>'+(paused?'Resume':'Pause for me')+'</button></div>'
     +'<div class="us-disc" style="margin-top:6px">'+(paused?'Paused: nothing is recorded for this account, and the operator sees “paused”.':'Pausing stops the beacon for this account; the operator sees “paused”.')+'</div>'
@@ -297,4 +325,4 @@ async function usagePause(on){
   }catch(_){ }
   US.busy=false; usageMeLoad();
 }
-export { US, US_CONTROLS, US_CTL_SET, usCtlKeys, usTr, usTrGive, usTrSettle, usTrTake, usTrView, usTrVis, usageCtl, usageSearch, usUnquote, usAcc, usCounting, usGive, usHrAdd, usInput, usSetTab, usSetVis, usSettle, usTake, usTakeHr, usageAct, usageCardHtml, usageErr, usageFirstPaint, usageFlush, usageMeLoad, usagePaint, usagePause, usageView };
+export { usPublic, usOn, usPubNotice, usPubNoticeHtml, US_PUB_NOTE_KEY, US, US_CONTROLS, US_CTL_SET, usCtlKeys, usTr, usTrGive, usTrSettle, usTrTake, usTrView, usTrVis, usageCtl, usageSearch, usUnquote, usAcc, usCounting, usGive, usHrAdd, usInput, usSetTab, usSetVis, usSettle, usTake, usTakeHr, usageAct, usageCardHtml, usageErr, usageFirstPaint, usageFlush, usageMeLoad, usagePaint, usagePause, usageView };

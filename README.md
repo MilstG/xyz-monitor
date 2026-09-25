@@ -631,7 +631,7 @@ is added without it. The list below is the tour.
   **pause** it; the operator then sees "paused". The sitewide panel is not logged; **opening one
   member's detail is**, as `view-usage` in the same audit log as the message read-through.
   Signed-out tracking is a server flag (`USAGE_PUBLIC=1`), off, and in this build collects nothing
-  even when set. Routes: `POST /api/usage`, `GET /api/usage/me`, `POST /api/usage/pause`,
+  even when set (superseded by build 2026.09.25-122: cookieless public visitor counting, below). Routes: `POST /api/usage`, `GET /api/usage/me`, `POST /api/usage/pause`,
   `GET /api/admin/usage?r=7|30`, `GET /api/admin/usage/member?h=`.
 - **Usage, stages B + C** (build 2026.09.24-110) — the same fold gains adoption, retention, a
   heatmap and client health, all from the same `usage_day` aggregates:
@@ -846,6 +846,73 @@ is added without it. The list below is the tour.
     JSON object (400 otherwise — a text/plain body was a 500); a `usage_day(kind, day)` index; the
     regression tick stops for a build once every condition has alerted or it is more than 3 days
     past first-seen, and the triage sweep runs every 10 minutes instead of every tick.
+- **Usage: public (signed-out) visitors, counted without cookies** (build 2026.09.25-122) —
+  Plausible-style. A signed-out page sends the **same beacon** a member's page sends (tab time, hour
+  buckets, tab paths, entry tab, control counts, device class / PWA flag, first paint, errors) and
+  **nothing that identifies it**: no cookie, no `localStorage`, no id (`s` is per page load and never
+  stored). The shell tells the page whether to beacon (`window.__USPUB`); off, it sends nothing.
+  - **Visitor key**: `HMAC-SHA256(dailySalt, ip | userAgent | host)`, truncated, computed per request
+    (`src/usage-public.js`). The salt is 32 random bytes per **ET day**, held **only in memory** —
+    never persisted, logged or returned — and replaced at ET midnight together with every map keyed
+    by it, so a visitor is **not linked across days**. The IP (`clientIp`: the socket, or the last
+    `X-Forwarded-For` element only under `TRUST_PROXY`), the User-Agent and the key are **never
+    stored**. A restart mints a new salt, so a visitor who returns later that day is counted again.
+  - **Storage**: sitewide totals only, under **uid `'-1'`** in `usage_day` (never a member, never
+    folded into `'0'`, never a per-visitor row): `tab`, `hr`, `tr`/`en`/`ctl`/`tdev`, `perf`, `err`
+    (into `usage_err` and triage, counted there as **public hits** — never as members affected — and
+    never feeding the post-deploy alerts; all visitors together may add **10 new distinct errors a
+    day**), plus `pv` (key = the day, n = distinct visitors that day, from the in-memory set), `ptr`
+    (key `<day>|<tab>`, n = distinct visitors who opened that tab that day — reach), `pmin` (a
+    histogram of visitor-day minutes, so a median exists without per-visitor rows) and `pdrop`
+    (beacons the caps refused). Kept **30 days**, then deleted.
+  - **Abuse bounds**: a separate instance of the members' rate gate keyed by the in-memory visitor key
+    + page session (wall-time clamp, held early beacons, per-visitor budget), the members' per-day
+    sitewide bounds per visitor, the same 4 KB body / allowlists / cross-site refusal, and two
+    server-wide caps — **20,000 distinct visitors per ET day** and **600 public beacons per minute** —
+    past which a beacon is dropped (204) and counted for the operator.
+  - **Control**: on by default; **Admin → Usage** has a toggle (`usage_cfg.publicOn`,
+    `POST /api/admin/usage/public {on}`), and env **`USAGE_PUBLIC=0` forces it off**. Members and the
+    break-glass operator are never counted as visitors.
+  - **The fold**: a **who** control — members | public | both — over the KPIs (online now = open
+    signed-out streams, a count; visitors / active visitors today; visitor-days in range, since a
+    visitor is never linked across days; the median minutes per active visitor-day, bucketed), the
+    daily chart (stacked for both), the heatmap, the tab table (public reach = **mean daily reach**),
+    paths / controls / devices (public: ≥ 7 complete days and **≥ 3 distinct visitors on one day**)
+    and client health. The members table, drill-in, adoption and cohorts stay members-only and say
+    so. The chip shows the live state, today's visitors and today's drops.
+  - **Disclosure**: signed-out pages show a one-line dismissible notice (dismissal remembered for the
+    tab in `sessionStorage`) linking to the manual's *signed-out visitors* note (`/docs#public-usage`);
+    the Your usage card and the manual say the same. The weekly digest gains a public line
+    (visitor-days this week vs last, top public tabs).
+  - **Privacy summary**: no cookies, no identifiers on the client, no IP, User-Agent, key or salt at
+    rest; aggregates only; nothing linked across days; days with fewer than 3 visitors aren't shown
+    (build 2026.09.25-122, below).
+- **Usage fixes, public visitors** (build 2026.09.25-122):
+  - **k ≥ 3 per day, everywhere**: an ET day with fewer than **3** distinct visitors (`pv`) is left
+    out of every public figure the operator sees — tab time and "vs prior", mean daily reach (`ptr`),
+    the minutes histogram (`pmin`), the heatmap, paths / controls / devices, first paint, errors
+    (public health, and the triage's public column), the digest's public line — and that day's own
+    figures ("visitors today", "active today", the chip) read **"<3"**; range KPIs sum qualifying
+    days only, and the fold says "days with fewer than 3 visitors are hidden". Anonymous online-now
+    reads "<3" at 1–2. The rows are still stored (30 days); they are never shown.
+  - **Errors**: only a **member's** hit reopens a resolved error or marks it regressed
+    (`usage_err.memAt`, the last member hit). A signed-out hit moves only `usage_err.pubAt` — never
+    `lastAt` or `memAt` — and the triage's "last seen" and last build of an error members hit are
+    the last **member** hit's (retention and eviction read the later of `lastAt`/`pubAt`). An error only
+    signed-out pages hit keeps **no message text** (`msg = ''`: its file:line and the hash in its
+    key) until a member hits it; triage shows it as "public-only · file:line", and the digest's
+    new/regressed lines list members' errors only (public-only ones are a count line). Rows
+    written before this rule (no `memAt` column yet) are repaired at boot.
+  - **Midnight**: the public gate's held beacons are recorded at the old ET day's last millisecond,
+    and the distinct counts (`pv`/`ptr`/`pmin`) go under the day the visitor state belongs to — no
+    negative minutes bucket in the new day.
+  - **"vs prior"** on the public tab table is blank (with a note) when the prior window starts
+    before the 30-day public retention (r > 15). **Toggle off** discards the gate's held public
+    beacons at once instead of releasing them into storage.
+  - **"Both" never differences to a withheld population**: the members + public sitewide sections
+    (paths / controls / devices) are withheld whenever the members' own **or** the public's own
+    sections are (either population under k, or a range under 7 days). Before, one member beside
+    three shown visitors was exposed as both − public.
 - **Admin panel folds** — the panel had grown to eight full-height boxes, so reaching the one you
   wanted meant scrolling past the seven you did not. Every segment is now a collapsed row naming
   what is inside it, with an expand-all/collapse-all control. Each fold wraps its box from
@@ -1282,6 +1349,30 @@ periods/yr), and the level map's structure and volume profile keep every UTC bar
   2w", "$NVDA 2w short") decides the side without cancelling them; "in 2w" is a horizon; a word
   the target contradicts is refused with the word named. Preview, stamp and target row count
   days to the same deadline, rounded up.
+
+**Accuracy (build 2026.09.25-122): post-earnings drift runs on the study's reaction.** The
+`pead` shadow still read the -104 convention: the print day's own UTC bar against the bar before
+(or, with the hourly spine, the print-time price → +24h), so a Friday AMC reaction ended on
+Saturday's perp print and the 1.5σ gate and the 3-session entry window ran off a different bar
+than the reaction the Earnings tab reports. `detectPead` now uses `compute.earnReactWindow`: the
+reaction is the last cash close before the print → the first cash close after it (BMO/DMH the
+prior close → the print day's; AMC the print day's close → the next session's, Friday → Monday;
+holidays and 13:00 half days via `usDayStatus`), entry opens after the reaction session's (`rsD`)
+close, and freshness counts US sessions since it (weekends no longer age a signal). Exact closes
+come off the hourly spine (the -107 rule: a bar closing ON the anchor, never an hourly close up
+to 3h early), which waits up to 3h for the bell bar; without it, BMO/DMH fall back to
+session bars and AMC does not fire (that window spans two sessions). Untimed (TBD) prints no longer
+fire. Finality: a close counts only once the series holds a row at or after it
+(`compute.anchorLanded` — the hourly spine's last row can be the forming 15:00–16:00 candle, its
+tail refreshed every 10 min and restored as-is on boot), in `detectPead`, the Earnings study's
+`final` state and the pooled study alike; the daily fallback needs a later daily bar before it
+trusts the reaction bar. PEAD reads the same 5m-archive neighbourhoods as the study
+(`fineAround(r, earnFineWins(…))`), so a spine missing the bell bar agrees with it; home-market
+(foreign-listed) names are skipped. Freshness counts sessions by **ET** day (no flip at 00:00Z),
+and only the newest print that has begun is a candidate: while its reaction is still open (or it
+is untimed) an older print does not fire. **The trigger changed under the same event type:** `pead` ledger records opened before this
+build used the old reaction; records from -122 carry `ew` (`cash` / `daily`, the price tier), so
+the accrued record splits cleanly on its presence — read pre- and post-122 fires as two samples.
 
 ## Optional: earnings calendar (Finnhub)
 

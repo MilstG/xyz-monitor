@@ -219,8 +219,12 @@ test("-107 earnings: a reaction is final only off an exact anchor — an hourly 
   assert.deepEqual(C.earnPrintReaction(p, daily, 120, hs, now), { pct: 20, state: "forming", src: "cash" }, "not final off the 15:00 close");
   assert.equal(C.earnReactionsFor([p], daily, now, hs, {}), null, "and not pooled as a cash reaction");
   hs.push([w.post - HOUR, 110, 125, 110, 121, 1]);                                                             // the bell bar lands
-  assert.deepEqual(C.earnPrintReaction(p, daily, 120, hs, now), { pct: 21, state: "final", src: "cash" });
-  assert.equal(C.earnReactionsFor([p], daily, now, hs, {}).cashN, 1);
+  // (build 2026.09.25-122) ...but as the spine's LAST row it may be the forming candle: still forming
+  assert.deepEqual(C.earnPrintReaction(p, daily, 120, hs, now), { pct: 20, state: "forming", src: "cash" }, "the bell bar as the last row is not proof it closed");
+  assert.equal(C.earnReactionsFor([p], daily, now, hs, {}), null);
+  hs.push([w.post, 121, 121, 121, 121, 1]);                                                                   // a row at/after the bell: the fetch ran after it
+  assert.deepEqual(C.earnPrintReaction(p, daily, 120, hs, now + 10 * MIN), { pct: 21, state: "final", src: "cash" });
+  assert.equal(C.earnReactionsFor([p], daily, now + 10 * MIN, hs, {}).cashN, 1);
 });
 
 // ---- 11. AMC on session bars is a two-session window: labelled, not pooled -------------------------

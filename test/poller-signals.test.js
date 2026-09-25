@@ -400,28 +400,69 @@ test("HTF shadow batch 2: failbrk mirror, pead reaction gate, fundext restored a
   const stale = flat.map((k) => [k[0], k[1]]);
   stale[stale.length - 2][1] = hi - 1; stale[stale.length - 1][1] = hi - 1;
   assert.equal(C.detectFailBrk(stale, hi - 0.4), null, "an aged-out break never fires");
-  // ---- pead: completed outsized reaction drifts; AMC convention matches earnReactionsFor
-  const dayOf = (t) => { const x = new Date(t); return x.getUTCFullYear() + "-" + String(x.getUTCMonth() + 1).padStart(2, "0") + "-" + String(x.getUTCDate()).padStart(2, "0"); };
-  const daily = []; for (let i = 0; i < 30; i++) daily.push({ t: now - (30 - i) * DAY, c: 100, o: 100 });
-  daily[27].c = 106;   // +6% reaction bar
-  daily[28].c = 106.5; daily[29].c = 107;   // reaction session complete, drift underway
-  const printsB = [{ t: "X", d: dayOf(daily[27].t), s: "BMO" }];
-  const pd = C.detectPead(printsB, daily, 107, 2);
-  assert.ok(pd && pd.side === "long", "BMO reaction bar is the print day itself");
+  // ---- pead: completed outsized reaction drifts. (re-pinned -122) The reaction is the study's own
+  // earnReactWindow: last cash close before the print -> first cash close after it, entry after
+  // that close, freshness counted in US sessions. Fixed calendar (September 2026), UTC-day bars.
+  const U = (m, d, h) => Date.UTC(2026, m - 1, d, h || 0);
+  const daily = []; for (let i = 0; i < 30; i++) daily.push({ t: U(8, 27) + i * DAY, c: 100, o: 100 });
+  const bar = (m, d) => daily.find((k) => k.t === U(m, d));
+  bar(9, 15).c = 106;   // Tue 09-15: +6% reaction session
+  for (const k of daily) if (k.t > U(9, 15)) k.c = 106.5;
+  const printsB = [{ t: "X", d: "2026-09-15", s: "BMO" }];
+  const pd = C.detectPead(printsB, daily, 107, 2, null, U(9, 17, 12));
+  assert.ok(pd && pd.side === "long", "BMO: prior close (09-14) -> the print day's close (09-15)");
   assert.equal(pd.mv, 6, "reaction magnitude frozen");
+  assert.equal(pd.src, "daily", "no spine: the labelled session-bar tier");
   assert.ok(pd.stop < 107 && pd.target > 107, "long geometry: stop below, target above");
   assert.ok(Math.abs(pd.stop - 106 * 0.98) < 1e-6, "stop 1σ back through the reaction close");
   assert.ok(Math.abs(pd.target - 107 * 1.03) < 1e-6, "target = half the reaction further from the mark");
-  // Re-baselined (AMC timing fix): a 16:05 ET AMC print sits inside its own UTC-day bar, so the print
-  // day's bar IS the reaction bar for AMC too — same convention as earnReactionsFor.
-  const printsA = [{ t: "X", d: dayOf(daily[27].t), s: "AMC" }];
-  assert.ok(C.detectPead(printsA, daily, 107, 2), "AMC books the print day's OWN bar as the reaction — same convention as earnReactionsFor");
-  assert.equal(C.detectPead([{ t: "X", d: dayOf(daily[26].t), s: "AMC" }], daily, 107, 2), null, "dating the print a day early reads a flat bar: no reaction");
-  assert.equal(C.detectPead(printsB, daily, 107, 5), null, "a reaction under 1.5σ is noise, not a REACTION");
-  const incomplete = daily.slice(0, 28);   // reaction bar is the LAST bar — session not complete
-  assert.equal(C.detectPead(printsB, incomplete, 106, 2), null, "no entry until the reaction session is complete");
-  const old = [{ t: "X", d: dayOf(daily[20].t), s: "BMO" }];
-  assert.equal(C.detectPead(old, daily, 107, 2), null, "a print older than 3 sessions has drifted without us — no chase");
+  assert.equal(C.detectPead(printsB, daily, 107, 5, null, U(9, 17, 12)), null, "a reaction under 1.5σ is noise, not a REACTION");
+  assert.equal(C.detectPead(printsB, daily, 106, 2, null, U(9, 15, 18)), null, "14:00 ET on the reaction day: no entry before its cash close");
+  assert.ok(C.detectPead(printsB, daily, 107, 2, null, U(9, 20, 12)), "Sunday: 3 sessions since (16-18) — the weekend does not age it");
+  assert.equal(C.detectPead(printsB, daily, 107, 2, null, U(9, 21, 12)), null, "a 4th session begun: drifted without us — no chase");
+  assert.equal(C.detectPead([{ t: "X", d: "2026-09-15", s: "TBD" }], daily, 107, 2, null, U(9, 17, 12)), null, "an untimed print has no window");
+  // AMC daily-only: the print day's bar closes after the print, so the session-bar window spans two
+  // sessions (earnPrintReaction's `wide`) — never a one-session REACTION, never a fire.
+  assert.equal(C.detectPead([{ t: "X", d: "2026-09-14", s: "AMC" }], daily, 107, 2, null, U(9, 17, 12)), null, "daily-tier AMC never fires");
+  // Friday AMC (09-11): Friday's 16:00 ET close -> MONDAY's (09-14). The perp's Saturday print is not
+  // a cash close: +1% by Saturday (the old +24h read, under the 3% gate), +6% by Monday's bell.
+  const fri = C.etWallToUtc(2026, 9, 11, 16, 0), mon = C.etWallToUtc(2026, 9, 14, 16, 0);
+  const hsA = []; for (let t = fri - 48 * HOUR; t < mon + 24 * HOUR; t += HOUR) { const e = t + HOUR; hsA.push([t, 0, 0, 0, e <= fri ? 100 : e < mon ? 101 : 106, 1]); }
+  const printsA = [{ t: "X", d: "2026-09-11", s: "AMC" }];
+  const pa = C.detectPead(printsA, daily, 107, 2, hsA, mon + 2 * HOUR);
+  assert.ok(pa && pa.side === "long" && pa.mv === 6 && pa.src === "cash", "Friday AMC reacts into Monday's cash close");
+  assert.equal(C.detectPead(printsA, daily, 107, 2, hsA, fri + 24 * HOUR), null, "Saturday is not the reaction close");
+  assert.equal(C.detectPead(printsA, daily, 107, 2, hsA.filter((k) => k[0] + HOUR < mon), mon + HOUR), null, "the bell bar has not landed: wait for it");
+  assert.equal(C.detectPead(printsA, daily, 107, 2, hsA.filter((k) => k[0] + HOUR < mon), mon + 4 * HOUR), null, "still missing past the wait: the daily tier, which an AMC print never fires on");
+  // (build 2026.09.25-122) look-ahead guard: the spine already holds Monday's 16:00 bar (a replayed or
+  // back-filled series), but at 15:30 ET the reaction session has not closed — nothing reads it early
+  assert.equal(C.detectPead(printsA, daily, 107, 2, hsA, mon - 30 * 60000), null, "no fire before w.post, even with the close on the spine");
+  // (build 2026.09.25-122) BMO on the spine: the bell-bar wait, then the labelled session-bar fallback
+  const tue = C.etWallToUtc(2026, 9, 15, 16, 0), monC = C.etWallToUtc(2026, 9, 14, 16, 0);
+  const hsB = []; for (let t = monC - 48 * HOUR; t < tue + 24 * HOUR; t += HOUR) { const e = t + HOUR; hsB.push([t, 0, 0, 0, e <= monC ? 100 : e < tue ? 103 : 106, 1]); }
+  const pb = C.detectPead(printsB, daily, 107, 2, hsB, tue + HOUR);
+  assert.ok(pb && pb.src === "cash" && pb.mv === 6, "BMO cash: Monday 16:00 ET -> Tuesday 16:00 ET");
+  const hsBnoBell = hsB.filter((k) => k[0] + HOUR < tue);
+  assert.equal(C.detectPead(printsB, daily, 107, 2, hsBnoBell, tue + HOUR), null, "the bell bar has not landed: wait (no stale 15:00 close)");
+  const pbD = C.detectPead(printsB, daily, 107, 2, hsBnoBell, tue + 5 * HOUR);
+  assert.ok(pbD && pbD.src === "daily" && pbD.mv === 6, "past EARN_BELL_WAIT, and past the UTC bar's close: BMO falls back to session bars");
+  // (build 2026.09.25-122) holidays: Labor Day is Monday 2026-09-07.
+  // Daily tier, BMO Tuesday 09-08: the reference is FRIDAY 09-04's session bar — the perp's weekend and
+  // holiday bars (103) are not session closes — so the reaction is +6%, not +2.9% (under the 3% gate).
+  const dH = []; for (let i = 0; i < 30; i++) dH.push({ t: U(8, 20) + i * DAY, c: 100, o: 100 });
+  for (const k of dH) { if (k.t > U(9, 4) && k.t < U(9, 8)) k.c = 103; if (k.t >= U(9, 8)) k.c = 106; }
+  const ph = C.detectPead([{ t: "X", d: "2026-09-08", s: "BMO" }], dH, 107, 2, null, U(9, 9, 12));
+  assert.ok(ph && ph.mv === 6 && ph.src === "daily", "BMO after Labor Day: Friday's close -> Tuesday's");
+  // Cash tier, Friday 09-04 AMC: Friday's 16:00 ET close -> TUESDAY 09-08's (Monday is a holiday; the
+  // perp's Monday 16:00 read, 101, is not a cash close). Freshness counts sessions: 09-09/10/11 = 3.
+  const f4 = C.etWallToUtc(2026, 9, 4, 16, 0), m7 = C.etWallToUtc(2026, 9, 7, 16, 0), t8 = C.etWallToUtc(2026, 9, 8, 16, 0);
+  const hsH = []; for (let t = f4 - 48 * HOUR; t < t8 + 24 * 8 * HOUR; t += HOUR) { const e = t + HOUR; hsH.push([t, 0, 0, 0, e <= f4 ? 100 : e < t8 ? (e <= m7 ? 101 : 102) : 106, 1]); }
+  const printsH = [{ t: "X", d: "2026-09-04", s: "AMC" }];
+  assert.equal(C.detectPead(printsH, dH, 107, 2, hsH, m7 + 2 * HOUR), null, "Labor Day's 16:00 is not the reaction close");
+  const pH = C.detectPead(printsH, dH, 107, 2, hsH, t8 + 2 * HOUR);
+  assert.ok(pH && pH.src === "cash" && pH.mv === 6 && pH.d === "2026-09-04", "Friday AMC before Labor Day reacts into Tuesday's close");
+  assert.ok(C.detectPead(printsH, dH, 107, 2, hsH, U(9, 11, 23)), "Friday 09-11: 3 sessions since Tuesday — still fresh");
+  assert.equal(C.detectPead(printsH, dH, 107, 2, hsH, U(9, 14, 12)), null, "Monday 09-14: a 4th session — no chase");
   // ---- EV_META + wiring pins
   assert.equal(C.EV_META.failbrk.horizonMs, 5 * DAY);
   assert.equal(C.EV_META.pead.horizonMs, 10 * DAY);

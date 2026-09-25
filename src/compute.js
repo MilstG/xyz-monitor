@@ -1864,39 +1864,67 @@ function regime200(closes, px) {
 }
 
 // Post-earnings drift (xyz only): a reaction bigger than 1.5x the name's own daily σ tends to
-// keep drifting its own way for weeks — entered AFTER the reaction session is complete (there
-// is at least one bar past the reaction index), within 3 sessions of it, drifting WITH the
-// move. Its print->reaction-bar convention is the -104 one: on UTC-day bars the print day's
-// OWN bar is the reaction bar for BMO and AMC alike (its 00:00Z close sits hours after a 16:05
-// ET print — see the timing note above earnPrintUtc); the reference is the bar before it. (The
-// reaction STUDY moved to earnReactWindow's cash-close window in build 2026.09.24-106; this live
-// ledger event keeps its own trigger definition, which its accrued out-of-sample record is pinned to.)
-// `hourly` (optional, packed or object rows) + `now` anchor a BMO/AMC print at its ET time and
-// take the +24h close as the reaction close once it has printed, the daily bars otherwise.
+// keep drifting its own way for weeks — entered AFTER the reaction session's close, within 3
+// sessions of it, drifting WITH the move. (build 2026.09.25-122) The reaction is the study's own:
+// earnReactWindow's last cash close before the print -> the first cash close after it (BMO/DMH:
+// the prior close -> the print day's; AMC: the print day's close -> the next session's, so a
+// Friday AMC reacts into Monday's close, never a Saturday perp print; holidays skipped, 13:00 on
+// a half day). The reaction session is w.rsD and entry opens at w.post, its close. Before -122
+// this ledger event read the print day's own UTC bar against the bar before (or an hourly +24h
+// off earnPrintUtc), so the 1.5σ gate and the 3-session entry window ran off a different bar
+// than the study reports; fires from -122 carry `ew` (the price tier) to split the record.
+// Prices: the 5m archive (opts.fine, the same neighbourhoods the study reads) and the hourly
+// spine's exact closes, through anchorLanded — a close counts only once the series holds a row
+// at or after it (build 2026.09.25-122: the spine's last row can be the forming bell bar); a
+// bell bar not landed yet waits EARN_BELL_WAIT. Without it, the session-bar fallback
+// (earnReactDaily) for BMO/DMH, trusted only once a LATER daily bar exists (the reaction bar is
+// then closed, not a mid-session snapshot); a daily-tier AMC window spans two sessions (see
+// earnPrintReaction's `wide`), so it never fires. Untimed (TBD) prints have no window and never
+// fire. Only the NEWEST print that has begun is a candidate: while its reaction is still open
+// (or it is a TBD print) nothing fires — an older print's drift is superseded (build
+// 2026.09.25-122). Freshness counts sessions by ET day, so the verdict does not flip at 00:00Z.
+// `opts.off` = the market's sessOffFn for the fallback (default US); `opts.fine` = 5m rows.
 // Stop = 1σ back through the reaction close against the drift; target = half the reaction
 // magnitude further, from the mark — drift scales with the surprise, mechanically.
-function detectPead(prints, daily, px, sd30, hourly, now) {
+// Returns { side, mv, d, stop, target, src ("cash" | "daily") } or null.
+function detectPead(prints, daily, px, sd30, hourly, now, opts) {
   if (!Array.isArray(prints) || !prints.length || !Array.isArray(daily) || daily.length < 25) return null;
   if (!(px > 0) || !(sd30 > 0)) return null;
-  const dayOf = (t) => { const x = new Date(t); return x.getUTCFullYear() + "-" + String(x.getUTCMonth() + 1).padStart(2, "0") + "-" + String(x.getUTCDate()).padStart(2, "0"); };
-  const idxByDay = new Map();
-  for (let i = 0; i < daily.length; i++) if (daily[i] && Number.isFinite(daily[i].c)) idxByDay.set(dayOf(daily[i].t), i);
+  const o = opts || {};
+  const nowMs = now == null ? Date.now() : now;
+  const et = etParts(nowMs), today = Math.floor(Date.UTC(et.y, et.mo - 1, et.d) / DAY);   // the ET day
+  const isSess = (d) => { const x = new Date(d * DAY); return usDayStatus(x.getUTCFullYear(), x.getUTCMonth() + 1, x.getUTCDate()) !== 2; };
+  // the newest print that has begun (a timed print once its reference close has passed; a TBD
+  // print from its ET day on) — ordered by print day, then session order
   let best = null;
   for (const pr of prints) {
-    const pi = idxByDay.get(pr.d);
-    if (pi == null) continue;
-    const ri = pi;                                         // the print day's own bar carries the reaction
-    if (ri <= 0 || ri >= daily.length - 1) continue;      // reaction session must be COMPLETE
-    if (ri < daily.length - 4) continue;                   // and fresh: within 3 sessions of now
-    if (!best || ri > best.ri) best = { pr, ri };
+    if (!pr || typeof pr.d !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(pr.d)) continue;
+    const w = earnReactWindow(pr);
+    const pD = Math.floor(Date.UTC(+pr.d.slice(0, 4), +pr.d.slice(5, 7) - 1, +pr.d.slice(8, 10)) / DAY);
+    if (w ? !(w.pre <= nowMs) : pD > today) continue;
+    const key = pD * 4 + (w ? EARN_SESS_ORD[w.s] : EARN_SESS_ORD.TBD);
+    if (!best || key > best.key) best = { pr, w, key };
   }
-  if (!best) return null;
-  let c1 = best.ri < daily.length ? daily[best.ri].c : null, c0 = daily[best.ri - 1].c;
-  if (hourly) {
-    const nowMs = now == null ? Date.now() : now, t0 = earnPrintUtc(best.pr);
-    const hs = t0 != null && t0 + 24 * HOUR <= nowMs ? packedRows(hourly) : [];
-    const p0 = hs.length ? priceAsOf(hs, t0, 3 * HOUR) : null, p1 = p0 > 0 ? priceAsOf(hs, t0 + 24 * HOUR, 3 * HOUR) : null;
-    if (p0 > 0 && p1 > 0) { c0 = p0; c1 = p1; }
+  if (!best || !best.w || !(best.w.post <= nowMs)) return null;   // TBD, or its reaction session has not closed
+  const { pr, w } = best;
+  let after = 0;                                           // sessions begun since the reaction session
+  for (let d = w.rsD + 1; d <= today && after < 4; d++) if (isSess(d)) after++;
+  if (after > 3) return null;                              // fresh: within 3 sessions of it
+  let c0 = null, c1 = null, src = null;
+  const hs = hourly ? packedRows(hourly) : [], fine = Array.isArray(o.fine) && o.fine.length ? packedRows(o.fine) : null;
+  if (hs.length || fine) {
+    const a0 = anchorLanded(hs, fine, w.pre, 3 * HOUR), a1 = anchorLanded(hs, fine, w.post, 3 * HOUR);
+    if (a0.px > 0 && !a0.approx && a1.px > 0 && !a1.approx) { c0 = a0.px; c1 = a1.px; src = "cash"; }
+    else if (nowMs - w.post < EARN_BELL_WAIT) return null;   // the bell bar has not landed yet
+  }
+  if (src == null) {
+    if (w.s === "AMC") return null;                        // two sessions on session bars: not one reaction
+    const dd = earnReactDaily(pr, daily, o.off);
+    if (!dd || !dd.post || !(dd.post.t + DAY <= nowMs)) return null;
+    // (build 2026.09.25-122) a later daily bar proves the reaction bar closed (a dailyRaw fetched
+    // mid-session ends on a partial bar however late `now` is)
+    if (!daily.some((k) => k && +k.t > dd.post.t)) return null;
+    c0 = dd.ref.c; c1 = dd.post.c; src = "daily";
   }
   if (!Number.isFinite(c1) || !Number.isFinite(c0) || !(c0 > 0)) return null;
   const mv = (c1 - c0) / c0 * 100;
@@ -1904,8 +1932,8 @@ function detectPead(prints, daily, px, sd30, hourly, now) {
   const up = mv > 0, sgn = up ? 1 : -1;
   const stop = c1 * (1 - sgn * sd30 / 100), target = px * (1 + sgn * Math.abs(mv) / 200);
   if (up ? !(stop < px && target > px) : !(stop > px && target < px && target > 0)) return null;
-  return { side: up ? "long" : "short", mv: +mv.toFixed(2), d: best.pr.d,
-    stop: +stop.toPrecision(6), target: +target.toPrecision(6) };
+  return { side: up ? "long" : "short", mv: +mv.toFixed(2), d: pr.d,
+    stop: +stop.toPrecision(6), target: +target.toPrecision(6), src };
 }
 
 // ---- intraday liquidity sweep (5m microstructure) ------------------------------------------
@@ -3405,6 +3433,19 @@ function anchorPrice(prices, fine, t, tol) {
   const r = Array.isArray(prices) && prices.length ? asOfRow(prices, t, tol || 3 * HOUR, HOUR) : null;
   return r ? { px: r.px, approx: r.lag !== 0 } : { px: null, approx: true };
 }
+// (build 2026.09.25-122) anchorPrice for a close that must be FINAL: a series only resolves the
+// anchor t once it holds a row with t0 >= t — proof the fetch ran after the bar closing on t. The
+// hourly spine's tail refreshes every 10 min INCLUDING the forming candle (and is restored as-is
+// on boot), so its last row can be the 15:00-16:00 bell bar snapshotted at 15:52; read on its own
+// it looked exact (lag 0) and booked a mid-bar price as the reaction close. Same test on the 5m
+// archive. An unlanded anchor is { px: null, approx: true, open: true } — callers treat it as the
+// bell bar not having landed yet (wait EARN_BELL_WAIT, then their fallback rules).
+function anchorLanded(prices, fine, t, tol) {
+  const past = (a) => Array.isArray(a) && a.length > 0 && +a[a.length - 1][0] >= t;
+  const p = past(prices), f = past(fine);
+  if (!p && !f) return { px: null, approx: true, open: true };
+  return anchorPrice(p ? prices : null, f ? fine : null, t, tol);
+}
 // Sum of hourly funding rates over [enter, exit) — the fraction a 1x long pays (or receives, if <0).
 function fundingOver(funding, enter, exit) {
   let s = 0, any = false;
@@ -4321,7 +4362,7 @@ module.exports = {
   // EMA trend ladder (Trend tab)
   emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS,
   closedBars, closedLadder, trendWhen,
-  priceAsOf, anchorPrice, packedRows, FIVE_MIN, FINE_TOL, closedDailyCloses, fundingOver, netEventR, holdReturn, runHolds, overnightSplit, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats,
+  priceAsOf, anchorPrice, anchorLanded, packedRows, FIVE_MIN, FINE_TOL, closedDailyCloses, fundingOver, netEventR, holdReturn, runHolds, overnightSplit, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats,
   // structural-level outcome study (build 2026.07.24-10): does detectLevels output actually hold?
   normCdf, touchBaseline, studyBars, levelOutcomes, levelStudy, LVL_EDGES, PLACEBO_K,
   // session anatomy (build 2026.07.24-11): excursion / open-quartile / Monday range / naked opens
@@ -4671,11 +4712,14 @@ function earnPrintReaction(print, daily, px, hourly, now, opts) {
     // closing ON the close — never an hourly close up to 3h early (a spine still missing the
     // 15:00-16:00 bar marked the print final off the 15:00 price). Until the bell bar lands the
     // reaction is forming (for EARN_BELL_WAIT after the close), then the labelled daily path.
+    // (build 2026.09.25-122) "final" also needs the bell bar LANDED (anchorLanded: the series holds
+    // a row at or after the close) — the spine's last row can be the forming 15:00-16:00 candle.
+    // Same rule as detectPead and earnReactionsFor, so the study and the PEAD fire agree.
     const a0 = anchorPrice(hs, fine, w.pre, 3 * HOUR);
     if (a0.px > 0 && !a0.approx) {
       if (w.post <= nowMs) {
-        const a1 = anchorPrice(hs, fine, w.post, 3 * HOUR);
-        if (a1.px > 0 && !a1.approx) return { pct: pct(a1.px, a0.px), state: "final", src: "cash" };
+        const f0 = anchorLanded(hs, fine, w.pre, 3 * HOUR), a1 = anchorLanded(hs, fine, w.post, 3 * HOUR);
+        if (f0.px > 0 && !f0.approx && a1.px > 0 && !a1.approx) return { pct: pct(a1.px, f0.px), state: "final", src: "cash" };
         if (nowMs - w.post < EARN_BELL_WAIT && live != null) return { pct: pct(live, a0.px), state: "forming", src: "cash" };
       } else if (live != null) return { pct: pct(live, a0.px), state: "forming", src: "cash" };
     }
@@ -4970,8 +5014,9 @@ function earnReactionsFor(prints, daily, now, hourly, opts) {
     if (!(w.post <= nowMs)) continue;                            // the reaction session has not closed: not a reaction yet
     let mv = null, a0 = null, a1 = null;
     if (intra) {
-      a0 = anchorPrice(hs, fine, w.pre, 3 * HOUR); a1 = anchorPrice(hs, fine, w.post, 3 * HOUR);
-      // (build 2026.09.24-107) exact anchors only — an approx (stale hourly) leg is not a cash move
+      a0 = anchorLanded(hs, fine, w.pre, 3 * HOUR); a1 = anchorLanded(hs, fine, w.post, 3 * HOUR);
+      // (build 2026.09.24-107) exact anchors only — an approx (stale hourly) leg is not a cash move;
+      // (build 2026.09.25-122) and a landed one (anchorLanded), as in earnPrintReaction and detectPead
       if (a0.px > 0 && a1.px > 0 && !a0.approx && !a1.approx) { mv = (a1.px / a0.px - 1) * 100; cashN++; }
       else { a0 = null; a1 = null; }
     }

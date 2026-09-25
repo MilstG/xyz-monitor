@@ -2385,6 +2385,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           mktR: "benchmark 24h move % at fire (BTC for the crypto universe, the SPX proxy for xyz)",
           gw: "gapfade shadow only: void width as a multiple of the market's own gap σ (1.0 or 1.5)",
           emv: "pead shadow only: the frozen earnings-reaction move, %",
+          ew: "pead only, from build -122: the reaction was earnReactWindow's cash-close window (last cash close before the print -> first after it), read off the hourly spine (cash) or session bars (daily); absent = the pre-122 trigger (print day's UTC bar vs the bar before, or hourly +24h)",
           lvn: "structural-void families (lvlhold/lvlrej/squeeze2/unwind2): confirmed pivot touches on the anchoring cluster at fire",
           lva: "structural-void families: days since that cluster's most recent touch, at fire",
           vpw: "volume-node families (vphold/vprej): the anchoring node's share of total profile volume at fire, %",
@@ -3100,7 +3101,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     { ev: "unwind2", uni: "xyz", label: "long unwind \u00b7 structural void", unit: "R",
       tip: "the unwind's structural-void twin \u2014 identical trigger and target, void on the nearest confirmed cluster overhead (0.3\u20133\u03c3, stop half a \u03c3 through). The PURRDAT case measured: a formula void at three-quarters of the 30d range vs a confirmed flip a fraction as far from entry. The record, not the chart, decides which stop earns the board. 3d horizon, R-united." },
     { ev: "pead", uni: "xyz", label: "post-earnings drift", unit: "R",
-      tip: "an earnings reaction >=1.5\u03c3 of the name's own daily vol, entered only after the reaction session completes, drifting WITH the move \u2014 stop 1\u03c3 back through the reaction close. 10d horizon, stocks only; accrues at earnings-season pace." },
+      tip: "an earnings reaction >=1.5\u03c3 of the name's own daily vol, measured like the earnings study (the last cash close before the print \u2192 the first cash close after it), entered only after that close and within 3 sessions of it, drifting WITH the move \u2014 stop 1\u03c3 back through the reaction close. 10d horizon, stocks only; accrues at earnings-season pace." },
     { ev: "sweep", uni: "xyz", label: "liquidity sweep (5m)", unit: "R",
       tip: "the failed-break reclaim one timeframe down: a 5m wick pierces the prior session's high or low and is rejected inside the bar, the reclaim holds, and the mark is back on the origin side \u2014 a stop-run that trapped the break and reversed. Void = the sweep extreme, target = level + 1x the trap depth. 1d horizon, R-united, stop-aware. Builds forward on the 5m archive; accrues out of sample." },
   ];
@@ -3382,14 +3383,22 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
             }
           }
           // post-earnings drift, xyz only: enter with a completed outsized reaction (the
-          // detector enforces completeness, freshness and the 1.5σ magnitude floor)
-          if (r.uni === "xyz" && r.dailyRaw && r.dailyRaw.length >= 25) {
+          // detector enforces completeness, freshness and the 1.5σ magnitude floor). (-122) The
+          // reaction is earnReactWindow's cash-close window; `ew` stamps its price tier, which
+          // also marks the fire as -122-trigger (absent = the -104 print-day-bar trigger).
+          // (build 2026.09.25-122) The 5m archive neighbourhoods the study reads (earnFineWins over
+          // the prints still inside the freshness window) resolve the anchors here too, so a spine
+          // missing the bell bar agrees with the study. Home-market (foreign-listed) names are
+          // skipped: earnReactWindow's anchors are US cash closes on the US calendar.
+          if (r.uni === "xyz" && r.dailyRaw && r.dailyRaw.length >= 25 && !homeMkt(r.ticker, r.uni)) {
             const prints = earnPrintsByTk.get(r.ticker);
-            const pd = prints ? detectPead(prints, r.dailyRaw, r.px, sd30, r.hourlyRaw, now) : null;
+            const recent = prints ? prints.filter((p) => { const w = earnReactWindow(p); return w && w.post <= now && now - w.post < 10 * DAY; }) : null;
+            const fine = recent && recent.length ? fineAround(r, earnFineWins(recent)) : null;
+            const pd = prints ? detectPead(prints, r.dailyRaw, r.px, sd30, r.hourlyRaw, now, { off: sessOffOf(r), fine }) : null;
             if (pd && stopGeometryOk(pd.side, r.px, pd.stop))
               openLedger(r, "pead", { score: 0, reading: "" }, pd.side === "long" ? 1 : -1,
                 { sd0: +sd30.toFixed(3), psd: pd.side, pn: 1, stp: pd.stop,
-                  mv: +(Math.abs(pd.target / r.px - 1) * 100).toFixed(2), emv: pd.mv }, 0);
+                  mv: +(Math.abs(pd.target / r.px - 1) * 100).toFixed(2), emv: pd.mv, ew: pd.src }, 0);
           }
           // intraday liquidity sweep (5m): the failed-break reclaim fired on a prior-session
           // high/low stop-run. xyz only for now — the ledger takes no crypto claim, and gating

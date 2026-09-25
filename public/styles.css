@@ -2982,6 +2982,17 @@ tr[data-wlsep] td:first-child{position:relative} tr[data-wlsep] td:first-child::
 .dm-usage .us-kpi .v{font-size:var(--fs-lg)}
 .dm-usage .us-row{margin:0}
 .us-disc{font-family:var(--mono);font-size:var(--fs-2xs);color:var(--dim);line-height:1.5}
+/* (build 2026.09.25-122) the signed-out visitor's one-line notice (usage.js), and the fold's public bits */
+.us-pubnote{position:fixed;left:50%;bottom:var(--sp-3);transform:translateX(-50%);z-index:60;max-width:min(680px,calc(100vw - 24px));box-sizing:border-box;
+  display:flex;align-items:center;gap:var(--sp-2);background:var(--panel2);border:1px solid var(--border);border-radius:var(--r-2);
+  padding:6px 6px 6px 12px;font-size:var(--fs-xs);color:var(--muted);box-shadow:0 6px 24px rgba(0,0,0,.35)}
+.us-pubnote span{flex:1;min-width:0}
+.us-pubnote a{color:var(--accent);white-space:nowrap}
+.us-pubnote .us-pubx{background:none;border:0;color:var(--muted);font-size:var(--fs-lg);line-height:1;cursor:pointer;padding:2px 8px;border-radius:var(--r-1)}
+.us-pubnote .us-pubx:hover,.us-pubnote .us-pubx:focus{color:var(--text);outline:1px solid var(--border)}
+.us-barp{fill:var(--blue);opacity:.85}
+.us-pop{font-family:var(--mono);font-size:var(--fs-2xs);letter-spacing:.06em;color:var(--blue);text-transform:uppercase}
+.us-pubctl{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-2);font-size:var(--fs-sm);margin:0 0 var(--sp-3)}
 /* (build 2026.09.24-110) stage B+C: heatmap, adoption funnel, join-week cohorts, features row, client health */
 .us-heatc{fill:var(--accent)}
 .us-heat{max-width:420px}

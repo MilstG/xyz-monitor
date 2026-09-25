@@ -46,16 +46,18 @@ test("audit 2/A: earnReactionCurve anchors at the ET print time; earnReactionsFo
   assert.equal(C.earnPrintUtc({ d: "2026-09-02", s: "AMC" }), t16);
   assert.equal(C.earnPrintUtc({ d: "2026-09-02", s: "BMO" }), C.etWallToUtc(2026, 9, 2, 6, 0));
   assert.equal(C.earnPrintUtc({ d: "2026-09-02", s: "TBD" }), null);
-  // detectPead: a flat daily tape hides a reaction the hourly anchor sees (+6% off the 16:00 close)
+  // detectPead (re-pinned -122): a flat daily tape hides a reaction the hourly spine sees. The print
+  // is a FRIDAY AMC (2026-08-28), so its window is Friday's 16:00 ET close -> Monday 08-31's close
+  // (earnReactWindow) — the old +24h anchor landed on Saturday.
   const base = Date.UTC(2026, 7, 1), dly = []; for (let i = 0; i < 30; i++) dly.push({ t: base + i * DAY, c: 100, o: 100 });
-  const pd = dly[27], pt = C.etWallToUtc(2026, 8, 28, 16, 0);   // dly[27] is 2026-08-28
+  const pd = dly[27], pt = C.etWallToUtc(2026, 8, 28, 16, 0), pm = C.etWallToUtc(2026, 8, 31, 16, 0);   // dly[27] is 2026-08-28
   assert.equal(new Date(pd.t).toISOString().slice(0, 10), "2026-08-28");
-  const hs2 = []; for (let t = pt - 48 * HOUR; t < pt + 60 * HOUR; t += HOUR) hs2.push([t, 0, 0, 0, t + HOUR <= pt ? 100 : 106, 1]);
+  const hs2 = []; for (let t = pt - 48 * HOUR; t < pm + 12 * HOUR; t += HOUR) hs2.push([t, 0, 0, 0, t + HOUR <= pt ? 100 : 106, 1]);
   const pr = [{ t: "X", d: "2026-08-28", s: "AMC" }];
-  assert.equal(C.detectPead(pr, dly, 107, 2), null, "daily bars are flat: nothing to drift from");
-  const pead = C.detectPead(pr, dly, 107, 2, hs2, pt + 30 * HOUR);
-  assert.ok(pead && pead.side === "long" && pead.mv === 6, "hourly anchor: +6% from the 16:00 ET close to +24h");
-  assert.equal(C.detectPead(pr, dly, 107, 2, hs2, pt + 20 * HOUR), null, "+24h has not printed: back to the (flat) daily read");
+  assert.equal(C.detectPead(pr, dly, 107, 2, null, pm + 2 * HOUR), null, "daily bars only: an AMC session-bar window spans two sessions — no fire");
+  const pead = C.detectPead(pr, dly, 107, 2, hs2, pm + 2 * HOUR);
+  assert.ok(pead && pead.side === "long" && pead.mv === 6 && pead.src === "cash", "hourly anchors: +6% from Friday's 16:00 ET close to Monday's");
+  assert.equal(C.detectPead(pr, dly, 107, 2, hs2, pt + 30 * HOUR), null, "Saturday: the reaction session (Monday) has not closed");
 });
 
 test("audit 4: the 5m archive resolves a 09:30 ET anchor; hourly alone reads the 09:00 close and says approx", () => {
@@ -239,4 +241,68 @@ test("audit C: medNet — event R net of the funding a 1x position paid over the
   assert.equal(C.netEventR(funding, 1, 2, 1, T + 41 * DAY, T + 42 * DAY), +(2 - 0.24).toFixed(3));
   assert.equal(C.netEventR(funding, -1, -2, 1, T + 41 * DAY, T + 42 * DAY), +(2 + 0.24).toFixed(3), "a short receives what a long pays");
   assert.equal(C.netEventR([], 1, 2, 1, T, T + DAY), null);
+});
+
+// ---- (build 2026.09.25-122) PEAD / earnings reaction finality, 5m parity, ET-day freshness -----------------------------------
+const E122 = (y, m, d, h, mi) => C.etWallToUtc(y, m, d, h, mi || 0);
+const flatDaily = (y, m, d, n, c) => { const a = []; for (let i = 0; i < n; i++) a.push({ t: Date.UTC(y, m - 1, d) + i * DAY, c, o: c }); return a; };
+
+test("audit 122/1: a forming bell bar (the spine's last row) is not a landed close — PEAD waits and the study reads forming", () => {
+  const mon = E122(2026, 9, 14, 16), tue = E122(2026, 9, 15, 16), pr = { d: "2026-09-15", s: "BMO" };
+  const hs = []; for (let t = mon - 48 * HOUR; t <= tue - HOUR; t += HOUR) hs.push([t, 0, 0, 0, t + HOUR <= mon ? 100 : 103, 1]);
+  hs[hs.length - 1][4] = 104.6;   // the 15:00-16:00 candle snapshotted at 15:52
+  const daily = flatDaily(2026, 8, 20, 30, 100);
+  assert.equal(C.detectPead([pr], daily, 104.6, 3, hs, tue + 30e3), null, "16:00:30: the bell bar has not landed");
+  assert.equal(C.earnPrintReaction(pr, daily, 104.6, hs, tue + 30e3).state, "forming");
+  assert.equal(C.earnReactionsFor([pr], daily, tue + 30e3, hs), null, "the study pools nothing off a forming bar");
+  // the next fetch: the bell bar's final close (105, +5%) and the 16:00 row after it
+  const hs2 = hs.map((r) => r.slice()); hs2[hs2.length - 1][4] = 105; hs2.push([tue, 0, 0, 0, 105, 1]);
+  const pd = C.detectPead([pr], daily, 105, 3, hs2, tue + 20 * 60e3);
+  assert.ok(pd && pd.src === "cash" && pd.mv === 5, JSON.stringify(pd));
+  assert.deepEqual(C.earnPrintReaction(pr, daily, 105, hs2, tue + 20 * 60e3), { pct: 5, state: "final", src: "cash" });
+  assert.equal(C.anchorLanded(hs, null, tue, 3 * HOUR).open, true); assert.equal(C.anchorLanded(hs2, null, tue, 3 * HOUR).px, 105);
+});
+
+test("audit 122/2: the daily fallback trusts the reaction bar only once a later daily bar exists", () => {
+  const pr = { d: "2026-09-15", s: "BMO" };
+  const daily = flatDaily(2026, 8, 18, 29, 100);   // ends on the 09-15 bar
+  daily[daily.length - 1].c = 105;                  // a mid-session snapshot of it
+  const now = Date.UTC(2026, 9 - 1, 16, 0, 30);
+  assert.equal(C.detectPead([pr], daily, 105, 2, null, now), null, "no later bar: the 09-15 bar may be partial");
+  assert.equal(C.detectPead([pr], daily, 105, 2, [[Date.UTC(2026, 8, 1), 0, 0, 0, 100, 1]], now), null, "a stale spine past the wait: same");
+  const d2 = daily.concat([{ t: Date.UTC(2026, 8, 16), c: 105, o: 105 }]);
+  const pd = C.detectPead([pr], d2, 105, 2, null, now);
+  assert.ok(pd && pd.src === "daily" && pd.mv === 5, JSON.stringify(pd));
+});
+
+test("audit 122/3: PEAD reads the 5m archive the study reads — a spine missing the bell bar agrees with the study", () => {
+  const M5 = 300e3, mon = E122(2026, 9, 14, 16), tue = E122(2026, 9, 15, 16), pr = { d: "2026-09-15", s: "BMO" };
+  const hs = []; for (let t = mon - 48 * HOUR; t < tue + DAY; t += HOUR) if (t + HOUR !== tue) hs.push([t, 0, 0, 0, t + HOUR <= mon ? 100 : 106, 1]);
+  const fine = []; for (let t = mon - 2 * HOUR; t < tue + HOUR; t += M5) fine.push([t, 0, 0, 0, t + M5 <= mon ? 100 : 106, 1]);
+  const daily = flatDaily(2026, 8, 20, 30, 100); for (const k of daily) if (k.t >= Date.UTC(2026, 8, 15)) k.c = 101;
+  const now = tue + 5 * HOUR, off = C.sessOffFn("US");
+  assert.deepEqual(C.earnPrintReaction(pr, daily, 106, hs, now, { off, fine }), { pct: 6, state: "final", src: "cash" });
+  assert.equal(C.detectPead([pr], daily, 106, 2, hs, now, { off }), null, "without the archive: the daily tier's +1% is under the gate");
+  const pd = C.detectPead([pr], daily, 106, 2, hs, now, { off, fine });
+  assert.ok(pd && pd.src === "cash" && pd.mv === 6, JSON.stringify(pd));
+  assert.ok(Math.abs(Math.abs(pd.mv) - C.earnReactionsFor([pr], daily, now, hs, { off, fine }).avgAbs) < 0.006, "PEAD's move is the study's");
+});
+
+test("audit 122/5: freshness counts sessions by ET day; a newer print still pending (or untimed) blocks an older one", () => {
+  // Thanksgiving Wed AMC -> Fri 13:00 half-day reaction close: Mon/Tue/Wed are sessions 1-3
+  const w = C.earnReactWindow({ d: "2026-11-25", s: "AMC" });
+  const hs = []; for (let t = w.pre - 48 * HOUR; t < w.post + 10 * DAY; t += HOUR) hs.push([t, 0, 0, 0, t + HOUR <= w.pre ? 100 : t + HOUR < w.post ? 101 : 95, 1]);
+  const daily = flatDaily(2026, 10, 20, 50, 100), p = [{ d: "2026-11-25", s: "AMC" }];
+  assert.ok(C.detectPead(p, daily, 94, 2, hs, E122(2026, 12, 2, 12)), "Wed noon ET: 3rd session");
+  assert.ok(C.detectPead(p, daily, 94, 2, hs, E122(2026, 12, 2, 20, 30)), "Wed 20:30 ET (already Thu in UTC): still the 3rd session");
+  assert.equal(C.detectPead(p, daily, 94, 2, hs, E122(2026, 12, 3, 12)), null, "Thu: a 4th session begun");
+  // an older valid BMO with a newer print whose reaction is still open
+  const mon = E122(2026, 9, 14, 16), tue = E122(2026, 9, 15, 16);
+  const hs2 = []; for (let t = mon - 48 * HOUR; t < tue + 5 * DAY; t += HOUR) hs2.push([t, 0, 0, 0, t + HOUR <= mon ? 100 : 106, 1]);
+  const d2 = flatDaily(2026, 8, 20, 30, 100), at = E122(2026, 9, 16, 17), old = { d: "2026-09-15", s: "BMO" };
+  assert.ok(C.detectPead([old], d2, 107, 2, hs2, at), "alone, the older print fires");
+  assert.equal(C.detectPead([old, { d: "2026-09-16", s: "AMC" }], d2, 107, 2, hs2, at), null, "a newer AMC printed, its reaction open: nothing fires");
+  assert.equal(C.detectPead([old, { d: "2026-09-16", s: "TBD" }], d2, 107, 2, hs2, at), null, "a newer untimed print on/before today: nothing fires");
+  assert.ok(C.detectPead([old, { d: "2026-12-10", s: "AMC" }], d2, 107, 2, hs2, at), "next quarter's scheduled print does not block");
+  assert.ok(C.detectPead([old, { d: "2026-09-16", s: "AMC" }], d2, 107, 2, hs2, E122(2026, 9, 16, 15)), "before the newer print's reference close it has not begun");
 });
