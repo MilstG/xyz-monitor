@@ -14842,7 +14842,25 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
   const EMA_TFS = { D1: DAY, H4: 4 * HOUR };
   const EMA_NS = [50, 200];
   const EMA_NEAR_SD = 0.5, EMA_NEAR_EXIT_SD = 0.75, EMA_REARM_SD = 1.0, EMA_LIST_SD = 1.5;
-  const EMA_CARD_TTL = 48 * HOUR, EMA_CARD_MAX = 400;
+  const EMA_CARD_MAX = 400;
+  // (build 2026.09.25-118) Decay runs on the card's OWN clock — candles of its timeframe, not hours:
+  // a 4H touch 40h old is ten candles stale, a 1D touch 40h old is one or two sessions. A resolved
+  // card is FRESH for the first few candles after its touch, FADING after that (or at once when a
+  // later close fails it), and GONE past the keep window. The hard TTL is only a backstop for a
+  // card whose line stopped being scanned (a delisted name, history lost).
+  const EMA_FRESH_BARS = { H4: 3, D1: 2 }, EMA_KEEP_BARS = { H4: 6, D1: 5 };
+  const EMA_WORKED_SD = 1.0;                  // follow-through that counts as "worked", in the rung's sigma
+  const EMA_CARD_HARD_TTL = 10 * DAY;
+  // The side a resolved card expects price to go: a held support (from above) and a reclaim (from
+  // below, closed through) want UP; a rejected resistance and a breakdown want DOWN.
+  const emaDir = (c) => ((c.st === "held") === (c.from === "above") ? 1 : -1);
+  function emaStage(c) {
+    if (c.st === "live") return "live";
+    const age = Number.isFinite(c.age) ? c.age : 0;
+    if (age > (EMA_KEEP_BARS[c.tf] || 6)) return "gone";
+    if (c.failed) return "fading";
+    return age <= (EMA_FRESH_BARS[c.tf] || 3) ? "fresh" : "fading";
+  }
   const emaSt = new Map();       // coin -> { "H4|50": {s, armed, lastBar, open, zone, rb, g, fb}, ..., m50: { D1: {fired, seen, s}, H4 } }
   let emaCards = [];             // touch + near entries, oldest first
   let emaNear = [];              // the live on-deck board, rebuilt every scan
@@ -14885,6 +14903,9 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     const near = [];
     let fired = 0, touched = 0;
     const ver0 = emaVer;
+    const emaByKey = new Map();   // coin|tf|N -> its touch cards, built once per scan
+    emaCards = emaCards.filter((c) => c.k === "touch");   // (-118) near entries left the feed: the list on the left is their live view
+    for (const c of emaCards) { const k = c.coin + "|" + c.tf + "|" + c.n; if (!emaByKey.has(k)) emaByKey.set(k, []); emaByKey.get(k).push(c); }
     const liveId = (id) => id != null && emaCards.some((c) => c.id === id && c.st === "live");
     for (const r of rows.values()) {
       if (r.delisted || !(r.px > 0)) continue;
@@ -14928,6 +14949,13 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
               c.close = +cl.toPrecision(9); c.lineC = +e.toPrecision(9); c.resAt = now;
               emaVer++;
             }
+            // (-118) a resolved card FAILS when a later close lands on the wrong side of the line —
+            // the support that held has since broken, the breakdown has been reclaimed. It stops
+            // being a setup at once rather than sitting in the feed saying the opposite of the tape.
+            for (const c of emaByKey.get(r.coin + "|" + key) || []) {
+              if (c.st === "live" || c.failed || !(+lastC.t > c.barT)) continue;
+              if (emaDir(c) * (+lastC.c - ln.eC) < 0) { c.failed = 1; c.failAt = now; c.failClose = +(+lastC.c).toPrecision(9); emaVer++; }
+            }
             if (Math.abs((lastC.c / ln.eC - 1) * 100) >= EMA_REARM_SD * sdTf) K.armed = true;
             K.rb = +lastC.t;
           }
@@ -14938,6 +14966,17 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
           const gapPct = (px / ln.live - 1) * 100, gapSd = gapPct / sdTf;
           K.g.push(+Math.abs(gapSd).toFixed(3)); if (K.g.length > 5) K.g.shift();
           const from = lastC.c >= ln.eC ? "above" : "below";
+          // (-118) every resolved card of this line: its age in closed candles since the touch
+          // candle, and its follow-through — how far price has gone from the line in the expected
+          // direction, in sigma (now and best). >= 1 sigma at any point marks it worked.
+          for (const c of emaByKey.get(r.coin + "|" + key) || []) {
+            let a = 0; for (let i = L; i >= 0 && +closed[i].t > c.barT; i--) a++;
+            if (c.age !== a) { c.age = a; emaVer++; }
+            if (c.st === "live") continue;
+            const ft = +(emaDir(c) * (px / ln.live - 1) * 100 / sdTf).toFixed(2);
+            c.ft = ft; c.ftMax = Math.max(Number.isFinite(c.ftMax) ? c.ftMax : ft, ft);
+            if (!c.worked && c.ftMax >= EMA_WORKED_SD) { c.worked = 1; emaVer++; }
+          }
           const oth = lines[N === 50 ? 200 : 50];
           const stacked = !!oth && Math.abs((oth.live / ln.live - 1) * 100) <= EMA_NEAR_SD * sdTf;
           const touching = K.fb.l <= ln.live && ln.live <= K.fb.h;
@@ -14957,12 +14996,8 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
             continue;
           }
           // ---- near band, with hysteresis -------------------------------------------------------
-          if (!K.zone && Math.abs(gapSd) <= EMA_NEAR_SD && !touching) {
-            K.zone = 1;
-            emaCardAdd({ k: "near", coin: r.coin, t: r.ticker || r.coin, uni: r.uni === "main" ? "crypto" : "stocks", tf, n: N,
-              from, at: now, px, line: +ln.live.toPrecision(9), gapPct: +gapPct.toFixed(3), gapSd: +gapSd.toFixed(3) });
-            emaVer++;
-          } else if (K.zone && Math.abs(gapSd) > EMA_NEAR_EXIT_SD) K.zone = 0;
+          if (!K.zone && Math.abs(gapSd) <= EMA_NEAR_SD && !touching) K.zone = 1;
+          else if (K.zone && Math.abs(gapSd) > EMA_NEAR_EXIT_SD) K.zone = 0;
           // ---- touch ----------------------------------------------------------------------------
           if (!touching) continue;
           K.zone = 1;   // a touch is inside the band by definition — no "near" entry after it
@@ -14978,6 +15013,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
             tf, n: N, from, at: now, barT: fbT, closeAt, px, line: +ln.live.toPrecision(9), sd: +sdTf.toFixed(3),
             gapPct: +gapPct.toFixed(3), stacked: stacked ? 1 : 0, retouch: 0, st: "live" });
           K.open = card.id; emaVer++; touched++;
+          { const bk = r.coin + "|" + key; if (!emaByKey.has(bk)) emaByKey.set(bk, []); emaByKey.get(bk).push(card); }
           if (nr) nr.open = card.id;
           const kind = "touch" + N;
           if (emaClassWanted(kind)) {
@@ -15028,8 +15064,9 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       }
     }
     for (const c of [...emaSt.keys()]) if (!rows.has(c) || rows.get(c).delisted) emaSt.delete(c);
-    const cut = now - EMA_CARD_TTL;
-    if (emaCards.length && emaCards[0].at < cut) emaCards = emaCards.filter((c) => c.at >= cut || c.st === "live");
+    const nCards = emaCards.length;
+    emaCards = emaCards.filter((c) => { c.stage = emaStage(c); return c.stage !== "gone" && now - c.at < EMA_CARD_HARD_TTL; });
+    if (emaCards.length !== nCards) emaVer++;
     near.sort((a, b) => Math.abs(a.gapSd) - Math.abs(b.gapSd));
     emaNear = near;
     // Persist on a real change (a card, a resolution, a fold, a lane fire), else at most every 10
@@ -15045,13 +15082,15 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     const day = (emaScanAt || now) - DAY;   // the scan's clock: the counts describe the payload they ride
     return { ts: now, dataTs: emaVer, scanAt: emaScanAt || null, primed: emaPrimed,
       params: { nearSd: EMA_NEAR_SD, exitSd: EMA_NEAR_EXIT_SD, rearmSd: EMA_REARM_SD, listSd: EMA_LIST_SD,
-        ttlH: EMA_CARD_TTL / HOUR, ns: EMA_NS, tfs: Object.keys(EMA_TFS) },
+        freshBars: EMA_FRESH_BARS, keepBars: EMA_KEEP_BARS, workedSd: EMA_WORKED_SD, ns: EMA_NS, tfs: Object.keys(EMA_TFS) },
       counts: { live: cards.filter((c) => c.k === "touch" && c.st === "live").length,
         touches24: cards.filter((c) => c.k === "touch" && c.at >= day).length,
         held24: cards.filter((c) => c.k === "touch" && c.at >= day && c.st === "held").length,
         thru24: cards.filter((c) => c.k === "touch" && c.at >= day && c.st === "thru").length,
         folded24: cards.filter((c) => c.k === "touch" && c.at >= day).reduce((a, c) => a + (c.retouch || 0), 0),
-        near24: cards.filter((c) => c.k === "near" && c.at >= day).length,
+        fresh: cards.filter((c) => c.stage === "fresh").length,
+        worked: cards.filter((c) => c.worked && !c.failed).length,
+        failed: cards.filter((c) => c.failed).length,
         lines: emaNear.length },
       near: emaNear, cards };
   }

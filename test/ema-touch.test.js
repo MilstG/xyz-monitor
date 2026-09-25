@@ -41,7 +41,7 @@ test("ema feed: seeds silently, near band, one card per candle, resolves at the 
   p.seedRowNow("EMA", { px: 100.4 });
   p.emaScanNow(dEnd + 2 * HOUR);
   const f1 = p.getEmaFeed();
-  assert.deepEqual(f1.cards.map((c) => c.k), ["near"], "inside 0.5 sigma, not touching: a near entry");
+  assert.equal(f1.cards.length, 0, "(-118) inside 0.5 sigma is the list on the left, not a feed event");
   assert.equal(f1.near.length, 1, "the D1 EMA50 line is on deck (the 200 cannot seed on 120 bars)");
   assert.equal(f1.near[0].n, 50); assert.equal(f1.near[0].tf, "D1"); assert.equal(f1.near[0].from, "above");
   assert.ok(f1.near[0].inBand && !f1.near[0].touching);
@@ -84,6 +84,38 @@ test("ema feed: seeds silently, near band, one card per candle, resolves at the 
   assert.equal(touches(p)[0].st, "thru", "newest first: closed below the line it came down to");
   const cnt = p.getEmaFeed().counts;
   assert.equal(cnt.touches24, 1, "counts ride the scan clock"); assert.equal(cnt.thru24, 1);
+  // (-118) the first card (support held) had worked — the close at 103 put it > 1 sigma above the
+  // line — and the close at 98.5 then went back through: it is failed now, and fading at once
+  const first = touches(p)[1];
+  assert.equal(first.st, "held"); assert.equal(first.worked, 1); assert.equal(first.failed, 1);
+  assert.equal(first.stage, "fading", "failed fades at once, whatever its age");
+  assert.equal(first.age, 2, "two closed sessions since its touch candle");
+  const second = touches(p)[0];
+  assert.ok(!second.failed, "a card is never failed by the close that resolved it");
+  assert.equal(second.stage, "fresh"); assert.equal(second.age, 0);
+  assert.ok(second.ft > 0, "a breakdown expects DOWN: price below the line reads positive follow-through");
+});
+
+test("ema feed -118: cards decay on their own clock — fresh, then fading, then gone — in candles, not hours", () => {
+  const { p } = harness();
+  const { daily, dEnd } = seedName(p, 103);
+  p.emaScanNow(dEnd + HOUR); p.emaPrimeNow();
+  p.seedRowNow("EMA", { px: 99.9 }); p.emaScanNow(dEnd + 2 * HOUR);
+  let bars = daily.concat([{ t: dEnd, c: 100.8, h: 103, l: 99.8 }]);
+  p.seedRowNow("EMA", { dailyRaw: bars, px: 100.8 }); p.emaScanNow(dEnd + DAY + 60e3);
+  const card = () => touches(p)[0];
+  assert.equal(card().stage, "fresh"); assert.equal(card().age, 0);
+  const stages = [];
+  for (let k = 1; k <= 6; k++) {
+    // closes drift up and away from the line: no new touches, no failure
+    bars = bars.concat([{ t: dEnd + k * DAY, c: 101 + k * 0.2, h: 101.2 + k * 0.2, l: 100.9 + k * 0.2 }]);
+    p.seedRowNow("EMA", { dailyRaw: bars, px: 101 + k * 0.2 }); p.emaScanNow(dEnd + (k + 1) * DAY + 60e3);
+    stages.push(card() ? card().stage + ":" + card().age : "gone");
+  }
+  assert.deepEqual(stages, ["fresh:1", "fresh:2", "fading:3", "fading:4", "fading:5", "gone"],
+    "1D: fresh for 2 sessions after the touch, fading to 5, then gone");
+  const P = p.getEmaFeed().params;
+  assert.deepEqual(P.freshBars, { H4: 3, D1: 2 }); assert.deepEqual(P.keepBars, { H4: 6, D1: 5 }); assert.equal(P.workedSd, 1);
 });
 
 test("ema feed: the touch classes only enter the stream for an opted-in operator; state and cards persist", () => {
@@ -195,7 +227,25 @@ test("ema touch tab client: renders both panes from a payload, filters by scope/
   const ctx = { state: { scope: "stocks" }, store: { get: () => null, set: () => {} }, el: () => null, esc: (s) => String(s), fmtPrice: (v) => String(v),
     fetchJSON: async () => ({}), openDetail: () => {}, Date, JSON, Math, String };
   vm.createContext(ctx);
-  vm.runInContext(body + "\nthis.emtPass=emtPass; this.EMT=EMT;", ctx);
+  vm.runInContext(body + "\nthis.emtPass=emtPass; this.EMT=EMT; this.emtCardTitle=emtCardTitle; this.emtCardAction=emtCardAction; this.emtRelSort=emtRelSort;", ctx);
+  // (-118) the words on a card: a plain title, and one action line with its invalidation
+  const held = { st: "held", from: "above", tf: "H4", lineC: 148.05 };
+  assert.equal(ctx.emtCardTitle(held), "Support held");
+  assert.match(ctx.emtCardAction(held), /^Bullish while above 148\.05\. A 4H close below it invalidates\.$/);
+  assert.equal(ctx.emtCardTitle({ st: "thru", from: "above" }), "Broke down");
+  assert.match(ctx.emtCardAction({ st: "thru", from: "above", tf: "D1", lineC: 50 }), /^Bearish: 50 is now resistance/);
+  assert.equal(ctx.emtCardTitle({ st: "thru", from: "below" }), "Reclaimed");
+  assert.equal(ctx.emtCardTitle({ st: "held", from: "below" }), "Resistance held");
+  assert.equal(ctx.emtCardTitle({ st: "live", from: "above" }), "Testing support");
+  assert.match(ctx.emtCardAction({ st: "live", from: "above", tf: "H4", line: 10 }), /^Watch the 4H close: above 10 = support held, below = breakdown\.$/);
+  assert.match(ctx.emtCardAction({ st: "held", from: "above", tf: "H4", lineC: 10, failed: 1 }), /^Failed/);
+  // relevance: live first (soonest close), then fresh (1D, the 200, stacked first), then fading, failed last
+  const cs = [{ id: "fail", st: "held", failed: 1, stage: "fading", tf: "D1", n: 200, at: 9 },
+    { id: "fade", st: "held", stage: "fading", tf: "H4", n: 50, at: 8 },
+    { id: "freshH4", st: "held", stage: "fresh", tf: "H4", n: 50, at: 7 },
+    { id: "freshD1", st: "thru", stage: "fresh", tf: "D1", n: 50, at: 1 },
+    { id: "live2", st: "live", closeAt: 20 }, { id: "live1", st: "live", closeAt: 10 }];
+  assert.deepEqual(cs.slice().sort(ctx.emtRelSort).map((c) => c.id), ["live1", "live2", "freshD1", "freshH4", "fade", "fail"]);
   const x = { uni: "stocks", tf: "H4", n: 50 };
   assert.equal(ctx.emtPass(x), true);
   ctx.EMT.tf = "D1"; assert.equal(ctx.emtPass(x), false);

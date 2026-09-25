@@ -471,6 +471,26 @@ table.ptbl td:first-child{text-align:left}
 .emt-pill.held{background:rgba(70,185,126,.14);color:var(--up)}
 .emt-pill.thru{background:rgba(229,96,77,.14);color:var(--down)}
 .emt-pill.near{background:var(--grid);color:var(--muted)}
+/* (-118) card tones, stage, outcome, action line, legend */
+.emt-ev.live{border-left-color:var(--accent)}
+.emt-ev.bull{border-left-color:var(--up)}
+.emt-ev.bear{border-left-color:var(--down)}
+.emt-ev.bad{border-left:3px dashed var(--down)}
+.emt-ev.fading{opacity:.55}
+.emt-ev.fading:hover{opacity:.9}
+.emt-pill.bull{background:rgba(70,185,126,.14);color:var(--up)}
+.emt-pill.bear{background:rgba(229,96,77,.14);color:var(--down)}
+.emt-pill.bad{background:var(--grid);color:var(--muted);text-decoration:line-through}
+.emt-stage{margin-left:auto;font-family:var(--mono);font-size:var(--fs-2xs);letter-spacing:.04em;white-space:nowrap;color:var(--dim)}
+.emt-stage.live{color:var(--accent)}
+.emt-stage.fresh{color:var(--text)}
+.emt-out{font-family:var(--mono);font-size:var(--fs-2xs);letter-spacing:.04em;padding:1px 5px;border-radius:var(--r-1);white-space:nowrap}
+.emt-out.ok{color:var(--up);border:1px solid rgba(70,185,126,.45)}
+.emt-out.bad{color:var(--down);border:1px solid rgba(229,96,77,.5)}
+.emt-out.wait{color:var(--dim);border:1px solid var(--border)}
+.emt-act{font-size:var(--fs-sm);color:var(--text);margin-top:4px;line-height:1.45}
+.emt-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:var(--fs-xs);color:var(--muted);margin:var(--sp-2) 2px 0;line-height:1.5}
+.emt-legend b{margin-right:4px;margin-left:0}
 /* ===== Drawdown tab (build 2026.09.23-92): return vs drawdown scatter + table ===== */
 .rvd-title{font-family:var(--disp);font-size:var(--fs-lg);font-weight:600;margin:2px 2px 2px}
 .rvd-sub{color:var(--muted);font-size:var(--fs-md);line-height:1.55;margin:0 2px var(--sp-2);max-width:100ch}
