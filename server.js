@@ -15,7 +15,7 @@ const { featureGateFor, resolveFeatures, featureVisible, parseAlertCmd, ALERT_HE
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.09.25-115";
+const VERSION = "2026.09.25-116";
 // (build 2026.09.24-107) Distinguishes this process from the last one in ETags built on
 // per-process counters (a restart must never 304 a client onto a different body).
 const BOOT_NONCE = Date.now().toString(36) + crypto.randomBytes(3).toString("hex");
@@ -483,8 +483,10 @@ function setAdminCookies(reply, req, maxAgeSec, token) {
 // per-IP damper, which is the right one to spend here.
 function adminPwOk(pw) {
   if (!ADMIN_PASSWORD) return false;
-  const a = Buffer.from(String(pw == null ? "" : pw), "utf8"), b = Buffer.from(ADMIN_PASSWORD, "utf8");
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
+  // (build 2026.09.25-116) digest both sides first: a length check before the constant-time compare
+  // answered faster for a wrong LENGTH, which leaked how long the password is
+  const h = (v) => crypto.createHash("sha256").update(String(v == null ? "" : v), "utf8").digest();
+  return crypto.timingSafeEqual(h(pw), h(ADMIN_PASSWORD));
 }
 
 // The IP a rate limiter may key on. X-Forwarded-For is client-writable except for the LAST
@@ -497,7 +499,12 @@ function adminPwOk(pw) {
 // Behind Railway's edge the forwarded headers are trustworthy and the socket peer is the proxy;
 // exposed directly they are whatever the client typed. TRUST_PROXY=0 switches both the client-IP
 // damper key and the Secure-cookie decision to the socket's own view.
-const TRUST_PROXY = process.env.TRUST_PROXY !== "0";
+// (build 2026.09.25-116) Unset means "trust it where the edge is known to append": on Railway
+// (RAILWAY_ENVIRONMENT / RAILWAY_PROJECT_ID are injected there). Anywhere else an unset value now
+// means OFF — a directly exposed server used to trust a header every caller writes, which let a
+// script pick a fresh rate-limit key per request. An explicit 1 / 0 always wins.
+const TRUST_PROXY = process.env.TRUST_PROXY === "1" ? true : process.env.TRUST_PROXY === "0" ? false
+  : !!(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_ENVIRONMENT_NAME || process.env.RAILWAY_PROJECT_ID);
 function clientIp(req) {
   const xff = TRUST_PROXY ? String(req.headers["x-forwarded-for"] || "").split(",").pop().trim() : "";
   return xff || String(req.ip || "");
@@ -572,9 +579,12 @@ function cspRecord(body) {
   if (min !== CSP_REPORTS.minute) { CSP_REPORTS.minute = min; CSP_REPORTS.inMinute = 0; }
   for (const r of items) {
     if (++CSP_REPORTS.inMinute > 120) { CSP_REPORTS.dropped++; continue; }   // a page in a loop is not 10k log lines
-    const directive = String(r["effective-directive"] || r.effectiveDirective || r["violated-directive"] || r.violatedDirective || "?").slice(0, 60);
-    const blocked = String(r["blocked-uri"] || r.blockedURL || r.blockedURI || "").slice(0, 160);
-    const source = String(r["source-file"] || r.sourceFile || "").slice(0, 160);
+    // (build 2026.09.25-116) the route is open, so these are attacker text: control characters
+    // (CR/LF above all) are stripped before they reach the ledger or a log line
+    const clean = (v, n) => String(v || "").replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, n);
+    const directive = clean(r["effective-directive"] || r.effectiveDirective || r["violated-directive"] || r.violatedDirective || "?", 60);
+    const blocked = clean(r["blocked-uri"] || r.blockedURL || r.blockedURI, 160);
+    const source = clean(r["source-file"] || r.sourceFile, 160);
     const line = Number(r["line-number"] || r.lineNumber) || 0;
     CSP_REPORTS.n++;
     const key = directive + "|" + blocked + "|" + source + "|" + line;
@@ -907,10 +917,28 @@ async function buildServer() {
     if (String(req.headers["sec-fetch-site"] || "").toLowerCase() === "cross-site")
       return reply.code(403).header("cache-control", "no-store").send({ error: "cross-site request refused" });
   });
+  // (build 2026.09.25-116) The paths a gate must judge: the route the router actually MATCHED (it
+  // decodes %XX before matching, so /api/%61sk runs the /api/ask handler) and the decoded request
+  // path. A gate that compared the raw URL let every re-spelled path through — every admin-only
+  // tab's data, and the AI spend routes. null = an undecodable path (refused with a 400, never
+  // guessed at). Gates block when ANY candidate is blocked.
+  function gatePaths(req) {
+    const raw = String(req.url || "").split("?")[0];
+    let dec;
+    try { dec = decodeURIComponent(raw); } catch (_) { return null; }
+    const out = [dec];
+    const matched = req.routeOptions && req.routeOptions.url;
+    if (typeof matched === "string" && matched && matched !== dec) out.push(matched);
+    if (raw !== dec) out.push(raw);
+    return out;
+  }
+  fastify.addHook("onRequest", async (req, reply) => {
+    if (gatePaths(req) === null) return reply.code(400).header("cache-control", "no-store").send({ error: "bad request path" });
+  });
   const AI_COST_PATHS = new Set(["/api/ask", "/api/ai-report"]);
   fastify.addHook("onRequest", async (req, reply) => {
-    const u = req.url.split("?")[0];
-    if (req.method === "POST" && AI_COST_PATHS.has(u)) {
+    const ps = gatePaths(req) || [];
+    if (req.method === "POST" && ps.some((u) => AI_COST_PATHS.has(u))) {
       if (!reqAuthed(req))
         return reply.code(401).header("cache-control", "no-store").send({ error: "unauthorized", detail: "AI endpoints require authentication — set SITE_PASSWORD to enable them" });
       // DELIBERATE REVERSAL of the locked-by-default posture: AI generation is now OPEN to every
@@ -923,8 +951,15 @@ async function buildServer() {
   });
   // One place computes "who is asking" for the AI-cost routes: the signed xyzown handle keys the
   // per-user quota; admin = AI unlock OR admin view (both are ADMIN_PASSWORD-derived cookies).
-  const aiWho = (req, reply) => ({ owner: ownerFor(req, reply),
-    admin: aiUnlockOk(getCookie(req, "xyzai")) || isAdmin(req) });
+  // (build 2026.09.25-116) The per-user AI quota keys on the ACCOUNT. A caller without one (the
+  // legacy shared password, Basic auth) keys on its IP instead of the xyzown cookie — that cookie is
+  // minted fresh for any request without it, so it let a cookie-less script reset its own caps
+  // every call and drain the group's shared pools.
+  const aiWho = (req, reply) => {
+    const me = meOf(req);
+    return { owner: me ? ownerFor(req, reply) : "ip:" + clientIp(req),
+      admin: aiUnlockOk(getCookie(req, "xyzai")) || isAdmin(req) };
+  };
 
   // Optional shared-password gate. Disabled unless SITE_PASSWORD is set. Two ways in:
   //   1. Session cookie from the login page (30-day HMAC token) — the normal browser path.
@@ -987,7 +1022,9 @@ async function buildServer() {
   // never be closed by a flag write. Routes no feature claims pass through untouched — see the
   // ASYMMETRY note in compute.js before changing that.
   fastify.addHook("onRequest", async (req, reply) => {
-    const blocked = featureGateFor(req.method, req.url, poller.getFlags(), isAdmin(req));
+    const flags = poller.getFlags(), adm = isAdmin(req);
+    let blocked = null;
+    for (const p of gatePaths(req) || []) { blocked = featureGateFor(req.method, p, flags, adm); if (blocked) break; }
     if (!blocked) return;
     // Same lifecycle rule as the site gate above: RETURN the reply or the handler still runs and
     // double-sends. 403 not 404 — hiding the route's existence is the client's job (it never renders
@@ -1360,9 +1397,13 @@ async function buildServer() {
     const me = meOf(req);
     if (!me) return reply.code(401).send({ ok: false, error: "sign in first" });
     const b = req.body || {};
+    // (build 2026.09.25-116) the current-password check spends the same per-IP damper as /login: a
+    // stolen session must not become an unmetered guessing oracle for the member's real password
+    const ip = clientIp(req);
+    { const lockedMin = loginLockedFor(ip); if (lockedMin) return reply.code(429).send({ ok: false, error: `too many attempts — locked for ${lockedMin} min` }); }
     if (pwBusy(reply)) return PW_BUSY;
     const r = await withPw(() => ACCOUNTS.login(me.handle, String(b.current == null ? "" : b.current)));
-    if (!r.ok) return reply.code(403).send({ ok: false, error: "current password is wrong", field: "current" });
+    if (!r.ok) { loginFail(ip); return reply.code(403).send({ ok: false, error: "current password is wrong", field: "current" }); }
     const set = await withPw(() => ACCOUNTS.setPassword(me.uid, b.password));
     if (!set.ok) return reply.code(400).send({ ok: false, error: set.error, field: "password" });
     signIn(reply, req, set.user, set.token);   // keep THIS device signed in; the epoch bump drops the rest
@@ -1858,7 +1899,7 @@ async function buildServer() {
     try { buf = Buffer.from(String(b.data || ""), "base64"); }
     catch (_) { return reply.code(400).send({ ok: false, error: "that upload was malformed" }); }
     const r = ACCOUNTS.putFile(me.uid, one(b.thread), str(b.name), buf);
-    return reply.code(r.ok ? 200 : 400).send(r);
+    return reply.code(r.ok ? 200 : r.retry ? 429 : 400).send(r);   // (-116) the upload budget answers 429
   });
   // Downloads are membership-checked, never id-checked: a forwarded link is not an access grant.
   // Only the four raster formats we verified by magic bytes render inline; everything else — SVG
@@ -1879,7 +1920,7 @@ async function buildServer() {
       .header("content-disposition", dispo + "; filename*=UTF-8''" + safe)
       .header("x-content-type-options", "nosniff")
       .header("content-security-policy", "default-src 'none'; sandbox")
-      .header("cache-control", "private, max-age=86400")
+      .header("cache-control", "private, no-cache")   // (-116) revalidated: a deleted file or a removed member stops being served, not a day later
       .send(fs.createReadStream(r.path));
   });
   // The calls record: every price-stamped message, with the move since it was sent. This is what
@@ -1969,8 +2010,10 @@ async function buildServer() {
         // The thread is gone, so dmPoke (which resolves members) has nobody to resolve — wake the
         // collected members directly with a `gone` hint so their rails drop it now, not at the
         // next full load.
-        const frame = "data: " + JSON.stringify({ dm: { seq: ACCOUNTS.msgSeq(), gone: r.deleted } }) + "\n\n";
-        for (const uid of r.peers || []) { const set = sseByUid.get(uid); if (set) for (const e2 of set) sseWrite(e2, frame); }
+        for (const uid of r.peers || []) { const set = sseByUid.get(uid);
+          if (!set) continue;
+          const frame = "data: " + JSON.stringify({ dm: { seq: ACCOUNTS.msgSeqFor(uid), gone: r.deleted } }) + "\n\n";   // (-116) each member's own cursor
+          for (const e2 of set) sseWrite(e2, frame); }
       }
     }
     // Close and clear are per-viewer state: no dmPoke — nobody else's screen changed.
@@ -2795,7 +2838,9 @@ async function buildServer() {
     // match on the whole query: a stale ?v= from last build fails the match and falls back to
     // revalidation, never to a year of wrong code.
     const q = req.url.indexOf("?");
-    if (q >= 0 && req.url.slice(q + 1) === "v=" + VERSION && reply.statusCode === 200 && !req.url.startsWith("/api/"))
+    // (-116) the decoded path decides "is this the API": /%61pi/... is the API too, and must never be cached a year
+    const gp = gatePaths(req);
+    if (q >= 0 && req.url.slice(q + 1) === "v=" + VERSION && reply.statusCode === 200 && gp && !gp.some((u) => u.startsWith("/api/")))
       reply.header("cache-control", "public, max-age=31536000, immutable");
     // HTML pages: mint the nonce, stamp it into every slot and name it in the report-only policy.
     // Streams (static files) and JSON never carry the slot, so they pass through untouched. Last
@@ -2961,10 +3006,15 @@ async function buildServer() {
   const DOCS_HTML = loadDocPage(path.join(__dirname, "public", "docs.html"));
   const serveDocs = (req, reply) => {
     if (!DOCS_HTML) return reply.code(404).header("cache-control", "no-store").send({ error: "docs not available" });
-    const boot = bootScript(isAdmin(req), meOf(req));
+    const adm = isAdmin(req), boot = bootScript(adm, meOf(req));
+    // (build 2026.09.25-116) A section about a tab this caller cannot see is removed HERE, not hidden
+    // by the client: the markup a member receives never documents an operator-only tab.
+    const flags = poller.getFlags();
+    let html = DOCS_HTML.replace(/<section id="[^"]*" data-feature="([^"]+)"[^>]*>[\s\S]*?<\/section>\n?/g,
+      (m, key) => (featureVisible(flags, key, adm) ? m : ""));
+    if (html.includes(FLAG_SLOT)) html = html.split(FLAG_SLOT).join(boot);
     // Audience-specific like the shell, hence no-store like the shell.
-    return reply.header("cache-control", "no-store").type("text/html; charset=utf-8")
-      .send(DOCS_HTML.includes(FLAG_SLOT) ? DOCS_HTML.split(FLAG_SLOT).join(boot) : DOCS_HTML);
+    return reply.header("cache-control", "no-store").type("text/html; charset=utf-8").send(html);
   };
   fastify.get("/docs", serveDocs);
   fastify.get("/docs.html", serveDocs);
@@ -2975,7 +3025,8 @@ async function buildServer() {
   const DOC_REF_HTML = {};
   for (const [k, f] of Object.entries(DOC_REFS)) { const h = loadDocPage(path.join(__dirname, "docs", f)); if (h) DOC_REF_HTML[k] = h; }
   fastify.get("/docs/ref/:page", (req, reply) => {
-    const h = DOC_REF_HTML[String(req.params.page || "")];
+    const k = String(req.params.page || "");
+    const h = Object.hasOwn(DOC_REF_HTML, k) ? DOC_REF_HTML[k] : null;   // (-116) never a prototype key
     if (!h) return reply.code(404).header("cache-control", "no-store").send({ error: "no such reference page", pages: Object.keys(DOC_REF_HTML) });
     return reply.header("cache-control", "no-cache").type("text/html; charset=utf-8").send(h);
   });
@@ -3321,6 +3372,8 @@ async function buildServer() {
   // Manual per-ticker refresh: cooldown is the group's rate limit, enforced in the poller —
   // the client's disabled button is convenience, this check is the gate. Cooldown maps to 429.
   fastify.post("/api/derivs/refresh", { bodyLimit: 8 * 1024 }, async (req, reply) => {
+    // (-116) authz in the handler too: the manifest gate (derivs.refresh) was this route's only wall
+    if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "forbidden" });
     const coin = String((req.body && req.body.coin) || "");
     const r = await poller.refreshDerivs(coin);
     if (!r.ok && r.error === "cooldown") return reply.code(429).send(r);
@@ -3406,7 +3459,7 @@ async function buildServer() {
   // modal) — [t,o,h,l,c] bars plus the live mark, so the client's plotted EMAs reproduce the
   // board's to the last bit. Unknown tf values fall through to the legacy hourly shape.
   const grid5m = (v, up) => (v != null && v !== "" && Number.isFinite(+v) ? (up ? Math.ceil(+v / 300000) : Math.floor(+v / 300000)) * 300000 : "");
-  const intOr = (v) => (v != null && v !== "" && Number.isFinite(+v) ? Math.trunc(+v) : "");
+  const candleCap = (v) => Math.max(200, Math.min(6000, Number(v) || 3000));   // the poller's own clamp, applied before the key
   fastify.get("/api/candles", (req, reply) => {
     const coin = (req.query && req.query.coin) || "";
     const days = req.query && req.query.days;
@@ -3422,7 +3475,14 @@ async function buildServer() {
     // because the perps trade (and the capture lane records) around the clock.
     if (req.query && (req.query.res === "5m" || req.query.res === "5")) {
       // from/to snapped to the 5m grid BEFORE the key (a 1ms change used to mint a fresh entry).
-      const from = grid5m(req.query.from, false), to = grid5m(req.query.to, true), max = intOr(req.query.max);
+      // (build 2026.09.25-116) and clamped exactly as getCandles5m clamps them, so two requests
+      // that do the SAME work share one key: max to 200..6000, to at most an hour ahead, from within
+      // 370 days of it. Raw values used to mint a fresh entry (and a fresh 100k-row read) per spelling.
+      const hiCap = Math.ceil((Date.now() + 3600e3) / 300000) * 300000;
+      let from = grid5m(req.query.from, false), to = grid5m(req.query.to, true);
+      if (to !== "") to = Math.min(to, hiCap);
+      if (from !== "") from = Math.min(Math.max(from, Math.floor(((to === "" ? hiCap : to) - 370 * 86400e3) / 300000) * 300000), hiCap);
+      const max = candleCap(req.query.max);
       const key = "candles5m|" + coin + "|" + from + "|" + to + "|" + max + "|" + (poller.getM5Stamp ? poller.getM5Stamp(coin) : 0);
       return serveKeyed(req, reply, key, () => poller.getCandles5m(coin, from, to, max), { coin, res: "5m", enabled: false, candles: [], coverage: { enabled: false } });
     }
@@ -3432,7 +3492,10 @@ async function buildServer() {
     // forward on the closed-bar guard. Same serveKeyed discipline; the ETag folds in the
     // interval's own last-captured-bar stamp so a freshly closed day mints a fresh key.
     if (req.query && (req.query.res === "4h" || req.query.res === "12h" || req.query.res === "1d")) {
-      const iv = req.query.res, from = req.query.from, to = req.query.to, max = req.query.max;
+      // (-116) snapped to the interval's own grid and the cap clamped before keying, like res=5m
+      const iv = req.query.res, w = { "4h": 4 * 3600e3, "12h": 12 * 3600e3, "1d": 86400e3 }[iv];
+      const snap = (v) => (v != null && v !== "" && Number.isFinite(+v) ? Math.floor(+v / w) * w : "");
+      const from = snap(req.query.from), to = snap(req.query.to), max = candleCap(req.query.max);
       const key = "candlesdeep|" + iv + "|" + coin + "|" + (from || "") + "|" + (to || "") + "|" + (max || "") + "|" + (poller.getDeepStamp ? poller.getDeepStamp(coin, iv) : 0);
       return serveKeyed(req, reply, key, () => poller.getCandlesDeep(coin, iv, from, to, max), { coin, res: iv, enabled: false, candles: [], coverage: { enabled: false } });
     }
@@ -3655,7 +3718,7 @@ async function buildServer() {
   // 8 KB body cap — the payload is just { password }; anything larger is malformed or hostile (413).
   fastify.post("/api/ai-reset", { bodyLimit: 8 * 1024 }, async (req, reply) => {
     reply.header("cache-control", "no-store");
-    const r = poller.resetAiDay(String((req.body || {}).password || ""), req.ip);
+    const r = poller.resetAiDay(String((req.body || {}).password || ""), clientIp(req));
     return reply.code(r.ok ? 200 : (r.error === "rate" ? 429 : r.error === "not-configured" ? 503 : 403)).send(r);
   });
   // Admin AI unlock: verify ADMIN_PASSWORD (same constant-time compare + shared lockout as the
@@ -3663,7 +3726,7 @@ async function buildServer() {
   // there is no header/script path. Body is just { password } — 8 KB cap like the reset route.
   fastify.post("/api/ai-unlock", { bodyLimit: 8 * 1024 }, async (req, reply) => {
     reply.header("cache-control", "no-store");
-    const r = poller.checkAdminPassword(String((req.body || {}).password || ""), req.ip);
+    const r = poller.checkAdminPassword(String((req.body || {}).password || ""), clientIp(req));
     if (!r.ok) return reply.code(r.error === "rate" ? 429 : r.error === "not-configured" ? 503 : 403).send(r);
     setAiUnlockCookie(reply, req, signAiUnlock(Date.now() + AI_UNLOCK_MS));
     // The terminal path is also an escalation path: someone who proves ADMIN_PASSWORD here gets the
@@ -3740,11 +3803,13 @@ async function buildServer() {
   // unknown or non-fund symbol returns an honest { ok:false, error } the card renders as-is.
   fastify.get("/api/fund/:t", async (req, reply) => {
     reply.header("cache-control", "no-store");
-    return poller.fundamentals(req.params.t || "");
+    const r = await poller.fundamentals(req.params.t || "");
+    return r && r.retry ? reply.code(429).header("retry-after", "60").send(r) : r;   // (-116) the EDGAR miss budget
   });
   fastify.get("/api/etf/:t", async (req, reply) => {
     reply.header("cache-control", "no-store");
-    return poller.etfHoldings(req.params.t || "");
+    const r = await poller.etfHoldings(req.params.t || "");
+    return r && r.retry ? reply.code(429).header("retry-after", "60").send(r) : r;   // (-116) the EDGAR miss budget
   });
   // ===== SSE version push (build 2026.07.29-07, Phase 2 of the perf batch) =====================
   // Pushes VERSIONS, never payloads: `{dataTs, alertVer, v}` on content-clock or alert-seq change.
@@ -3805,7 +3870,7 @@ async function buildServer() {
   function sseHelloFrame(me) {
     const s = poller.getSnapshot();
     return "data: " + JSON.stringify({ dataTs: s ? s.dataTs : 0, alertVer: s ? s.alertVer : 0,
-      v: VERSION, dm: me ? { seq: ACCOUNTS.msgSeq() } : undefined }) + "\n\n";
+      v: VERSION, dm: me ? { seq: ACCOUNTS.msgSeqFor(me.uid) } : undefined }) + "\n\n";
   }
   const sseWrite = (entry, frame) => sseWriteTo(entry, frame, sseDetach);
   let sseLastTs = -1, sseLastAlert = -1;
@@ -3831,10 +3896,13 @@ async function buildServer() {
   function dmPoke(threadId, extra) {
     const peers = ACCOUNTS.threadPeers(threadId);
     if (!peers.length) return;
-    const frame = "data: " + JSON.stringify({ dm: Object.assign({ seq: ACCOUNTS.msgSeq() }, extra || {}) }) + "\n\n";
     for (const uid of peers) {
       const set = sseByUid.get(uid);
-      if (set) for (const e of set) sseWrite(e, frame);
+      if (!set) continue;
+      // (-116) each peer's OWN visible max — a site-wide counter told everyone when, and how much,
+      // everyone else was messaging
+      const frame = "data: " + JSON.stringify({ dm: Object.assign({ seq: ACCOUNTS.msgSeqFor(uid) }, extra || {}) }) + "\n\n";
+      for (const e of set) sseWrite(e, frame);
     }
   }
 

@@ -5031,7 +5031,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (!a || a.id == null || !a.headline) continue;
       const pub = (typeof a.datetime === "number" ? a.datetime : 0) * 1000;
       out.push({ id: a.id, tk: tk || null, h: String(a.headline).slice(0, 220),
-        src: a.source ? String(a.source).slice(0, 40) : null, url: a.url || null, pub,
+        src: a.source ? String(a.source).slice(0, 40) : null, url: /^https?:\/\//i.test(String(a.url || "")) ? String(a.url).slice(0, 1000) : null, pub,   // (-116) web links only — a feed item is never a javascript: href
         sm: a.summary ? String(a.summary).slice(0, 400) : null });   // transient: relevance gating only, stripped before merge
     }
     return out;
@@ -5749,6 +5749,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     try {
       const res = await extFetch(url, { headers: Object.assign({ "user-agent": SEC_UA, accept: kind === "xml" ? "application/xml" : "application/json" }, extraHeaders || {}), signal: ac.signal });
       if (!res.ok) return { ok: false, error: "HTTP " + res.status };
+      // (build 2026.09.25-116) a declared body past 64 MB is refused before it is read: the largest
+      // real companyfacts file is a fraction of that, and the parse is synchronous
+      const len = +(res.headers && res.headers.get ? res.headers.get("content-length") : 0) || 0;
+      if (len > 64 * 1024 * 1024) return { ok: false, error: "response too large" };
       return { ok: true, body: kind === "xml" ? await res.text() : await res.json() };
     } catch (e) { return { ok: false, error: "fetch failed: " + (e && e.message) }; } finally { clearTimeout(t); }
   }
@@ -5776,11 +5780,23 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   const cikPad = (cik) => String(cik).padStart(10, "0");
   function extCached(cache, key) { const c = cache.get(key);
     if (c && Date.now() - c.at < (c.res && c.res.ok ? FUND_TTL : EXT_ERR_TTL)) return c.res; return null; }
+  // (build 2026.09.25-116) Cache MISSES are what cost: each is a multi-MB EDGAR pull and parse, and
+  // sec.gov blocks an IP past its fair-access rate — which would take the Form 4, 13F and filings
+  // lanes down with it. A global bucket of misses per minute (hits and in-flight joins are free),
+  // and the cache evicts its oldest entry instead of emptying itself at 200 (cycling 201 symbols
+  // used to force every one of them to be fetched again).
+  const EXT_MISS_PER_MIN = 20;
+  let extMissLog = [];
   function extRun(cache, key, flightKey, work) {
     const hit = extCached(cache, key); if (hit) return Promise.resolve(hit);
     if (extInflight.has(flightKey)) return extInflight.get(flightKey);
-    const p = work().then((res) => { cache.set(key, { at: Date.now(), res });
-      if (cache.size > 200) cache.clear(); return res; })
+    const nowM = Date.now();
+    extMissLog = extMissLog.filter((t) => nowM - t < 60000);
+    if (extMissLog.length >= EXT_MISS_PER_MIN) return Promise.resolve({ ok: false, error: "too many new lookups right now — try again in a minute", retry: true });
+    extMissLog.push(nowM);
+    const p = work().then((res) => { cache.delete(key); cache.set(key, { at: Date.now(), res });
+      while (cache.size > 200) cache.delete(cache.keys().next().value);
+      return res; })
       .finally(() => extInflight.delete(flightKey));
     extInflight.set(flightKey, p); return p;
   }
@@ -6777,11 +6793,21 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   const housePtrUrl = (y, docId) => HOUSE_DISC + "ptr-pdfs/" + y + "/" + docId + ".pdf";
   // Whole-entry read, for the index. The 13F lane streams because its TSV inflates to ~1.2GB; an
   // index is a few MB and XML is not line-oriented, so this one materializes. Same ZIP primitives.
+  // (build 2026.09.25-116) A filed PDF is third-party bytes: a declared body past 25 MB is refused
+  // before it is read (real PTRs are a few hundred KB; a scanned one a few MB), and one that arrives
+  // bigger anyway is refused after. An empty buffer reads as "not a PDF" to every caller.
+  async function pdfBody(res) {
+    const PDF_MAX = 25 * 1024 * 1024;
+    const len = +(res.headers && res.headers.get ? res.headers.get("content-length") : 0) || 0;
+    if (len > PDF_MAX) return Buffer.alloc(0);
+    const b = Buffer.from(await res.arrayBuffer());
+    return b.length > PDF_MAX ? Buffer.alloc(0) : b;
+  }
   function zipEntryText(buf, e) {
     const raw = t13fZipSlice(buf, e);
     if (e.method === 0) return raw.toString("utf8");
     if (e.method !== 8) throw new Error("ZIP: unsupported compression method " + e.method + " on " + e.name);
-    return require("zlib").inflateRawSync(raw).toString("utf8");
+    return require("zlib").inflateRawSync(raw, { maxOutputLength: 256 * 1024 * 1024 }).toString("utf8");   // (-116) a bomb throws, never fills memory
   }
   // Date shapes seen or plausible in the index, normalized to ISO. A shape not listed here returns
   // "" rather than a guessed date — and the ingest COUNTS those and samples the raw text, because
@@ -7125,7 +7151,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           finally { clearTimeout(to); }
           if (!res || !res.ok) { store.congressBumpTry(f.id); failed++;
             if (!first) first = f.id + " → HTTP " + (res ? res.status : "no response"); continue; }
-          const buf = Buffer.from(await res.arrayBuffer());
+          const buf = await pdfBody(res);
           // A 200 whose body is not a PDF is a FETCH problem — a redirect, an error page, a login
           // wall — and must never be recorded as "scanned". The first cut did exactly that, which
           // marked the row permanently unreadable and made a wrong URL look like a paper filing.
@@ -7239,7 +7265,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           try { res = await extFetch(f.url, { headers: { "user-agent": SEC_UA }, signal: ac.signal }); }
           finally { clearTimeout(to); }
           if (!res || !res.ok) { failed++; if (!first) first = f.id + " \u2192 HTTP " + (res ? res.status : "no response"); continue; }
-          const buf = Buffer.from(await res.arrayBuffer());
+          const buf = await pdfBody(res);
           const imgs = pdfImages(buf).filter((i) => i.ready);
           if (!imgs.length) { store.congressNote(f.id, "ocr-no-usable-image"); empty++; continue; }
           let text = "";
@@ -7320,7 +7346,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (!res) return { ok: false, url, error: "no response" };
       const ct = res.headers && res.headers.get ? res.headers.get("content-type") : null;
       if (!res.ok) return { ok: false, url, status: res.status, ct, error: "HTTP " + res.status };
-      const buf = Buffer.from(await res.arrayBuffer());
+      const buf = await pdfBody(res);
       const head = buf.subarray(0, 64).toString("latin1");
       const isPdf = buf.subarray(0, 5).toString("latin1") === "%PDF-";
       const out = { ok: true, build: version, url, status: res.status, ct, bytes: buf.length, isPdf,
@@ -10896,10 +10922,13 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const admin = !!(who && who.admin), owner = (who && who.owner) || null;
     const withBudget = (r) => Object.assign(r, { askPerDay: ASK_REPORTS_PER_DAY, askDayLeft: askDayLeft() },
       admin ? { admin: true } : aiUserQuota(owner));
-    q = String(q || "").trim();
+    // (build 2026.09.25-116) bounded before anything reads them: a terminal question is a sentence,
+    // and the scope is one of two words — never a free-form object riding into the prompt
+    q = String(q || "").trim().slice(0, 1000);
     if (!q) return withBudget({ ok: false, error: "empty question" });
     if (!AI_KEY() && !aiFetch) return withBudget({ ok: false, disabled: true, error: "AI fallback needs an API key on the server (OPENAI_API_KEY / ANTHROPIC_API_KEY)" });
-    ctx = ctx || {};
+    ctx = Object.assign({}, ctx && typeof ctx === "object" ? ctx : {});
+    ctx.scope = ctx.scope === "stocks" || ctx.scope === "crypto" ? ctx.scope : null;
     // Session history, sanitized hard: caps on count and length, strings only. Statelessness was
     // the terminal's original sin — "not what I asked" arrived alone and the analyst truthfully
     // said it could only see those four words. The transcript rides every call now.
@@ -10910,7 +10939,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     // The cache key carries the last prior exchange: the same literal words are a DIFFERENT
     // question after a different conversation ("not what I asked" must never serve another
     // session's cached complaint).
-    const cacheKey = normQ + "|h:" + (hist.length ? hist[hist.length - 1].q.toLowerCase().replace(/\s+/g, " ").slice(0, 80) : "");
+    // (-116) and it is the ASKER's: the context rides from the client, so a shared entry let one
+    // member's steered context answer another member's identical words
+    const cacheKey = (owner || "-") + "|" + (ctx.scope || "") + "|" + (ctx.mode === "analyst" || ctx.mode === "planner" ? ctx.mode : "")
+      + "|" + normQ + "|h:" + (hist.length ? hist[hist.length - 1].q.toLowerCase().replace(/\s+/g, " ").slice(0, 80) : "");
     const cached = askCache.get(cacheKey);
     if (cached && Date.now() - cached.at < ASK_CACHE_TTL) return withBudget(Object.assign({ cached: true }, cached.res));   // a cache hit never burns budget
     const now = Date.now();
@@ -12414,14 +12446,17 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if ((r.owner || "") === owner) return { ok: false, error: "already-yours" };
     const now = Date.now();
     const prev = adoptCodes.get(key);
-    let sends = 1;
+    let sends = 1, tries = 0;
     if (prev && now - prev.t < ADOPT_TTL) {
-      if (prev.sends >= ADOPT_MAX_SENDS) return { ok: false, error: "throttled" };
-      sends = prev.sends + 1;
+      // (build 2026.09.25-116) a chat whose guesses ran out stays locked for the window, and the
+      // guess count survives a re-send — re-requesting used to hand out a fresh five guesses, which
+      // made the six-digit code a matter of patience
+      if (prev.locked || prev.sends >= ADOPT_MAX_SENDS) return { ok: false, error: "throttled" };
+      sends = prev.sends + 1; tries = prev.tries || 0;
     }
     // Digits, uniform: it is typed off a phone screen, and randomInt avoids the modulo bias.
     const code = String(require("crypto").randomInt(0, 1000000)).padStart(6, "0");
-    adoptCodes.set(key, { code, owner, t: now, sends, tries: 0 });
+    adoptCodes.set(key, { code, owner, t: now, sends, tries });
     return { ok: true, code, name: r.name, ttlMin: Math.round(ADOPT_TTL / 60000) };
   }
   function pushAdoptVerify(chat, owner, given) {
@@ -12430,8 +12465,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const e = adoptCodes.get(key);
     if (!e || e.owner !== owner) return bad;
     if (Date.now() - e.t > ADOPT_TTL) { adoptCodes.delete(key); return bad; }
+    if (e.locked) return bad;
     e.tries++;
-    if (e.tries > ADOPT_MAX_TRIES) { adoptCodes.delete(key); return bad; }
+    if (e.tries > ADOPT_MAX_TRIES) { e.locked = true; e.code = null; return bad; }   // (-116) locked until the window lapses, never reset
     const a = Buffer.from(String(given || "").replace(/\s/g, "")), b = Buffer.from(e.code);
     let match = false;
     try { match = a.length === b.length && require("crypto").timingSafeEqual(a, b); } catch (_) {}

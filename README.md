@@ -10,6 +10,10 @@ instant, and the per-IP rate limit stops being a per-user problem.
 
 ## What it does
 
+The complete, current route reference — every endpoint with who may call it and its limits — is
+§13 *HTTP API* of the manual (`/docs#api`, `public/docs.html`); a test fails the build when a route
+is added without it. The list below is the tour.
+
 - **`/api/snapshot`** — the market table: price, funding, %-changes, reference prices,
   momentum/vol features, and open-interest deltas for every market. Rebuilt every ~15s.
 - **`/api/daily`** — daily closes per market, used client-side for correlation, beta and
@@ -36,6 +40,37 @@ instant, and the per-IP rate limit stops being a per-user problem.
 - **`/api/earnings/setups`** — pre-earnings setup cards for names reporting within 5 sessions:
   reaction study + positioning into the print + run-up + implied vs typical, with a rule-composed
   verdict line (build 2026.09.24-100; see the entry below).
+- **Security pass** (build 2026.09.25-116) — a full audit of every route, the client's rendering of
+  user and feed text, and every outbound request. Fixed:
+  - **Gate bypass (high)**: the feature gate and the AI-login hook compared the raw URL while the
+    router decodes `%XX`, so `/api/%63ongress` or `/api/%61sk` reached operator-only data and the
+    AI routes. Both gates now judge the decoded path and the route that will actually run; an
+    undecodable path is a 400. The immutable-cache upgrade uses the same decoded path.
+  - **Browser push SSRF**: a subscription endpoint must be a real push service (FCM, Mozilla,
+    Windows, Apple — https, port 443, no IP literals) and never re-binds to another account.
+  - **Upload budget**: 30 uploads or 96 MB per member per 10 minutes, and uploads pause when the
+    volume drops under 512 MB free (attachments share it with the database).
+  - **AI**: quotas for callers without an account key on the IP (the self-minted `xyzown` cookie
+    let a script reset its caps); questions capped at 1,000 characters and the scope to
+    `stocks|crypto`; the ask cache is per member; the unlock/reset lockout keys on the client IP.
+  - **Codes**: the password-reset guess budget is per account per hour (a re-send refilled it), and
+    the Telegram adopt code keeps its guesses across re-sends and locks for the window.
+  - **Accounts**: the current-password check on a password change spends the login damper; the
+    break-glass password compare no longer leaks its length; a member who left a thread can no
+    longer edit their old messages or move their calls there (deleting their own stays allowed).
+  - **Privacy**: the DM sync/history cursor and the live stream carry each member's own newest
+    message id, not the site-wide count; `/docs` leaves out sections about tabs closed to the caller;
+    attachments revalidate on every view.
+  - **Resource caps**: candle cache keys are clamped before keying; SEC pull-throughs share 20 new
+    lookups a minute with oldest-first eviction and a 64 MB response cap; filed PDFs are capped at
+    25 MB and every deflate stream at 32 MB (128 MB per document); the House index ZIP inflates under
+    a cap.
+  - **Smaller**: `POST /api/derivs/refresh` re-checks admin in the handler; the terminal's `news`
+    links go through `safeHref` and feed URLs must be http(s); CSP report fields are stripped of
+    control characters; `/docs/ref/constructor` and friends are 404s; `TRUST_PROXY` defaults on only
+    on Railway.
+  - Not changed, on purpose: the site stays open when `SITE_PASSWORD` is unset (documented
+    posture; the boot log warns); command-result badges on chat posts remain client-labelled.
 - **EMA Touch tab** (`/api/ema-feed`, build 2026.09.25-115) — every name's **50 and 200 EMA on the
   4H and 1D** candles: which are touching a line right now, and which are about to. Scanned
   server-side once a minute (`poller.emaScan`), full roster, both universes. The line is the
@@ -1251,10 +1286,11 @@ session; plain redeploys don't. Eight wrong passwords from one IP lock that IP o
 15 minutes — HTTP Basic attempts count against the same lock. Scripts and `curl` can skip
 the cookie and use HTTP Basic (`curl -u friend:PASSWORD .../api/snapshot`), which is still
 accepted. `/api/health` stays open for Railway's healthcheck. Leave `SITE_PASSWORD` unset
-to stay open. `TRUST_PROXY=1` (the default) keys that lock on the **last** `X-Forwarded-For`
-element, which assumes exactly one trusted proxy (Railway's edge) appends it — set
-`TRUST_PROXY=0` when the service is exposed directly or sits behind a proxy that does not,
-or every caller can pick its own key.
+to stay open. `TRUST_PROXY=1` keys that lock on the **last** `X-Forwarded-For` element, which
+assumes exactly one trusted proxy (Railway's edge) appends it. Unset, it is **on only when
+Railway's environment variables are present** (build 2026.09.25-116; it used to default on
+everywhere) — set `TRUST_PROXY=0` when the service is exposed directly or sits behind a proxy
+that does not append, or every caller can pick its own key.
 
 ## Tuning (optional)
 

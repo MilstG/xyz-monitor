@@ -14,6 +14,7 @@ process.env.SITE_PASSWORD = "shared-door-pw";
 process.env.SITE_USER = "friend";
 process.env.ADMIN_PASSWORD = "break-glass-pw-1";
 process.env.XYZ_QUIET = "1";
+process.env.TRUST_PROXY = "1";   // -116: unset now means off away from Railway; these tests exercise the edge-appended XFF path
 process.env.XYZ_NO_NET = "1";
 delete process.env.TG_BOT_TOKEN; delete process.env.FINNHUB_TOKEN; delete process.env.FRED_KEY;
 const { buildServer } = require("../server.js");
@@ -958,7 +959,7 @@ test("retest study -96: /api/retest-study rides the Backtest tab's gate, answers
   assert.equal(d.scope, "stocks"); assert.equal(d.params.def, "touch"); assert.equal(d.params.cd, 10);
   assert.deepEqual(d.params.horizons, [1, 3, 5, 10, 20]);
   // (-107) the build and a per-boot nonce ride the tag: a restart never 304s onto another body
-  assert.match(r.headers.etag, /^W\/"rt-2026\.09\.25-115-[0-9a-z]+-stocks-touch-10-0-[0-9a-z]+-[^"]+"$/);
+  assert.match(r.headers.etag, /^W\/"rt-2026\.09\.25-116-[0-9a-z]+-stocks-touch-10-0-[0-9a-z]+-[^"]+"$/);
   assert.equal(r.headers["cache-control"], "no-cache");
   assert.equal((await get("/api/retest-study?u=stocks&def=touch&cd=10", gus, { "if-none-match": r.headers.etag })).statusCode, 304);
   const bad = JSON.parse((await get("/api/retest-study?u=moon&def=%3Cx%3E&cd=999", gus)).body);
@@ -967,6 +968,43 @@ test("retest study -96: /api/retest-study rides the Backtest tab's gate, answers
   assert.notEqual(cx.headers.etag, r.headers.etag, "the universes never share a validator");
   const C = require("../src/compute");
   assert.ok(C.FEATURES.find((f) => f.key === "backtest").routes.includes("/api/retest-study"), "the manifest owns the route");
+});
+
+// ===== build 2026.09.25-116: security pass — the gates judge the route that will RUN =============
+test("-116 gate bypass: a percent-encoded or re-spelled path is gated exactly like the plain one", async () => {
+  const cara = jar(); cara.absorb(await post("/login", { handle: "cara", password: "yet-another-long-pw" }));
+  // Plain spellings: a member is refused the admin tabs and the admin-only AI routes.
+  assert.equal((await get("/api/congress", cara)).statusCode, 403);
+  // The router decodes %XX before it matches, so these reach the SAME handlers — and must meet the
+  // same gate.
+  for (const u of ["/api/%63ongress", "/api/%69nsiders", "/api/%77hale", "/api/ema%2Dfeed", "/api/%68ousing"])
+    assert.equal((await get(u, cara)).statusCode, 403, u);
+  // The AI routes: the encoded spelling answers exactly what the plain one does for this caller.
+  for (const [plain, enc] of [["/api/ask", "/api/%61sk"], ["/api/ai-report", "/api/%61i-report"]]) {
+    const a = await post(plain, { q: "x" }, cara), e = await post(enc, { q: "x" }, cara);
+    assert.equal(e.statusCode, a.statusCode, enc + " answers like " + plain);
+  }
+  // Signed out, the AI-cost hook refuses before any handler runs — whichever spelling.
+  for (const u of ["/api/ask", "/api/%61sk"]) assert.equal((await post(u, { q: "x" })).statusCode, 401, u);
+  assert.equal((await get("/api/%E0%A4%A", cara)).statusCode, 400, "an undecodable path is refused, never guessed");
+});
+
+test("-116 hardening over the wire: docs strip gated sections, prototype keys 404, derivs refresh is operator-only, the password check is damped", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const cara = jar(); cara.absorb(await post("/login", { handle: "cara", password: "yet-another-long-pw" }));
+  // A tab the member cannot see is not documented in the markup they receive.
+  const dm = (await get("/docs", cara)).body, dg = (await get("/docs", gus)).body;
+  assert.ok(!dm.includes('id="tab-ematouch"') && !dm.includes('id="tab-congress"'), "member: operator-only sections are absent");
+  assert.ok(dm.includes('id="tab-markets"') || dm.includes('data-feature="markets"'), "member: public sections stay");
+  assert.ok(dg.includes('id="tab-ematouch"'), "operator: the section is there");
+  for (const k of ["constructor", "__proto__", "toString"]) assert.equal((await get("/docs/ref/" + k, cara)).statusCode, 404, k);
+  // derivs refresh: refused to a member however the path is spelled
+  for (const u of ["/api/derivs/refresh", "/api/derivs/%72efresh"]) assert.equal((await post(u, { coin: "BTC" }, cara)).statusCode, 403, u);
+  // the current-password check spends the login damper
+  const H = { "x-forwarded-for": "198.51.100.77" };
+  let last;
+  for (let i = 0; i < 9; i++) last = (await post("/api/account", { current: "wrong-" + i, password: "whatever-long-pw-1" }, cara, H)).statusCode;
+  assert.equal(last, 429, "wrong current passwords lock like wrong logins");
 });
 
 // ===== build 2026.09.25-115: the EMA Touch feed over the wire ========================================

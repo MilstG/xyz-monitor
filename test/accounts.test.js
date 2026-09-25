@@ -963,13 +963,13 @@ test("messages -66: web push subscriptions — stored per account, validated, de
   const { A, g, l } = await seedDesk();
   assert.ok(!A.webPushAdd(g.uid, { endpoint: "http://insecure/x", keys: { p256dh: "a", auth: "b" } }, "").ok, "plain-http endpoints are refused");
   assert.ok(!A.webPushAdd(g.uid, { endpoint: "https://push/x" }, "").ok, "keys are required");
-  assert.ok(A.webPushAdd(g.uid, { endpoint: "https://push.svc/one", keys: { p256dh: "a", auth: "b" } }, "ua").ok);
-  assert.ok(A.webPushAdd(g.uid, { endpoint: "https://push.svc/two", keys: { p256dh: "c", auth: "d" } }, "ua").ok);
+  assert.ok(A.webPushAdd(g.uid, { endpoint: "https://fcm.googleapis.com/fcm/send/one", keys: { p256dh: "a", auth: "b" } }, "ua").ok);
+  assert.ok(A.webPushAdd(g.uid, { endpoint: "https://fcm.googleapis.com/fcm/send/two", keys: { p256dh: "c", auth: "d" } }, "ua").ok);
   assert.equal(A.webPushFor(g.uid).length, 2, "a member may hold several devices");
-  A.webPushDrop(l.uid, "https://push.svc/one");
+  A.webPushDrop(l.uid, "https://fcm.googleapis.com/fcm/send/one");
   assert.equal(A.webPushFor(g.uid).length, 2, "another account cannot remove your subscription");
-  A.webPushDrop(g.uid, "https://push.svc/one");
-  A.webPushDropDead("https://push.svc/two");
+  A.webPushDrop(g.uid, "https://fcm.googleapis.com/fcm/send/one");
+  A.webPushDropDead("https://fcm.googleapis.com/fcm/send/two");
   assert.equal(A.webPushFor(g.uid).length, 0, "owner-drop and dead-drop both land");
 });
 

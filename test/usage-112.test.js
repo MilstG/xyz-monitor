@@ -410,5 +410,5 @@ test("-112 disclosure: the card, the member guide and README say sitewide (not l
   assert.ok(readme.includes("never text, tickers or filter values beyond the\n    allowlisted preset ids"));
   const mock = src("docs/xyz-monitor-usage-stats-mock.html");
   assert.ok(/Built in build 2026\.09\.24-112<\/em> \(roadmap item 2\)/.test(mock));
-  assert.ok(src("server.js").includes('const VERSION = "2026.09.25-115"'));
+  assert.ok(src("server.js").includes('const VERSION = "2026.09.25-116"'));
 });

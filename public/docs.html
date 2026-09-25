@@ -827,40 +827,133 @@ footer.docfoot{max-width:1320px;margin:0 auto;padding:18px 34px 40px;color:var(-
 <!-- ================================================================================ -->
 <section id="api">
 <h2>13. HTTP API</h2>
-<p>All JSON, under <code>/api</code>. Reads accept the session cookie or HTTP Basic; writes additionally refuse cross-site requests. Feature-gated routes return <code>403 {error:"feature-gated"}</code> when the tab that owns them is closed to you; a signed-out call is <code>401</code>. Cached payloads carry an ETag; the SSE stream tells a client when to re-fetch.</p>
+<p>Everything the site shows comes from these routes. All JSON, under <code>/api</code>, unless noted. The reference below lists every route the server registers; a test fails the build when a route is added without appearing here.</p>
+<h3>How a request is judged</h3>
+<ul>
+  <li><b>Site gate</b> — with <code>SITE_PASSWORD</code> set, every route needs a signed-in session (cookie) or HTTP Basic, except the doors and the few routes marked <i>Open</i>. Signed out is <code>401</code>. Once accounts exist, a shared-password session is sent to <code>/claim</code> (<code>401 {error:"claim-account"}</code>).</li>
+  <li><b>Feature gate</b> — a route owned by a tab or action in the feature manifest answers <code>403 {error:"feature-gated", feature}</code> when that feature is closed to you. The column below names the key and its default audience; the operator can change it in Admin › Features. The gate judges the <i>decoded</i> path and the route that will actually run, so a percent-encoded or re-spelled path meets the same gate; an undecodable path is <code>400</code>.</li>
+  <li><b>Operator</b> — routes marked <i>Operator</i> re-check the admin session inside the handler as well (<code>403</code>), whatever the feature flag says.</li>
+  <li><b>Account</b> — personal routes need a member account (not the shared password): messages, prefs, positions, usage, the adopt flow.</li>
+  <li><b>Writes</b> — every non-GET refuses a cross-site request (<code>Sec-Fetch-Site: cross-site</code> → <code>403</code>); cookies are <code>HttpOnly</code>, <code>SameSite=Lax</code>, <code>Secure</code> over HTTPS. Bodies are size-capped per route (<code>413</code> past it).</li>
+  <li><b>Limits</b> — a limited route answers <code>429</code>, usually with <code>Retry-After</code>. Per-IP limits key on the last <code>X-Forwarded-For</code> element only when <code>TRUST_PROXY</code> is on (see Configuration).</li>
+  <li><b>Caching</b> — cached payloads carry an ETag and revalidate (<code>304</code>); personal and operator bodies are <code>no-store</code>. <code>GET /api/events</code> (Server-Sent Events) tells a client when to re-fetch.</li>
+</ul>
+<p class="sec">Access column: <b>Open</b> = no credential · <b>Site</b> = behind the site gate · <b>Account</b> = a member account · <b>Operator</b> = the admin session, re-checked in the handler · <code>key</code> (default) = the feature key that gates it and who sees it by default.</p>
+
+<h3>Doors and open routes</h3>
 <div class="tw"><table>
-<tr><th>Route</th><th>Returns</th></tr>
-<tr><td><code>GET /api/health</code></td><td>Liveness, build, poll and feed timestamps, event-loop stats, the CSP report ledger (signed in). Open, no credential.</td></tr>
-<tr><td><code>GET /api/snapshot</code></td><td>The market table for both universes: price, funding, %-changes, reference prices, momentum, vol, OI deltas, note digests, earnings badges.</td></tr>
-<tr><td><code>GET /api/daily</code></td><td>Daily closes per market (correlation, beta, sparklines, backtest).</td></tr>
-<tr><td><code>GET /api/series?coin=</code> · <code>GET /api/candles?coin=&amp;days=</code></td><td>Per-market OI/funding history; hourly OHLCV (1–60 days).</td></tr>
-<tr><td><code>GET /api/events</code></td><td>The Server-Sent Events stream: data versions, alert sequence, DM sequence, prefs and position pokes.</td></tr>
-<tr><td><code>GET /api/analytics</code> · <code>/api/funding</code> · <code>/api/trend</code> · <code>/api/corr-crypto</code></td><td>The session studies; the funding heatmap; the EMA ladder; the crypto intraday correlation grid.</td></tr>
-<tr><td><code>GET /api/signals</code> · <code>/api/ledger</code> · <code>/api/triggers?since=</code> · <code>/api/actionable</code> · <code>/api/duel</code></td><td>Live signals; the claim ledger and records; the event stream (cursor-based); the Actionable board; the Score duel.</td></tr>
-<tr><td><code>GET /api/export/ledger</code></td><td>The ledger as CSV.</td></tr>
-<tr><td><code>GET /api/earnings</code> · <code>POST /api/earnings/void</code> · <code>POST /api/earnings/backfill</code></td><td>The calendar (upcoming + reported + reaction study); void a print (operator); run the backfill (operator).</td></tr>
-<tr><td><code>GET /api/news</code> · <code>GET|POST /api/news/channels</code></td><td>The tape; the Telegram channel list (write is operator).</td></tr>
-<tr><td><code>GET /api/housing</code> · <code>/api/liquidity</code></td><td>The FRED boards.</td></tr>
-<tr><td><code>GET /api/focus</code> · <code>GET|POST /api/focus/limits</code></td><td>Today's frozen list; the liquidity floors (operator).</td></tr>
-<tr><td><code>GET /api/whale</code> · <code>POST /api/whale/watch</code> · <code>GET /api/fund/:t</code> · <code>GET /api/etf/:t</code></td><td>13F watchlist, fund books and season; curate (operator); XBRL facts; N-PORT composition.</td></tr>
-<tr><td><code>GET|POST /api/congress</code> · <code>GET|POST /api/insiders</code></td><td>The lanes; POST is operator maintenance.</td></tr>
-<tr><td><code>GET /api/fundamentals</code> · <code>GET /api/derivs</code> · <code>POST /api/derivs/refresh</code></td><td>Finnhub financials; Coinalyze context; force a refresh (operator).</td></tr>
-<tr><td><code>GET|POST /api/notes</code></td><td>Notes (write needs <i>notes.write</i>).</td></tr>
-<tr><td><code>GET|POST /api/baskets</code> · <code>GET /api/ratio</code></td><td>Custom baskets; pair candles.</td></tr>
-<tr><td><code>GET /api/sector-audit</code> · <code>POST …/run|apply|revert|ack</code></td><td>The classification audit (operator).</td></tr>
-<tr><td><code>GET /api/ai-report?coin=</code> · <code>POST /api/ai-report</code> · <code>GET /api/ai-reports</code> · <code>GET /api/ai-status</code> · <code>GET /api/ai-sectors</code></td><td>Read a cached report; generate (metered); recent reports; budget and lock state; sector list for group reports.</td></tr>
-<tr><td><code>POST /api/ask</code></td><td>The terminal's AI fallback (metered).</td></tr>
-<tr><td><code>POST /api/ai-unlock</code> · <code>/api/ai-lock</code> · <code>/api/ai-reset</code></td><td>Operator: unlock unlimited AI for this caller, re-lock, reset the daily budget.</td></tr>
-<tr><td><code>GET /api/alerts</code> · <code>POST /api/alerts/link|claim|unlink|adopt|prefs|classes|test|brief-test</code> · <code>GET|POST /api/alerts/rules</code> · <code>GET /api/alerts/adoptable</code></td><td>Telegram recipients and everything in the bell panel.</td></tr>
-<tr><td><code>GET /api/dm</code> · <code>/api/dm/sync?since=</code> · <code>/api/dm/:id</code> · <code>/api/dm/search</code> · <code>/api/dm/calls</code> · <code>/api/dm/export/:id</code> · <code>/api/dm/file/:id</code> · <code>POST /api/dm</code> · <code>/api/dm/upload</code> · <code>/api/dm/push-sub</code> · <code>GET /api/dm/push-key</code></td><td>Messages: thread list, cursor sync, history, search, the calls record, export, attachments, every write verb, web-push subscription.</td></tr>
-<tr><td><code>POST /api/dm/request-invite</code></td><td>The signed-out invite request (1 per IP per hour).</td></tr>
-<tr><td><code>GET|POST /api/prefs</code> · <code>GET|POST /api/positions</code></td><td>Account-synced watchlist and layouts; the linked wallet and its positions.</td></tr>
-<tr><td><code>GET|POST /api/account</code> · <code>GET|POST /api/access</code> · <code>GET /api/access/dm</code> · <code>/api/access/dm/:id</code> · <code>/api/access/dm/search</code> · <code>/api/access/dm/audit</code></td><td>Your own account; the operator's access panel; the read-through and its audit log (operator).</td></tr>
-<tr><td><code>GET|POST /api/features</code> · <code>POST /api/nav-groups</code></td><td>Feature visibility and nav menus (operator).</td></tr>
-<tr><td><code>POST /api/csp-report</code></td><td>Browser CSP violation reports (open).</td></tr>
-<tr><td><code>/login</code> · <code>/logout</code> · <code>/join[/:code]</code> · <code>/claim</code> · <code>/bootstrap</code> · <code>/reset</code> · <code>/reset/code</code></td><td>The doors (HTML pages and their POSTs).</td></tr>
-<tr><td><code>/docs</code> · <code>/docs/ref/:page</code></td><td>This manual and the reference pages.</td></tr>
-<tr><td><code>/manifest.webmanifest</code> · <code>/icon.svg</code> · <code>/sw.js</code></td><td>PWA assets.</td></tr>
+<tr><th>Route</th><th>Access</th><th>Returns · limits</th></tr>
+<tr><td><code>GET /api/health</code></td><td>Open</td><td>Liveness, build, staleness. Signed-in members also get poll/feed stats; the operator gets the rest (CSP report ledger, data dir).</td></tr>
+<tr><td><code>POST /api/csp-report</code></td><td>Open</td><td>Browser CSP violation reports. 8 KB body, 120 a minute; control characters stripped before they are stored or logged.</td></tr>
+<tr><td><code>POST /api/dm/request-invite</code></td><td>Open</td><td>The signed-out "request an invite" — pings the operator. 1 per IP per hour.</td></tr>
+<tr><td><code>GET|POST /login</code> · <code>GET|POST /logout</code></td><td>Open</td><td>Sign in (account, break-glass <code>ADMIN_PASSWORD</code>, or the legacy shared password) and out. 8 wrong passwords per IP = 15-minute lock.</td></tr>
+<tr><td><code>GET /join/:code</code> · <code>GET|POST /join</code></td><td>Open</td><td>Redeem an invite or a reset link. Same per-IP damper.</td></tr>
+<tr><td><code>GET|POST /reset</code> · <code>GET|POST /reset/code</code></td><td>Open</td><td>Forgot password: a 6-digit code over Telegram. 5 requests per IP per hour; 3 codes and 5 guesses per account per hour (a re-send does not refill the guesses).</td></tr>
+<tr><td><code>GET|POST /claim</code> · <code>GET|POST /bootstrap</code></td><td>Open (a legacy session / the admin session)</td><td>A legacy shared-password member makes their own account; the operator creates account #1 (needs the admin session, closes once any account exists).</td></tr>
+</table></div>
+
+<h3>Markets and studies</h3>
+<div class="tw"><table>
+<tr><th>Route</th><th>Access</th><th>Returns · limits</th></tr>
+<tr><td><code>GET /api/snapshot</code></td><td>Site · <code>markets</code> (everyone)</td><td>The market table for both universes: price, funding, %-changes, reference prices, momentum, vol, OI deltas, note digests, earnings badges.</td></tr>
+<tr><td><code>GET /api/daily</code></td><td>Site · <code>markets</code></td><td>Daily bars per market (correlation, beta, sparklines, backtest, drawdown).</td></tr>
+<tr><td><code>GET /api/series?coin=</code></td><td>Site · <code>markets</code></td><td>Per-market OI and funding history.</td></tr>
+<tr><td><code>GET /api/candles?coin=</code></td><td>Site · <code>markets</code></td><td><code>days=1..60</code> hourly OHLCV; <code>tf=1h|4h|12h|1d</code> the exact ladder series (with <code>fast=&amp;slow=</code> for a custom MA pair); <code>res=5m</code> the 5-minute archive and <code>res=4h|12h|1d</code> the deep archive, with <code>from=&amp;to=</code> (epoch ms) and <code>max=200..6000</code> points. Ranges are clamped and snapped before caching.</td></tr>
+<tr><td><code>GET /api/events</code></td><td>Site</td><td>The Server-Sent Events stream: data versions, alert sequence, your own message cursor, prefs and position pokes. 200 streams site-wide, 4 per account or IP.</td></tr>
+<tr><td><code>GET /api/analytics?u=</code></td><td>Site · <code>sessions</code> (everyone)</td><td>The session studies for one universe.</td></tr>
+<tr><td><code>GET /api/funding?u=</code></td><td>Site · <code>funding</code> (everyone)</td><td>The funding heatmap.</td></tr>
+<tr><td><code>GET /api/trend</code></td><td>Site · <code>trend</code> (everyone)</td><td>The EMA 13/21 ladder; <code>fast=&amp;slow=</code> for a custom pair.</td></tr>
+<tr><td><code>GET /api/corr-crypto?w=</code></td><td>Site · <code>corr</code> (everyone)</td><td>The crypto intraday correlation grid.</td></tr>
+<tr><td><code>GET /api/ema-feed</code></td><td>Site · <code>ematouch</code> (operator)</td><td>EMA Touch: every H4/D1 × EMA50/200 line within 1.5σ, plus the last 48h of touch and near-band cards.</td></tr>
+<tr><td><code>GET /api/retest-study?u=&amp;def=&amp;cd=</code> · <code>GET /api/duel</code></td><td>Site · <code>backtest</code> (operator)</td><td>The D1 retest study (<code>def=board|touch</code>, cooldown bars); the Score duel record.</td></tr>
+<tr><td><code>GET /api/fundamentals?coin=</code> · <code>GET /api/derivs?coin=</code></td><td>Site</td><td>Finnhub financials for an equity; Coinalyze context for a coin.</td></tr>
+<tr><td><code>POST /api/derivs/refresh</code></td><td>Operator · <code>derivs.refresh</code></td><td>Force a Coinalyze refresh for one coin (per-coin cooldown).</td></tr>
+<tr><td><code>GET /api/fund/:t</code> · <code>GET /api/etf/:t</code></td><td>Site</td><td>SEC XBRL facts for a filer; N-PORT holdings for a fund. Cached; at most 20 new (uncached) lookups a minute site-wide.</td></tr>
+</table></div>
+
+<h3>Signals, calendar, news</h3>
+<div class="tw"><table>
+<tr><th>Route</th><th>Access</th><th>Returns · limits</th></tr>
+<tr><td><code>GET /api/signals</code> · <code>GET /api/ledger?coin=&amp;ev=</code></td><td>Site · <code>signals</code> (everyone; equity slice operator)</td><td>Live signals; the claim ledger and records.</td></tr>
+<tr><td><code>GET /api/triggers?since=</code></td><td>Site · <code>signals</code></td><td>The alert event stream past your cursor; your own rule events only. Operator-only classes (ops, ma50, touch200, touch50) are in the operator's stream only.</td></tr>
+<tr><td><code>GET /api/actionable</code></td><td>Site · <code>actionable</code> (operator)</td><td>The Actionable board.</td></tr>
+<tr><td><code>GET /api/export/ledger</code></td><td>Site · <code>export.ledger</code> (everyone)</td><td>The ledger as a download.</td></tr>
+<tr><td><code>GET /api/earnings</code> · <code>GET /api/earnings/setups</code></td><td>Site · <code>earnings</code> (everyone)</td><td>The calendar (upcoming, reported, reaction study); pre-earnings setup cards.</td></tr>
+<tr><td><code>POST /api/earnings/void</code> · <code>POST /api/earnings/backfill</code></td><td>Operator</td><td>Void a feed-garbage print; run the history backfill.</td></tr>
+<tr><td><code>GET /api/news</code> · <code>GET /api/news/channels</code></td><td>Site · <code>news</code> (everyone)</td><td>The tape; the Telegram channel list.</td></tr>
+<tr><td><code>POST /api/news/channels</code></td><td>Operator · <code>news.write</code></td><td>Replace the channel list.</td></tr>
+<tr><td><code>GET /api/housing</code> · <code>GET /api/liquidity</code></td><td>Site · <code>housing</code> / <code>liquidity</code> (operator)</td><td>The FRED boards.</td></tr>
+<tr><td><code>GET /api/focus</code></td><td>Site · <code>focus</code> (operator)</td><td>Today's frozen list.</td></tr>
+<tr><td><code>GET|POST /api/focus/limits</code></td><td>Operator · <code>focus.limits</code></td><td>The liquidity floors and the scan behind them.</td></tr>
+<tr><td><code>GET /api/whale</code></td><td>Site · <code>funds</code> (operator)</td><td>The 13F watchlist; <code>fund=</code>, <code>holds=</code>, <code>season=</code> views.</td></tr>
+<tr><td><code>POST /api/whale/watch</code></td><td>Operator · <code>whale.write</code></td><td>Curate the watchlist (search, pull, add, remove, mute, seen).</td></tr>
+<tr><td><code>GET /api/congress</code> · <code>GET /api/insiders</code></td><td>Site · <code>congress</code> / <code>insiders</code> (operator)</td><td>The PTR and Form 4 feeds.</td></tr>
+<tr><td><code>POST /api/congress</code> · <code>POST /api/insiders</code></td><td>Operator</td><td>Lane maintenance (ingest, parse, requeue, backfill, status).</td></tr>
+<tr><td><code>GET|POST /api/notes</code></td><td>Site · <code>notes</code> (operator); writes Operator · <code>notes.write</code></td><td>Per-ticker notes.</td></tr>
+<tr><td><code>GET|POST /api/baskets</code> · <code>GET /api/ratio?num=&amp;den=&amp;tf=</code></td><td>Site · <code>baskets</code> (operator); writes Operator</td><td>Custom baskets; ratio pair candles.</td></tr>
+<tr><td><code>GET /api/sector-audit</code> · <code>POST /api/sector-audit/run|apply|revert|ack</code></td><td>Operator</td><td>The classification audit.</td></tr>
+</table></div>
+
+<h3>AI</h3>
+<div class="tw"><table>
+<tr><th>Route</th><th>Access</th><th>Returns · limits</th></tr>
+<tr><td><code>GET /api/ai-report?coin=</code> · <code>GET /api/ai-reports</code></td><td>Site · <code>report</code> (everyone)</td><td>A cached report and your quota; the shared recent-reports feed.</td></tr>
+<tr><td><code>POST /api/ai-report</code></td><td>Signed in · <code>ai.generate</code> (operator)</td><td>Generate a single-name or group report. Per member 3 a day and 20 a month, plus the shared daily pool; the operator is exempt.</td></tr>
+<tr><td><code>POST /api/ask</code></td><td>Signed in · <code>ai.ask</code> (operator)</td><td>The terminal's AI fallback. 5 a day per member plus the shared pool and a per-minute window; the question is capped at 1,000 characters, the body at 256 KB. Answers are cached per member.</td></tr>
+<tr><td><code>POST /api/dm/call-read</code></td><td>Account · <code>ai.ask</code> + <code>dm.ask</code></td><td>An AI read of a chat call (text capped at 1,200 characters).</td></tr>
+<tr><td><code>GET /api/ai-status</code> · <code>GET /api/ai-sectors</code></td><td>Site</td><td>Lock and budget state; the sector list for group reports.</td></tr>
+<tr><td><code>POST /api/ai-unlock</code> · <code>POST /api/ai-reset</code> · <code>POST /api/ai-lock</code></td><td><code>ADMIN_PASSWORD</code></td><td>Unlock unlimited AI for this browser; reset the daily budget; re-lock. 8 wrong passwords per IP lock it for 5 minutes.</td></tr>
+</table></div>
+<p class="sec">Without an account (shared password or Basic), AI quotas are counted per IP address.</p>
+
+<h3>Alerts and Telegram</h3>
+<div class="tw"><table>
+<tr><th>Route</th><th>Access</th><th>Returns · limits</th></tr>
+<tr><td><code>GET /api/alerts</code></td><td>Site (yours)</td><td>Your linked recipients, classes, quiet hours, schedules and a pending link code.</td></tr>
+<tr><td><code>POST /api/alerts/link|unlink|prefs|classes|test</code></td><td>Site (yours; operator for any)</td><td>Mint a link code, unlink, set quiet hours / thresholds / schedules, pick classes, send a test (30 s cooldown).</td></tr>
+<tr><td><code>POST /api/alerts/claim</code> · <code>POST /api/alerts/brief-test</code></td><td>Operator</td><td>Claim an unowned recipient; fire the brief / landscape / desk now.</td></tr>
+<tr><td><code>GET /api/alerts/adoptable</code> · <code>POST /api/alerts/adopt</code></td><td>Account</td><td>Adopt a chat the bot already serves: a 6-digit code goes to that chat. 3 codes per chat per 10 minutes and 5 guesses in total; a chat whose guesses run out stays locked for the window.</td></tr>
+<tr><td><code>GET|POST /api/alerts/rules</code></td><td>Site (yours; operator for any)</td><td>Your metric rules: list, add, delete. 60 per owner.</td></tr>
+</table></div>
+
+<h3>Messages</h3>
+<div class="tw"><table>
+<tr><th>Route</th><th>Access</th><th>Returns · limits</th></tr>
+<tr><td><code>GET /api/dm</code> · <code>GET /api/dm/sync?since=</code> · <code>GET /api/dm/:id</code></td><td>Account · <code>dm</code></td><td>Threads, directory and boards; the cursor sync (your cursor is your own newest message); one thread's history.</td></tr>
+<tr><td><code>GET /api/dm/search</code> · <code>GET /api/dm/calls</code> · <code>GET /api/dm/targets</code> · <code>GET /api/dm/export/:id</code></td><td>Account · <code>dm</code></td><td>Search your threads; the calls record; price targets; one thread as JSON. <code>all=1</code> views are operator-only.</td></tr>
+<tr><td><code>GET /api/dm/file/:id</code></td><td>Account · <code>dm</code> (members of that thread)</td><td>An attachment: sniffed type, <code>nosniff</code>, sandboxed, downloads unless a verified image or voice note; revalidated on every view.</td></tr>
+<tr><td><code>POST /api/dm</code></td><td>Account · <code>dm</code></td><td>Every write verb: send, edit, delete, react, pin, read, mute, typing, groups and boards, calls. 20 messages per 10 s; 16 KB body; edits and call changes need you to still be in the thread.</td></tr>
+<tr><td><code>POST /api/dm/upload</code></td><td>Account · <code>dm</code></td><td>An attachment (png, jpeg, gif, webp, .txt, voice). 8 MB each; 30 uploads or 96 MB per member per 10 minutes; paused when the volume runs low on space.</td></tr>
+<tr><td><code>GET /api/dm/push-key</code> · <code>POST /api/dm/push-sub</code></td><td>Account · <code>dm</code></td><td>Browser push: the public key; subscribe or unsubscribe. Only real push services are accepted (FCM, Mozilla, Windows, Apple) and a subscription stays with the account that registered it.</td></tr>
+<tr><td><code>POST /api/dm/targets</code></td><td>Operator</td><td>Run the price-target resolver now.</td></tr>
+</table></div>
+
+<h3>Your account</h3>
+<div class="tw"><table>
+<tr><th>Route</th><th>Access</th><th>Returns · limits</th></tr>
+<tr><td><code>GET|POST /api/account</code></td><td>Site / Account</td><td>Who you are; change your password (the current-password check uses the login lock).</td></tr>
+<tr><td><code>GET|POST /api/prefs</code></td><td>Account</td><td>Synced watchlist, layouts and settings (allowlisted keys, 64 KB per value).</td></tr>
+<tr><td><code>GET|POST /api/positions</code></td><td>Account</td><td>Your linked wallet and its positions.</td></tr>
+<tr><td><code>POST /api/usage</code> · <code>GET /api/usage/me</code> · <code>POST /api/usage/pause</code></td><td>Account</td><td>The usage beacon (one per 30 s per page); your own usage card; pause or resume it.</td></tr>
+</table></div>
+
+<h3>Operator</h3>
+<div class="tw"><table>
+<tr><th>Route</th><th>Access</th><th>Returns · limits</th></tr>
+<tr><td><code>GET|POST /api/access</code></td><td>Operator</td><td>Members, invites and stats; mint or revoke invites, reset links, sign out, disable, promote, rename.</td></tr>
+<tr><td><code>GET /api/access/dm</code> · <code>/api/access/dm/:id</code> · <code>/api/access/dm/search</code> · <code>/api/access/dm/audit</code></td><td>Operator</td><td>The message read-through; every thread read and search is written to the audit log.</td></tr>
+<tr><td><code>GET|POST /api/features</code> · <code>POST /api/nav-groups</code></td><td>Operator</td><td>Feature visibility; menu names and tab placement.</td></tr>
+<tr><td><code>GET /api/admin/usage</code> · <code>GET /api/admin/usage/member</code></td><td>Operator</td><td>Sitewide usage; one member's drill-in (audited).</td></tr>
+<tr><td><code>POST /api/admin/usage/errors</code></td><td>Operator</td><td>Resolve or reopen a client error.</td></tr>
+<tr><td><code>GET|POST /api/admin/usage/digest</code> · <code>POST /api/admin/usage/digest/test</code></td><td>Operator</td><td>Weekly digest and lapsed-member reminder settings; send the digest now.</td></tr>
+</table></div>
+
+<h3>Pages and assets</h3>
+<div class="tw"><table>
+<tr><th>Route</th><th>Access</th><th>Returns</th></tr>
+<tr><td><code>GET /</code> · <code>GET /index.html</code></td><td>Site</td><td>The app shell, with your feature flags, nav and identity injected (<code>no-store</code>).</td></tr>
+<tr><td><code>GET /docs</code> · <code>GET /docs.html</code> · <code>GET /docs/ref/:page</code> · <code>GET /docs/ref/img/:file</code></td><td>Site</td><td>This manual (sections about tabs closed to you are left out) and the reference pages.</td></tr>
+<tr><td><code>GET /app.js</code> · <code>/styles.css</code> · <code>/js/*.js</code> · <code>/sw.js</code> · <code>/manifest.webmanifest</code> · <code>/icon.svg</code></td><td>Site (icon and manifest Open)</td><td>The client and PWA assets; build-stamped URLs cache for a year.</td></tr>
 </table></div>
 </section>
 
@@ -876,7 +969,7 @@ footer.docfoot{max-width:1320px;margin:0 auto;padding:18px 34px 40px;color:var(-
 <tr><td><code>PORT</code></td><td><code>3000</code></td><td>Listen port. Railway injects it; do not set it there.</td></tr>
 <tr><td><code>DEX</code></td><td><code>xyz</code></td><td>The HIP-3 dex whose universe the equities lane polls.</td></tr>
 <tr><td><code>CRYPTO</code></td><td><code>1</code></td><td><code>0</code> disables the crypto universe entirely.</td></tr>
-<tr><td><code>TRUST_PROXY</code></td><td><code>1</code></td><td><code>1</code> = exactly one trusted edge appends the last <code>X-Forwarded-For</code> element (Railway). <code>0</code> when exposed directly, or every caller could pick its own rate-limit key.</td></tr>
+<tr><td><code>TRUST_PROXY</code></td><td>on for Railway, off elsewhere</td><td><code>1</code> = exactly one trusted edge appends the last <code>X-Forwarded-For</code> element, and per-IP limits key on it. Unset, it is on only when Railway's environment variables are present. <code>0</code> when exposed directly, or every caller could pick its own rate-limit key.</td></tr>
 <tr><td><code>PUBLIC_URL</code></td><td>—</td><td>The <code>https://…</code> origin used in push and Telegram links.</td></tr>
 <tr><td><code>CSP_ENFORCE</code></td><td><code>0</code></td><td><code>1</code> enforces the Content-Security-Policy (default report-only; watch the health ledger stay at zero first).</td></tr>
 <tr><td><code>XYZ_QUIET</code> · <code>XYZ_NO_NET</code></td><td>—</td><td>Silence the stdout log; reject every outbound request (tests and offline development).</td></tr>

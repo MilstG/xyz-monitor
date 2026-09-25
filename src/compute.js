@@ -9472,14 +9472,23 @@ function pdfObjects(buf) {
     objs.set(num, { dict, data, gen, img });
   }
   const dec = pdfDecryptor(src, objs);
+  // (build 2026.09.25-116) Filed PDFs are third-party bytes: every stream inflates under a cap, and
+  // the document under a total budget — a deflate bomb stops being decoded, it never fills memory.
+  const PDF_STREAM_MAX = 32 * 1024 * 1024;
+  let pdfBudget = 128 * 1024 * 1024;
   for (const [num, o] of objs) {
     if (!o.data) { o.data = null; continue; }
     let raw = o.data.raw;
     const flate = o.data.flate, gen = o.data.gen;
     if (dec && dec.decrypt) raw = dec.decrypt(num, gen, raw);
     if (flate) {
-      try { raw = zlib.inflateSync(raw); }
-      catch (_) { try { raw = zlib.inflateRawSync(raw); } catch (_2) { raw = null; } }
+      const cap = { maxOutputLength: Math.max(1, Math.min(PDF_STREAM_MAX, pdfBudget)) };
+      if (pdfBudget <= 0) raw = null;
+      else {
+        try { raw = zlib.inflateSync(raw, cap); }
+        catch (_) { try { raw = zlib.inflateRawSync(raw, cap); } catch (_2) { raw = null; } }
+      }
+      if (raw) pdfBudget -= raw.length;
     }
     o.data = raw;
   }

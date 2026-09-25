@@ -117,6 +117,18 @@ function pwError(pw) {
 }
 
 // ---- message bodies ----------------------------------------------------------------------------
+// (build 2026.09.25-116) Browser-push endpoints are URLs the SERVER will POST to, so only the
+// push services browsers actually hand out are accepted: FCM (Chrome, Edge, Android), Mozilla
+// autopush, Windows WNS and Apple. https on the default port, a DNS name, never an IP literal.
+const WEBPUSH_HOSTS = [/^fcm\.googleapis\.com$/, /^(?:[a-z0-9-]+\.)*push\.services\.mozilla\.com$/,
+  /^(?:[a-z0-9-]+\.)*notify\.windows\.com$/, /^(?:[a-z0-9-]+\.)*push\.apple\.com$/];
+function webPushHostOk(endpoint) {
+  let u;
+  try { u = new URL(String(endpoint)); } catch (_) { return false; }
+  if (u.protocol !== "https:" || (u.port && u.port !== "443") || u.username || u.password) return false;
+  const h = u.hostname.toLowerCase();
+  return WEBPUSH_HOSTS.some((re) => re.test(h));
+}
 const DM_MAX_LEN = 4000;
 const DM_BURST_N = 20, DM_BURST_MS = 10000;   // 20 messages / 10s per sender
 const DM_CMD_MAX = 160;                       // a command label; the OUTPUT is the body and takes the body cap
@@ -566,9 +578,10 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
 
     otpGet: db.prepare("SELECT * FROM otp WHERE uid = ?"),
     otpPut: db.prepare(`INSERT INTO otp (uid, code, createdAt, expiresAt, tries, sends, windowStart)
-      VALUES (?,?,?,?,0,?,?) ON CONFLICT(uid) DO UPDATE SET code = excluded.code,
-      createdAt = excluded.createdAt, expiresAt = excluded.expiresAt, tries = 0,
+      VALUES (?,?,?,?,?,?,?) ON CONFLICT(uid) DO UPDATE SET code = excluded.code,
+      createdAt = excluded.createdAt, expiresAt = excluded.expiresAt, tries = excluded.tries,
       sends = excluded.sends, windowStart = excluded.windowStart`),
+    otpKill: db.prepare("UPDATE otp SET code = '' WHERE uid = ?"),
     otpTry: db.prepare("UPDATE otp SET tries = tries + 1 WHERE uid = ?"),
     otpBurn: db.prepare("DELETE FROM otp WHERE uid = ?"),
 
@@ -620,6 +633,10 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     msgUnread: db.prepare("SELECT COUNT(*) AS n FROM dm_msg WHERE thread = ? AND id > ? AND sender <> ? AND deletedAt IS NULL AND sys IS NULL"),
     msgBurst: db.prepare("SELECT COUNT(*) AS n FROM dm_msg WHERE sender = ? AND ts > ?"),
     msgMaxId: db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM dm_msg"),
+    // (build 2026.09.25-116) the newest message id THIS member can see — the cursor a member is
+    // handed. The global max told every member how many DMs the whole site had sent, and when.
+    msgMaxFor: db.prepare(`SELECT COALESCE(MAX(s.id), 0) AS m FROM dm_msg s JOIN dm_member m ON m.thread = s.thread
+      WHERE m.uid = ? AND m.leftAt IS NULL`),
     // Search is scoped by a JOIN on membership, never by a thread id the caller supplied: the
     // filter IS the authorization, so there is no way to phrase a query that reaches outside it.
     msgSearch: db.prepare(`SELECT s.* FROM dm_msg s JOIN dm_member m ON m.thread = s.thread
@@ -629,8 +646,11 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
         AND (? IS NULL OR s.thread = ?)
         AND s.body LIKE ? ESCAPE '\\' ORDER BY s.id DESC LIMIT ?`),
 
+    // (build 2026.09.25-116) a known endpoint re-registers only for the account that holds it — it
+    // is never re-bound to whoever else presents the same URL
     wpAdd: db.prepare(`INSERT INTO dm_webpush (endpoint, uid, p256dh, auth, ua, addedAt) VALUES (?,?,?,?,?,?)
-      ON CONFLICT(endpoint) DO UPDATE SET uid = excluded.uid, p256dh = excluded.p256dh, auth = excluded.auth, ua = excluded.ua`),
+      ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth, ua = excluded.ua
+      WHERE dm_webpush.uid = excluded.uid`),
     wpDrop: db.prepare("DELETE FROM dm_webpush WHERE endpoint = ?"),
     wpDropMine: db.prepare("DELETE FROM dm_webpush WHERE endpoint = ? AND uid = ?"),
     wpFor: db.prepare("SELECT * FROM dm_webpush WHERE uid = ?"),
@@ -1040,15 +1060,18 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     if (!u || u.disabledAt) return { ok: true, sent: false };
     const now = Date.now();
     const prev = S.otpGet.get(u.uid);
-    let sends = 1, windowStart = now;
+    let sends = 1, windowStart = now, tries = 0;
     if (prev && now - prev.windowStart < OTP_WINDOW_MS) {
-      if (prev.sends >= OTP_MAX_SENDS) return { ok: true, sent: false, throttled: true, uid: u.uid };
-      sends = prev.sends + 1; windowStart = prev.windowStart;
+      // (build 2026.09.25-116) the guess budget is per WINDOW, not per code: a re-send used to
+      // hand out five fresh guesses (and a burned row restarted the window), so the hourly send cap
+      // did not actually cap guessing
+      if (prev.sends >= OTP_MAX_SENDS || prev.tries >= OTP_MAX_TRIES) return { ok: true, sent: false, throttled: true, uid: u.uid };
+      sends = prev.sends + 1; windowStart = prev.windowStart; tries = prev.tries || 0;
     }
     // randomInt is uniform; a modulo of random bytes would not be, and a 6-digit space is small
     // enough for the bias to be worth avoiding.
     const code = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
-    S.otpPut.run(u.uid, code, now, now + OTP_TTL_MS, sends, windowStart);
+    S.otpPut.run(u.uid, code, now, now + OTP_TTL_MS, tries, sends, windowStart);
     return { ok: true, sent: true, uid: u.uid, code, display: u.display, ttlMin: Math.round(OTP_TTL_MS / 60000) };
   }
   async function otpVerify(handle, code, password) {
@@ -1056,9 +1079,11 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     const bad = { ok: false, error: "that code is wrong or has expired" };
     if (!u || u.disabledAt) return bad;
     const row = S.otpGet.get(u.uid);
-    if (!row) return bad;
-    if (row.expiresAt < Date.now()) { S.otpBurn.run(u.uid); return bad; }
-    if (row.tries >= OTP_MAX_TRIES) { S.otpBurn.run(u.uid); return bad; }
+    if (!row || !row.code) return bad;
+    // (-116) a dead code is emptied, never deleted: the row carries the window's send and guess
+    // counts, and deleting it handed out a fresh window
+    if (row.expiresAt < Date.now()) { S.otpKill.run(u.uid); return bad; }
+    if (row.tries >= OTP_MAX_TRIES) { S.otpKill.run(u.uid); return bad; }
     // Count the attempt BEFORE comparing, so a crash or a race cannot hand out a free guess.
     S.otpTry.run(u.uid);
     const given = String(code == null ? "" : code).replace(/\s/g, "");
@@ -1438,10 +1463,29 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     }
     return out.trim().slice(0, 120) || "file";
   }
+  // (build 2026.09.25-116) Upload budget: attachments land on the same volume as the database and
+  // the secrets, so a looping client (or a stolen session) must not be able to fill it. Per member,
+  // a sliding 10-minute window of count and bytes, plus a free-space floor for everyone.
+  const UPLOAD_WINDOW_MS = 10 * 60 * 1000, UPLOAD_MAX_N = 30, UPLOAD_MAX_BYTES = 96 * 1024 * 1024;
+  const UPLOAD_FREE_FLOOR = 512 * 1024 * 1024;
+  const uploadLog = new Map();   // uid -> [[t, bytes], ...]
+  function uploadBudget(uid, bytes, now) {
+    const cut = now - UPLOAD_WINDOW_MS;
+    const log = (uploadLog.get(uid) || []).filter((e) => e[0] > cut);
+    uploadLog.set(uid, log);
+    if (log.length >= UPLOAD_MAX_N || log.reduce((a, e) => a + e[1], 0) + bytes > UPLOAD_MAX_BYTES)
+      return "too many uploads in the last 10 minutes — try again shortly";
+    try {
+      const st = fs.statfsSync(fs.existsSync(fileDir) ? fileDir : path.dirname(fileDir));
+      if (st && Number.isFinite(st.bavail) && st.bavail * st.bsize - bytes < UPLOAD_FREE_FLOOR) return "the server is short on disk space — uploads are paused";
+    } catch (_) { /* statfs unavailable: the per-member window still holds */ }
+    return null;
+  }
   function putFile(uid, threadId, name, buf) {
     if (!isMember(threadId, uid)) return { ok: false, error: "no such conversation" };
     if (!buf || !buf.length) return { ok: false, error: "that file is empty" };
     if (buf.length > FILE_MAX) return { ok: false, error: "that file is too large (8 MB maximum)" };
+    { const why = uploadBudget(uid, buf.length, Date.now()); if (why) return { ok: false, error: why, retry: true }; }
     const sniff = safeMime(buf, name);
     if (!sniff) return { ok: false, error: "only images (png, jpeg, gif, webp), .txt files and voice notes can be shared here" };
     if (sniff.audio && buf.length > AUDIO_MAX) return { ok: false, error: "voice notes cap at 3 MB — keep it under ~3 minutes" };
@@ -1456,6 +1500,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     // to strand up to 8 MB on disk forever.
     try { S.fileIns.run(id, Math.trunc(+threadId), uid, fileNameClean(name), sniff.mime, buf.length, sniff.inline, Date.now()); }
     catch (_) { try { fs.unlinkSync(path.join(fileDir, id)); } catch (_) {} return { ok: false, error: "could not store that file" }; }
+    uploadLog.get(uid).push([Date.now(), buf.length]);
     return { ok: true, file: S.fileById.get(id) };
   }
   // ---- retention --------------------------------------------------------------------------------
@@ -1686,7 +1731,9 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   }
   function callClose(uid, id) {
     const m = S.msgById.get(+id);
-    if (!m || m.sender !== uid) return { ok: false, error: "that isn't your call" };
+    // (build 2026.09.25-116) and still in the room: a member who left or was removed no longer
+    // moves the shared calls record
+    if (!m || m.sender !== uid || !isMember(m.thread, uid)) return { ok: false, error: "that isn't your call" };
     if (!m.ref || !(m.refPx > 0)) return { ok: false, error: "that message carries no call" };
     if (m.deletedAt) return { ok: false, error: "that message was deleted — its call runs to its horizon" };
     const st = callState(m);
@@ -1699,7 +1746,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   }
   function callExtend(uid, id, days) {
     const m = S.msgById.get(+id);
-    if (!m || m.sender !== uid) return { ok: false, error: "that isn't your call" };
+    if (!m || m.sender !== uid || !isMember(m.thread, uid)) return { ok: false, error: "that isn't your call" };
     if (!m.ref || !(m.refPx > 0)) return { ok: false, error: "that message carries no call" };
     if (m.deletedAt) return { ok: false, error: "that message was deleted — its call runs to its horizon" };
     const d = Math.trunc(+days);
@@ -1850,6 +1897,9 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     const m = S.msgById.get(+id);
     const mod = !!asAdmin && !!m && m.sender !== uid;
     if (!m || (m.sender !== uid && !mod) || m.sys) return { ok: false, error: "that isn't your message" };
+    // (build 2026.09.25-116) rewording is for people still in the room — a departed member's old
+    // lines stay as the group read them (deleting your own words stays allowed: drop has no such check)
+    if (!mod && !isMember(m.thread, uid)) return { ok: false, error: "you're no longer in that conversation" };
     if (m.deletedAt) return { ok: false, error: "that message was deleted" };
     // A command result is the board's output under your name, not your prose: rewording it would
     // put a "computed" badge on words nobody computed. Delete it and run the command again.
@@ -1964,7 +2014,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     const cf = (S.readGet.get(t.id, uid) || {}).clearedUpTo || 0;
     const rows = S.msgPage.all(t.id, b, cf, n).reverse().map((m) => wire(m, uid));
     return { ok: true, thread: t.id, info: threadInfo(t, uid), messages: rows,
-      more: rows.length === n, cursor: S.msgMaxId.get().m };
+      more: rows.length === n, cursor: S.msgMaxFor.get(uid).m };
   }
 
   // The SSE-triggered pull. One cursor across every thread the caller is in, which is why the
@@ -1987,7 +2037,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     const truncated = out.length > n;
     const sliced = truncated ? out.slice(0, n) : out;
     return { ok: true,
-      cursor: truncated ? sliced[sliced.length - 1].id : S.msgMaxId.get().m,
+      cursor: truncated ? sliced[sliced.length - 1].id : Math.max(s, S.msgMaxFor.get(uid).m),
       more: truncated || undefined,
       messages: sliced, threads: threads(uid) };
   }
@@ -2577,6 +2627,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   // The global message sequence alone — what an SSE poke needs. stats() also scans the invite
   // table and was being called on every typing keystroke, fanned out to every peer.
   function msgSeq() { return S.msgMaxId.get().m; }
+  function msgSeqFor(uid) { return S.msgMaxFor.get(uid).m; }   // (-116) what a member's stream may say
   function stats() {
     return { users: users.size, admins: [...users.values()].filter((u) => u.isAdmin && !u.disabledAt).length,
       invitesOpen: S.invList.all().filter((i) => inviteState(i, Date.now()) === "open").length,
@@ -3774,7 +3825,7 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   return {
     // identity
     signSession, sessionUser, tokenFor, countUsers, getUser, getUserByHandle, listUsers, pub, deriveKey,
-    backup, backupAsync, backupDrain, close, lastBackup: () => lastBackup, msgSeq,
+    backup, backupAsync, backupDrain, close, lastBackup: () => lastBackup, msgSeq, msgSeqFor,
     login, setPassword, signOutEverywhere, setDisabled, setAdmin, renameUser, touch, hydrate,
     // invites
     mintInvite, readInvite, revokeInvite, listInvites, redeem, bootstrap, claim, inviteState,
@@ -3813,6 +3864,9 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
     webPushAdd: (uid, sub, ua) => {
       const e = sub && sub.endpoint, k = sub && sub.keys;
       if (typeof e !== "string" || !/^https:\/\//.test(e) || e.length > 1024) return { ok: false, error: "bad endpoint" };
+      // (build 2026.09.25-116) the server POSTs to this URL, so it must be a real push service —
+      // never an internal host a member picked (blind SSRF from the server's network position)
+      if (!webPushHostOk(e)) return { ok: false, error: "bad endpoint" };
       if (!k || typeof k.p256dh !== "string" || typeof k.auth !== "string" || k.p256dh.length > 256 || k.auth.length > 128)
         return { ok: false, error: "bad keys" };
       S.wpAdd.run(e, uid, k.p256dh, k.auth, String(ua || "").slice(0, 120), Date.now());
@@ -3827,5 +3881,5 @@ CREATE INDEX IF NOT EXISTS dm_tg_msg ON dm_tg(msg);
   };
 }
 
-module.exports = { openAccounts, mintCode, normCode, handleError, pwError, hashPw, hashPwSync, verifyPw, adoptableUid,
+module.exports = { webPushHostOk, openAccounts, mintCode, normCode, handleError, pwError, hashPw, hashPwSync, verifyPw, adoptableUid,
   cleanBody, firstTickerRef, CODE_ALPHABET, DM_MAX_LEN, PW_MIN, FILE_MAX: 8 * 1024 * 1024 };
