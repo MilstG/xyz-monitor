@@ -71,6 +71,16 @@ is added without it. The list below is the tour.
     on Railway.
   - Not changed, on purpose: the site stays open when `SITE_PASSWORD` is unset (documented
     posture; the boot log warns).
+- **EMA Touch: decay, outcomes, action lines** (build 2026.09.25-118) — cards now age in candles of
+  their own timeframe instead of a flat 48 hours: **fresh** for 3 bars (4H) / 2 sessions (1D) after
+  the touch, **fading** (dimmed) until 6 bars / 5 sessions, then gone. Each resolved card tracks its
+  follow-through in σ (`since`, and the best since): **worked** at ≥ 1σ the expected way (held
+  support / reclaim up, rejected resistance / breakdown down), **failed** when a later close goes back
+  through the line (it fades at once). Every card carries one plain action line — e.g. "Bullish while
+  above 148.05. A 4H close below it invalidates." — and a plain title (*Testing support*, *Support
+  held*, *Broke down*, *Reclaimed*, …). The feed sorts most-relevant-first (live, then fresh — 1D, the
+  200 and stacked lines first — then fading, failed last), with *newest* and *live + fresh* one click
+  away. Near-band entries left the feed; the list on the left is their live view.
 - **Security pass, round two** (build 2026.09.25-117) — the audit's remaining findings:
   - **Note digests** (`nt` on every snapshot row: how many notes, when, at what mark) ride only to
     callers the Notes tab is open to; everyone else gets the same body without them, same `dataTs`,
