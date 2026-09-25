@@ -959,7 +959,7 @@ test("retest study -96: /api/retest-study rides the Backtest tab's gate, answers
   assert.equal(d.scope, "stocks"); assert.equal(d.params.def, "touch"); assert.equal(d.params.cd, 10);
   assert.deepEqual(d.params.horizons, [1, 3, 5, 10, 20]);
   // (-107) the build and a per-boot nonce ride the tag: a restart never 304s onto another body
-  assert.match(r.headers.etag, /^W\/"rt-2026\.09\.25-116-[0-9a-z]+-stocks-touch-10-0-[0-9a-z]+-[^"]+"$/);
+  assert.match(r.headers.etag, /^W\/"rt-2026\.09\.25-117-[0-9a-z]+-stocks-touch-10-0-[0-9a-z]+-[^"]+"$/);
   assert.equal(r.headers["cache-control"], "no-cache");
   assert.equal((await get("/api/retest-study?u=stocks&def=touch&cd=10", gus, { "if-none-match": r.headers.etag })).statusCode, 304);
   const bad = JSON.parse((await get("/api/retest-study?u=moon&def=%3Cx%3E&cd=999", gus)).body);
@@ -1005,6 +1005,22 @@ test("-116 hardening over the wire: docs strip gated sections, prototype keys 40
   let last;
   for (let i = 0; i < 9; i++) last = (await post("/api/account", { current: "wrong-" + i, password: "whatever-long-pw-1" }, cara, H)).statusCode;
   assert.equal(last, 429, "wrong current passwords lock like wrong logins");
+});
+
+test("-117 over the wire: a forged engine label is refused; the member snapshot has its own validator", async () => {
+  const gus = jar(); gus.absorb(await post("/login", { handle: "gus", password: "a-long-password-12" }));
+  const cara = jar(); cara.absorb(await post("/login", { handle: "cara", password: "yet-another-long-pw" }));
+  for (const cmd of ["alert #12 fired", "target $NVDA hit", "  Alerts"]) {
+    const r = await post("/api/dm", { to: "gus", body: "totally real", cmd }, cara);
+    assert.equal(r.statusCode, 400, cmd);
+    assert.match(JSON.parse(r.body).error, /reserved/);
+  }
+  const m = await get("/api/snapshot", cara), a = await get("/api/snapshot", gus);
+  assert.equal(m.statusCode, 200); assert.equal(a.statusCode, 200);
+  if (JSON.parse(m.body).dataTs) {
+    assert.match(m.headers.etag, /-nn"$/, "the member copy (notes closed) has its own tag");
+    assert.notEqual(m.headers.etag, a.headers.etag, "an audience change can never 304 onto the other copy");
+  }
 });
 
 // ===== build 2026.09.25-115: the EMA Touch feed over the wire ========================================
